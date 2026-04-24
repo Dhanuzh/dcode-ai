@@ -29,36 +29,6 @@
 - **In-process session resume** — `/resume <id>` swaps sessions without restarting the process.
 - **Big-pickle / OpenCode Zen provider** — first-class support alongside Anthropic, OpenAI, OpenRouter.
 
-## Install
-
-### One-line install (macOS + Linux)
-
-```bash
-curl -fsSL https://dcode-ai-cli.com/install | bash
-```
-
-Set `DCODE_AI_INSTALL_DIR` to override `/usr/local/bin`.
-
-### GitHub Releases
-
-Prebuilt binaries on every release: [releases page](https://github.com/madebyaris/dcode-ai/releases).
-
-| Platform              | Target                      |
-| --------------------- | --------------------------- |
-| macOS (Apple Silicon) | `aarch64-apple-darwin`      |
-| macOS (Intel)         | `x86_64-apple-darwin`       |
-| Linux (x86_64)        | `x86_64-unknown-linux-gnu`  |
-| Linux (aarch64)       | `aarch64-unknown-linux-gnu` |
-| Windows (x86_64)      | `x86_64-pc-windows-msvc`    |
-
-### From source
-
-```bash
-git clone https://github.com/madebyaris/dcode-ai
-cd dcode-ai
-cargo install --path crates/cli
-```
-
 ## Quick Start
 
 ```bash
@@ -240,9 +210,3 @@ cargo test --workspace
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## Links
-
-- Repo: https://github.com/madebyaris/dcode-ai
-- Issues: https://github.com/madebyaris/dcode-ai/issues
-- Install script: https://dcode-ai-cli.com/install
