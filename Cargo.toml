@@ -1,0 +1,49 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/common",
+    "crates/core",
+    "crates/runtime",
+    "crates/cli",
+    "crates/autoresearch",
+]
+
+[workspace.package]
+version = "0.3.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/madebyaris/dcode-ai"
+homepage = "https://dcode-ai-cli.com"
+
+# Release profile optimized for size and speed
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+# Dev profile for faster builds during development
+[profile.dev]
+opt-level = 0
+
+[workspace.dependencies]
+# Shared across multiple crates
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.9"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "2"
+anyhow = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# External crates
+cli-prompts = "0.1"
+
+# Internal crates
+dcode-ai-common = { path = "crates/common" }
+dcode-ai-core = { path = "crates/core" }
+dcode-ai-runtime = { path = "crates/runtime" }
+dcode-ai-autoresearch = { path = "crates/autoresearch" }

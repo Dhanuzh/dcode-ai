@@ -1,0 +1,165 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+
+# Only run release jobs when:
+# - A PR is merged to main (from dev or any branch)
+# - A version tag is pushed (v*)
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY_NAME: dcode-ai
+
+jobs:
+  # Determine if this is a release-worthy push
+  should-release:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.check.outputs.should_release }}
+    steps:
+      - name: Check release conditions
+        id: check
+        run: |
+          # Release on PR merge to main
+          if [[ "${{ github.event.pull_request.merged }}" == "true" ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "trigger=PR merge to main" >> "$GITHUB_OUTPUT"
+          # Release on tag push
+          elif [[ "${{ startsWith(github.ref, 'refs/tags/v') }}" == "true" ]]; then
+            echo "should_release=true" >> "$GITHUB_OUTPUT"
+            echo "trigger=Tag push" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_release=false" >> "$GITHUB_OUTPUT"
+            echo "trigger=Non-release push" >> "$GITHUB_OUTPUT"
+          fi
+
+  # CI check (required before release)
+  ci-check:
+    needs: should-release
+    if: needs.should-release.outputs.value == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config ripgrep
+
+      - name: Check formatting
+        run: cargo fmt --check --all
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  # Multi-platform build
+  build:
+    needs: [should-release, ci-check]
+    if: needs.should-release.outputs.value == 'true'
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            archive: tar.gz
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            archive: tar.gz
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install OpenSSL (Linux targets)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+
+      - name: Build
+        run: cargo build --release --target ${{ matrix.target }} -p dcode-ai-cli
+
+      - name: Package
+        shell: bash
+        run: |
+          cd target/${{ matrix.target }}/release
+          tar czf ../../../${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }} ${{ env.BINARY_NAME }}
+          cd ../../..
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
+          path: ${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }}
+
+  # Create GitHub Release (only on tags)
+  release:
+    needs: [should-release, build]
+    if: needs.should-release.outputs.value == 'true' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/**/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # Update install script (only on tags)
+  update-install-script:
+    needs: [should-release, release]
+    if: needs.should-release.outputs.value == 'true' && startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version
+        id: version
+        run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
+
+      - name: Update install script version
+        run: sed -i "s/^VERSION=.*/VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
+
+      - name: Commit updated install script
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add install.sh
+          git diff --staged --quiet || git commit -m "chore: bump install script to v${{ steps.version.outputs.version }}"
+          git push origin HEAD:main

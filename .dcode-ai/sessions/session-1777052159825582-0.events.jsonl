@@ -1,0 +1,2 @@
+{"id":1,"ts":"2026-04-24T17:36:00.916567348Z","event":{"type":"SessionStarted","session_id":"session-1777052159825582-0","workspace":"/mnt/d/d-projects/rust-projects/dcode-ai","model":"big-pickle"}}
+{"id":2,"ts":"2026-04-24T17:50:50.894748847Z","event":{"type":"SessionEnded","reason":"UserExit"}}

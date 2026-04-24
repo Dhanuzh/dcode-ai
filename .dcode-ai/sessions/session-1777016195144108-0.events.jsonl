@@ -1,0 +1,11 @@
+{"id":1,"ts":"2026-04-24T07:36:35.277939060Z","event":{"type":"SessionStarted","session_id":"session-1777016195144108-0","workspace":"/mnt/d/d-projects/rust-projects/dcode-ai","model":"MiniMax-M2.5"}}
+{"id":2,"ts":"2026-04-24T07:37:04.344547106Z","event":{"type":"MessageReceived","role":"user","content":"hello"}}
+{"id":3,"ts":"2026-04-24T07:37:04.345574760Z","event":{"type":"BusyStateChanged","state":"thinking"}}
+{"id":4,"ts":"2026-04-24T07:37:04.346508123Z","event":{"type":"Checkpoint","phase":"provider_request","detail":"Starting model turn 1","turn":1}}
+{"id":5,"ts":"2026-04-24T07:37:11.223122470Z","event":{"type":"BusyStateChanged","state":"streaming"}}
+{"id":6,"ts":"2026-04-24T07:37:11.226374263Z","event":{"type":"TokensStreamed","delta":"Hello! I'm"}}
+{"id":7,"ts":"2026-04-24T07:37:11.557617072Z","event":{"type":"TokensStreamed","delta":" ready to help with your Rust workspace. What would you like to work on?"}}
+{"id":8,"ts":"2026-04-24T07:37:11.568625282Z","event":{"type":"CostUpdated","input_tokens":3605,"output_tokens":53,"estimated_cost_usd":0.01161}}
+{"id":9,"ts":"2026-04-24T07:37:11.569654859Z","event":{"type":"MessageReceived","role":"assistant","content":"Hello! I'm ready to help with your Rust workspace. What would you like to work on?"}}
+{"id":10,"ts":"2026-04-24T07:37:11.570819551Z","event":{"type":"BusyStateChanged","state":"idle"}}
+{"id":11,"ts":"2026-04-24T07:37:20.739728620Z","event":{"type":"SessionEnded","reason":"Completed"}}

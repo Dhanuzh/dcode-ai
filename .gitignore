@@ -1,0 +1,30 @@
+# Rust
+/target
+**/*.rs.bk
+
+# nca agent data
+.nca/
+*.sock
+
+# Environment / secrets
+.env
+.env.local
+.env.*.local
+
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+
+# for testing agent build stuff
+for-test/

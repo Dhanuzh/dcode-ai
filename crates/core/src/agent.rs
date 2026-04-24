@@ -1,0 +1,628 @@
+use dcode_ai_common::event::{AgentEvent, BusyState};
+use dcode_ai_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
+use dcode_ai_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
+use futures_util::future::join_all;
+use serde_json::json;
+use std::collections::HashSet;
+use std::path::Path;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use crate::approval::{ApprovalPolicy, ApprovalVerdict};
+use crate::cost::CostTracker;
+use crate::hooks::{HookEventKind, HookRunner};
+use crate::provider::{Provider, ProviderError, StreamChunk};
+use crate::tools::ToolRegistry;
+
+/// Drives the multi-turn conversation and tool-use loop.
+pub struct AgentLoop {
+    pub provider: Box<dyn Provider>,
+    pub tools: ToolRegistry,
+    pub approval: ApprovalPolicy,
+    pub messages: Vec<Message>,
+    pub model: String,
+    pub cost_tracker: CostTracker,
+    event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    max_turns: u32,
+    max_tool_calls_per_turn: u32,
+    checkpoint_interval: u32,
+    cancel_flag: Arc<AtomicBool>,
+    hooks: Option<HookRunner>,
+}
+
+impl AgentLoop {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        provider: Box<dyn Provider>,
+        tools: ToolRegistry,
+        approval: ApprovalPolicy,
+        model: String,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+        max_turns: u32,
+        max_tool_calls_per_turn: u32,
+        checkpoint_interval: u32,
+        hooks: Option<HookRunner>,
+    ) -> Self {
+        Self {
+            provider,
+            tools,
+            approval,
+            messages: Vec::new(),
+            model,
+            cost_tracker: CostTracker::default(),
+            event_tx,
+            max_turns,
+            max_tool_calls_per_turn,
+            checkpoint_interval,
+            cancel_flag: Arc::new(AtomicBool::new(false)),
+            hooks,
+        }
+    }
+
+    /// Add a system prompt once at startup.
+    pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
+        self.messages.push(Message::system(prompt));
+    }
+
+    /// Replace the LLM provider (e.g. after user switches provider in-session).
+    pub fn replace_provider(&mut self, provider: Box<dyn Provider>) {
+        self.provider = provider;
+    }
+
+    /// Run one turn: send messages to the provider, execute any tool calls,
+    /// and repeat until the provider returns a final text response.
+    pub async fn run_turn(
+        &mut self,
+        user_input: &str,
+        workspace_root: &Path,
+        attachments: &[ImageAttachment],
+    ) -> Result<String, ProviderError> {
+        self.cancel_flag.store(false, Ordering::SeqCst);
+        let user_msg = if attachments.is_empty() {
+            Message::user(user_input)
+        } else {
+            let mut parts: Vec<ContentPart> = Vec::new();
+            let trimmed = user_input.trim();
+            if !trimmed.is_empty() {
+                parts.push(ContentPart::Text {
+                    text: user_input.to_string(),
+                });
+            } else {
+                parts.push(ContentPart::Text {
+                    text: "(See attached image(s).)".into(),
+                });
+            }
+            for a in attachments {
+                parts.push(ContentPart::Image {
+                    media_type: a.media_type.clone(),
+                    path: a.path.clone(),
+                });
+            }
+            Message::user_with_parts(parts)
+        };
+        let preview = user_msg.event_preview();
+        self.messages.push(user_msg);
+        self.emit(AgentEvent::MessageReceived {
+            role: "user".into(),
+            content: preview,
+        })
+        .await;
+
+        let mut turn = 0_u32;
+        let mut empty_retries = 0_u32;
+        let mut attachments_cleaned = attachments.is_empty();
+        const MAX_EMPTY_RETRIES: u32 = 2;
+        // Consecutive failures of the same tool — stops infinite retry loops.
+        let mut consecutive_tool_failures: u32 = 0;
+        let mut last_failed_tool: String = String::new();
+        const MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
+
+        let final_text = loop {
+            if self.is_cancelled() {
+                self.emit(AgentEvent::Error {
+                    message: "Run cancelled".into(),
+                })
+                .await;
+                return Err(ProviderError::Other("run cancelled".into()));
+            }
+            turn += 1;
+            if turn > self.max_turns {
+                return Err(ProviderError::Other(format!(
+                    "turn budget exceeded (max {})",
+                    self.max_turns
+                )));
+            }
+
+            self.emit(AgentEvent::BusyStateChanged {
+                state: BusyState::Thinking,
+            })
+            .await;
+            self.emit(AgentEvent::Checkpoint {
+                phase: "provider_request".into(),
+                detail: format!("Starting model turn {turn}"),
+                turn,
+            })
+            .await;
+            self.provider
+                .prepare_messages_for_request(&mut self.messages, workspace_root)
+                .await?;
+            let mut stream = self
+                .provider
+                .chat(
+                    &self.messages,
+                    &self.tool_definitions(),
+                    &self.model,
+                    workspace_root,
+                )
+                .await?;
+
+            let mut assistant_text = String::new();
+            let mut tool_calls: Vec<ToolCall> = Vec::new();
+            let mut got_usage = false;
+
+            let mut cancel_poll = tokio::time::interval(Duration::from_millis(25));
+            cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                let chunk = tokio::select! {
+                    _ = cancel_poll.tick() => {
+                        if self.is_cancelled() {
+                            self.emit(AgentEvent::Error {
+                                message: "Run cancelled while streaming model output".into(),
+                            })
+                            .await;
+                            return Err(ProviderError::Other("run cancelled".into()));
+                        }
+                        continue;
+                    }
+                    chunk = stream.recv() => chunk,
+                };
+                let Some(chunk) = chunk else {
+                    break;
+                };
+                match chunk {
+                    StreamChunk::ThinkingDelta(delta) => {
+                        self.emit(AgentEvent::ThinkingDelta { delta }).await;
+                    }
+                    StreamChunk::TextDelta(delta) => {
+                        if assistant_text.is_empty() {
+                            self.emit(AgentEvent::BusyStateChanged {
+                                state: BusyState::Streaming,
+                            })
+                            .await;
+                        }
+                        assistant_text.push_str(&delta);
+                        self.emit(AgentEvent::TokensStreamed { delta }).await;
+                    }
+                    StreamChunk::ToolUse(call) => {
+                        self.emit(AgentEvent::ToolCallStarted {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            input: call.input.clone(),
+                        })
+                        .await;
+                        tool_calls.push(call);
+                    }
+                    StreamChunk::Usage {
+                        input_tokens,
+                        output_tokens,
+                    } => {
+                        got_usage = true;
+                        self.cost_tracker.add(input_tokens, output_tokens);
+                        self.emit(AgentEvent::CostUpdated {
+                            input_tokens: self.cost_tracker.input_tokens,
+                            output_tokens: self.cost_tracker.output_tokens,
+                            estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
+                        })
+                        .await;
+                    }
+                    StreamChunk::Done => break,
+                }
+            }
+
+            if !attachments_cleaned {
+                cleanup_processed_attachments(&mut self.messages, workspace_root, attachments);
+                attachments_cleaned = true;
+            }
+
+            if tool_calls.is_empty() {
+                if assistant_text.trim().is_empty() {
+                    empty_retries += 1;
+                    if empty_retries <= MAX_EMPTY_RETRIES && got_usage {
+                        self.emit(AgentEvent::Error {
+                            message: format!(
+                                "Provider returned empty response (retry {empty_retries}/{MAX_EMPTY_RETRIES})"
+                            ),
+                        })
+                        .await;
+                        continue;
+                    }
+                    self.emit(AgentEvent::Error {
+                        message: "Provider returned empty response with no tool calls".into(),
+                    })
+                    .await;
+                    return Err(ProviderError::Other(
+                        "Provider returned empty response with no tool calls after retries".into(),
+                    ));
+                }
+                self.messages
+                    .push(Message::assistant(assistant_text.clone()));
+                self.emit(AgentEvent::MessageReceived {
+                    role: "assistant".into(),
+                    content: assistant_text.clone(),
+                })
+                .await;
+                break assistant_text;
+            }
+
+            let replay_tool_calls = tool_calls
+                .iter()
+                .map(|call| MessageToolCall {
+                    id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.input.clone(),
+                })
+                .collect();
+
+            self.messages.push(Message::assistant_with_tool_calls(
+                assistant_text,
+                replay_tool_calls,
+            ));
+
+            if tool_calls.len() as u32 > self.max_tool_calls_per_turn {
+                return Err(ProviderError::Other(format!(
+                    "tool-call budget exceeded in turn {turn} ({} > {})",
+                    tool_calls.len(),
+                    self.max_tool_calls_per_turn
+                )));
+            }
+
+            // ── Phase 1: permission checks (sequential — approvals may be interactive) ──
+            //
+            // Produces, in original order, either a pre-resolved result (denied /
+            // approval-denied) or a ticket to execute concurrently in phase 2.
+            enum Ticket {
+                Resolved(ToolResult),
+                Execute(ToolCall),
+            }
+
+            if self.is_cancelled() {
+                self.emit(AgentEvent::Error {
+                    message: "Run cancelled before tool execution".into(),
+                })
+                .await;
+                return Err(ProviderError::Other("run cancelled".into()));
+            }
+
+            let mut tickets: Vec<Ticket> = Vec::with_capacity(tool_calls.len());
+
+            for call in &tool_calls {
+                let tier = self.approval.check(&call.name, &call.input.to_string());
+
+                match tier {
+                    PermissionTier::Denied => {
+                        tickets.push(Ticket::Resolved(ToolResult {
+                            call_id: call.id.clone(),
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("tool `{}` denied by policy", call.name)),
+                        }));
+                    }
+
+                    PermissionTier::Ask => {
+                        let description = format!("Tool `{}` requires approval", call.name);
+                        self.emit(AgentEvent::ApprovalRequested {
+                            call_id: call.id.clone(),
+                            tool: call.name.clone(),
+                            description: description.clone(),
+                        })
+                        .await;
+                        if let Some(hooks) = &self.hooks {
+                            hooks
+                                .run_best_effort(
+                                    HookEventKind::ApprovalRequested,
+                                    Some(&call.name),
+                                    &json!({
+                                        "call_id": call.id.clone(),
+                                        "tool": call.name.clone(),
+                                        "input": call.input.clone(),
+                                        "description": description,
+                                    }),
+                                )
+                                .await;
+                        }
+                        let verdict = self.approval.resolve(call, &description).await;
+                        let approved = verdict.is_approved();
+                        self.emit(AgentEvent::ApprovalResolved {
+                            call_id: call.id.clone(),
+                            approved,
+                        })
+                        .await;
+                        if let ApprovalVerdict::AllowPattern(pattern) = &verdict {
+                            self.approval.add_session_allow(pattern.clone());
+                        }
+
+                        if approved {
+                            if let Some(hooks) = &self.hooks
+                                && let Err(reason) = hooks
+                                    .run(
+                                        HookEventKind::PreToolUse,
+                                        Some(&call.name),
+                                        &json!({
+                                            "call_id": call.id.clone(),
+                                            "tool": call.name.clone(),
+                                            "input": call.input.clone(),
+                                        }),
+                                    )
+                                    .await
+                            {
+                                tickets.push(Ticket::Resolved(ToolResult {
+                                    call_id: call.id.clone(),
+                                    success: false,
+                                    output: String::new(),
+                                    error: Some(reason),
+                                }));
+                                continue;
+                            }
+                            tickets.push(Ticket::Execute(call.clone()));
+                        } else {
+                            if self.approval.should_fail_on_ask() {
+                                let message = format!(
+                                    "tool `{}` requires approval in headless mode; rerun with a non-interactive permission mode such as `dont-ask` or `bypass-permissions`",
+                                    call.name
+                                );
+                                self.emit(AgentEvent::Error {
+                                    message: message.clone(),
+                                })
+                                .await;
+                                return Err(ProviderError::Other(message));
+                            }
+                            tickets.push(Ticket::Resolved(ToolResult {
+                                call_id: call.id.clone(),
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!(
+                                    "tool `{}` requires approval; request was denied",
+                                    call.name
+                                )),
+                            }));
+                        }
+                    }
+
+                    PermissionTier::Allowed => {
+                        if let Some(hooks) = &self.hooks
+                            && let Err(reason) = hooks
+                                .run(
+                                    HookEventKind::PreToolUse,
+                                    Some(&call.name),
+                                    &json!({
+                                        "call_id": call.id.clone(),
+                                        "tool": call.name.clone(),
+                                        "input": call.input.clone(),
+                                    }),
+                                )
+                                .await
+                        {
+                            tickets.push(Ticket::Resolved(ToolResult {
+                                call_id: call.id.clone(),
+                                success: false,
+                                output: String::new(),
+                                error: Some(reason),
+                            }));
+                            continue;
+                        }
+                        tickets.push(Ticket::Execute(call.clone()));
+                    }
+                }
+            }
+
+            // ── Phase 2: concurrent execution ────────────────────────────────────────
+            //
+            // All approved calls run simultaneously. `ToolRegistry::execute` takes
+            // `&self` so multiple concurrent borrows are safe.
+            //
+            // We keep a parallel `Option<ToolResult>` vec (None = still executing)
+            // and fill it from the join results.
+            let n = tickets.len();
+            let mut results: Vec<Option<ToolResult>> = (0..n).map(|_| None).collect();
+
+            // Gather indices and refs for calls that actually need execution
+            let to_execute: Vec<(usize, &ToolCall)> = tickets
+                .iter()
+                .enumerate()
+                .filter_map(|(i, t)| {
+                    if let Ticket::Execute(call) = t {
+                        Some((i, call))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+
+            if !to_execute.is_empty() {
+                let futs = to_execute.iter().map(|(i, call)| {
+                    let fut = self.tools.execute(call);
+                    async move { (*i, fut.await) }
+                });
+                let executed: Vec<(usize, ToolResult)> = join_all(futs).await;
+                for (i, result) in executed {
+                    results[i] = Some(result);
+                }
+            }
+
+            // Fill pre-resolved slots
+            for (i, ticket) in tickets.into_iter().enumerate() {
+                if let Ticket::Resolved(result) = ticket {
+                    results[i] = Some(result);
+                }
+            }
+
+            let mut final_results = Vec::new();
+            for result in results.into_iter().flatten() {
+                final_results.push(result);
+            }
+
+            if let Some(hooks) = &self.hooks {
+                for result in &final_results {
+                    let hook_event = if result.success {
+                        HookEventKind::PostToolUse
+                    } else {
+                        HookEventKind::PostToolFailure
+                    };
+                    hooks
+                        .run_best_effort(
+                            hook_event,
+                            None,
+                            &json!({
+                                "call_id": result.call_id,
+                                "success": result.success,
+                                "output": result.output,
+                                "error": result.error,
+                            }),
+                        )
+                        .await;
+                }
+            }
+
+            // ── Phase 3: push results to history + emit events (in original order) ──
+            if self.checkpoint_interval > 0 && n as u32 >= self.checkpoint_interval {
+                self.emit(AgentEvent::Checkpoint {
+                    phase: "tool_execution".into(),
+                    detail: format!("Executed {n} tool calls in turn {turn}"),
+                    turn,
+                })
+                .await;
+            }
+
+            // Track consecutive failures of the same tool to detect infinite retry loops.
+            let all_failed_same_tool = !final_results.is_empty()
+                && final_results.iter().all(|r| !r.success)
+                && tool_calls.len() == 1;
+            if all_failed_same_tool {
+                let tool_name = &tool_calls[0].name;
+                if *tool_name == last_failed_tool {
+                    consecutive_tool_failures += 1;
+                } else {
+                    last_failed_tool = tool_name.clone();
+                    consecutive_tool_failures = 1;
+                }
+            } else {
+                consecutive_tool_failures = 0;
+                last_failed_tool.clear();
+            }
+
+            for result in final_results {
+                self.messages.push(Message::tool(
+                    result.call_id.clone(),
+                    format_tool_result(&result),
+                ));
+                self.emit(AgentEvent::ToolCallCompleted {
+                    call_id: result.call_id.clone(),
+                    output: result,
+                })
+                .await;
+            }
+
+            if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
+                let msg = format!(
+                    "Tool `{}` failed {} times consecutively — stopping to avoid infinite loop.",
+                    last_failed_tool, consecutive_tool_failures
+                );
+                self.emit(AgentEvent::Error {
+                    message: msg.clone(),
+                })
+                .await;
+                break msg;
+            }
+        };
+
+        if self.cost_tracker.input_tokens == 0 && self.cost_tracker.output_tokens == 0 {
+            let estimated_input = (self
+                .messages
+                .iter()
+                .map(|message| message.content.approx_chars())
+                .sum::<usize>()
+                / 4) as u64;
+            let estimated_output = (final_text.len() / 4) as u64;
+            self.cost_tracker.add(estimated_input, estimated_output);
+            self.emit(AgentEvent::CostUpdated {
+                input_tokens: self.cost_tracker.input_tokens,
+                output_tokens: self.cost_tracker.output_tokens,
+                estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
+            })
+            .await;
+        }
+
+        self.emit(AgentEvent::BusyStateChanged {
+            state: BusyState::Idle,
+        })
+        .await;
+        Ok(final_text)
+    }
+
+    fn tool_definitions(&self) -> Vec<ToolDefinition> {
+        self.tools.definitions()
+    }
+
+    async fn emit(&self, event: AgentEvent) {
+        let _ = self.event_tx.send(event).await;
+    }
+
+    pub fn event_sender(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {
+        Some(self.event_tx.clone())
+    }
+
+    pub fn request_cancel(&self) {
+        self.cancel_flag.store(true, Ordering::SeqCst);
+    }
+
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.cancel_flag.clone()
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.cancel_flag.load(Ordering::SeqCst)
+    }
+}
+
+fn cleanup_processed_attachments(
+    messages: &mut [Message],
+    workspace_root: &Path,
+    attachments: &[ImageAttachment],
+) {
+    let removed_paths: HashSet<String> = attachments.iter().map(|a| a.path.clone()).collect();
+    if removed_paths.is_empty() {
+        return;
+    }
+
+    for message in messages {
+        let _ = message.content.strip_image_paths(&removed_paths);
+    }
+
+    for attachment in attachments {
+        let full_path = workspace_root.join(&attachment.path);
+        if let Err(err) = std::fs::remove_file(&full_path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(
+                "failed to remove processed image attachment {}: {}",
+                full_path.display(),
+                err
+            );
+        }
+        if let Some(parent) = full_path.parent() {
+            let _ = std::fs::remove_dir(parent);
+        }
+    }
+}
+
+fn format_tool_result(result: &dcode_ai_common::tool::ToolResult) -> String {
+    if result.success {
+        result.output.clone()
+    } else {
+        result
+            .error
+            .clone()
+            .unwrap_or_else(|| "tool failed".to_string())
+    }
+}

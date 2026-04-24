@@ -1,0 +1,51 @@
+[package]
+name = "dcode-ai-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Interactive TUI shell and CLI entrypoint for dcode-ai"
+
+[[bin]]
+name = "dcode-ai"
+path = "src/main.rs"
+
+[dependencies]
+dcode-ai-autoresearch = { workspace = true }
+dcode-ai-common = { workspace = true }
+dcode-ai-core = { workspace = true }
+dcode-ai-runtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { workspace = true }
+cli-prompts = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+ratatui = "0.30"
+crossterm = "0.29"
+futures = "0.3"
+reedline = "0.38"
+syntect = "5"
+pulldown-cmark = "0.12"
+colored = "3"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock"] }
+similar = "2"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+urlencoding = "2"
+url = "2"
+
+[dev-dependencies]
+dcode-ai-runtime = { workspace = true }
+tempfile = "3"
+assert_cmd = "2"
+insta = "1"
+predicates = "3"
+cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy", "run-cargo-test"] }
