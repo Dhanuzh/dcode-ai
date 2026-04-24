@@ -28,3 +28,6 @@ Thumbs.db
 
 # for testing agent build stuff
 for-test/
+
+# dcode-ai local data (sessions, config, memory)
+.dcode-ai/
