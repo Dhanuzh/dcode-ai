@@ -1,2 +1,0 @@
-{"id":1,"ts":"2026-04-24T10:20:20.805661254Z","event":{"type":"SessionStarted","session_id":"session-1777026020668960-0","workspace":"/mnt/d/d-projects/rust-projects/dcode-ai","model":"MiniMax-M2.5"}}
-{"id":2,"ts":"2026-04-24T10:20:36.774046812Z","event":{"type":"SessionEnded","reason":"Completed"}}

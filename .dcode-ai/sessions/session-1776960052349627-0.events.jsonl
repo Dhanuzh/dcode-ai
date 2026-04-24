@@ -1,5 +1,0 @@
-{"id":1,"ts":"2026-04-23T16:00:52.388225958Z","event":{"type":"SessionStarted","session_id":"session-1776960052349627-0","workspace":"/mnt/d/d-projects/rust-projects/dcode-ai","model":"gemini-2.5-pro"}}
-{"id":2,"ts":"2026-04-23T16:00:52.388548356Z","event":{"type":"MessageReceived","role":"user","content":"hello"}}
-{"id":3,"ts":"2026-04-23T16:00:52.388914716Z","event":{"type":"BusyStateChanged","state":"thinking"}}
-{"id":4,"ts":"2026-04-23T16:00:52.389341201Z","event":{"type":"Checkpoint","phase":"provider_request","detail":"Starting model turn 1","turn":1}}
-{"id":5,"ts":"2026-04-23T16:00:54.113182472Z","event":{"type":"SessionEnded","reason":"Error"}}
