@@ -15,8 +15,8 @@ use arboard::Clipboard;
 use crossterm::{
     cursor::{Hide, MoveToColumn, Show},
     event::{
-        DisableBracketedPaste, EnableBracketedPaste,
-        Event, KeyCode, KeyModifiers, MouseButton, MouseEventKind, poll, read,
+        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers, MouseButton,
+        MouseEventKind, poll, read,
     },
     execute,
     terminal::{
@@ -1301,10 +1301,7 @@ fn transcript_lines_and_hits(
                         &mut lines,
                         &mut hits,
                         Line::from(vec![
-                            Span::styled(
-                                " │ ",
-                                Style::default().fg(theme::muted()),
-                            ),
+                            Span::styled(" │ ", Style::default().fg(theme::muted())),
                             Span::styled(
                                 text_line,
                                 Style::default()
@@ -1462,10 +1459,10 @@ fn tool_input_preview(name: &str, input: &str) -> String {
             }
         }
         let lowname = name.to_ascii_lowercase();
-        if lowname.contains("bash") || lowname.contains("shell") {
-            if let Some(val) = obj.get("command").and_then(|x| x.as_str()) {
-                return val.replace('\n', " ");
-            }
+        if (lowname.contains("bash") || lowname.contains("shell"))
+            && let Some(val) = obj.get("command").and_then(|x| x.as_str())
+        {
+            return val.replace('\n', " ");
         }
     }
     trimmed.replace('\n', " ")
@@ -1836,11 +1833,11 @@ fn render_table_lines(
 
     let render_row = |row: &[String], is_header: bool| -> Line<'static> {
         let mut spans = vec![Span::styled("│ ", Style::default().fg(theme::muted()))];
-        for i in 0..col_count {
+        for (i, w) in widths.iter().enumerate().take(col_count) {
             let val = row.get(i).map(String::as_str).unwrap_or("");
             let aligned = align_table_cell(
                 val,
-                widths[i],
+                *w,
                 table.alignments.get(i).copied().unwrap_or(Alignment::None),
             );
             let style = if is_header {
@@ -2403,6 +2400,7 @@ fn parse_tui_question_answer(
 /// the async loop is stuck in `run_turn` (that task does not poll `cmd_rx` until the turn ends).
 /// `mouse_capture`: enables terminal mouse capture for scroll and click events.
 /// `scroll_speed`: lines per scroll event.
+#[allow(clippy::too_many_arguments)]
 pub fn run_blocking(
     state: Arc<Mutex<TuiSessionState>>,
     cmd_tx: UnboundedSender<TuiCmd>,
@@ -3216,7 +3214,7 @@ pub fn run_blocking(
 
                 if g.theme_picker_open {
                     let entries = g.theme_picker_entries.clone();
-                    let rows = (entries.len() as u16).saturating_add(6).max(8).min(20);
+                    let rows = (entries.len() as u16).saturating_add(6).clamp(8, 20);
                     let popup_area = centered_rect(area, 44, rows);
                     let mut lines: Vec<Line> = vec![
                         Line::from(Span::styled(
@@ -4506,10 +4504,8 @@ pub fn run_blocking(
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) => {
                                 // Revert live preview: re-apply the original theme from config.
-                                let name = g
-                                    .theme_picker_entries
-                                    .get(g.theme_picker_index)
-                                    .cloned();
+                                let name =
+                                    g.theme_picker_entries.get(g.theme_picker_index).cloned();
                                 g.close_theme_picker();
                                 drop(g);
                                 // Ask repl to reapply persisted theme (no-op if same).
@@ -4517,8 +4513,7 @@ pub fn run_blocking(
                             }
                             (KeyCode::Up, _) => {
                                 if count > 0 {
-                                    g.theme_picker_index =
-                                        g.theme_picker_index.saturating_sub(1);
+                                    g.theme_picker_index = g.theme_picker_index.saturating_sub(1);
                                     // Live preview: apply selected theme immediately.
                                     if let Some(name) =
                                         g.theme_picker_entries.get(g.theme_picker_index)
@@ -4539,10 +4534,8 @@ pub fn run_blocking(
                                 }
                             }
                             (KeyCode::Enter, _) => {
-                                let name = g
-                                    .theme_picker_entries
-                                    .get(g.theme_picker_index)
-                                    .cloned();
+                                let name =
+                                    g.theme_picker_entries.get(g.theme_picker_index).cloned();
                                 g.close_theme_picker();
                                 drop(g);
                                 if let Some(n) = name {

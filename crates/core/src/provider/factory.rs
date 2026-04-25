@@ -10,10 +10,13 @@ pub fn build_provider(config: &DcodeAiConfig) -> Result<Box<dyn Provider>, Provi
     match config.provider.default {
         ProviderKind::OpenRouter => Ok(Box::new(OpenRouterProvider::from_config(config)?)),
         ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_config(config)?)),
-        ProviderKind::OpenAi | ProviderKind::Antigravity => {
-            Ok(Box::new(OpenAiProvider::from_config(config, config.provider.default)?))
-        }
-        ProviderKind::OpenCodeZen => Ok(Box::new(OpenAiProvider::from_config(config, config.provider.default)?)),
+        ProviderKind::OpenAi | ProviderKind::Antigravity => Ok(Box::new(
+            OpenAiProvider::from_config(config, config.provider.default)?,
+        )),
+        ProviderKind::OpenCodeZen => Ok(Box::new(OpenAiProvider::from_config(
+            config,
+            config.provider.default,
+        )?)),
     }
 }
 

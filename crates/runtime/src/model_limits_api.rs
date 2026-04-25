@@ -623,7 +623,10 @@ async fn fetch_openai_model_ids(client: &reqwest::Client, config: &DcodeAiConfig
     ids
 }
 
-async fn fetch_opencodezen_model_ids(client: &reqwest::Client, config: &DcodeAiConfig) -> Vec<String> {
+async fn fetch_opencodezen_model_ids(
+    client: &reqwest::Client,
+    config: &DcodeAiConfig,
+) -> Vec<String> {
     let base = config.provider.opencodezen.base_url.trim_end_matches('/');
 
     let key = if let Some(k) = config.provider.opencodezen.resolve_api_key() {

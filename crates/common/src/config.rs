@@ -1429,10 +1429,6 @@ fn is_false(v: &bool) -> bool {
     !v
 }
 
-fn is_true(v: &bool) -> bool {
-    *v
-}
-
 fn default_max_memory_notes() -> usize {
     128
 }

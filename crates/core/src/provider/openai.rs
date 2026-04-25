@@ -17,7 +17,10 @@ pub struct OpenAiProvider {
 }
 
 impl OpenAiProvider {
-    pub fn from_config(config: &DcodeAiConfig, provider: ProviderKind) -> Result<Self, ProviderError> {
+    pub fn from_config(
+        config: &DcodeAiConfig,
+        provider: ProviderKind,
+    ) -> Result<Self, ProviderError> {
         let openai = match provider {
             ProviderKind::OpenAi | ProviderKind::Antigravity => config.provider.openai.clone(),
             ProviderKind::OpenCodeZen => config.provider.opencodezen.clone(),
@@ -25,7 +28,7 @@ impl OpenAiProvider {
                 return Err(ProviderError::Configuration(format!(
                     "OpenAiProvider does not support provider {:?}",
                     provider
-                )))
+                )));
             }
         };
         let auth_store = AuthStore::load().ok().unwrap_or_default();
@@ -241,7 +244,8 @@ mod tests {
         config.provider.openai.api_key = Some("openai-test-key".into());
         config.provider.openai.base_url = base_url;
 
-        let provider = OpenAiProvider::from_config(&config, ProviderKind::OpenAi).expect("provider");
+        let provider =
+            OpenAiProvider::from_config(&config, ProviderKind::OpenAi).expect("provider");
         let stream = provider
             .chat(
                 &[Message::user("hello")],

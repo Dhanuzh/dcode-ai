@@ -5,7 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use base64::Engine;
 use dcode_ai_common::auth::{
-    AntigravityAuth, AuthStore, CopilotAuth, LoggedProvider, OpenAiOAuth, OpenCodeZenOAuth, ProviderAuth,
+    AntigravityAuth, AuthStore, CopilotAuth, LoggedProvider, OpenAiOAuth, OpenCodeZenOAuth,
+    ProviderAuth,
 };
 use sha2::{Digest, Sha256};
 
@@ -611,7 +612,10 @@ async fn login_opencodezen() -> anyhow::Result<()> {
         .get("refresh_token")
         .and_then(|x| x.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing refresh_token"))?;
-    let expires_in = v.get("expires_in").and_then(|x| x.as_i64()).unwrap_or(86400);
+    let expires_in = v
+        .get("expires_in")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(86400);
     let expires_at = chrono::Utc::now().timestamp() + expires_in - 300;
 
     let mut store = AuthStore::load().unwrap_or_default();
@@ -653,7 +657,8 @@ async fn wait_for_opencodezen_callback() -> anyhow::Result<(String, String)> {
         .map(|(_, v)| v.to_string())
         .ok_or_else(|| anyhow::anyhow!("missing state"))?;
 
-    let body = "<html><body><h2>Authentication complete.</h2><p>You can close this tab.</p></body></html>";
+    let body =
+        "<html><body><h2>Authentication complete.</h2><p>You can close this tab.</p></body></html>";
     let resp = format!(
         "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
         body.len(),

@@ -32,7 +32,10 @@ pub async fn validate_api_key(
     };
 
     let result = match provider {
-        ProviderKind::OpenAi | ProviderKind::OpenRouter | ProviderKind::Antigravity | ProviderKind::OpenCodeZen => {
+        ProviderKind::OpenAi
+        | ProviderKind::OpenRouter
+        | ProviderKind::Antigravity
+        | ProviderKind::OpenCodeZen => {
             let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
             client
                 .get(&url)

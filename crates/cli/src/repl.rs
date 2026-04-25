@@ -432,9 +432,9 @@ impl Repl {
                         p.display_name(),
                         self.runtime.model()
                     )),
-                    Err(e) => out.eprintln(&format!(
-                        "[provider] applied but global save failed: {e}"
-                    )),
+                    Err(e) => {
+                        out.eprintln(&format!("[provider] applied but global save failed: {e}"))
+                    }
                 }
             }
             Err(e) => out.eprintln(&format!("[provider] {e}")),
@@ -1926,10 +1926,10 @@ impl Repl {
                         {
                             Ok(()) => {
                                 // Abort the old bridge — its channel is dead after runtime swap.
-                                if let Ok(mut h) = bridge_handle.lock() {
-                                    if let Some(old) = h.take() {
-                                        old.abort();
-                                    }
+                                if let Ok(mut h) = bridge_handle.lock()
+                                    && let Some(old) = h.take()
+                                {
+                                    old.abort();
                                 }
 
                                 let new_rx = self.runtime.take_event_rx();
@@ -2454,6 +2454,7 @@ fn build_model_picker_entries(
     });
     for p in ProviderKind::ALL {
         let model = config.provider.model_for(p);
+        #[allow(clippy::if_same_then_else)]
         let key_status = if config.provider.api_key_present_for(p) {
             "key ✓"
         } else if p == ProviderKind::OpenAi

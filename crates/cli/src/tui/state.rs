@@ -552,10 +552,10 @@ impl TuiSessionState {
                     self.set_busy_state(BusyState::Thinking);
                 } else if role == "assistant" {
                     self.streaming_assistant = None;
-                    if let Some(t) = self.streaming_thinking.take() {
-                        if !t.trim().is_empty() {
-                            self.blocks.push(DisplayBlock::Thinking(t));
-                        }
+                    if let Some(t) = self.streaming_thinking.take()
+                        && !t.trim().is_empty()
+                    {
+                        self.blocks.push(DisplayBlock::Thinking(t));
                     }
                     self.blocks.push(DisplayBlock::Assistant(content.clone()));
                     self.set_busy_state(BusyState::Idle);

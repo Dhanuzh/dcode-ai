@@ -72,6 +72,7 @@ fn run_without_config_exits_nonzero() {
         .current_dir(temp.path())
         .env("HOME", temp.path())
         .env_remove("MINIMAX_API_KEY")
+        .env_remove("OPENAI_API_KEY")
         .arg("run")
         .arg("--prompt")
         .arg("hello")
@@ -80,7 +81,7 @@ fn run_without_config_exits_nonzero() {
         .assert()
         .failure()
         .code(10)
-        .stderr(predicates::str::contains("missing MiniMax API key"));
+        .stderr(predicates::str::contains("missing OpenAI API key"));
 }
 
 #[test]
@@ -373,7 +374,7 @@ model = "openai/gpt-4o-mini"
     let provider_models = payload["provider_models"]
         .as_array()
         .expect("provider_models array");
-    assert_eq!(provider_models.len(), 4);
+    assert_eq!(provider_models.len(), 5);
     assert!(provider_models.iter().any(|entry| {
         entry["provider"] == "OpenAI" && entry["model"] == "gpt-4o" && entry["selected"] == true
     }));
@@ -413,7 +414,7 @@ model = "claude-3-7-sonnet-latest"
     assert_eq!(payload["provider"], "Anthropic");
     assert_eq!(payload["default_model"], "claude-3-7-sonnet-latest");
     let providers = payload["providers"].as_array().expect("providers array");
-    assert_eq!(providers.len(), 4);
+    assert_eq!(providers.len(), 5);
     assert!(providers.iter().any(|entry| {
         entry["provider"] == "Anthropic"
             && entry["selected"] == true

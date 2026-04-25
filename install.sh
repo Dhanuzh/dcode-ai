@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-VERSION="0.3.0"
-REPO="madebyaris/dcode-ai"
+VERSION="0.0.1"
+REPO="Dhanuzh/dcode-ai"
 BINARY="dcode-ai"
 INSTALL_DIR="${DCODE_AI_INSTALL_DIR:-/usr/local/bin}"
 

@@ -124,7 +124,8 @@ pub fn spawn_anthropic_stream(
                                 if let Some(text) = delta["thinking"].as_str()
                                     && !text.is_empty()
                                 {
-                                    let _ = tx.send(StreamChunk::ThinkingDelta(text.to_string())).await;
+                                    let _ =
+                                        tx.send(StreamChunk::ThinkingDelta(text.to_string())).await;
                                 }
                             }
                             "text_delta" => {
