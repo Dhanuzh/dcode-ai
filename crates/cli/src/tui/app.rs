@@ -133,6 +133,27 @@ const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 110;
 const COMMAND_PALETTE_WIDTH: u16 = 48;
 const COMMAND_PALETTE_MAX_ROWS: usize = 10;
 
+/// Copy text to clipboard. On X11/Wayland the selection is owned by the process —
+/// dropping `Clipboard` immediately can race clipboard managers, so on Linux we
+/// hand the clipboard to a background thread that blocks on `.wait()` until
+/// another app takes ownership.
+fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
+    #[cfg(target_os = "linux")]
+    {
+        use arboard::SetExtLinux;
+        let mut cb = Clipboard::new()?;
+        std::thread::spawn(move || {
+            let _ = cb.set().wait().text(text);
+        });
+        Ok(())
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let mut cb = Clipboard::new()?;
+        cb.set_text(text)
+    }
+}
+
 fn slash_panel_visible(buffer: &str) -> bool {
     buffer.starts_with('/') && !buffer.contains(' ')
 }
@@ -1106,7 +1127,7 @@ fn transcript_lines_and_hits(
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
                 let (md_lines, md_hits) =
                     render_markdown_lines_with_hits(content, state.code_line_numbers);
-                for (md_line, md_hit) in md_lines.into_iter().zip(md_hits.into_iter()) {
+                for (md_line, md_hit) in md_lines.into_iter().zip(md_hits) {
                     push_transcript_line(&mut lines, &mut hits, md_line, md_hit);
                 }
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
@@ -1381,7 +1402,7 @@ fn transcript_lines_and_hits(
         );
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
         let (md_lines, md_hits) = render_markdown_lines_with_hits(stream, state.code_line_numbers);
-        for (md_line, md_hit) in md_lines.into_iter().zip(md_hits.into_iter()) {
+        for (md_line, md_hit) in md_lines.into_iter().zip(md_hits) {
             push_transcript_line(&mut lines, &mut hits, md_line, md_hit);
         }
     }
@@ -3983,9 +4004,7 @@ pub fn run_blocking(
                                                     }
                                                 }
                                                 LineClickHit::CopyText(text) => {
-                                                    let feedback = match Clipboard::new()
-                                                        .and_then(|mut cb| cb.set_text(text))
-                                                    {
+                                                    let feedback = match copy_to_clipboard(text) {
                                                         Ok(_) => " Copied code block to clipboard"
                                                             .to_string(),
                                                         Err(e) => {
