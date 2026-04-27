@@ -30,8 +30,12 @@ detect_platform() {
     echo "${arch}-${os}"
 }
 
+tmpdir=""
+cleanup() { [ -n "$tmpdir" ] && rm -rf "$tmpdir"; }
+trap cleanup EXIT
+
 main() {
-    local platform target_url tmpdir archive
+    local platform target_url archive
 
     info "Installing ${BINARY} v${VERSION}"
 
@@ -42,7 +46,6 @@ main() {
     info "Downloading from: ${target_url}"
 
     tmpdir="$(mktemp -d)"
-    trap 'rm -rf "$tmpdir"' EXIT
 
     archive="${tmpdir}/${BINARY}.tar.gz"
 
