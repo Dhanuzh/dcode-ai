@@ -1,5 +1,7 @@
 //! Full-screen session TUI: transcript, streaming assistant, composer.
 
+#![allow(clippy::collapsible_match, clippy::explicit_into_iter_loop)]
+
 use std::path::{Path, PathBuf};
 
 use crate::file_mentions;
