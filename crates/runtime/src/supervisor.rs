@@ -417,17 +417,17 @@ impl Supervisor {
         let stats = self.context_manager.stats(&self.agent.messages);
 
         // Emit warning at 80% threshold
-        if stats.needs_attention {
-            if let Some(tx) = self.agent.event_sender() {
-                let _ = tx
-                    .send(AgentEvent::ContextWarning {
-                        message: format!(
-                            "Context window at {}% ({} tokens). Consider summarizing.",
-                            stats.usage_percent, stats.estimated_tokens
-                        ),
-                    })
-                    .await;
-            }
+        if stats.needs_attention
+            && let Some(tx) = self.agent.event_sender()
+        {
+            let _ = tx
+                .send(AgentEvent::ContextWarning {
+                    message: format!(
+                        "Context window at {}% ({} tokens). Consider summarizing.",
+                        stats.usage_percent, stats.estimated_tokens
+                    ),
+                })
+                .await;
         }
 
         // Proactively compact before the turn if we should summarize

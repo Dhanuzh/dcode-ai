@@ -85,14 +85,13 @@ pub fn preview_from_display_input(tool: &str, input: &str) -> String {
         return String::new();
     }
 
-    if tool == "spawn_subagent" {
-        if let Some(task) = trimmed
+    if tool == "spawn_subagent"
+        && let Some(task) = trimmed
             .lines()
             .find_map(|line| line.strip_prefix("task:").map(str::trim))
             .filter(|s| !s.is_empty())
-        {
-            return task.to_string();
-        }
+    {
+        return task.to_string();
     }
 
     if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
