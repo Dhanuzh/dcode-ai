@@ -8,7 +8,7 @@ use dcode_ai_common::tool::ToolDefinition;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
 use super::openai_compat::{map_provider_error, openai_request_body, spawn_openai_stream};
-use super::{Provider, ProviderError, StreamChunk};
+use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk};
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -171,6 +171,22 @@ async fn fetch_copilot_access_token(github_token: String) -> Result<String, Prov
 
 #[async_trait::async_trait]
 impl Provider for OpenAiProvider {
+    fn capabilities(&self) -> ProviderCapabilities {
+        // OpenAI o-series: o1, o3, o4, etc.
+        // Also: deepseek-r1, qwen-qwq, etc.
+        let model = &self.config.model;
+        let model_lower = model.to_ascii_lowercase();
+        let supports_thinking_stream = model_lower.starts_with('o')
+            || model_lower.contains("deepseek-r1")
+            || model_lower.contains("qwq")
+            || model_lower.contains("reasoning");
+        ProviderCapabilities {
+            supports_thinking_stream,
+            supports_native_images: true,
+            supports_video: model_lower.starts_with("gpt-4.1"),
+        }
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

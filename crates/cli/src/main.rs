@@ -1,3 +1,4 @@
+mod activity;
 mod approval_prompts;
 mod cli_index;
 mod file_mentions;
@@ -9,6 +10,7 @@ mod repl;
 mod runner;
 mod slash_commands;
 mod stream;
+mod tool_ui;
 mod tui;
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;

@@ -1,20 +1,6 @@
 # dcode-ai
 
-<p align="center">
-</p>
-
-<p align="center">
-  <strong>Rust-native coding agent. Single binary. Terminal-first.</strong>
-</p>
-
-<p align="center">
-  <a href="#install">Install</a> ·
-  <a href="#quick-start">Quick Start</a> ·
-  <a href="#tui-features">TUI</a> ·
-  <a href="#providers">Providers</a> ·
-  <a href="#commands">Commands</a> ·
-  <a href="#config">Config</a>
-</p>
+**Rust-native coding agent. Single binary. Terminal-first.**
 
 ---
 
@@ -206,6 +192,10 @@ Tests:
 ```bash
 cargo test --workspace
 ```
+
+## Author
+
+Dhanush
 
 ## License
 

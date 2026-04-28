@@ -317,6 +317,7 @@ impl ContextManager {
     pub fn summary_prompt(&self, messages: &[Message]) -> String {
         let prepared = self.prepare_for_summary(messages);
         let stats = self.stats(&prepared);
+        let conversation = render_summary_conversation(&prepared);
 
         format!(
             r#"Please summarize the following conversation concisely.
@@ -337,8 +338,12 @@ Current context stats:
 
 Conversation to summarize:
 
+{}
 "#,
-            stats.message_count, stats.estimated_tokens, self.config.context_window_target
+            stats.message_count,
+            stats.estimated_tokens,
+            self.config.context_window_target,
+            conversation
         )
     }
 
@@ -369,6 +374,34 @@ pub struct CompactionPlan {
 pub struct SummarizeRange {
     pub start: usize,
     pub end: usize,
+}
+
+fn render_summary_conversation(messages: &[Message]) -> String {
+    if messages.is_empty() {
+        return "(no messages provided)".to_string();
+    }
+
+    messages
+        .iter()
+        .enumerate()
+        .map(|(idx, message)| {
+            let role = match message.role {
+                Role::User => "User",
+                Role::Assistant => "Assistant",
+                Role::System => "System",
+                Role::Tool => "Tool",
+            };
+            let raw = message.content.to_summary_text();
+            let trimmed = raw.trim();
+            let content = if trimmed.is_empty() {
+                "<empty>".to_string()
+            } else {
+                trimmed.chars().take(2000).collect::<String>()
+            };
+            format!("[{}] {}:\n{}", idx + 1, role, content)
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 #[cfg(test)]
@@ -616,5 +649,21 @@ mod tests {
         let window = manager.get_sliding_window(&messages, None);
 
         assert_no_orphaned_tool_results(&window);
+    }
+
+    #[test]
+    fn summary_prompt_includes_conversation_content() {
+        let manager =
+            ContextManager::new(ContextManagerConfig::default(), "test-model".to_string());
+        let messages = vec![
+            make_message(Role::User, "Need help with context errors"),
+            make_message(Role::Assistant, "Let's compact earlier history first."),
+        ];
+
+        let prompt = manager.summary_prompt(&messages);
+        assert!(prompt.contains("Need help with context errors"));
+        assert!(prompt.contains("Let's compact earlier history first."));
+        assert!(prompt.contains("[1] User:"));
+        assert!(prompt.contains("[2] Assistant:"));
     }
 }

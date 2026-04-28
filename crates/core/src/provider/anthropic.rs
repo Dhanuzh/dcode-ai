@@ -7,7 +7,7 @@ use dcode_ai_common::tool::ToolDefinition;
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use super::anthropic_compat::{anthropic_request_body, map_provider_error, spawn_anthropic_stream};
-use super::{Provider, ProviderError, StreamChunk};
+use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk};
 
 pub struct AnthropicProvider {
     client: reqwest::Client,
@@ -62,6 +62,19 @@ impl AnthropicProvider {
 
 #[async_trait::async_trait]
 impl Provider for AnthropicProvider {
+    fn capabilities(&self) -> ProviderCapabilities {
+        // Anthropic extended thinking models emit thinking tokens.
+        // Models: claude-3-5-sonnet-20241022, claude-3-7-sonnet-20250501, etc.
+        // Check for known extended thinking model patterns.
+        let model = &self.config.model;
+        let supports_thinking_stream = model.contains("sonnet") || model.contains("opus");
+        ProviderCapabilities {
+            supports_thinking_stream,
+            supports_native_images: true,
+            ..Default::default()
+        }
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

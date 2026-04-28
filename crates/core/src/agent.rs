@@ -70,6 +70,21 @@ impl AgentLoop {
         self.provider = provider;
     }
 
+    /// Apply a context compaction to the message history.
+    /// Called by Supervisor when context exceeds threshold.
+    /// Returns the new message count.
+    pub fn compact_messages(&mut self, new_messages: Vec<Message>) -> usize {
+        let old_count = self.messages.len();
+        self.messages = new_messages;
+        let new_count = self.messages.len();
+        tracing::info!(
+            "context compacted: {} messages → {} messages",
+            old_count,
+            new_count
+        );
+        new_count
+    }
+
     /// Run one turn: send messages to the provider, execute any tool calls,
     /// and repeat until the provider returns a final text response.
     pub async fn run_turn(
@@ -181,7 +196,7 @@ impl AgentLoop {
                     break;
                 };
                 match chunk {
-                    StreamChunk::ThinkingDelta(delta) => {
+                    StreamChunk::InternalDelta(delta) => {
                         self.emit(AgentEvent::ThinkingDelta { delta }).await;
                     }
                     StreamChunk::TextDelta(delta) => {
@@ -215,6 +230,13 @@ impl AgentLoop {
                             estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
                         })
                         .await;
+                    }
+                    StreamChunk::Error(message) => {
+                        self.emit(AgentEvent::Error {
+                            message: message.clone(),
+                        })
+                        .await;
+                        return Err(ProviderError::RequestFailed(message));
                     }
                     StreamChunk::Done => break,
                 }
@@ -624,5 +646,136 @@ fn format_tool_result(result: &dcode_ai_common::tool::ToolResult) -> String {
             .error
             .clone()
             .unwrap_or_else(|| "tool failed".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::approval::ApprovalPolicy;
+    use crate::provider::{Provider, ProviderError, StreamChunk};
+    use crate::tools::ToolRegistry;
+    use async_trait::async_trait;
+    use dcode_ai_common::config::PermissionConfig;
+    use dcode_ai_common::message::Message;
+    use dcode_ai_common::tool::ToolDefinition;
+    use std::path::Path;
+    use std::sync::Mutex;
+
+    struct ChunkProvider {
+        chunks: Mutex<Option<Vec<StreamChunk>>>,
+    }
+
+    #[async_trait]
+    impl Provider for ChunkProvider {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            _model: &str,
+            _workspace_root: &Path,
+        ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError> {
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let chunks = self
+                .chunks
+                .lock()
+                .expect("provider chunks lock")
+                .take()
+                .unwrap_or_default();
+            tokio::spawn(async move {
+                for chunk in chunks {
+                    let _ = tx.send(chunk).await;
+                }
+            });
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn provider_stream_error_fails_loudly() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(Some(vec![StreamChunk::Error(
+                "openai stream error: connection reset".into(),
+            )])),
+        });
+        let mut agent = AgentLoop::new(
+            provider,
+            ToolRegistry::new(),
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "test-model".into(),
+            event_tx,
+            3,
+            3,
+            1,
+            None,
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = agent.run_turn("hello", temp.path(), &[]).await;
+
+        assert!(
+            matches!(result, Err(ProviderError::RequestFailed(message)) if message.contains("connection reset"))
+        );
+
+        let mut saw_error_event = false;
+        let mut saw_token_event = false;
+        while let Ok(event) = event_rx.try_recv() {
+            match event {
+                AgentEvent::Error { message } if message.contains("connection reset") => {
+                    saw_error_event = true;
+                }
+                AgentEvent::TokensStreamed { .. } => {
+                    saw_token_event = true;
+                }
+                _ => {}
+            }
+        }
+
+        assert!(saw_error_event);
+        assert!(!saw_token_event);
+    }
+
+    #[tokio::test]
+    async fn compact_messages_replaces_history_and_returns_count() {
+        let (event_tx, _rx) = tokio::sync::mpsc::channel(16);
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(None),
+        });
+        let mut agent = AgentLoop::new(
+            provider,
+            ToolRegistry::new(),
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "test-model".into(),
+            event_tx,
+            3,
+            3,
+            0,
+            None,
+        );
+
+        // Populate with some messages
+        agent.messages.push(Message::system("You are helpful"));
+        agent.messages.push(Message::user("Hello"));
+        agent.messages.push(Message::assistant("Hi there!"));
+        agent.messages.push(Message::user("How are you?"));
+        agent.messages.push(Message::assistant("I'm fine."));
+        assert_eq!(agent.messages.len(), 5);
+
+        // Compact: keep only system + last 2 messages
+        let compacted = vec![
+            Message::system("You are helpful"),
+            Message::user("How are you?"),
+            Message::assistant("I'm fine."),
+        ];
+        let new_count = agent.compact_messages(compacted);
+
+        assert_eq!(new_count, 3, "should return the new message count");
+        assert_eq!(agent.messages.len(), 3, "messages should be replaced");
+        assert_eq!(
+            agent.messages[0].role,
+            dcode_ai_common::message::Role::System
+        );
+        assert_eq!(agent.messages[2].content.event_preview(), "I'm fine.");
     }
 }

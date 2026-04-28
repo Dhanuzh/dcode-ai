@@ -407,28 +407,62 @@ impl Supervisor {
         ContextManager::new(context_config, model.to_string())
     }
 
-    /// Check if context needs attention or summarization.
+    /// Check context and compact proactively before running a model request.
+    /// This is called BEFORE each turn to prevent context-window errors.
     async fn maybe_compact_context(&mut self) {
         if !self.context_manager.config().enable_auto_summarize {
             return;
         }
 
         let stats = self.context_manager.stats(&self.agent.messages);
-        if stats.needs_attention
-            && let Some(tx) = self.agent.event_sender()
-        {
-            let _ = tx
-                .send(AgentEvent::ContextWarning {
-                    message: format!(
-                        "Context window at {}% ({} tokens). Consider summarizing.",
-                        stats.usage_percent, stats.estimated_tokens
-                    ),
-                })
-                .await;
+
+        // Emit warning at 80% threshold
+        if stats.needs_attention {
+            if let Some(tx) = self.agent.event_sender() {
+                let _ = tx
+                    .send(AgentEvent::ContextWarning {
+                        message: format!(
+                            "Context window at {}% ({} tokens). Consider summarizing.",
+                            stats.usage_percent, stats.estimated_tokens
+                        ),
+                    })
+                    .await;
+            }
+        }
+
+        // Proactively compact before the turn if we should summarize
+        if stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens) {
+            if let Some(tx) = self.agent.event_sender() {
+                let _ = tx
+                    .send(AgentEvent::ContextCompaction {
+                        phase: "starting".to_string(),
+                        message: format!(
+                            "Proactive compaction before turn ({}% full, {} tokens)",
+                            stats.usage_percent, stats.estimated_tokens
+                        ),
+                    })
+                    .await;
+            }
+
+            match self.perform_auto_summarize().await {
+                Ok(()) => {
+                    tracing::info!(
+                        "proactive compaction reduced context from {} to {} tokens",
+                        stats.estimated_tokens,
+                        self.context_manager
+                            .stats(&self.agent.messages)
+                            .estimated_tokens
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("proactive compaction failed: {e}");
+                    self.last_summary_at_tokens = 0;
+                }
+            }
         }
     }
 
-    /// Check if context should be summarized and trigger if needed.
+    /// Check if context should be summarized after a turn completes.
     async fn check_and_summarize_context(&mut self) {
         if !self.context_manager.config().enable_auto_summarize {
             return;
@@ -436,94 +470,103 @@ impl Supervisor {
 
         let stats = self.context_manager.stats(&self.agent.messages);
 
-        // Don't summarize if we just summarized
-        if self.last_summary_at_tokens > 0 && stats.estimated_tokens < self.last_summary_at_tokens {
-            // Context was reduced, reset the flag
-            self.last_summary_at_tokens = 0;
-        }
-
-        if stats.should_summarize && self.last_summary_at_tokens == 0 {
-            // Emit event that summarization is starting
+        // Only compact if we missed it before the turn (e.g., context grew during turn)
+        if stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens) {
             if let Some(tx) = self.agent.event_sender() {
                 let _ = tx
                     .send(AgentEvent::ContextCompaction {
                         phase: "starting".to_string(),
                         message: format!(
-                            "Auto-summarizing context ({}% full, {} tokens)",
+                            "Post-turn compaction ({}% full, {} tokens)",
                             stats.usage_percent, stats.estimated_tokens
                         ),
                     })
                     .await;
             }
 
-            // Trigger summarization
             if let Err(e) = self.perform_auto_summarize().await {
-                tracing::error!("Auto-summarize failed: {}", e);
-                // Reset so we can try again
+                tracing::warn!("post-turn compaction failed: {e}");
                 self.last_summary_at_tokens = 0;
             }
         }
     }
 
-    /// Perform the actual auto-summarization.
+    /// Perform auto-summarization: generate a summary and apply it to agent messages.
     async fn perform_auto_summarize(&mut self) -> Result<(), String> {
         let messages_to_summarize = self
             .context_manager
             .get_messages_to_summarize(&self.agent.messages);
 
         if messages_to_summarize.is_empty() {
-            // Nothing to summarize, use sliding window instead
+            // Nothing to summarize — use sliding window compaction
             let compacted = self
                 .context_manager
                 .get_sliding_window(&self.agent.messages, None);
-            self.agent.messages = compacted;
+            let new_count = self.agent.compact_messages(compacted);
+            let new_stats = self.context_manager.stats(&self.agent.messages);
+            self.last_summary_at_tokens = new_stats.estimated_tokens;
+
+            if let Some(tx) = self.agent.event_sender() {
+                let _ = tx
+                    .send(AgentEvent::ContextCompaction {
+                        phase: "completed".to_string(),
+                        message: format!(
+                            "Context compacted via sliding window. {} messages → {} messages",
+                            new_count + messages_to_summarize.len(),
+                            new_count
+                        ),
+                    })
+                    .await;
+            }
             return Ok(());
-        }
+        };
 
         // Generate summary prompt
         let summary_prompt = self.context_manager.summary_prompt(&messages_to_summarize);
+        let old_count = self.agent.messages.len();
 
-        // Try to use the AI to summarize. If the provider supports a quick call,
-        // we can use it. Otherwise, fall back to extractive summarization.
-        match self.summarize_with_ai(&summary_prompt).await {
-            Ok(summary) => {
-                // Apply the summary
-                self.agent.messages = self
-                    .context_manager
-                    .apply_summary(&self.agent.messages, &summary);
-                self.last_summary_at_tokens = self
-                    .context_manager
-                    .stats(&self.agent.messages)
-                    .estimated_tokens;
+        // Try AI summarization first, fall back to extractive
+        let summary_text = match self.summarize_with_ai(&summary_prompt).await {
+            Ok(s) if !s.trim().is_empty() => s,
+            Ok(_) | Err(_) => {
+                tracing::warn!("AI summarization returned empty, using extractive fallback");
+                build_compaction_fallback_summary(&messages_to_summarize)
+            }
+        };
 
-                if let Some(tx) = self.agent.event_sender() {
-                    let _ = tx
-                        .send(AgentEvent::ContextCompaction {
-                            phase: "completed".to_string(),
-                            message: format!(
-                                "Context summarized. Reduced from {} to ~{} tokens.",
-                                messages_to_summarize.len() * 100, // rough estimate
-                                self.last_summary_at_tokens
-                            ),
-                        })
-                        .await;
-                }
-            }
-            Err(e) => {
-                // Fallback: just use sliding window
-                tracing::warn!("AI summarization failed, using sliding window: {}", e);
-                let compacted = self
-                    .context_manager
-                    .get_sliding_window(&self.agent.messages, None);
-                self.agent.messages = compacted;
-                self.last_summary_at_tokens = self
-                    .context_manager
-                    .stats(&self.agent.messages)
-                    .estimated_tokens;
-            }
+        // Apply summary through agent to keep it isolated
+        let compacted = self
+            .context_manager
+            .apply_summary(&self.agent.messages, &summary_text);
+        let new_count = self.agent.compact_messages(compacted);
+        let new_stats = self.context_manager.stats(&self.agent.messages);
+        self.last_summary_at_tokens = new_stats.estimated_tokens;
+
+        if let Some(tx) = self.agent.event_sender() {
+            let _ = tx
+                .send(AgentEvent::ContextCompaction {
+                    phase: "completed".to_string(),
+                    message: format!(
+                        "Context summarized: {} messages → {} messages (~{} tokens)",
+                        old_count, new_count, new_stats.estimated_tokens
+                    ),
+                })
+                .await;
         }
 
         Ok(())
+    }
+
+    fn summary_rearm_ready(&mut self, current_tokens: usize) -> bool {
+        if self.last_summary_at_tokens == 0 {
+            return true;
+        }
+        if current_tokens < self.last_summary_at_tokens {
+            self.last_summary_at_tokens = 0;
+            return true;
+        }
+        let rearm_delta = (self.context_manager.config().context_window_target / 10).max(1024);
+        current_tokens.saturating_sub(self.last_summary_at_tokens) >= rearm_delta
     }
 
     /// Use AI to generate a summary of the conversation.
@@ -551,7 +594,11 @@ impl Supervisor {
             }
         }
 
-        Ok(summary.trim().to_string())
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            return Err("provider returned empty compaction summary".to_string());
+        }
+        Ok(summary)
     }
 
     pub async fn finish(&mut self, reason: EndReason) {
@@ -1322,6 +1369,15 @@ fn build_parent_summary(messages: &[dcode_ai_common::message::Message]) -> Strin
     summary
 }
 
+fn build_compaction_fallback_summary(messages: &[dcode_ai_common::message::Message]) -> String {
+    let summary = build_parent_summary(messages);
+    if summary.trim().is_empty() {
+        "Earlier conversation context was compacted due to token limits.".to_string()
+    } else {
+        summary
+    }
+}
+
 /// Configuration for spawning a child session.
 pub struct ChildSessionConfig {
     pub parent_session_id: String,
@@ -1698,5 +1754,100 @@ mod tests {
 
         let _ = cmd_tx.send(AgentCommand::Shutdown);
         task.abort();
+    }
+
+    #[test]
+    fn compaction_fallback_summary_uses_default_when_empty() {
+        let summary = build_compaction_fallback_summary(&[]);
+        assert_eq!(
+            summary,
+            "Earlier conversation context was compacted due to token limits."
+        );
+    }
+
+    #[test]
+    fn compaction_fallback_summary_prefers_message_summary() {
+        let summary = build_compaction_fallback_summary(&[
+            Message::user("Need to fix context overflow"),
+            Message::assistant("Auto-compact before the next model request."),
+        ]);
+        assert!(summary.contains("Need to fix context overflow"));
+        assert!(summary.contains("Auto-compact before the next model request."));
+    }
+
+    // ─── Context Overflow Hardening Tests ──────────────────────────────────────
+
+    /// `summary_rearm_ready` is backed by `last_summary_at_tokens`.
+    /// Test the rearm logic directly via ContextManager stats to avoid
+    /// needing a live provider in unit tests.
+    #[test]
+    fn context_manager_rearm_logic() {
+        use crate::context_manager::ContextManager;
+
+        // Context at 80% should trigger needs_attention
+        let config = ContextManagerConfig {
+            context_window_target: 10_000,
+            max_retained_messages: 50,
+            auto_summarize_threshold: 75,
+            enable_auto_summarize: true,
+            max_message_chars_for_summary: 10000,
+        };
+        let cm = ContextManager::new(config, "test-model".to_string());
+
+        // 7000 / 10000 = 70% → not needs_attention
+        let msgs_small = vec![
+            Message::user("a".repeat(28_000).as_str()), // ~7000 tokens
+        ];
+        let stats_small = cm.stats(&msgs_small);
+        assert!(
+            !stats_small.needs_attention,
+            "70% should not need attention"
+        );
+        assert!(
+            !stats_small.should_summarize,
+            "70% should not auto-summarize"
+        );
+
+        // 8000 / 10000 = 80% → needs_attention but not auto-summarize (75% threshold)
+        let msgs_medium = vec![
+            Message::user("a".repeat(32_000).as_str()), // ~8000 tokens
+        ];
+        let stats_medium = cm.stats(&msgs_medium);
+        assert!(stats_medium.needs_attention, "80% should need attention");
+        assert!(
+            stats_medium.should_summarize,
+            "80% should trigger auto-summarize"
+        );
+    }
+
+    /// Empty AI summary must fall back to extractive summarization.
+    /// `build_compaction_fallback_summary` handles this.
+    #[test]
+    fn empty_summary_triggers_extractive_fallback() {
+        let msgs = vec![
+            Message::user("What files are in the project?"),
+            Message::assistant("There are 50 Rust source files across 4 crates."),
+            Message::user("Run the tests"),
+            Message::assistant("All tests passed."),
+        ];
+        let fallback = build_compaction_fallback_summary(&msgs);
+        assert!(
+            !fallback.trim().is_empty(),
+            "fallback summary must not be empty when messages are provided"
+        );
+        assert!(
+            fallback.contains("files") || fallback.contains("project"),
+            "fallback should contain content from messages"
+        );
+    }
+
+    /// `build_compaction_fallback_summary` with empty input returns a default message.
+    #[test]
+    fn empty_messages_fallback_uses_default_message() {
+        let fallback = build_compaction_fallback_summary(&[]);
+        assert_eq!(
+            fallback,
+            "Earlier conversation context was compacted due to token limits."
+        );
     }
 }

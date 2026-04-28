@@ -16,6 +16,7 @@ use dcode_ai_common::event::{EndReason, QuestionSelection};
 use dcode_ai_core::skills::SkillCatalog;
 use dcode_ai_runtime::memory_store::MemoryStore;
 use reedline::{Completer, Emacs, FileBackedHistory, Reedline, Signal, Suggestion, Vi};
+use std::collections::VecDeque;
 use std::io::Write;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
@@ -39,6 +40,7 @@ impl ReplOutput<'_> {
                     for line in s.split('\n') {
                         g.blocks.push(DisplayBlock::System(line.to_string()));
                     }
+                    g.touch_transcript();
                 }
             }
         }
@@ -54,6 +56,7 @@ impl ReplOutput<'_> {
             ReplOutput::Tui(st) => {
                 if let Ok(mut g) = st.lock() {
                     g.blocks.push(DisplayBlock::System(format!("[!] {s}")));
+                    g.touch_transcript();
                 }
             }
         }
@@ -70,6 +73,7 @@ impl ReplOutput<'_> {
                     g.blocks.clear();
                     g.streaming_assistant = None;
                     g.scroll_lines = 0;
+                    g.touch_transcript();
                 }
             }
         }
@@ -553,6 +557,11 @@ impl Repl {
                     "KEYBOARD SHORTCUTS:".into(),
                     "  Tab          Cycle agent profile".into(),
                     "  Ctrl+P       Command palette".into(),
+                    "  Ctrl+F       Transcript search (TUI)".into(),
+                    "  Ctrl+K       Pin latest message (TUI)".into(),
+                    "  Ctrl+J       Pinned notes list (TUI)".into(),
+                    "  Ctrl+G       Sub-agent dashboard (TUI)".into(),
+                    "  Shift+Enter  Insert newline (TUI)".into(),
                     "  Ctrl+X M     Switch model".into(),
                     "  Ctrl+X E     Open editor".into(),
                     "  Ctrl+X L     Switch session".into(),
@@ -565,6 +574,7 @@ impl Repl {
                     "  Ctrl+X Q     Exit".into(),
                     "  Ctrl+C       Cancel request".into(),
                     "  Ctrl+L       Clear screen".into(),
+                    "  F6           Copy latest assistant response (TUI)".into(),
                     "  Ctrl+V       Paste image (TUI)".into(),
                     "  F2           Cycle recent models".into(),
                 ];
@@ -1604,6 +1614,9 @@ impl Repl {
             self.runtime.workspace_root().to_path_buf(),
             self.runtime.config().ui.code_line_numbers,
         )));
+        if let Ok(mut g) = tui_state.lock() {
+            g.mouse_capture_on = self.runtime.config().ui.mouse_capture;
+        }
 
         let log_path = self.runtime.event_log_path();
         replay_event_log_into_state(&log_path, &tui_state).await;
@@ -1715,10 +1728,71 @@ impl Repl {
             )
         });
 
+        let mut queued_steering: VecDeque<String> = VecDeque::new();
+        let mut queued_followup: VecDeque<String> = VecDeque::new();
+        let mut pending_cmds: VecDeque<TuiCmd> = VecDeque::new();
+
         loop {
-            let cmd = cmd_rx.recv().await;
-            let Some(cmd) = cmd else { break };
+            if pending_cmds.is_empty() && queued_steering.is_empty() && queued_followup.is_empty() {
+                let cmd = cmd_rx.recv().await;
+                let Some(cmd) = cmd else { break };
+                pending_cmds.push_back(cmd);
+            }
+
+            while let Ok(cmd) = cmd_rx.try_recv() {
+                pending_cmds.push_back(cmd);
+            }
+
+            let mut retained: VecDeque<TuiCmd> = VecDeque::new();
+            while let Some(cmd) = pending_cmds.pop_front() {
+                match cmd {
+                    TuiCmd::QueueSteering(line) => queued_steering.push_back(line),
+                    TuiCmd::QueueFollowUp(line) => queued_followup.push_back(line),
+                    other => retained.push_back(other),
+                }
+            }
+            pending_cmds = retained;
+
+            if let Ok(mut g) = tui_state.lock() {
+                g.queued_steering = queued_steering.len();
+                g.queued_followup = queued_followup.len();
+            }
+
+            let cmd = if let Some(cmd) = pending_cmds.pop_front() {
+                cmd
+            } else if let Some(line) = queued_steering.pop_front() {
+                if let Ok(mut g) = tui_state.lock() {
+                    g.queued_steering = queued_steering.len();
+                    g.queued_followup = queued_followup.len();
+                }
+                TuiCmd::Submit(line)
+            } else if let Some(line) = queued_followup.pop_front() {
+                if let Ok(mut g) = tui_state.lock() {
+                    g.queued_steering = queued_steering.len();
+                    g.queued_followup = queued_followup.len();
+                }
+                TuiCmd::Submit(line)
+            } else {
+                continue;
+            };
+
             match cmd {
+                TuiCmd::QueueSteering(line) => {
+                    queued_steering.push_back(line);
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.queued_steering = queued_steering.len();
+                        g.queued_followup = queued_followup.len();
+                    }
+                    continue;
+                }
+                TuiCmd::QueueFollowUp(line) => {
+                    queued_followup.push_back(line);
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.queued_steering = queued_steering.len();
+                        g.queued_followup = queued_followup.len();
+                    }
+                    continue;
+                }
                 TuiCmd::Exit => {
                     if let Ok(mut g) = tui_state.lock() {
                         g.should_exit = true;
@@ -1760,6 +1834,7 @@ impl Repl {
                                 "Switched to branch: {}",
                                 name
                             )));
+                            g.touch_transcript();
                         }
                     } else if let Ok(mut g) = tui_state.lock() {
                         g.push_error(format!("Failed to switch to branch: {}", name));
@@ -1774,6 +1849,7 @@ impl Repl {
                                 "Created and switched to branch: {}",
                                 name
                             )));
+                            g.touch_transcript();
                         }
                     } else if let Ok(mut g) = tui_state.lock() {
                         g.push_error(format!("Failed to create branch: {}", name));
@@ -1815,6 +1891,7 @@ impl Repl {
                                     "[model] switched to {} (saved)",
                                     self.runtime.model()
                                 )));
+                                g.touch_transcript();
                             }
                         }
                         Err(e) => {
@@ -1846,6 +1923,7 @@ impl Repl {
                         g.blocks.push(DisplayBlock::System(format!(
                             "permission mode set to {mode:?}"
                         )));
+                        g.touch_transcript();
                     }
                 }
                 TuiCmd::SwitchAgent(idx) => {
@@ -1864,6 +1942,7 @@ impl Repl {
                                 "switched to @{}",
                                 profile.label()
                             )));
+                            g.touch_transcript();
                         }
                     }
                 }
@@ -1959,6 +2038,7 @@ impl Repl {
                                     g.streaming_thinking = None;
                                     g.session_id = self.runtime.session_id().to_string();
                                     g.model = self.runtime.model().to_string();
+                                    g.touch_transcript();
                                 }
                                 replay_event_log_into_state(&new_log, &tui_state).await;
                                 if let Ok(mut g) = tui_state.lock() {
@@ -1966,6 +2046,7 @@ impl Repl {
                                         "Resumed session {session_id}"
                                     )));
                                     g.transcript_follow_tail = true;
+                                    g.touch_transcript();
                                 }
                             }
                             Err(e) => {
@@ -2000,6 +2081,7 @@ impl Repl {
                                     "[F2] switched to {}",
                                     self.runtime.model()
                                 )));
+                                g.touch_transcript();
                             }
                         }
                     } else if let Ok(mut g) = tui_state.lock() {
@@ -2007,6 +2089,7 @@ impl Repl {
                             "[F2] no recent models to cycle (need 2+ in model.recent_models)"
                                 .into(),
                         ));
+                        g.touch_transcript();
                     }
                 }
                 TuiCmd::ValidateApiKey(provider, api_key) => {
@@ -2102,6 +2185,7 @@ impl Repl {
                             "theme set to {}",
                             applied.name
                         )));
+                        g.touch_transcript();
                     }
                 }
                 TuiCmd::CompleteOnboarding => {
@@ -2157,6 +2241,7 @@ impl Repl {
                                         "[apikey] keeping existing key for {}",
                                         p.display_name()
                                     )));
+                                    g.touch_transcript();
                                 }
                                 if connect_after_save {
                                     self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
@@ -2189,6 +2274,7 @@ impl Repl {
                             g.blocks.push(DisplayBlock::System(
                                 "[apikey] entry cancelled (empty line)".into(),
                             ));
+                            g.touch_transcript();
                         }
                         continue;
                     }
@@ -2218,6 +2304,7 @@ impl Repl {
                                             "[apikey] saved for {}",
                                             p.display_name()
                                         )));
+                                        g.touch_transcript();
                                     }
                                 }
                                 Err(e) => {
@@ -2296,6 +2383,7 @@ impl Repl {
         fn log(st: &Arc<Mutex<TuiSessionState>>, s: &str) {
             if let Ok(mut g) = st.lock() {
                 g.blocks.push(DisplayBlock::System(s.to_string()));
+                g.touch_transcript();
             }
         }
         if cmd.is_empty() {
@@ -2320,6 +2408,7 @@ impl Repl {
                     for line in stdout.lines() {
                         g.blocks.push(DisplayBlock::System(line.to_string()));
                     }
+                    g.touch_transcript();
                 }
                 if !stderr.is_empty() {
                     log(st, &format!("[stderr] {stderr}"));

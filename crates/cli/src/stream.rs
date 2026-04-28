@@ -2,15 +2,19 @@
 //!
 //! This module provides streaming event rendering with Claude Code-inspired styling.
 
+use crate::activity;
 use crate::ipc_pending::{ApprovalPendingMap, QuestionPendingMap};
+use crate::tool_ui;
 use colored::Colorize;
 use dcode_ai_common::event::{
     AgentEvent, EventEnvelope, InteractiveQuestionPayload, QuestionSelection,
 };
 use dcode_ai_runtime::ipc::IpcHandle;
 use dcode_ai_runtime::supervisor;
+use std::collections::HashMap;
 use std::io::{self, IsTerminal, Write};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 use tokio::sync::oneshot;
@@ -85,6 +89,7 @@ struct StreamStats {
     estimated_cost: Arc<AtomicU64>,
     #[allow(dead_code)]
     start_time: Instant,
+    tool_calls: Arc<Mutex<HashMap<String, String>>>,
 }
 
 impl StreamStats {
@@ -94,6 +99,7 @@ impl StreamStats {
             output_tokens: Arc::new(AtomicU64::new(0)),
             estimated_cost: Arc::new(AtomicU64::new(0)),
             start_time: Instant::now(),
+            tool_calls: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -122,6 +128,19 @@ impl StreamStats {
     #[allow(dead_code)]
     fn elapsed_secs(&self) -> u64 {
         self.start_time.elapsed().as_secs()
+    }
+
+    fn track_tool_started(&self, call_id: String, tool: String) {
+        if let Ok(mut map) = self.tool_calls.lock() {
+            map.insert(call_id, tool);
+        }
+    }
+
+    fn take_tool_for_call(&self, call_id: &str) -> Option<String> {
+        self.tool_calls
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(call_id))
     }
 }
 
@@ -318,27 +337,67 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
         }
         AgentEvent::ToolCallStarted {
             tool,
-            input: _,
-            call_id: _,
+            input,
+            call_id,
         } => {
+            stats.track_tool_started(call_id.clone(), tool.clone());
+            let ui = tool_ui::metadata(tool);
+            let preview = tool_ui::preview_from_value(tool, input);
             print!("{}", theme::CLEAR_LINE);
             println!();
             println!(
-                "  {} {}",
-                "⚡".color(theme::TOOL_BG).bold(),
-                tool.to_uppercase().color(theme::TOOL_BG)
+                "  {} {} {} {}",
+                format!(" {} ", ui.icon)
+                    .on_color(theme::TOOL_BG)
+                    .black()
+                    .bold(),
+                ui.label.color(theme::TOOL_BG).bold(),
+                format!("({})", ui.family).color(theme::TEXT_DIM),
+                "running".color(theme::WARNING).bold()
             );
+            if !preview.is_empty() {
+                println!(
+                    "    {} {}",
+                    "input".color(theme::TEXT_DIM),
+                    preview.color(theme::TEXT)
+                );
+            }
+            if let Some(message) = activity::started(tool, input) {
+                println!(
+                    "    {} {}",
+                    "•".color(theme::TEXT_DIM),
+                    message.color(theme::TEXT_DIM)
+                );
+            }
         }
-        AgentEvent::ToolCallCompleted { call_id: _, output } => {
+        AgentEvent::ToolCallCompleted { call_id, output } => {
             print!("{}", theme::CLEAR_LINE);
             println!();
             if output.success {
+                let tool = stats.take_tool_for_call(call_id);
+                let ui = tool_ui::metadata(tool.as_deref().unwrap_or("tool"));
                 println!(
-                    "  {} {}",
-                    "✓".color(theme::SUCCESS),
-                    "Tool completed".color(theme::TEXT_DIM)
+                    "  {} {} {}",
+                    " done ".on_color(theme::SUCCESS).black().bold(),
+                    ui.label.color(theme::TOOL_BG).bold(),
+                    output
+                        .output
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .color(theme::TEXT_DIM)
                 );
+                if let Some(tool) = tool
+                    && let Some(message) = activity::completed(&tool, true, &output.output, None)
+                {
+                    println!(
+                        "    {} {}",
+                        "•".color(theme::TEXT_DIM),
+                        message.color(theme::TEXT_DIM)
+                    );
+                }
             } else {
+                let _ = stats.take_tool_for_call(call_id);
                 println!(
                     "  {} {}",
                     "✗".color(theme::ERROR),
@@ -355,12 +414,21 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
             tool,
             description,
         } => {
+            let ui = tool_ui::metadata(tool);
             print!("{}", theme::CLEAR_LINE);
             println!();
             println!(
-                "  {} {}: {}",
-                "?".color(theme::WARNING).bold(),
-                tool.color(theme::WARNING),
+                "  {} {} {}",
+                format!(" {} ", ui.icon)
+                    .on_color(theme::WARNING)
+                    .black()
+                    .bold(),
+                ui.label.color(theme::WARNING).bold(),
+                "approval required".color(theme::WARNING).bold()
+            );
+            println!(
+                "    {} {}",
+                "why".color(theme::TEXT_DIM),
                 description.color(theme::TEXT_DIM)
             );
         }

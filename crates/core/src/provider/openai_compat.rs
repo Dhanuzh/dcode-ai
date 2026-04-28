@@ -66,8 +66,8 @@ pub fn spawn_openai_stream(
                 Ok(chunk) => chunk,
                 Err(err) => {
                     let _ = tx
-                        .send(StreamChunk::TextDelta(format!(
-                            "\n[{provider_name} stream error: {err}]"
+                        .send(StreamChunk::Error(format!(
+                            "{provider_name} stream error: {err}"
                         )))
                         .await;
                     break;
@@ -122,7 +122,7 @@ pub fn spawn_openai_stream(
                     if let Some(text) = delta["reasoning_content"].as_str()
                         && !text.is_empty()
                     {
-                        let _ = tx.send(StreamChunk::ThinkingDelta(text.to_string())).await;
+                        let _ = tx.send(StreamChunk::InternalDelta(text.to_string())).await;
                     }
                     if let Some(text) = delta["content"].as_str()
                         && !text.is_empty()

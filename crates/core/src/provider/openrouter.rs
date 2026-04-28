@@ -6,7 +6,7 @@ use dcode_ai_common::tool::ToolDefinition;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 
 use super::openai_compat::{map_provider_error, openai_request_body, spawn_openai_stream};
-use super::{Provider, ProviderError, StreamChunk};
+use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk};
 
 pub struct OpenRouterProvider {
     client: reqwest::Client,
@@ -78,6 +78,23 @@ impl OpenRouterProvider {
 
 #[async_trait::async_trait]
 impl Provider for OpenRouterProvider {
+    fn capabilities(&self) -> ProviderCapabilities {
+        // OpenRouter hosts many models, some with reasoning: deepseek-r1, qwen-qwq, etc.
+        // Heuristic: check for known reasoning model prefixes.
+        let model = &self.config.model;
+        let model_lower = model.to_ascii_lowercase();
+        let supports_thinking_stream = model_lower.contains("deepseek-r1")
+            || model_lower.contains("qwq")
+            || model_lower.starts_with("o1")
+            || model_lower.contains("reasoning");
+        ProviderCapabilities {
+            supports_thinking_stream,
+            // Images depend on the underlying model; default to true for most.
+            supports_native_images: true,
+            ..Default::default()
+        }
+    }
+
     async fn chat(
         &self,
         messages: &[Message],

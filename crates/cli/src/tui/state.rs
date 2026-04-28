@@ -1,9 +1,9 @@
 //! Transcript + status driven by `AgentEvent`.
 
+use crate::{activity, tool_ui};
 use dcode_ai_common::config::ProviderKind;
 use dcode_ai_common::event::{AgentEvent, BusyState, InteractiveQuestionPayload};
 use dcode_ai_common::message::ImageAttachment;
-use serde_json::Value;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Instant;
@@ -54,6 +54,12 @@ pub struct SubagentRow {
     pub skill: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct PinnedNote {
+    pub title: String,
+    pub body: String,
+}
+
 /// Status of an API key validation during onboarding.
 #[derive(Debug, Clone)]
 pub enum OnboardingValidation {
@@ -86,6 +92,10 @@ pub struct TuiSessionState {
     pub model: String,
     pub agent_profile: String,
     pub permission_mode: String,
+    /// Compact current process title for the live status row.
+    pub process_title: String,
+    /// Optional process detail for the live status row.
+    pub process_detail: String,
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
@@ -182,8 +192,14 @@ pub struct TuiSessionState {
     pub onboarding_mode: bool,
     /// Result of the most recent API key validation attempt (None = no attempt yet).
     pub validation_status: Option<OnboardingValidation>,
+    /// Queued steering messages (Enter while busy).
+    pub queued_steering: usize,
+    /// Queued follow-up messages (Alt+Enter while busy).
+    pub queued_followup: usize,
     /// Render fenced code blocks with line numbers in assistant markdown.
     pub code_line_numbers: bool,
+    /// Monotonic revision for transcript render caching.
+    pub transcript_rev: u64,
     /// Maps paste placeholder tokens (e.g. `[pasted 5 lines #1]`) to their real content.
     /// Cleared when the input buffer is submitted or cleared.
     pub paste_store: HashMap<String, String>,
@@ -196,6 +212,19 @@ pub struct TuiSessionState {
     pub theme_picker_open: bool,
     pub theme_picker_index: usize,
     pub theme_picker_entries: Vec<String>,
+    /// Pinned notes shown at transcript top.
+    pub pinned_notes: Vec<PinnedNote>,
+    /// Pins modal popup (`Ctrl+J`).
+    pub pins_modal_open: bool,
+    pub pins_modal_index: usize,
+    /// Sub-agent details modal popup (`Ctrl+G`).
+    pub subagent_modal_open: bool,
+    pub subagent_modal_index: usize,
+    /// Transcript search popup (`Ctrl+F`).
+    pub transcript_search_open: bool,
+    pub transcript_search_query: String,
+    /// Selected match index within the current filtered match list.
+    pub transcript_search_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +266,8 @@ impl TuiSessionState {
             model,
             agent_profile,
             permission_mode,
+            process_title: "idle".to_string(),
+            process_detail: String::new(),
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: 0.0,
@@ -297,13 +328,24 @@ impl TuiSessionState {
             session_picker_scroll: 0,
             onboarding_mode: false,
             validation_status: None,
+            queued_steering: 0,
+            queued_followup: 0,
             code_line_numbers,
+            transcript_rev: 0,
             paste_store: HashMap::new(),
             paste_counter: 0,
-            mouse_capture_on: true,
+            mouse_capture_on: false,
             theme_picker_open: false,
             theme_picker_index: 0,
             theme_picker_entries: Vec::new(),
+            pinned_notes: Vec::new(),
+            pins_modal_open: false,
+            pins_modal_index: 0,
+            subagent_modal_open: false,
+            subagent_modal_index: 0,
+            transcript_search_open: false,
+            transcript_search_query: String::new(),
+            transcript_search_index: 0,
         }
     }
 
@@ -316,6 +358,40 @@ impl TuiSessionState {
     pub fn close_theme_picker(&mut self) {
         self.theme_picker_open = false;
         self.theme_picker_index = 0;
+    }
+
+    pub fn open_pins_modal(&mut self) {
+        self.pins_modal_open = true;
+        self.pins_modal_index = self
+            .pins_modal_index
+            .min(self.pinned_notes.len().saturating_sub(1));
+    }
+
+    pub fn close_pins_modal(&mut self) {
+        self.pins_modal_open = false;
+        self.pins_modal_index = 0;
+    }
+
+    pub fn open_subagent_modal(&mut self) {
+        self.subagent_modal_open = true;
+        self.subagent_modal_index = self
+            .subagent_modal_index
+            .min(self.subagents.len().saturating_sub(1));
+    }
+
+    pub fn close_subagent_modal(&mut self) {
+        self.subagent_modal_open = false;
+        self.subagent_modal_index = 0;
+    }
+
+    pub fn open_transcript_search(&mut self) {
+        self.transcript_search_open = true;
+        self.transcript_search_index = 0;
+    }
+
+    pub fn close_transcript_search(&mut self) {
+        self.transcript_search_open = false;
+        self.transcript_search_index = 0;
     }
 
     pub fn open_connect_modal(&mut self) {
@@ -409,12 +485,14 @@ impl TuiSessionState {
         self.question_modal_open = true;
         self.question_modal_index = 0;
         self.question_modal_scroll = 0;
+        self.touch_transcript();
     }
 
     pub fn close_question_modal(&mut self) {
         self.question_modal_open = false;
         self.question_modal_index = 0;
         self.question_modal_scroll = 0;
+        self.touch_transcript();
     }
 
     pub fn open_session_picker(&mut self, entries: Vec<String>, current: &str) {
@@ -460,6 +538,11 @@ impl TuiSessionState {
 
     pub fn push_error(&mut self, msg: String) {
         self.blocks.push(DisplayBlock::ErrorLine(msg));
+        self.touch_transcript();
+    }
+
+    pub fn touch_transcript(&mut self) {
+        self.transcript_rev = self.transcript_rev.wrapping_add(1);
     }
 
     /// Approval/question prompts from replayed history are transcript only.
@@ -511,6 +594,11 @@ impl TuiSessionState {
         self.permission_mode = mode.to_string();
     }
 
+    fn set_process(&mut self, title: impl Into<String>, detail: impl Into<String>) {
+        self.process_title = title.into();
+        self.process_detail = detail.into();
+    }
+
     pub fn toggle_sidebar(&mut self) {
         self.sidebar_open = !self.sidebar_open;
     }
@@ -533,6 +621,7 @@ impl TuiSessionState {
     }
 
     pub fn apply_event(&mut self, e: &AgentEvent) {
+        let mut transcript_dirty = false;
         match e {
             AgentEvent::SessionStarted {
                 session_id,
@@ -543,13 +632,16 @@ impl TuiSessionState {
                 self.model = model.clone();
                 self.workspace_root = workspace.clone();
                 self.workspace_display = workspace.display().to_string();
+                self.set_process("session ready", model.clone());
             }
             AgentEvent::MessageReceived { role, content } => {
                 if role == "user" {
                     self.streaming_assistant = None;
                     self.streaming_thinking = None;
                     self.blocks.push(DisplayBlock::User(content.clone()));
+                    self.set_process("queued prompt", truncate(content, 96));
                     self.set_busy_state(BusyState::Thinking);
+                    transcript_dirty = true;
                 } else if role == "assistant" {
                     self.streaming_assistant = None;
                     if let Some(t) = self.streaming_thinking.take()
@@ -558,19 +650,25 @@ impl TuiSessionState {
                         self.blocks.push(DisplayBlock::Thinking(t));
                     }
                     self.blocks.push(DisplayBlock::Assistant(content.clone()));
+                    self.set_process("response ready", truncate(content, 96));
                     self.set_busy_state(BusyState::Idle);
+                    transcript_dirty = true;
                 }
             }
             AgentEvent::ThinkingDelta { delta } => {
                 self.streaming_thinking
                     .get_or_insert_with(String::new)
                     .push_str(delta);
+                self.set_process("thinking", "analyzing and planning");
+                transcript_dirty = true;
             }
             AgentEvent::TokensStreamed { delta } => {
                 self.streaming_assistant
                     .get_or_insert_with(String::new)
                     .push_str(delta);
+                self.set_process("writing response", truncate(delta, 96));
                 self.set_busy_state(BusyState::Streaming);
+                transcript_dirty = true;
             }
             AgentEvent::ToolCallStarted {
                 call_id,
@@ -581,9 +679,23 @@ impl TuiSessionState {
                 self.blocks.push(DisplayBlock::ToolRunning {
                     name: tool.clone(),
                     call_id: call_id.clone(),
-                    input: format_tool_input_for_display(tool, input),
+                    input: tool_ui::format_input_for_display(tool, input),
                 });
+                if let Some(message) = activity::started(tool, input) {
+                    self.blocks.push(DisplayBlock::System(message));
+                }
+                let ui = tool_ui::metadata(tool);
+                let preview = tool_ui::preview_from_value(tool, input);
+                self.set_process(
+                    format!("running {}", ui.label.to_ascii_lowercase()),
+                    if preview.is_empty() {
+                        ui.family.to_string()
+                    } else {
+                        truncate(&preview, 96)
+                    },
+                );
                 self.set_busy_state(BusyState::ToolRunning);
+                transcript_dirty = true;
             }
             AgentEvent::ToolCallCompleted { call_id, output } => {
                 let ok = output.success;
@@ -608,6 +720,14 @@ impl TuiSessionState {
                         DisplayBlock::ApprovalPending(req) => req.tool.clone(),
                         _ => "?".into(),
                     };
+                    if let Some(message) = activity::completed(
+                        &name,
+                        ok,
+                        &output.output,
+                        Some(self.workspace_root.as_path()),
+                    ) {
+                        self.blocks.push(DisplayBlock::System(message));
+                    }
                     self.blocks[idx] = DisplayBlock::ToolDone { name, ok, detail };
                 } else {
                     self.blocks.push(DisplayBlock::ToolDone {
@@ -616,6 +736,18 @@ impl TuiSessionState {
                         detail,
                     });
                 }
+                self.set_process(
+                    if ok { "tool completed" } else { "tool failed" },
+                    truncate(
+                        if ok {
+                            &output.output
+                        } else {
+                            output.error.as_deref().unwrap_or("failed")
+                        },
+                        96,
+                    ),
+                );
+                transcript_dirty = true;
             }
             AgentEvent::ApprovalRequested {
                 call_id,
@@ -644,10 +776,13 @@ impl TuiSessionState {
                 if let Some(idx) = self.blocks.iter().rposition(
                     |b| matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id),
                 ) {
-                    self.blocks[idx] = DisplayBlock::ApprovalPending(req);
+                    self.blocks.remove(idx);
+                    self.blocks.push(DisplayBlock::ApprovalPending(req));
                 } else {
                     self.blocks.push(DisplayBlock::ApprovalPending(req));
                 }
+                self.set_process("waiting approval", truncate(description, 96));
+                transcript_dirty = true;
             }
             AgentEvent::ApprovalResolved { call_id, approved } => {
                 let tool = self
@@ -672,6 +807,15 @@ impl TuiSessionState {
                     tool,
                     approved: *approved,
                 });
+                self.set_process(
+                    if *approved {
+                        "approval granted"
+                    } else {
+                        "approval denied"
+                    },
+                    "",
+                );
+                transcript_dirty = true;
             }
             AgentEvent::QuestionRequested { question } => {
                 self.active_question = Some(question.clone());
@@ -679,6 +823,8 @@ impl TuiSessionState {
                 // Bring the prompt into view when follow-tail is on (default).
                 self.transcript_follow_tail = true;
                 self.open_question_modal();
+                self.set_process("waiting input", truncate(&question.prompt, 96));
+                transcript_dirty = true;
             }
             AgentEvent::QuestionResolved {
                 question_id,
@@ -689,6 +835,8 @@ impl TuiSessionState {
                 self.blocks.push(DisplayBlock::System(format!(
                     "Answered question {question_id}: {selection:?}"
                 )));
+                self.set_process("input received", format!("{selection:?}"));
+                transcript_dirty = true;
             }
             AgentEvent::CostUpdated {
                 input_tokens,
@@ -699,13 +847,18 @@ impl TuiSessionState {
                 self.output_tokens = *output_tokens;
                 self.cost_usd = *estimated_cost_usd;
             }
+            AgentEvent::SessionEnded { .. } => {
+                self.set_process("session ended", "");
+            }
             AgentEvent::Error { message } => {
                 self.blocks.push(DisplayBlock::ErrorLine(message.clone()));
+                self.set_process("error", truncate(message, 96));
                 if message.to_ascii_lowercase().contains("run cancelled") {
                     self.set_busy_state(BusyState::Idle);
                 } else {
                     self.set_busy_state(BusyState::Error);
                 }
+                transcript_dirty = true;
             }
             AgentEvent::Checkpoint { .. } => {}
             AgentEvent::ChildSessionSpawned {
@@ -736,6 +889,7 @@ impl TuiSessionState {
                     "Sub-agent {short}… — {}",
                     truncate(task, 80)
                 )));
+                transcript_dirty = true;
             }
             AgentEvent::ChildSessionActivity {
                 child_session_id,
@@ -771,6 +925,7 @@ impl TuiSessionState {
                 }
                 self.blocks
                     .push(DisplayBlock::System(format!("↳ {short}… · {phase} · {d}")));
+                transcript_dirty = true;
             }
             AgentEvent::ChildSessionCompleted {
                 child_session_id,
@@ -790,11 +945,18 @@ impl TuiSessionState {
                 self.blocks.push(DisplayBlock::System(format!(
                     "Sub-agent {short}… done: {status}"
                 )));
+                transcript_dirty = true;
             }
             AgentEvent::BusyStateChanged { state } => {
                 self.set_busy_state(*state);
+                if matches!(state, BusyState::Idle) && self.process_title == "writing response" {
+                    self.set_process("idle", "");
+                }
             }
             _ => {}
+        }
+        if transcript_dirty {
+            self.touch_transcript();
         }
     }
 }
@@ -813,42 +975,6 @@ fn truncate(s: &str, max: usize) -> String {
             t.chars().take(max.saturating_sub(1)).collect::<String>()
         )
     }
-}
-
-fn format_tool_input_for_display(tool: &str, value: &Value) -> String {
-    if tool == "spawn_subagent" {
-        format_spawn_subagent_input(value)
-    } else {
-        format_tool_input(value)
-    }
-}
-
-fn format_spawn_subagent_input(v: &Value) -> String {
-    let task = v.get("task").and_then(|t| t.as_str()).unwrap_or("").trim();
-    let wt = v
-        .get("use_worktree")
-        .and_then(|b| b.as_bool())
-        .unwrap_or(true);
-    let n_focus = v
-        .get("focus_files")
-        .and_then(|a| a.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    format!(
-        "task:\n{}\nworktree: {} · focus_files: {}",
-        truncate(task, 500),
-        wt,
-        n_focus
-    )
-}
-
-fn format_tool_input(value: &Value) -> String {
-    if let Some(raw) = value.as_str()
-        && let Ok(parsed) = serde_json::from_str::<Value>(raw)
-    {
-        return serde_json::to_string_pretty(&parsed).unwrap_or_else(|_| raw.to_string());
-    }
-    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
 }
 
 #[cfg(test)]
@@ -923,6 +1049,19 @@ mod tests {
     }
 
     #[test]
+    fn tui_state_defaults_mouse_capture_off() {
+        let st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        assert!(!st.mouse_capture_on);
+    }
+
+    #[test]
     fn approval_requested_promotes_running_tool_with_input() {
         let mut st = TuiSessionState::new(
             "session-x".into(),
@@ -952,6 +1091,41 @@ mod tests {
             }
             other => panic!("expected approval block, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn tool_events_append_codex_style_activity_lines() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp/repo"),
+            false,
+        );
+        st.apply_event(&AgentEvent::ToolCallStarted {
+            call_id: "call-1".into(),
+            tool: "web_search".into(),
+            input: serde_json::json!({"query":"tokio tutorial"}),
+        });
+        st.apply_event(&AgentEvent::ToolCallCompleted {
+            call_id: "call-1".into(),
+            output: dcode_ai_common::tool::ToolResult {
+                call_id: "call-1".into(),
+                success: true,
+                output: "- result".into(),
+                error: None,
+            },
+        });
+
+        assert!(st.blocks.iter().any(
+            |block| matches!(block, DisplayBlock::System(s) if s == "Using web context: tokio tutorial")
+        ));
+        assert!(
+            st.blocks
+                .iter()
+                .any(|block| matches!(block, DisplayBlock::System(s) if s == "Web context ready"))
+        );
     }
 
     #[test]

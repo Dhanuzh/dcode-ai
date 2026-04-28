@@ -65,8 +65,8 @@ pub fn spawn_anthropic_stream(
                 Ok(chunk) => chunk,
                 Err(err) => {
                     let _ = tx
-                        .send(StreamChunk::TextDelta(format!(
-                            "\n[{provider_name} stream error: {err}]"
+                        .send(StreamChunk::Error(format!(
+                            "{provider_name} stream error: {err}"
                         )))
                         .await;
                     break;
@@ -125,7 +125,7 @@ pub fn spawn_anthropic_stream(
                                     && !text.is_empty()
                                 {
                                     let _ =
-                                        tx.send(StreamChunk::ThinkingDelta(text.to_string())).await;
+                                        tx.send(StreamChunk::InternalDelta(text.to_string())).await;
                                 }
                             }
                             "text_delta" => {

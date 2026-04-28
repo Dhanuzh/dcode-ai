@@ -2,6 +2,14 @@ use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
 
+fn format_diff(old: &str, new: &str) -> String {
+    let diff = similar::TextDiff::from_lines(old, new);
+    diff.unified_diff()
+        .context_radius(3)
+        .header("before", "after")
+        .to_string()
+}
+
 pub struct WriteFileTool {
     workspace_root: std::path::PathBuf,
 }
@@ -76,13 +84,27 @@ impl ToolExecutor for WriteFileTool {
             };
         }
 
+        let old = tokio::fs::read_to_string(&full_path)
+            .await
+            .unwrap_or_default();
+
         match tokio::fs::write(&full_path, content).await {
-            Ok(()) => ToolResult {
-                call_id: call.id.clone(),
-                success: true,
-                output: format!("Wrote {}", full_path.display()),
-                error: None,
-            },
+            Ok(()) => {
+                let diff = format_diff(&old, content);
+                // Keep output machine- and human-friendly. The CLI can render this as-is.
+                let output = if diff.trim().is_empty() {
+                    format!("Wrote {} (no changes)", full_path.display())
+                } else {
+                    format!("Wrote {}\n\n{diff}", full_path.display())
+                };
+
+                ToolResult {
+                    call_id: call.id.clone(),
+                    success: true,
+                    output,
+                    error: None,
+                }
+            }
             Err(err) => ToolResult {
                 call_id: call.id.clone(),
                 success: false,
