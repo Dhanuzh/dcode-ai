@@ -18,6 +18,16 @@
 ## Quick Start
 
 ```bash
+# install latest release
+curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | bash
+
+# or pin an exact release tag
+curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | DCODE_AI_VERSION=vX.Y.Z bash
+
+# install without sudo (user-local)
+mkdir -p ~/.local/bin
+curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | DCODE_AI_INSTALL_DIR="$HOME/.local/bin" bash
+
 # interactive TUI
 dcode-ai
 
