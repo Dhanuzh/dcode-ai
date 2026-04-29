@@ -154,7 +154,7 @@ jobs:
         run: echo "version=${GITHUB_REF#refs/tags/v}" >> "$GITHUB_OUTPUT"
 
       - name: Update install script version
-        run: sed -i "s/^VERSION=.*/VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
+        run: sed -i "s/^FALLBACK_VERSION=.*/FALLBACK_VERSION=\"${{ steps.version.outputs.version }}\"/" install.sh
 
       - name: Commit updated install script
         run: |
