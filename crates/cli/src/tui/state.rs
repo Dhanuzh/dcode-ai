@@ -214,7 +214,7 @@ pub struct TuiSessionState {
     pub theme_picker_entries: Vec<String>,
     /// Pinned notes shown at transcript top.
     pub pinned_notes: Vec<PinnedNote>,
-    /// Pins modal popup (`Ctrl+J`).
+    /// Pins modal popup (`Ctrl+;`).
     pub pins_modal_open: bool,
     pub pins_modal_index: usize,
     /// Sub-agent details modal popup (`Ctrl+G`).

@@ -559,7 +559,7 @@ impl Repl {
                     "  Ctrl+P       Command palette".into(),
                     "  Ctrl+F       Transcript search (TUI)".into(),
                     "  Ctrl+K       Pin latest message (TUI)".into(),
-                    "  Ctrl+J       Pinned notes list (TUI)".into(),
+                    "  Ctrl+;       Pinned notes list (TUI)".into(),
                     "  Ctrl+G       Sub-agent dashboard (TUI)".into(),
                     "  Shift+Enter  Insert newline (TUI)".into(),
                     "  Ctrl+X M     Switch model".into(),

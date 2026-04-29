@@ -1250,7 +1250,7 @@ fn transcript_lines_and_hits(
                 ),
                 Span::styled(
                     format!(
-                        " {} item(s) · Ctrl+J list · Ctrl+K pin last",
+                        " {} item(s) · Ctrl+; list · Ctrl+K pin last",
                         state.pinned_notes.len()
                     ),
                     Style::default().fg(theme::muted()),
@@ -3405,7 +3405,7 @@ pub fn run_blocking(
                     ))
                 } else if g.input_buffer.is_empty() {
                     Line::from(Span::styled(
-                        "Enter send · Shift+Enter newline · Up/Down history · Ctrl+F find · Ctrl+K pin · Ctrl+J pins · Ctrl+G sub-agents · F6 copy last",
+                        "Enter send · Shift+Enter newline · Up/Down history · Ctrl+F find · Ctrl+K pin · Ctrl+; pins · Ctrl+G sub-agents · F6 copy last",
                         Style::default().fg(theme::muted()),
                     ))
                 } else {
@@ -5320,7 +5320,7 @@ pub fn run_blocking(
 
                     if g.pins_modal_open {
                         match (key.code, key.modifiers) {
-                            (KeyCode::Esc, _) | (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                            (KeyCode::Esc, _) | (KeyCode::Char(';'), KeyModifiers::CONTROL) => {
                                 g.close_pins_modal();
                             }
                             (KeyCode::Up, _) => {
@@ -5533,7 +5533,7 @@ pub fn run_blocking(
                             g.command_palette_query.clear();
                             g.palette_index = 0;
                         }
-                        (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                        (KeyCode::Char(';'), KeyModifiers::CONTROL) => {
                             if g.pinned_notes.is_empty() {
                                 g.blocks.push(DisplayBlock::System(
                                     "No pinned notes yet. Use Ctrl+K to pin the latest response."
