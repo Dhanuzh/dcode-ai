@@ -33,9 +33,7 @@ use dcode_ai_common::config::ProviderKind;
 use dcode_ai_common::event::{BusyState, QuestionSelection};
 use dcode_ai_core::approval::suggest_allow_pattern;
 use dcode_ai_core::skills::{SkillCatalog, SkillSource};
-use pulldown_cmark::{
-    Alignment, CodeBlockKind, Event as MdEvent, HeadingLevel, Options, Parser, Tag, TagEnd,
-};
+use pulldown_cmark::{Alignment, CodeBlockKind, Event as MdEvent, Options, Parser, Tag, TagEnd};
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
@@ -2407,20 +2405,7 @@ fn render_markdown_lines_with_hits(
                     if !current.is_empty() {
                         flush_md_render_line(&mut out, &mut hits, &mut current);
                     }
-                    let hashes = match level {
-                        HeadingLevel::H1 => 1,
-                        HeadingLevel::H2 => 2,
-                        HeadingLevel::H3 => 3,
-                        HeadingLevel::H4 => 4,
-                        HeadingLevel::H5 => 5,
-                        HeadingLevel::H6 => 6,
-                    };
-                    current.push(Span::styled(
-                        format!("{} ", "#".repeat(hashes)),
-                        Style::default()
-                            .fg(theme::assistant())
-                            .add_modifier(Modifier::BOLD),
-                    ));
+                    let _ = level;
                     open.push(MdOpenTag::Heading);
                 }
                 Tag::BlockQuote(_) => {
@@ -2696,6 +2681,16 @@ fn parse_md_inline(text: &str, base: Style) -> Vec<Span<'static>> {
 }
 
 #[allow(dead_code)]
+fn split_markdown_heading(text: &str) -> Option<(usize, &str)> {
+    let level = text.chars().take_while(|c| *c == '#').count();
+    if (1..=6).contains(&level) && text.chars().nth(level) == Some(' ') {
+        Some((level, &text[level + 1..]))
+    } else {
+        None
+    }
+}
+
+#[allow(dead_code)]
 fn parse_md_line(line: &str) -> Line<'static> {
     let base = Style::default().fg(theme::text());
     let trimmed = line.trim_start();
@@ -2715,20 +2710,11 @@ fn parse_md_line(line: &str) -> Line<'static> {
         ));
     }
 
-    let heading_level = trimmed.chars().take_while(|c| *c == '#').count();
-    if (1..=6).contains(&heading_level) && trimmed.chars().nth(heading_level) == Some(' ') {
+    if let Some((_heading_level, text)) = split_markdown_heading(trimmed) {
         let mut spans = Vec::new();
         if !leading.is_empty() {
             spans.push(Span::styled(leading.to_string(), base));
         }
-        let marker = "#".repeat(heading_level);
-        spans.push(Span::styled(
-            format!("{marker} "),
-            Style::default()
-                .fg(theme::assistant())
-                .add_modifier(Modifier::BOLD),
-        ));
-        let text = &trimmed[heading_level + 1..];
         spans.extend(parse_md_inline(
             text,
             Style::default()
@@ -2744,8 +2730,13 @@ fn parse_md_line(line: &str) -> Line<'static> {
             spans.push(Span::styled(leading.to_string(), base));
         }
         spans.push(Span::styled("▎ ", Style::default().fg(theme::warn())));
+        let quoted = if let Some((_level, content)) = split_markdown_heading(text) {
+            content
+        } else {
+            text
+        };
         spans.extend(parse_md_inline(
-            text,
+            quoted,
             Style::default()
                 .fg(theme::muted())
                 .add_modifier(Modifier::ITALIC),
@@ -6225,7 +6216,7 @@ mod approval_parse_tests {
     #[test]
     fn parse_md_line_styles_heading_and_list_marker() {
         let heading = parse_md_line("## Heading");
-        assert_eq!(heading.spans[0].content, "## ");
+        assert_eq!(heading.spans[0].content, "Heading");
 
         let list = parse_md_line("- item");
         assert_eq!(list.spans[0].content, "• ");
@@ -6234,7 +6225,7 @@ mod approval_parse_tests {
     #[test]
     fn markdown_event_renderer_renders_heading_and_link() {
         let lines = render_markdown_lines("## Title\nSee [docs](https://example.com)");
-        assert_eq!(lines[0].spans[0].content, "## ");
+        assert_eq!(lines[0].spans[0].content, "Title");
         let link_line = &lines[1];
         let link_span = link_line
             .spans
@@ -6247,6 +6238,17 @@ mod approval_parse_tests {
                 .add_modifier
                 .contains(ratatui::style::Modifier::UNDERLINED)
         );
+    }
+
+    #[test]
+    fn parse_md_line_quote_hides_heading_marker() {
+        let quoted_heading = parse_md_line("> ### Hidden marker");
+        let rendered = quoted_heading
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        assert_eq!(rendered, "▎ Hidden marker");
     }
 
     #[test]
