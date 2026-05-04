@@ -30,6 +30,7 @@ fn write_session(
     let session = SessionState {
         meta: SessionMeta {
             id: id.to_string(),
+            session_name: None,
             created_at: updated_at - Duration::minutes(1),
             updated_at,
             workspace: workspace.to_path_buf(),

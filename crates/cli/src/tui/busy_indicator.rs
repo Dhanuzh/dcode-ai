@@ -5,10 +5,34 @@ use ratatui::style::Color;
 use std::time::Instant;
 
 /// Animation frames for different busy states.
-const THINKING_FRAMES: &[&str] = &["◐", "◓", "◑", "◒"];
-const STREAMING_FRAMES: &[&str] = &["▌▌", "▍▍", "▎▎", "▏▏"];
-const TOOL_FRAMES: &[&str] = &["⚙", "⚙", "⚙", "⚙"];
-const APPROVAL_FRAMES: &[&str] = &["◆", "◆", "◆", "◆"];
+const THINKING_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const STREAMING_FRAMES: &[&str] = &[
+    "▁▂▃",
+    "▂▃▄",
+    "▃▄▅",
+    "▄▅▆",
+    "▅▆▇",
+    "▆▇█",
+    "▇█▇",
+    "█▇▆",
+    "▇▆▅",
+    "▆▅▄",
+    "▅▄▃",
+    "▄▃▂",
+];
+const TOOL_FRAMES: &[&str] = &["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"];
+const APPROVAL_FRAMES: &[&str] = &["◇", "◈", "◆", "◈"];
+
+/// Per-state frame interval (ms). Smaller = faster spin.
+fn frame_interval_ms(state: BusyState) -> u128 {
+    match state {
+        BusyState::Thinking => 90,
+        BusyState::Streaming => 70,
+        BusyState::ToolRunning => 100,
+        BusyState::ApprovalPending => 280,
+        _ => 120,
+    }
+}
 
 /// Get the color for a given busy state.
 pub fn color_for_state(state: BusyState) -> Color {
@@ -32,8 +56,15 @@ pub fn frame_for_state(state: BusyState, elapsed_ms: u128) -> &'static str {
         _ => return "●",
     };
 
-    let frame_idx = (elapsed_ms / 120) as usize % frames.len();
+    let interval = frame_interval_ms(state);
+    let frame_idx = (elapsed_ms / interval) as usize % frames.len();
     frames[frame_idx]
+}
+
+/// Animated trailing dots for any state. Cycles "", ".", "..", "..." every 350ms.
+pub fn trailing_dots(elapsed_ms: u128) -> &'static str {
+    const D: &[&str] = &["", ".", "..", "..."];
+    D[(elapsed_ms / 350) as usize % D.len()]
 }
 
 /// Build the busy indicator span with animation.
@@ -44,7 +75,11 @@ pub fn render_indicator(state: BusyState, state_since: Instant) -> String {
 
     match state {
         BusyState::Idle => format!(" ○ {label} "),
-        _ => format!(" {frame} {label} "),
+        BusyState::Error => format!(" ✕ {label} "),
+        _ => {
+            let dots = trailing_dots(elapsed_ms);
+            format!(" {frame} {label}{dots} ")
+        }
     }
 }
 
@@ -72,16 +107,26 @@ mod tests {
 
     #[test]
     fn frame_cycles_through_thinking_frames() {
-        let frames: Vec<&str> = (0..500)
-            .step_by(120)
-            .map(|ms| frame_for_state(BusyState::Thinking, ms as u128))
-            .collect();
-        // Should cycle: ◐ ◓ ◑ ◒ ◐ ...
-        assert_eq!(frames[0], "◐");
-        assert_eq!(frames[1], "◓");
-        assert_eq!(frames[2], "◑");
-        assert_eq!(frames[3], "◒");
-        assert_eq!(frames[4], "◐");
+        let interval = frame_interval_ms(BusyState::Thinking);
+        let f0 = frame_for_state(BusyState::Thinking, 0);
+        let f1 = frame_for_state(BusyState::Thinking, interval);
+        let f2 = frame_for_state(BusyState::Thinking, interval * 2);
+        let wrap = frame_for_state(
+            BusyState::Thinking,
+            interval * THINKING_FRAMES.len() as u128,
+        );
+        assert_eq!(f0, THINKING_FRAMES[0]);
+        assert_eq!(f1, THINKING_FRAMES[1]);
+        assert_eq!(f2, THINKING_FRAMES[2]);
+        assert_eq!(wrap, THINKING_FRAMES[0]);
+    }
+
+    #[test]
+    fn streaming_frames_advance() {
+        let interval = frame_interval_ms(BusyState::Streaming);
+        let a = frame_for_state(BusyState::Streaming, 0);
+        let b = frame_for_state(BusyState::Streaming, interval);
+        assert_ne!(a, b);
     }
 
     #[test]
@@ -92,10 +137,18 @@ mod tests {
     }
 
     #[test]
-    fn render_indicator_thinking() {
+    fn render_indicator_thinking_contains_braille_frame() {
         let ind = render_indicator(BusyState::Thinking, Instant::now());
         assert!(ind.contains("thinking"));
-        // Should contain one of the thinking frames
-        assert!(ind.contains("◐") || ind.contains("◓") || ind.contains("◑") || ind.contains("◒"));
+        assert!(THINKING_FRAMES.iter().any(|f| ind.contains(f)));
+    }
+
+    #[test]
+    fn trailing_dots_cycle() {
+        assert_eq!(trailing_dots(0), "");
+        assert_eq!(trailing_dots(350), ".");
+        assert_eq!(trailing_dots(700), "..");
+        assert_eq!(trailing_dots(1050), "...");
+        assert_eq!(trailing_dots(1400), "");
     }
 }

@@ -41,6 +41,7 @@ type EventFanoutCallback = Box<dyn Fn(&EventEnvelope) + Send>;
 /// and command handling.
 pub struct Supervisor {
     pub session_id: String,
+    pub session_name: Option<String>,
     pub workspace_root: PathBuf,
     pub model: String,
     pub created_at: chrono::DateTime<Utc>,
@@ -229,6 +230,7 @@ impl Supervisor {
 
         let sup = Self {
             session_id,
+            session_name: None,
             workspace_root,
             model: config.model.default_model.clone(),
             created_at,
@@ -293,6 +295,7 @@ impl Supervisor {
             .map_err(|e| ProviderError::Other(e.to_string()))?;
 
         sup.session_id = loaded.meta.id.clone();
+        sup.session_name = loaded.meta.session_name.clone();
         sup.workspace_root = loaded.meta.workspace.clone();
         sup.model = loaded.meta.model.clone();
         sup.agent.model = loaded.meta.model.clone();
@@ -347,6 +350,12 @@ impl Supervisor {
         prompt: &str,
         attachments: &[dcode_ai_common::message::ImageAttachment],
     ) -> Result<String, ProviderError> {
+        if self.session_name.is_none()
+            && let Some(name) = derive_session_name(prompt)
+        {
+            self.session_name = Some(name);
+        }
+
         if !attachments.is_empty()
             && !dcode_ai_common::model_caps::model_accepts_native_images(
                 self.config.provider.default,
@@ -658,6 +667,7 @@ impl Supervisor {
         SessionState {
             meta: SessionMeta {
                 id: self.session_id.clone(),
+                session_name: self.session_name.clone(),
                 created_at: self.created_at,
                 updated_at,
                 workspace: self.workspace_root.clone(),
@@ -708,7 +718,11 @@ impl Supervisor {
             id: format!("{}-{}", kind, Utc::now().timestamp_millis()),
             created_at: Utc::now(),
             kind: kind.to_string(),
-            title: Some(self.session_id.clone()),
+            title: Some(
+                self.session_name
+                    .clone()
+                    .unwrap_or_else(|| self.session_id.clone()),
+            ),
             content,
         };
         store
@@ -728,6 +742,7 @@ impl Supervisor {
     /// Reset for a fresh session: new ID, rebuild system prompt, clear lineage and cost.
     pub fn reset_for_new_session(&mut self) {
         self.session_id = generate_session_id();
+        self.session_name = None;
         self.agent.messages.clear();
         let system_prompt = build_system_prompt(
             &self.config,
@@ -750,6 +765,14 @@ impl Supervisor {
 
     pub fn session_id(&self) -> &str {
         &self.session_id
+    }
+
+    pub fn session_name(&self) -> Option<&str> {
+        self.session_name.as_deref()
+    }
+
+    pub fn set_session_name(&mut self, session_name: Option<String>) {
+        self.session_name = session_name.and_then(|name| normalize_session_name(&name));
     }
 
     pub fn status(&self) -> &SessionStatus {
@@ -822,6 +845,12 @@ impl Supervisor {
     ) {
         self.parent_session_id = Some(parent_id);
         self.inherited_summary = summary;
+        if self.session_name.is_none()
+            && let Some(ref task) = reason
+            && let Some(name) = derive_session_name(task)
+        {
+            self.session_name = Some(name);
+        }
         self.spawn_reason = reason;
     }
 
@@ -1138,6 +1167,37 @@ fn generate_session_id() -> String {
     static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
     let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("session-{}-{counter}", Utc::now().timestamp_micros())
+}
+
+fn derive_session_name(prompt: &str) -> Option<String> {
+    let first_line = prompt
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .map(str::trim)?;
+    normalize_session_name(first_line)
+}
+
+fn normalize_session_name(raw: &str) -> Option<String> {
+    if raw.trim().is_empty() {
+        return None;
+    }
+    let collapsed = raw
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect::<String>();
+    let compact = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compact.is_empty() {
+        return None;
+    }
+    const MAX: usize = 72;
+    let mut out = String::new();
+    for ch in compact.chars().take(MAX) {
+        out.push(ch);
+    }
+    if compact.chars().count() > MAX {
+        out.push('…');
+    }
+    Some(out)
 }
 
 /// Query the current state of a session from its store.
@@ -1612,6 +1672,7 @@ mod tests {
         let session = SessionState {
             meta: SessionMeta {
                 id: id.to_string(),
+                session_name: None,
                 created_at: updated_at - Duration::minutes(1),
                 updated_at,
                 workspace: workspace.to_path_buf(),

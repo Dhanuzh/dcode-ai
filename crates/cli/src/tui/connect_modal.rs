@@ -17,6 +17,7 @@ pub struct CatalogEntry {
     pub kind: ProviderKind,
     pub title: &'static str,
     pub subtitle: &'static str,
+    pub oauth_login_slug: Option<&'static str>,
 }
 
 /// Ordered catalog (OpenCode-like: recommended first, then popular APIs, then routing).
@@ -26,30 +27,42 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
         kind: ProviderKind::Antigravity,
         title: "Antigravity",
         subtitle: "Gemini/Claude/GPT-OSS (OAuth)",
+        oauth_login_slug: Some("antigravity"),
     },
     CatalogEntry {
         section: ConnectSection::Popular,
         kind: ProviderKind::OpenAi,
-        title: "OpenAI",
-        subtitle: "GPT models (connect/login)",
+        title: "OpenAI Codex",
+        subtitle: "GPT models via OpenAI OAuth",
+        oauth_login_slug: Some("openai"),
+    },
+    CatalogEntry {
+        section: ConnectSection::Popular,
+        kind: ProviderKind::OpenAi,
+        title: "Copilot",
+        subtitle: "GitHub Copilot (OAuth)",
+        oauth_login_slug: Some("copilot"),
     },
     CatalogEntry {
         section: ConnectSection::Popular,
         kind: ProviderKind::Anthropic,
         title: "Anthropic",
         subtitle: "Claude (connect/login)",
+        oauth_login_slug: Some("anthropic"),
     },
     CatalogEntry {
         section: ConnectSection::Popular,
         kind: ProviderKind::OpenCodeZen,
         title: "OpenCode Zen",
         subtitle: "Big Pickle, Kimi, GLM (free)",
+        oauth_login_slug: None,
     },
     CatalogEntry {
         section: ConnectSection::Other,
         kind: ProviderKind::OpenRouter,
         title: "OpenRouter",
         subtitle: "Multi-model routing (connect/login)",
+        oauth_login_slug: None,
     },
 ];
 
@@ -60,6 +73,7 @@ pub enum ConnectRow {
         kind: ProviderKind,
         title: &'static str,
         subtitle: &'static str,
+        oauth_login_slug: Option<&'static str>,
     },
 }
 
@@ -96,6 +110,7 @@ pub fn build_connect_rows(search: &str) -> Vec<ConnectRow> {
                 kind: e.kind,
                 title: e.title,
                 subtitle: e.subtitle,
+                oauth_login_slug: e.oauth_login_slug,
             });
         }
     }
@@ -122,10 +137,36 @@ pub fn clamp_selection(selection: usize, rows: &[ConnectRow]) -> usize {
     if n == 0 { 0 } else { selection.min(n - 1) }
 }
 
-pub fn provider_at_selection(rows: &[ConnectRow], selection: usize) -> Option<ProviderKind> {
+/// Pulsing chevron prefix for the selected row. 250ms duty cycle.
+pub fn selection_pulse(elapsed_ms: u128) -> &'static str {
+    const F: &[&str] = &["▶ ", "▷ ", "▶ ", "▸ "];
+    F[(elapsed_ms / 220) as usize % F.len()]
+}
+
+/// Sparkle frame for the modal title. 500ms duty cycle.
+pub fn title_sparkle(elapsed_ms: u128) -> &'static str {
+    const F: &[&str] = &["✦", "✧", "✦", "✧"];
+    F[(elapsed_ms / 500) as usize % F.len()]
+}
+
+/// Animated trailing dots for "not logged in" status; max 3 dots.
+pub fn status_dots(elapsed_ms: u128) -> &'static str {
+    const F: &[&str] = &["", ".", "..", "..."];
+    F[(elapsed_ms / 380) as usize % F.len()]
+}
+
+pub fn provider_at_selection(
+    rows: &[ConnectRow],
+    selection: usize,
+) -> Option<(ProviderKind, &'static str, Option<&'static str>)> {
     let i = row_index_for_selection(rows, selection)?;
     match rows.get(i)? {
-        ConnectRow::Provider { kind, .. } => Some(*kind),
+        ConnectRow::Provider {
+            kind,
+            title,
+            oauth_login_slug,
+            ..
+        } => Some((*kind, *title, *oauth_login_slug)),
         _ => None,
     }
 }
@@ -144,7 +185,7 @@ mod tests {
         assert!(rows.iter().any(|r| matches!(
             r,
             ConnectRow::Provider {
-                title: "OpenAI",
+                title: "OpenAI Codex",
                 ..
             }
         )));

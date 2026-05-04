@@ -19,6 +19,10 @@ pub fn model_accepts_native_images(kind: ProviderKind, model: &str) -> bool {
                 || m.contains("gpt-5")
                 || m.contains("o1")
                 || m.contains("o3")
+                || m.contains("claude-3")
+                || m.contains("claude-4")
+                || m.contains("gemini")
+                || m.contains("qwen-vl")
                 || m.contains("vision")
         }
         ProviderKind::OpenRouter => {
@@ -54,6 +58,14 @@ mod tests {
         assert!(!model_accepts_native_images(
             ProviderKind::OpenAi,
             "gpt-3.5-turbo"
+        ));
+    }
+
+    #[test]
+    fn copilot_claude_on_openai_surface_is_vision() {
+        assert!(model_accepts_native_images(
+            ProviderKind::OpenAi,
+            "claude-3-7-sonnet-latest"
         ));
     }
 }

@@ -173,6 +173,7 @@ impl AgentLoop {
                 .await?;
 
             let mut assistant_text = String::new();
+            let mut assistant_reasoning = String::new();
             let mut tool_calls: Vec<ToolCall> = Vec::new();
             let mut got_usage = false;
 
@@ -197,6 +198,7 @@ impl AgentLoop {
                 };
                 match chunk {
                     StreamChunk::InternalDelta(delta) => {
+                        assistant_reasoning.push_str(&delta);
                         self.emit(AgentEvent::ThinkingDelta { delta }).await;
                     }
                     StreamChunk::TextDelta(delta) => {
@@ -267,8 +269,10 @@ impl AgentLoop {
                         "Provider returned empty response with no tool calls after retries".into(),
                     ));
                 }
-                self.messages
-                    .push(Message::assistant(assistant_text.clone()));
+                self.messages.push(
+                    Message::assistant(assistant_text.clone())
+                        .with_reasoning_content(Some(assistant_reasoning.clone())),
+                );
                 self.emit(AgentEvent::MessageReceived {
                     role: "assistant".into(),
                     content: assistant_text.clone(),
@@ -286,10 +290,10 @@ impl AgentLoop {
                 })
                 .collect();
 
-            self.messages.push(Message::assistant_with_tool_calls(
-                assistant_text,
-                replay_tool_calls,
-            ));
+            self.messages.push(
+                Message::assistant_with_tool_calls(assistant_text, replay_tool_calls)
+                    .with_reasoning_content(Some(assistant_reasoning.clone())),
+            );
 
             if tool_calls.len() as u32 > self.max_tool_calls_per_turn {
                 return Err(ProviderError::Other(format!(

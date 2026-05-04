@@ -290,6 +290,8 @@ pub struct Message {
     pub tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<MessageToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_content: Option<String>,
 }
 
 impl Message {
@@ -299,6 +301,7 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -308,6 +311,7 @@ impl Message {
             content: MessageContent::Parts(parts),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -317,6 +321,7 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -329,6 +334,7 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: Some(tool_calls),
+            reasoning_content: None,
         }
     }
 
@@ -338,6 +344,7 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: None,
             tool_calls: None,
+            reasoning_content: None,
         }
     }
 
@@ -347,7 +354,20 @@ impl Message {
             content: MessageContent::Text(content.into()),
             tool_call_id: Some(tool_call_id.into()),
             tool_calls: None,
+            reasoning_content: None,
         }
+    }
+
+    pub fn with_reasoning_content(mut self, reasoning_content: Option<String>) -> Self {
+        self.reasoning_content = reasoning_content.and_then(|text| {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        });
+        self
     }
 
     pub fn event_preview(&self) -> String {

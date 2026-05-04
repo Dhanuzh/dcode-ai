@@ -295,6 +295,9 @@ fn to_openai_messages(
                             .collect(),
                     );
                 }
+                if let Some(reasoning_content) = &message.reasoning_content {
+                    value["reasoning_content"] = json!(reasoning_content);
+                }
 
                 out.push(value);
             }

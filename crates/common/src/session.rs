@@ -10,6 +10,8 @@ use crate::message::Message;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionMeta {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub workspace: PathBuf,
@@ -60,6 +62,8 @@ pub struct SessionState {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionSnapshot {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_name: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub workspace: PathBuf,
@@ -113,6 +117,7 @@ impl SessionState {
     pub fn snapshot(&self) -> SessionSnapshot {
         SessionSnapshot {
             id: self.meta.id.clone(),
+            session_name: self.meta.session_name.clone(),
             created_at: self.meta.created_at,
             updated_at: self.meta.updated_at,
             workspace: self.meta.workspace.clone(),

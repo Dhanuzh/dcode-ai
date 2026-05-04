@@ -60,6 +60,13 @@ pub struct PinnedNote {
     pub body: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionPickerEntry {
+    pub id: String,
+    pub label: String,
+    pub search_text: String,
+}
+
 /// Status of an API key validation during onboarding.
 #[derive(Debug, Clone)]
 pub enum OnboardingValidation {
@@ -148,6 +155,8 @@ pub struct TuiSessionState {
     pub connect_menu_index: usize,
     /// Scroll offset for the connect modal viewport.
     pub connect_modal_scroll: usize,
+    /// Guard against immediately consuming the same Enter key that opened the modal.
+    pub connect_modal_ignore_enter_once: bool,
     /// API key entry modal (used by `/connect` and `/apikey` TUI flows).
     pub api_key_modal_open: bool,
     pub api_key_target_provider: Option<ProviderKind>,
@@ -155,6 +164,11 @@ pub struct TuiSessionState {
     pub api_key_target_has_existing: bool,
     /// When true, Enter should connect to this provider after saving/confirming the key.
     pub api_key_connect_after_save: bool,
+    /// Anthropic OAuth code entry modal (URL + pasted authorization code).
+    pub anthropic_oauth_modal_open: bool,
+    pub anthropic_oauth_url: String,
+    pub anthropic_oauth_code_verifier: String,
+    pub anthropic_oauth_code_input: String,
     /// Generic info popup (read-only scrollable lines).
     pub info_modal_open: bool,
     pub info_modal_title: String,
@@ -185,7 +199,7 @@ pub struct TuiSessionState {
     pub session_picker_open: bool,
     pub session_picker_search: String,
     pub session_picker_index: usize,
-    pub session_picker_entries: Vec<String>,
+    pub session_picker_entries: Vec<SessionPickerEntry>,
     /// Scroll offset for the session picker viewport.
     pub session_picker_scroll: usize,
     /// When true, the onboarding gate is active — connect modal is locked open.
@@ -230,6 +244,7 @@ pub struct TuiSessionState {
 #[derive(Debug, Clone)]
 pub enum ModelPickerAction {
     SwitchProvider(ProviderKind),
+    SwitchCopilot,
     ApplyModel(String),
 }
 
@@ -298,11 +313,16 @@ impl TuiSessionState {
             connect_search: String::new(),
             connect_menu_index: 0,
             connect_modal_scroll: 0,
+            connect_modal_ignore_enter_once: false,
             api_key_modal_open: false,
             api_key_target_provider: None,
             api_key_input: String::new(),
             api_key_target_has_existing: false,
             api_key_connect_after_save: false,
+            anthropic_oauth_modal_open: false,
+            anthropic_oauth_url: String::new(),
+            anthropic_oauth_code_verifier: String::new(),
+            anthropic_oauth_code_input: String::new(),
             info_modal_open: false,
             info_modal_title: String::new(),
             info_modal_lines: Vec::new(),
@@ -399,6 +419,7 @@ impl TuiSessionState {
         self.connect_search.clear();
         self.connect_menu_index = 0;
         self.connect_modal_scroll = 0;
+        self.connect_modal_ignore_enter_once = true;
     }
 
     pub fn close_connect_modal(&mut self) {
@@ -406,6 +427,7 @@ impl TuiSessionState {
         self.connect_search.clear();
         self.connect_menu_index = 0;
         self.connect_modal_scroll = 0;
+        self.connect_modal_ignore_enter_once = false;
     }
 
     pub fn open_api_key_modal(
@@ -429,6 +451,20 @@ impl TuiSessionState {
         self.api_key_target_has_existing = false;
         self.api_key_connect_after_save = false;
         self.validation_status = None;
+    }
+
+    pub fn open_anthropic_oauth_modal(&mut self, url: String, code_verifier: String) {
+        self.anthropic_oauth_modal_open = true;
+        self.anthropic_oauth_url = url;
+        self.anthropic_oauth_code_verifier = code_verifier;
+        self.anthropic_oauth_code_input.clear();
+    }
+
+    pub fn close_anthropic_oauth_modal(&mut self) {
+        self.anthropic_oauth_modal_open = false;
+        self.anthropic_oauth_url.clear();
+        self.anthropic_oauth_code_verifier.clear();
+        self.anthropic_oauth_code_input.clear();
     }
 
     pub fn open_info_modal(&mut self, title: impl Into<String>, lines: Vec<String>) {
@@ -495,10 +531,10 @@ impl TuiSessionState {
         self.touch_transcript();
     }
 
-    pub fn open_session_picker(&mut self, entries: Vec<String>, current: &str) {
+    pub fn open_session_picker(&mut self, entries: Vec<SessionPickerEntry>, current: &str) {
         self.session_picker_open = true;
         self.session_picker_search.clear();
-        self.session_picker_index = entries.iter().position(|e| e == current).unwrap_or(0);
+        self.session_picker_index = entries.iter().position(|e| e.id == current).unwrap_or(0);
         self.session_picker_entries = entries;
         self.session_picker_scroll = 0;
     }

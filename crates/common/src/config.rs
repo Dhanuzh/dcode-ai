@@ -651,7 +651,7 @@ impl ProviderKind {
     /// Parse user/CLI input (slash commands, TUI pickers).
     pub fn from_cli_name(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
-            "openai" | "open-ai" | "gpt" => Some(Self::OpenAi),
+            "openai" | "open-ai" | "gpt" | "codex" => Some(Self::OpenAi),
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openrouter" | "open-router" => Some(Self::OpenRouter),
             "antigravity" | "ag" => Some(Self::Antigravity),

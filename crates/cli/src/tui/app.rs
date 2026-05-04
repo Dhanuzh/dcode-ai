@@ -10,7 +10,7 @@ use crate::slash_commands::SLASH_COMMANDS;
 use crate::tool_ui;
 use crate::tui::connect_modal::{
     ConnectRow, build_connect_rows, clamp_selection, provider_at_selection,
-    row_index_for_selection, selectable_row_indices,
+    row_index_for_selection, selectable_row_indices, selection_pulse, status_dots, title_sparkle,
 };
 use crate::tui::state::{
     ApprovalRequest, DisplayBlock, ModelPickerAction, ModelPickerEntry, PinnedNote, TuiSessionState,
@@ -19,8 +19,8 @@ use arboard::Clipboard;
 use crossterm::{
     cursor::{Hide, MoveToColumn, Show},
     event::{
-        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyModifiers, MouseButton,
-        MouseEventKind, poll, read,
+        DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEventKind, poll, read,
     },
     execute,
     terminal::{
@@ -120,6 +120,11 @@ pub enum TuiCmd {
     /// Validate an API key for onboarding (provider, api_key).
     /// The repl handler looks up base_url from config.
     ValidateApiKey(ProviderKind, String),
+    /// Complete Anthropic OAuth with pasted authorization code from TUI modal.
+    CompleteAnthropicOAuth {
+        code_verifier: String,
+        authorization_code: String,
+    },
     /// Mark onboarding as complete and persist the flag.
     #[allow(dead_code)]
     CompleteOnboarding,
@@ -160,6 +165,16 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
 
 fn slash_panel_visible(buffer: &str) -> bool {
     buffer.starts_with('/') && !buffer.contains(' ')
+}
+
+fn oauth_login_provider_slug(kind: ProviderKind) -> Option<&'static str> {
+    match kind {
+        ProviderKind::OpenAi => Some("openai"),
+        ProviderKind::Anthropic => Some("anthropic"),
+        ProviderKind::Antigravity => Some("antigravity"),
+        // Copilot uses the OpenAI provider surface at runtime, but auth is a distinct login flow.
+        ProviderKind::OpenCodeZen | ProviderKind::OpenRouter => None,
+    }
 }
 
 fn cursor_byte_index(line: &str, cursor_char_idx: usize) -> usize {
@@ -4092,7 +4107,10 @@ pub fn run_blocking(
                 if g.session_picker_open {
                     let filter = g.session_picker_search.to_ascii_lowercase();
                     let filtered_indices: Vec<usize> = g.session_picker_entries.iter().enumerate()
-                        .filter(|(_, s)| filter.is_empty() || s.to_ascii_lowercase().contains(&filter))
+                        .filter(|(_, entry)| {
+                            filter.is_empty()
+                                || entry.search_text.to_ascii_lowercase().contains(&filter)
+                        })
                         .map(|(i, _)| i)
                         .collect();
                     const SESSION_PICKER_MAX_ROWS: usize = 16;
@@ -4139,15 +4157,18 @@ pub fn run_blocking(
                             .skip(list_start)
                             .take(list_end.saturating_sub(list_start))
                         {
-                            let id = &g.session_picker_entries[filt_idx];
-                            let is_current = id == &current_session_id;
+                            let entry = &g.session_picker_entries[filt_idx];
+                            let is_current = entry.id == current_session_id;
                             let marker = if is_current { " *" } else { "" };
                             let st = if vis_idx == pick {
                                 Style::default().fg(Color::Black).bg(theme::user()).add_modifier(Modifier::BOLD)
                             } else {
                                 Style::default().fg(theme::text())
                             };
-                            lines.push(Line::from(Span::styled(format!(" {id}{marker}"), st)));
+                            lines.push(Line::from(Span::styled(
+                                format!(" {}{marker}", entry.label),
+                                st,
+                            )));
                         }
                         let remaining_below = n_filtered.saturating_sub(list_end);
                         if remaining_below > 0 {
@@ -4445,17 +4466,26 @@ pub fn run_blocking(
                     let rows = build_connect_rows(&g.connect_search);
                     let sel = clamp_selection(g.connect_menu_index, &rows);
                     let selected_row = row_index_for_selection(&rows, sel);
+                    let anim_ms = g.started.elapsed().as_millis();
+                    let cursor = selection_pulse(anim_ms);
+                    let sparkle = title_sparkle(anim_ms);
+                    let dots = status_dots(anim_ms);
                     let body_lines = rows.len().max(1);
                     let popup_h = (body_lines as u16).saturating_add(9).clamp(11, 24);
                     let popup_area = centered_rect(area, 58, popup_h);
+                    let viewport_rows = popup_h.saturating_sub(8).max(1) as usize;
+                    let max_scroll = rows.len().saturating_sub(viewport_rows);
+                    if let Some(sr) = selected_row {
+                        if sr < g.connect_modal_scroll {
+                            g.connect_modal_scroll = sr;
+                        } else if sr >= g.connect_modal_scroll.saturating_add(viewport_rows) {
+                            g.connect_modal_scroll = sr.saturating_sub(viewport_rows - 1);
+                        }
+                    }
+                    g.connect_modal_scroll = g.connect_modal_scroll.min(max_scroll);
+                    let list_start = g.connect_modal_scroll;
+                    let list_end = (list_start + viewport_rows).min(rows.len());
                     let auth_store = AuthStore::load().unwrap_or_default();
-                    let is_logged = |kind: ProviderKind| match kind {
-                        ProviderKind::OpenAi => auth_store.openai_oauth.is_some(),
-                        ProviderKind::Anthropic => auth_store.anthropic.is_some(),
-                        ProviderKind::Antigravity => auth_store.antigravity.is_some(),
-                        ProviderKind::OpenRouter => false,
-                        ProviderKind::OpenCodeZen => auth_store.opencodezen_oauth.is_some(),
-                    };
                     let mut lines: Vec<Line> = vec![
                         Line::from(vec![
                             Span::styled(
@@ -4481,7 +4511,18 @@ pub fn run_blocking(
                             Style::default().fg(theme::muted()),
                         )));
                     } else {
-                        for (i, row) in rows.iter().enumerate() {
+                        if list_start > 0 {
+                            lines.push(Line::from(Span::styled(
+                                format!(" ▲ {} above", list_start),
+                                Style::default().fg(theme::muted()),
+                            )));
+                        }
+                        for (i, row) in rows
+                            .iter()
+                            .enumerate()
+                            .skip(list_start)
+                            .take(viewport_rows)
+                        {
                             match row {
                                 ConnectRow::SectionHeader(h) => {
                                     lines.push(Line::from(Span::styled(
@@ -4495,6 +4536,7 @@ pub fn run_blocking(
                                     kind,
                                     title,
                                     subtitle,
+                                    oauth_login_slug,
                                 } => {
                                     let is_sel = selected_row == Some(i);
                                     let main_st = if is_sel {
@@ -4510,17 +4552,45 @@ pub fn run_blocking(
                                     } else {
                                         Style::default().fg(theme::muted())
                                     };
-                                    let status = if is_logged(*kind) {
-                                        " · logged in"
+                                    let logged = if matches!(*title, "Copilot") {
+                                        auth_store.copilot.is_some()
                                     } else {
-                                        ""
+                                        match kind {
+                                            ProviderKind::OpenAi => auth_store.openai_oauth.is_some(),
+                                            ProviderKind::Anthropic => auth_store.anthropic.is_some(),
+                                            ProviderKind::Antigravity => auth_store.antigravity.is_some(),
+                                            ProviderKind::OpenRouter => false,
+                                            ProviderKind::OpenCodeZen => {
+                                                auth_store.opencodezen_oauth.is_some()
+                                            }
+                                        }
+                                    };
+                                    let status = if logged {
+                                        " · logged in".to_string()
+                                    } else {
+                                        match oauth_login_slug {
+                                            Some(_) => format!(" · not logged in{dots}"),
+                                            None => String::new(),
+                                        }
+                                    };
+                                    let prefix = if is_sel {
+                                        cursor.to_string()
+                                    } else {
+                                        "  ".to_string()
                                     };
                                     lines.push(Line::from(vec![
-                                        Span::styled(format!(" {title}"), main_st),
+                                        Span::styled(format!(" {prefix}{title}"), main_st),
                                         Span::styled(format!(" — {subtitle}{status}"), sub_st),
                                     ]));
                                 }
                             }
+                        }
+                        let remaining_below = rows.len().saturating_sub(list_end);
+                        if remaining_below > 0 {
+                            lines.push(Line::from(Span::styled(
+                                format!(" ▼ {} more", remaining_below),
+                                Style::default().fg(theme::muted()),
+                            )));
                         }
                     }
                     lines.push(Line::default());
@@ -4531,7 +4601,7 @@ pub fn run_blocking(
                     frame.render_widget(ClearWidget, popup_area);
                     let title = Line::from(vec![
                         Span::styled(
-                            " Connect a provider ",
+                            format!(" {sparkle} Connect a provider {sparkle} "),
                             Style::default().fg(theme::muted()),
                         ),
                         Span::styled(" esc ", Style::default().fg(theme::muted())),
@@ -4547,12 +4617,59 @@ pub fn run_blocking(
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
                 }
+
+                if g.anthropic_oauth_modal_open {
+                    let popup_area = centered_rect(area, 84, 18);
+                    let mut lines = vec![
+                        Line::from(Span::styled(
+                            " Open this URL in your browser, then paste the authorization code below. ",
+                            Style::default().fg(theme::muted()),
+                        )),
+                        Line::default(),
+                    ];
+                    for wrapped in wrap_text(&g.anthropic_oauth_url, 78) {
+                        lines.push(Line::from(Span::styled(
+                            format!(" {wrapped}"),
+                            Style::default().fg(theme::text()),
+                        )));
+                    }
+                    lines.push(Line::default());
+                    lines.push(Line::from(vec![
+                        Span::styled(" Authorization code ", Style::default().fg(theme::muted())),
+                        Span::styled(
+                            g.anthropic_oauth_code_input.clone(),
+                            Style::default().fg(theme::user()),
+                        ),
+                    ]));
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        " Enter confirm · Esc cancel ",
+                        Style::default().fg(theme::muted()),
+                    )));
+                    frame.render_widget(ClearWidget, popup_area);
+                    let popup = Paragraph::new(Text::from(lines))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(theme::border()))
+                                .title(Span::styled(
+                                    " Anthropic OAuth login ",
+                                    Style::default().fg(theme::muted()),
+                                )),
+                        )
+                        .style(Style::default().bg(theme::surface()))
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(popup, popup_area);
+                }
             })?;
         }
 
         let poll_timeout = if let Ok(g) = state.lock() {
             if g.busy || !matches!(g.current_busy_state, BusyState::Idle) {
                 Duration::from_millis(40)
+            } else if g.connect_modal_open {
+                // Tick fast enough to drive the modal's animation.
+                Duration::from_millis(80)
             } else {
                 Duration::from_millis(120)
             }
@@ -4574,8 +4691,27 @@ pub fn run_blocking(
                 Event::Mouse(_) if g.command_palette_open => continue,
                 Event::Mouse(_) if g.info_modal_open => continue,
                 Event::Mouse(_) if g.model_picker_open => continue,
-                Event::Mouse(_) if g.connect_modal_open => continue,
+                Event::Mouse(m) if g.connect_modal_open => {
+                    let rows = build_connect_rows(&g.connect_search);
+                    let n_sel = selectable_row_indices(&rows).len();
+                    if n_sel > 0 {
+                        match m.kind {
+                            MouseEventKind::ScrollUp => {
+                                g.connect_modal_ignore_enter_once = false;
+                                g.connect_menu_index =
+                                    g.connect_menu_index.saturating_sub(1).min(n_sel - 1);
+                            }
+                            MouseEventKind::ScrollDown => {
+                                g.connect_modal_ignore_enter_once = false;
+                                g.connect_menu_index = (g.connect_menu_index + 1).min(n_sel - 1);
+                            }
+                            _ => {}
+                        }
+                    }
+                    continue;
+                }
                 Event::Mouse(_) if g.api_key_modal_open => continue,
+                Event::Mouse(_) if g.anthropic_oauth_modal_open => continue,
                 Event::Mouse(_) if g.provider_picker_open => continue,
                 Event::Mouse(_) if g.permission_picker_open => continue,
                 Event::Mouse(_) if g.agent_picker_open => continue,
@@ -4745,17 +4881,70 @@ pub fn run_blocking(
                         g.toggle_sidebar();
                     }
                 }
-                Event::Paste(pasted) => match stage_pasted_image_paths(&mut g, &pasted) {
-                    Ok(0) => {
-                        insert_pasted_text(&mut g, &slash_entries, &pasted);
-                        composer_history_index = None;
-                        composer_history_draft.clear();
+                Event::Paste(pasted) => {
+                    if g.api_key_modal_open {
+                        let normalized = pasted.replace('\r', "");
+                        let value = normalized.trim_end_matches('\n');
+                        g.api_key_input.push_str(value);
+                        if g.onboarding_mode {
+                            g.validation_status = None;
+                        }
+                    } else if g.anthropic_oauth_modal_open {
+                        let normalized = pasted.replace('\r', "");
+                        let value = normalized.trim_end_matches('\n');
+                        g.anthropic_oauth_code_input.push_str(value);
+                    } else {
+                        match stage_pasted_image_paths(&mut g, &pasted) {
+                            Ok(0) => {
+                                insert_pasted_text(&mut g, &slash_entries, &pasted);
+                                composer_history_index = None;
+                                composer_history_draft.clear();
+                            }
+                            Ok(_) => {}
+                            Err(e) => g.push_error(format!("[image] {e}")),
+                        }
                     }
-                    Ok(_) => {}
-                    Err(e) => g.push_error(format!("[image] {e}")),
-                },
+                }
                 Event::FocusGained | Event::FocusLost => {}
                 Event::Key(key) => {
+                    if !matches!(key.kind, KeyEventKind::Press) {
+                        continue;
+                    }
+
+                    if g.anthropic_oauth_modal_open {
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Esc, _) => {
+                                g.close_anthropic_oauth_modal();
+                                if g.onboarding_mode {
+                                    g.open_connect_modal();
+                                }
+                            }
+                            (KeyCode::Enter, _) => {
+                                let code = g.anthropic_oauth_code_input.trim().to_string();
+                                let verifier = g.anthropic_oauth_code_verifier.clone();
+                                if code.is_empty() {
+                                    g.push_error(
+                                        "[login] paste authorization code, then press Enter".into(),
+                                    );
+                                } else {
+                                    g.close_anthropic_oauth_modal();
+                                    drop(g);
+                                    let _ = cmd_tx.send(TuiCmd::CompleteAnthropicOAuth {
+                                        code_verifier: verifier,
+                                        authorization_code: code,
+                                    });
+                                }
+                            }
+                            (KeyCode::Backspace, _) => {
+                                g.anthropic_oauth_code_input.pop();
+                            }
+                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                g.anthropic_oauth_code_input.push(c);
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
                     if g.command_palette_open {
                         match (key.code, key.modifiers) {
                             (KeyCode::Esc, _) | (KeyCode::Char('p'), KeyModifiers::CONTROL) => {
@@ -4889,6 +5078,11 @@ pub fn run_blocking(
                                         ModelPickerAction::SwitchProvider(p) => {
                                             let _ = cmd_tx.send(TuiCmd::ApplyModelProvider(p));
                                         }
+                                        ModelPickerAction::SwitchCopilot => {
+                                            let _ = cmd_tx.send(TuiCmd::Submit(
+                                                "/provider copilot".to_string(),
+                                            ));
+                                        }
                                         ModelPickerAction::ApplyModel(m) => {
                                             let _ = cmd_tx.send(TuiCmd::ApplyModel(m));
                                         }
@@ -4920,27 +5114,42 @@ pub fn run_blocking(
                                     g.close_connect_modal();
                                 }
                             }
+                            (KeyCode::Enter, _) if g.connect_modal_ignore_enter_once => {
+                                g.connect_modal_ignore_enter_once = false;
+                            }
                             (KeyCode::Up, _) => {
+                                g.connect_modal_ignore_enter_once = false;
                                 if n_sel > 0 {
                                     g.connect_menu_index =
                                         g.connect_menu_index.saturating_sub(1).min(n_sel - 1);
                                 }
                             }
                             (KeyCode::Down, _) => {
+                                g.connect_modal_ignore_enter_once = false;
                                 if n_sel > 0 {
                                     g.connect_menu_index =
                                         (g.connect_menu_index + 1).min(n_sel - 1);
                                 }
                             }
                             (KeyCode::Enter, _) => {
-                                if let Some(p) = provider_at_selection(&rows, g.connect_menu_index)
+                                g.connect_modal_ignore_enter_once = false;
+                                if let Some((p, _title, oauth_login_slug)) =
+                                    provider_at_selection(&rows, g.connect_menu_index)
                                 {
                                     g.close_connect_modal();
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::PromptApiKey(p, true));
+                                    if let Some(slug) =
+                                        oauth_login_slug.or_else(|| oauth_login_provider_slug(p))
+                                    {
+                                        let _ =
+                                            cmd_tx.send(TuiCmd::Submit(format!("/login {slug}")));
+                                    } else {
+                                        let _ = cmd_tx.send(TuiCmd::PromptApiKey(p, true));
+                                    }
                                 }
                             }
                             (KeyCode::Backspace, _) => {
+                                g.connect_modal_ignore_enter_once = false;
                                 g.connect_search.pop();
                                 g.connect_menu_index = 0;
                                 g.connect_modal_scroll = 0;
@@ -4949,6 +5158,7 @@ pub fn run_blocking(
                                     clamp_selection(g.connect_menu_index, &rows2);
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                g.connect_modal_ignore_enter_once = false;
                                 g.connect_search.push(c);
                                 g.connect_menu_index = 0;
                                 g.connect_modal_scroll = 0;
@@ -5038,7 +5248,12 @@ pub fn run_blocking(
                                 g.close_provider_picker();
                                 if for_key {
                                     drop(g);
-                                    let _ = cmd_tx.send(TuiCmd::PromptApiKey(p, false));
+                                    if let Some(slug) = oauth_login_provider_slug(p) {
+                                        let _ =
+                                            cmd_tx.send(TuiCmd::Submit(format!("/login {slug}")));
+                                    } else {
+                                        let _ = cmd_tx.send(TuiCmd::PromptApiKey(p, false));
+                                    }
                                 } else {
                                     drop(g);
                                     let _ = cmd_tx.send(TuiCmd::ApplyDefaultProvider(p));
@@ -5268,8 +5483,9 @@ pub fn run_blocking(
                         let count = g
                             .session_picker_entries
                             .iter()
-                            .filter(|s| {
-                                filter.is_empty() || s.to_ascii_lowercase().contains(&filter)
+                            .filter(|entry| {
+                                filter.is_empty()
+                                    || entry.search_text.to_ascii_lowercase().contains(&filter)
                             })
                             .count();
                         match (key.code, key.modifiers) {
@@ -5286,18 +5502,21 @@ pub fn run_blocking(
                                 }
                             }
                             (KeyCode::Enter, _) => {
-                                let filtered: Vec<&String> = g
+                                let filtered: Vec<_> = g
                                     .session_picker_entries
                                     .iter()
-                                    .filter(|s| {
+                                    .filter(|entry| {
                                         filter.is_empty()
-                                            || s.to_ascii_lowercase().contains(&filter)
+                                            || entry
+                                                .search_text
+                                                .to_ascii_lowercase()
+                                                .contains(&filter)
                                     })
                                     .collect();
                                 let pick =
                                     g.session_picker_index.min(filtered.len().saturating_sub(1));
-                                if let Some(id) = filtered.get(pick) {
-                                    let id = (*id).clone();
+                                if let Some(entry) = filtered.get(pick) {
+                                    let id = entry.id.clone();
                                     g.close_session_picker();
                                     drop(g);
                                     let _ = cmd_tx.send(TuiCmd::ResumeSession(id));
@@ -5876,6 +6095,53 @@ pub fn run_blocking(
                         (KeyCode::Right, _) => {
                             let max = g.input_buffer.chars().count();
                             g.cursor_char_idx = (g.cursor_char_idx + 1).min(max);
+                        }
+                        (KeyCode::PageUp, _) => {
+                            if let Ok(sz) = terminal.size() {
+                                let area = Rect::new(0, 0, sz.width, sz.height);
+                                let (main_area, _) = layout_with_sidebar(area, g.sidebar_open);
+                                let sh = composer_chrome_height(
+                                    &slash_entries,
+                                    &workspace_files,
+                                    &g.input_buffer,
+                                    g.cursor_char_idx,
+                                );
+                                let input_h = composer_input_height(&g, main_area.width);
+                                let (tr, _, _, _) = layout_chunks(main_area, sh, input_h);
+                                let (lines, _hits) =
+                                    transcript_cache.get_or_rebuild(&g, tr.width.saturating_sub(2));
+                                let total = lines.len();
+                                let th = tr.height.saturating_sub(2) as usize;
+                                let max_scroll = total.saturating_sub(th);
+                                let step = th.max(scroll_speed as usize).max(1);
+                                g.transcript_follow_tail = false;
+                                g.scroll_lines =
+                                    g.scroll_lines.saturating_sub(step).min(max_scroll);
+                            }
+                        }
+                        (KeyCode::PageDown, _) => {
+                            if let Ok(sz) = terminal.size() {
+                                let area = Rect::new(0, 0, sz.width, sz.height);
+                                let (main_area, _) = layout_with_sidebar(area, g.sidebar_open);
+                                let sh = composer_chrome_height(
+                                    &slash_entries,
+                                    &workspace_files,
+                                    &g.input_buffer,
+                                    g.cursor_char_idx,
+                                );
+                                let input_h = composer_input_height(&g, main_area.width);
+                                let (tr, _, _, _) = layout_chunks(main_area, sh, input_h);
+                                let (lines, _hits) =
+                                    transcript_cache.get_or_rebuild(&g, tr.width.saturating_sub(2));
+                                let total = lines.len();
+                                let th = tr.height.saturating_sub(2) as usize;
+                                let max_scroll = total.saturating_sub(th);
+                                let step = th.max(scroll_speed as usize).max(1);
+                                g.scroll_lines = (g.scroll_lines + step).min(max_scroll);
+                                if g.scroll_lines >= max_scroll {
+                                    g.transcript_follow_tail = true;
+                                }
+                            }
                         }
                         (KeyCode::Up, _) => {
                             let at_matches = at_completion_matches(

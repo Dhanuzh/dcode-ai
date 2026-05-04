@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use dcode_ai_common::auth::AuthStore;
+use dcode_ai_common::auth::{AuthStore, OpenAiOAuth};
 use dcode_ai_common::config::{DcodeAiConfig, OpenAiConfig, ProviderKind};
 use dcode_ai_common::message::Message;
 use dcode_ai_common::tool::ToolDefinition;
@@ -15,6 +15,9 @@ pub struct OpenAiProvider {
     config: OpenAiConfig,
     max_tokens: u32,
 }
+
+const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const OPENAI_CODE_EXCHANGE_URL: &str = "https://auth.openai.com/oauth/token";
 
 impl OpenAiProvider {
     pub fn from_config(
@@ -36,10 +39,6 @@ impl OpenAiProvider {
 
         let api_key = if let Some(key) = openai.resolve_api_key() {
             key
-        } else if let Some(oauth) = auth_store.openai_oauth {
-            oauth.access_token
-        } else if let Some(oauth) = auth_store.opencodezen_oauth {
-            oauth.access_token
         } else if copilot_mode {
             let github_token = auth_store.copilot.map(|c| c.github_token).ok_or_else(|| {
                 ProviderError::Configuration(
@@ -47,6 +46,18 @@ impl OpenAiProvider {
                 )
             })?;
             fetch_copilot_access_token_blocking(github_token)?
+        } else if matches!(provider, ProviderKind::OpenAi | ProviderKind::Antigravity) {
+            let oauth = auth_store.openai_oauth.ok_or_else(|| {
+                ProviderError::Configuration(format!(
+                    "missing {} API key; set {} or provide `provider.{}.api_key` in config (or run `dcode-ai login openai`)",
+                    provider.display_name(),
+                    openai.api_key_env,
+                    provider.to_config_key()
+                ))
+            })?;
+            resolve_openai_oauth_access_token(oauth)?
+        } else if let Some(oauth) = auth_store.opencodezen_oauth {
+            oauth.access_token
         } else {
             return Err(ProviderError::Configuration(format!(
                 "missing {} API key; set {} or provide `provider.{}.api_key` in config (or run `dcode-ai login opencodezen`)",
@@ -112,6 +123,98 @@ impl OpenAiProvider {
 
 fn is_copilot_base_url(base_url: &str) -> bool {
     base_url.to_ascii_lowercase().contains("githubcopilot.com")
+}
+
+fn oauth_token_expired(expires_at: Option<i64>) -> bool {
+    let Some(expires_at) = expires_at else {
+        return false;
+    };
+    chrono::Utc::now().timestamp() >= expires_at - 60
+}
+
+fn resolve_openai_oauth_access_token(oauth: OpenAiOAuth) -> Result<String, ProviderError> {
+    if !oauth_token_expired(oauth.expires_at) {
+        return Ok(oauth.access_token);
+    }
+
+    let refreshed = refresh_openai_access_token_blocking(oauth)?;
+    Ok(refreshed.access_token)
+}
+
+fn refresh_openai_access_token_blocking(oauth: OpenAiOAuth) -> Result<OpenAiOAuth, ProviderError> {
+    let run = move || async move { refresh_openai_access_token(oauth).await };
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let j = std::thread::spawn(move || handle.block_on(run()));
+        return j.join().map_err(|_| {
+            ProviderError::RequestFailed("openai oauth refresh thread panicked".into())
+        })?;
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ProviderError::RequestFailed(format!("failed to build runtime: {e}")))?;
+    rt.block_on(run())
+}
+
+async fn refresh_openai_access_token(oauth: OpenAiOAuth) -> Result<OpenAiOAuth, ProviderError> {
+    #[derive(serde::Deserialize)]
+    struct TokenResp {
+        access_token: String,
+        #[serde(default)]
+        refresh_token: Option<String>,
+        expires_in: Option<u64>,
+    }
+
+    let body = format!(
+        "grant_type=refresh_token&refresh_token={}&client_id={}",
+        urlencoding::encode(&oauth.refresh_token),
+        urlencoding::encode(OPENAI_OAUTH_CLIENT_ID),
+    );
+    let client = reqwest::Client::new();
+    let response = client
+        .post(OPENAI_CODE_EXCHANGE_URL)
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| ProviderError::RequestFailed(format!("openai oauth refresh failed: {e}")))?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(ProviderError::AuthError(format!(
+            "openai oauth token refresh failed {status}: {text}"
+        )));
+    }
+
+    let data: TokenResp = response.json().await.map_err(|e| {
+        ProviderError::RequestFailed(format!("openai oauth refresh parse error: {e}"))
+    })?;
+    let expires_at = data
+        .expires_in
+        .map(|s| chrono::Utc::now().timestamp() + s as i64);
+
+    let refreshed = OpenAiOAuth {
+        access_token: data.access_token,
+        refresh_token: data.refresh_token.unwrap_or(oauth.refresh_token),
+        expires_at,
+    };
+
+    let mut store = AuthStore::load().map_err(|e| {
+        ProviderError::RequestFailed(format!(
+            "failed to load auth store while saving refreshed openai oauth token: {e}"
+        ))
+    })?;
+    store.openai_oauth = Some(refreshed.clone());
+    store.save().map_err(|e| {
+        ProviderError::RequestFailed(format!(
+            "failed to persist refreshed openai oauth token: {e}"
+        ))
+    })?;
+
+    Ok(refreshed)
 }
 
 fn fetch_copilot_access_token_blocking(github_token: String) -> Result<String, ProviderError> {

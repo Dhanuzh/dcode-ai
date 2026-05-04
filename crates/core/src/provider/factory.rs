@@ -57,12 +57,12 @@ mod tests {
     #[test]
     fn factory_fails_loudly_when_selected_provider_is_missing_credentials() {
         let mut config = DcodeAiConfig::default();
-        config.provider.default = ProviderKind::OpenAi;
+        config.provider.default = ProviderKind::OpenRouter;
         match build_provider(&config) {
             Ok(_) => panic!("missing credentials should fail"),
             Err(error) => {
                 assert!(
-                    matches!(error, ProviderError::Configuration(message) if message.contains("missing OpenAI API key"))
+                    matches!(error, ProviderError::Configuration(message) if message.contains("missing OpenRouter API key"))
                 );
             }
         }

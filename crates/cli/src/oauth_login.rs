@@ -41,6 +41,12 @@ pub enum OAuthProvider {
     Opencodezen,
 }
 
+#[derive(Debug, Clone)]
+pub struct AnthropicLoginPrompt {
+    pub authorization_url: String,
+    pub code_verifier: String,
+}
+
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
 pub enum LogoutTarget {
     Anthropic,
@@ -182,6 +188,22 @@ pub async fn login(provider: OAuthProvider) -> anyhow::Result<()> {
 }
 
 async fn login_anthropic() -> anyhow::Result<()> {
+    let prompt = begin_anthropic_login_prompt();
+
+    println!("\nAnthropic OAuth login\n");
+    if !open_browser(&prompt.authorization_url) {
+        println!("Open this URL:\n{}\n", prompt.authorization_url);
+    }
+    print!("Paste authorization code: ");
+    io::stdout().flush()?;
+    let mut code = String::new();
+    io::stdin().lock().read_line(&mut code)?;
+    finish_anthropic_login(&prompt.code_verifier, code.trim()).await?;
+    println!("Logged in to Anthropic ✓");
+    Ok(())
+}
+
+pub fn begin_anthropic_login_prompt() -> AnthropicLoginPrompt {
     let pkce = generate_pkce();
     let query = [
         ("code", "true"),
@@ -198,16 +220,14 @@ async fn login_anthropic() -> anyhow::Result<()> {
     .collect::<Vec<_>>()
     .join("&");
     let auth_url = format!("{ANTHROPIC_AUTHORIZE_URL}?{query}");
-
-    println!("\nAnthropic OAuth login\n");
-    if !open_browser(&auth_url) {
-        println!("Open this URL:\n{auth_url}\n");
+    AnthropicLoginPrompt {
+        authorization_url: auth_url,
+        code_verifier: pkce.verifier,
     }
-    print!("Paste authorization code: ");
-    io::stdout().flush()?;
-    let mut code = String::new();
-    io::stdin().lock().read_line(&mut code)?;
-    let code = code.trim();
+}
+
+pub async fn finish_anthropic_login(code_verifier: &str, raw_code: &str) -> anyhow::Result<()> {
+    let code = normalize_authorization_code(raw_code.trim());
     if code.is_empty() {
         bail!("No code provided");
     }
@@ -215,10 +235,10 @@ async fn login_anthropic() -> anyhow::Result<()> {
     let body = format!(
         "grant_type=authorization_code&code={}&code_verifier={}&client_id={}&redirect_uri={}&state={}",
         url_encode(code),
-        url_encode(&pkce.verifier),
+        url_encode(code_verifier),
         url_encode(ANTHROPIC_CLIENT_ID),
         url_encode(ANTHROPIC_REDIRECT_URI),
-        url_encode(&pkce.verifier),
+        url_encode(code_verifier),
     );
     let client = reqwest::Client::new();
     let resp = client
@@ -248,7 +268,6 @@ async fn login_anthropic() -> anyhow::Result<()> {
     });
     store.preferred_provider = Some(LoggedProvider::Anthropic);
     store.save()?;
-    println!("Logged in to Anthropic ✓");
     Ok(())
 }
 
@@ -259,7 +278,7 @@ async fn login_openai() -> anyhow::Result<()> {
         user_code: String,
         #[serde(default)]
         verification_uri: String,
-        #[serde(default)]
+        #[serde(default, deserialize_with = "de_string_or_u64")]
         interval: Option<u64>,
     }
     #[derive(serde::Deserialize)]
@@ -741,6 +760,10 @@ fn open_browser(url: &str) -> bool {
     cmd.is_ok()
 }
 
+pub fn try_open_browser(url: &str) -> bool {
+    open_browser(url)
+}
+
 fn url_encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for byte in s.bytes() {
@@ -753,4 +776,32 @@ fn url_encode(s: &str) -> String {
         }
     }
     out
+}
+
+fn normalize_authorization_code(code: &str) -> &str {
+    code.trim().split('#').next().unwrap_or(code.trim())
+}
+
+fn de_string_or_u64<'de, D>(d: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum StrOrU64 {
+        Str(String),
+        Num(u64),
+    }
+
+    match Option::<StrOrU64>::deserialize(d)? {
+        None => Ok(None),
+        Some(StrOrU64::Num(n)) => Ok(Some(n)),
+        Some(StrOrU64::Str(s)) => s
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
 }

@@ -56,7 +56,8 @@ const OAUTH_CHOICES: &[OAuthChoice] = &[
 ];
 
 pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAiConfig> {
-    let mouse_capture = config.ui.mouse_capture;
+    // In tmux, keep mouse capture on by default so wheel scrolling is reliable.
+    let mouse_capture = config.ui.mouse_capture || std::env::var_os("TMUX").is_some();
     let mut terminal = setup_terminal(mouse_capture)?;
     let mut selected: usize = 0;
     let mut status: Option<String> = None;

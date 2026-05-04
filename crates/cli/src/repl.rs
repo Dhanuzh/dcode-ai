@@ -2,14 +2,15 @@ use crate::file_mentions::{
     at_token_before_cursor, discover_workspace_files, expand_at_file_mentions_default,
     filter_paths_prefix,
 };
+use crate::oauth_login::OAuthProvider;
 use crate::prompt::DcodeAiPrompt;
 use crate::runner::{SessionRuntime, dispatch_question_answer, dispatch_tool_approval};
 use crate::slash_commands::SLASH_COMMANDS;
 use crate::tui::app::ApprovalAnswer;
 use crate::tui::{
-    DisplayBlock, ModelPickerAction, ModelPickerEntry, TuiCmd, TuiSessionState, git_create_branch,
-    git_current_branch, git_list_branches, git_switch_branch, replay_event_log_into_state,
-    run_blocking, spawn_tui_bridge,
+    DisplayBlock, ModelPickerAction, ModelPickerEntry, SessionPickerEntry, TuiCmd, TuiSessionState,
+    git_create_branch, git_current_branch, git_list_branches, git_switch_branch,
+    replay_event_log_into_state, run_blocking, spawn_tui_bridge,
 };
 use dcode_ai_common::config::{PermissionMode, ProviderKind};
 use dcode_ai_common::event::{EndReason, QuestionSelection};
@@ -78,6 +79,44 @@ impl ReplOutput<'_> {
             }
         }
     }
+}
+
+fn oauth_only_provider(provider: ProviderKind) -> bool {
+    matches!(
+        provider,
+        ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::Antigravity
+    )
+}
+
+fn oauth_login_slug_for_provider(provider: ProviderKind) -> Option<&'static str> {
+    match provider {
+        ProviderKind::OpenAi => Some("openai"),
+        ProviderKind::Anthropic => Some("anthropic"),
+        ProviderKind::Antigravity => Some("antigravity"),
+        ProviderKind::OpenRouter | ProviderKind::OpenCodeZen => None,
+    }
+}
+
+fn parse_oauth_provider(value: &str) -> Option<OAuthProvider> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "openai" | "open-ai" | "gpt" | "codex" => Some(OAuthProvider::Openai),
+        "anthropic" | "claude" => Some(OAuthProvider::Anthropic),
+        "copilot" | "github" => Some(OAuthProvider::Copilot),
+        "antigravity" | "ag" => Some(OAuthProvider::Antigravity),
+        "opencodezen" | "opencode" | "zen" => Some(OAuthProvider::Opencodezen),
+        _ => None,
+    }
+}
+
+fn prefers_openai_default_model(model: &str) -> bool {
+    let m = model.trim().to_ascii_lowercase();
+    m.is_empty()
+        || m.starts_with("minimax")
+        || m.starts_with("claude")
+        || m.starts_with("gemini")
+        || m.contains("big-pickle")
+        || m.contains("kimi")
+        || m.contains("glm")
 }
 
 /// Special input prefixes
@@ -423,6 +462,52 @@ impl Repl {
     ) -> anyhow::Result<()> {
         let mut cfg = self.runtime.config().clone();
         cfg.set_default_provider(p);
+        match p {
+            ProviderKind::OpenAi => {
+                if cfg
+                    .provider
+                    .openai
+                    .base_url
+                    .to_ascii_lowercase()
+                    .contains("githubcopilot.com")
+                {
+                    cfg.provider.openai.base_url = "https://api.openai.com".to_string();
+                }
+                if prefers_openai_default_model(cfg.provider.openai.model.as_str()) {
+                    cfg.provider.openai.model = "gpt-4o-mini".to_string();
+                }
+            }
+            ProviderKind::Antigravity
+                if cfg.provider.openai.model.trim().is_empty()
+                    || cfg
+                        .provider
+                        .openai
+                        .model
+                        .to_ascii_lowercase()
+                        .starts_with("gpt-")
+                    || cfg
+                        .provider
+                        .openai
+                        .model
+                        .to_ascii_lowercase()
+                        .starts_with("o1")
+                    || cfg
+                        .provider
+                        .openai
+                        .model
+                        .to_ascii_lowercase()
+                        .starts_with("o3")
+                    || cfg
+                        .provider
+                        .openai
+                        .model
+                        .to_ascii_lowercase()
+                        .starts_with("o4") =>
+            {
+                cfg.provider.openai.model = "MiniMax-M2.5".to_string();
+            }
+            _ => {}
+        }
         match self.runtime.apply_dcode_ai_config(cfg) {
             Ok(()) => {
                 if let ReplOutput::Tui(st) = &out
@@ -446,12 +531,165 @@ impl Repl {
         Ok(())
     }
 
+    async fn apply_provider_after_oauth_login(
+        &mut self,
+        provider: OAuthProvider,
+        out: &ReplOutput<'_>,
+    ) -> anyhow::Result<()> {
+        let mut cfg = self.runtime.config().clone();
+        let target = match provider {
+            OAuthProvider::Openai => {
+                cfg.set_default_provider(ProviderKind::OpenAi);
+                if cfg
+                    .provider
+                    .openai
+                    .base_url
+                    .to_ascii_lowercase()
+                    .contains("githubcopilot.com")
+                {
+                    cfg.provider.openai.base_url = "https://api.openai.com".to_string();
+                }
+                if prefers_openai_default_model(cfg.provider.openai.model.as_str()) {
+                    cfg.provider.openai.model = "gpt-4o-mini".to_string();
+                }
+                ProviderKind::OpenAi
+            }
+            OAuthProvider::Copilot => {
+                cfg.set_default_provider(ProviderKind::OpenAi);
+                cfg.provider.openai.base_url = "https://api.githubcopilot.com".to_string();
+                if cfg.provider.openai.model.trim().is_empty() {
+                    cfg.provider.openai.model = "gpt-4o".to_string();
+                }
+                ProviderKind::OpenAi
+            }
+            OAuthProvider::Anthropic => {
+                cfg.set_default_provider(ProviderKind::Anthropic);
+                ProviderKind::Anthropic
+            }
+            OAuthProvider::Antigravity => {
+                cfg.set_default_provider(ProviderKind::Antigravity);
+                if cfg.provider.openai.model.trim().is_empty()
+                    || cfg
+                        .provider
+                        .openai
+                        .model
+                        .to_ascii_lowercase()
+                        .starts_with("gpt-")
+                {
+                    cfg.provider.openai.model = "MiniMax-M2.5".to_string();
+                }
+                ProviderKind::Antigravity
+            }
+            OAuthProvider::Opencodezen => {
+                cfg.set_default_provider(ProviderKind::OpenCodeZen);
+                ProviderKind::OpenCodeZen
+            }
+        };
+        match self.runtime.apply_dcode_ai_config(cfg) {
+            Ok(()) => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.model = self.runtime.model().to_string();
+                }
+                if let Err(e) = self.runtime.config().save_global() {
+                    out.eprintln(&format!(
+                        "[login] logged in and switched provider, but global save failed: {e}"
+                    ));
+                } else {
+                    out.println(&format!(
+                        "[login] using {} - model {}",
+                        target.display_name(),
+                        self.runtime.model()
+                    ));
+                }
+            }
+            Err(e) => out.eprintln(&format!(
+                "[login] logged in, but failed to apply provider {}: {e}",
+                target.display_name()
+            )),
+        }
+        Ok(())
+    }
+
+    async fn apply_copilot_provider_in_session(
+        &mut self,
+        out: ReplOutput<'_>,
+    ) -> anyhow::Result<()> {
+        let auth = dcode_ai_common::auth::AuthStore::load().unwrap_or_default();
+        if auth.copilot.is_none() {
+            out.eprintln("[provider] Copilot is not logged in. Run: /login copilot");
+            return Ok(());
+        }
+        let mut cfg = self.runtime.config().clone();
+        cfg.set_default_provider(ProviderKind::OpenAi);
+        cfg.provider.openai.base_url = "https://api.githubcopilot.com".to_string();
+        if cfg.provider.openai.model.trim().is_empty()
+            || cfg
+                .provider
+                .openai
+                .model
+                .to_ascii_lowercase()
+                .starts_with("gpt-")
+            || cfg
+                .provider
+                .openai
+                .model
+                .to_ascii_lowercase()
+                .starts_with("o1")
+            || cfg
+                .provider
+                .openai
+                .model
+                .to_ascii_lowercase()
+                .starts_with("o3")
+            || cfg
+                .provider
+                .openai
+                .model
+                .to_ascii_lowercase()
+                .starts_with("o4")
+        {
+            cfg.provider.openai.model = "gpt-4o".to_string();
+        }
+        match self.runtime.apply_dcode_ai_config(cfg) {
+            Ok(()) => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.model = self.runtime.model().to_string();
+                }
+                match self.runtime.config().save_global() {
+                    Ok(()) => out.println(&format!(
+                        "[provider] Copilot - model {} - saved",
+                        self.runtime.model()
+                    )),
+                    Err(e) => {
+                        out.eprintln(&format!("[provider] applied but global save failed: {e}"))
+                    }
+                }
+            }
+            Err(e) => out.eprintln(&format!("[provider] {e}")),
+        }
+        Ok(())
+    }
+
     async fn save_provider_api_key(
         &mut self,
         p: ProviderKind,
         key: &str,
         out: ReplOutput<'_>,
     ) -> anyhow::Result<()> {
+        if oauth_only_provider(p) {
+            let login = oauth_login_slug_for_provider(p).unwrap_or("openai");
+            out.eprintln(&format!(
+                "[apikey] {} uses OAuth login. Run: dcode-ai login {}",
+                p.display_name(),
+                login
+            ));
+            return Ok(());
+        }
+
         let mut cfg = self.runtime.config().clone();
         cfg.set_provider_api_key(p, key);
         match self.runtime.apply_dcode_ai_config(cfg) {
@@ -525,6 +763,7 @@ impl Repl {
                     "SLASH COMMANDS:".into(),
                     "  /help              Show this help".into(),
                     "  /status            Session status".into(),
+                    "  /session-name      Show/set manual session name".into(),
                     "  /agent [profile]   Show or switch agent profile".into(),
                     "  /plan <task>       Planning-oriented turn".into(),
                     "  /review <task>     Code review turn".into(),
@@ -540,7 +779,7 @@ impl Repl {
                     "  /models            Browse and select models".into(),
                     "  /connect           Connect LLM provider".into(),
                     "  /login             Alias of /connect".into(),
-                    "  /provider [name]   Default provider".into(),
+                    "  /provider [name]   Provider connect/switch".into(),
                     "  /sidebar [mode]    Sidebar on/off/toggle (TUI)".into(),
                     "  /editor [seed]     Open external editor".into(),
                     "  /set-editor <cmd>  Persist editor command".into(),
@@ -590,8 +829,13 @@ impl Repl {
             }
             "/status" => {
                 let snapshot = self.runtime.snapshot();
+                let session_line = snapshot
+                    .session_name
+                    .as_ref()
+                    .map(|name| format!("Session:     {} ({})", name, snapshot.id))
+                    .unwrap_or_else(|| format!("Session:     {}", snapshot.id));
                 let mut lines = vec![
-                    format!("Session:     {}", snapshot.id),
+                    session_line,
                     format!("Model:       {}", self.runtime.model()),
                     format!("Agent:       @{}", self.agent_profile.label()),
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
@@ -610,6 +854,34 @@ impl Repl {
                     for l in &lines {
                         out.println(l);
                     }
+                }
+            }
+            "/session-name" => {
+                let raw = rest.trim();
+                if raw.is_empty() {
+                    if let Some(name) = self.runtime.session_name() {
+                        out.println(&format!("[session-name] {name} ({})", self.runtime.session_id()));
+                    } else {
+                        out.println(&format!("[session-name] unset ({})", self.runtime.session_id()));
+                    }
+                    out.println("usage: /session-name <name>  (or `/session-name clear`)");
+                    return Ok(true);
+                }
+                if raw.eq_ignore_ascii_case("clear") {
+                    self.runtime.set_session_name(None);
+                    if let Err(e) = self.runtime.save().await {
+                        out.eprintln(&format!("[session-name] cleared, but save failed: {e}"));
+                    } else {
+                        out.println("[session-name] cleared");
+                    }
+                    return Ok(true);
+                }
+                self.runtime.set_session_name(Some(raw.to_string()));
+                let applied = self.runtime.session_name().unwrap_or(self.runtime.session_id());
+                if let Err(e) = self.runtime.save().await {
+                    out.eprintln(&format!("[session-name] set to `{applied}`, but save failed: {e}"));
+                } else {
+                    out.println(&format!("[session-name] set to `{applied}`"));
                 }
             }
             "/agent" => {
@@ -730,13 +1002,22 @@ impl Repl {
             }
             "/cost" => {
                 let snapshot = self.runtime.snapshot();
-                out.eprintln(&format!("[cost] Session: {}", snapshot.id));
+                if let Some(name) = snapshot.session_name {
+                    out.eprintln(&format!("[cost] Session: {} ({})", name, snapshot.id));
+                } else {
+                    out.eprintln(&format!("[cost] Session: {}", snapshot.id));
+                }
                 out.eprintln("[cost] Use 'dcode-ai logs --follow' to see real-time token usage");
             }
             "/stats" => {
                 let snapshot = self.runtime.snapshot();
+                let session_line = snapshot
+                    .session_name
+                    .as_ref()
+                    .map(|name| format!("Session:     {} ({})", name, snapshot.id))
+                    .unwrap_or_else(|| format!("Session:     {}", snapshot.id));
                 let lines = vec![
-                    format!("Session:     {}", snapshot.id),
+                    session_line,
                     format!("Model:       {}", self.runtime.model()),
                     format!("Agent:       @{}", self.agent_profile.label()),
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
@@ -990,8 +1271,13 @@ impl Repl {
             }
             "/attach" => {
                 let snapshot = self.runtime.snapshot();
+                let session_line = snapshot
+                    .session_name
+                    .as_ref()
+                    .map(|name| format!("Session:  {} ({})", name, snapshot.id))
+                    .unwrap_or_else(|| format!("Session:  {}", snapshot.id));
                 let lines = vec![
-                    format!("Session:  {}", snapshot.id),
+                    session_line,
                     format!(
                         "Socket:   {}",
                         snapshot
@@ -1097,24 +1383,90 @@ impl Repl {
             "/login" | "/connect" => {
                 let provider_hint = rest.trim();
                 if !provider_hint.is_empty() {
-                    out.println(&format!(
-                        "Run OAuth login in shell: dcode-ai login {}",
-                        provider_hint
-                    ));
-                    out.println("Providers: anthropic, openai, copilot, antigravity");
+                    if let Some(oauth_provider) = parse_oauth_provider(provider_hint) {
+                        if let ReplOutput::Tui(st) = &out
+                            && matches!(oauth_provider, OAuthProvider::Anthropic)
+                        {
+                            let prompt = crate::oauth_login::begin_anthropic_login_prompt();
+                            let opened = crate::oauth_login::try_open_browser(&prompt.authorization_url);
+                            if let Ok(mut g) = st.lock() {
+                                g.open_anthropic_oauth_modal(
+                                    prompt.authorization_url.clone(),
+                                    prompt.code_verifier.clone(),
+                                );
+                            }
+                            if opened {
+                                out.println(
+                                    "[login] starting anthropic OAuth flow (browser opened)",
+                                );
+                            } else {
+                                out.println(
+                                    "[login] starting anthropic OAuth flow (browser open failed; use popup URL)",
+                                );
+                            }
+                            return Ok(true);
+                        }
+                        out.println(&format!("[login] starting {} OAuth flow…", provider_hint));
+                        match crate::oauth_login::login(oauth_provider).await {
+                            Ok(()) => {
+                                self.apply_provider_after_oauth_login(oauth_provider, &out)
+                                    .await?;
+                            }
+                            Err(e) => {
+                                out.eprintln(&format!("[login] {e}"));
+                            }
+                        }
+                    } else if let Some(p) = ProviderKind::from_cli_name(provider_hint)
+                        .or_else(|| ProviderKind::parse_display_name(provider_hint))
+                    {
+                        if let ReplOutput::Tui(st) = &out {
+                            if oauth_only_provider(p) {
+                                if let Some(oauth_provider) =
+                                    oauth_login_slug_for_provider(p).and_then(parse_oauth_provider)
+                                {
+                                    out.println(&format!(
+                                        "[login] {} uses OAuth. Running login flow…",
+                                        p.display_name(),
+                                    ));
+                                    match crate::oauth_login::login(oauth_provider).await {
+                                        Ok(()) => {
+                                            self.apply_provider_after_oauth_login(oauth_provider, &out)
+                                            .await?;
+                                        }
+                                        Err(e) => out.eprintln(&format!("[login] {e}")),
+                                    }
+                                }
+                            } else if let Ok(mut g) = st.lock() {
+                                g.open_api_key_modal(
+                                    p,
+                                    self.runtime.config().provider.api_key_present_for(p),
+                                    false,
+                                );
+                            }
+                        } else if oauth_only_provider(p) {
+                            out.println(&format!("dcode-ai login {}", provider_hint.to_lowercase()));
+                        } else {
+                            out.println(&format!("dcode-ai apikey {} <secret>", provider_hint));
+                        }
+                    } else {
+                        out.eprintln(
+                            "unknown provider. OAuth: openai/codex, anthropic, copilot, antigravity. API-key: openrouter, opencodezen",
+                        );
+                    }
                     return Ok(true);
                 }
-                if let ReplOutput::Tui(st) = out {
+                if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
                         g.open_connect_modal();
                     }
-                    out.println(
-                        "[connect] Choose a provider (↑↓ · Enter · type to search · Esc). If not connected, use `dcode-ai login <provider>`.",
-                    );
+                    out.println("[connect] Choose a provider (↑↓ · Enter · type to search · Esc).");
                 } else {
                     out.println("Connect an LLM provider (non-TUI):");
-                    out.println("  dcode-ai login <anthropic|openai|copilot|antigravity>");
-                    out.println("  /provider <openai|anthropic|openrouter|antigravity>");
+                    out.println("  dcode-ai login <anthropic|openai|codex|copilot|antigravity>");
+                    out.println("  /apikey <openrouter|opencodezen>");
+                    out.println(
+                        "  /provider <openai|copilot|anthropic|openrouter|antigravity|opencodezen>",
+                    );
                     out.println("  /model <name>                 — set model after switching provider");
                     out.println(&format!(
                         "  current: {} → {}",
@@ -1158,7 +1510,8 @@ impl Repl {
                     "  /connect           OpenCode-style provider picker".into(),
                     "  /login             Alias of /connect".into(),
                     "  /models            Browse and select models".into(),
-                    "  /provider [name]   Default LLM provider".into(),
+                    "  /provider [name]   Provider connect/switch".into(),
+                    "  /session-name      Show/set manual session name".into(),
                     "  /editor [seed]     Open external editor".into(),
                     "  /set-editor <cmd>  Persist editor command".into(),
                     "  /sidebar [mode]    Sidebar on/off/toggle (TUI)".into(),
@@ -1231,25 +1584,33 @@ impl Repl {
             "/provider" => {
                 let rest = rest.trim();
                 if rest.is_empty() {
-                    if let ReplOutput::Tui(st) = out {
+                    if let ReplOutput::Tui(st) = &out {
                         if let Ok(mut g) = st.lock() {
-                            g.open_provider_picker(self.runtime.config().provider.default, false);
+                            g.open_connect_modal();
                         }
-                        out.println("[provider] choose with ↑↓ + Enter, Esc to cancel");
+                        out.println("[provider] connect/login popup opened (↑↓ · Enter · Esc)");
                     } else {
                         out.println(&format!(
                             "current default provider: {} (model {})",
                             self.runtime.config().provider.default.display_name(),
                             self.runtime.model()
                         ));
-                        out.println("usage: /provider <openai|anthropic|openrouter|antigravity>");
+                        out.println(
+                            "usage: /provider <openai|codex|copilot|anthropic|openrouter|antigravity|opencodezen>",
+                        );
                     }
+                } else if rest.eq_ignore_ascii_case("copilot")
+                    || rest.eq_ignore_ascii_case("github")
+                {
+                    self.apply_copilot_provider_in_session(out).await?;
                 } else if let Some(p) = ProviderKind::from_cli_name(rest)
                     .or_else(|| ProviderKind::parse_display_name(rest))
                 {
                     self.apply_provider_in_session(p, out).await?;
                 } else {
-                    out.eprintln("unknown provider; try: openai, anthropic, openrouter, antigravity");
+                    out.eprintln(
+                        "unknown provider; try: openai/codex, copilot, anthropic, openrouter, antigravity, opencodezen",
+                    );
                 }
             }
             "/apikey" => {
@@ -1261,6 +1622,15 @@ impl Repl {
                     let p = ProviderKind::from_cli_name(pn)
                         .or_else(|| ProviderKind::parse_display_name(pn));
                     if let Some(p) = p {
+                        if oauth_only_provider(p) {
+                            let login = oauth_login_slug_for_provider(p).unwrap_or("openai");
+                            out.eprintln(&format!(
+                                "{} uses OAuth login. Run: dcode-ai login {}",
+                                p.display_name(),
+                                login
+                            ));
+                            return Ok(true);
+                        }
                         if key.is_empty() {
                             if let ReplOutput::Tui(st) = out {
                                 if let Ok(mut g) = st.lock() {
@@ -1277,7 +1647,9 @@ impl Repl {
                             self.save_provider_api_key(p, key, out).await?;
                         }
                     } else {
-                        out.eprintln("unknown provider; try: openai, anthropic, openrouter, antigravity");
+                        out.eprintln(
+                            "unknown provider; try: openai, copilot, anthropic, openrouter, antigravity, opencodezen",
+                        );
                     }
                 } else if let ReplOutput::Tui(st) = out {
                     if let Ok(mut g) = st.lock() {
@@ -1406,12 +1778,49 @@ impl Repl {
                         }
                     } else if let ReplOutput::Tui(st) = &out {
                         let current = self.runtime.session_id().to_string();
+                        let store = dcode_ai_runtime::session_store::SessionStore::new(
+                            self.runtime
+                                .workspace_root()
+                                .join(&self.runtime.config().session.history_dir),
+                        );
+                        let mut entries: Vec<SessionPickerEntry> = Vec::new();
+                        for id in &ids {
+                            let (label, search_text) = match store.load_snapshot(id).await {
+                                Ok(snapshot) => {
+                                    if let Some(name) = snapshot.session_name {
+                                        (format!("{name} ({id})"), format!("{name} {id}"))
+                                    } else {
+                                        (id.clone(), id.clone())
+                                    }
+                                }
+                                Err(_) => (id.clone(), id.clone()),
+                            };
+                            entries.push(SessionPickerEntry {
+                                id: id.clone(),
+                                label,
+                                search_text,
+                            });
+                        }
                         if let Ok(mut g) = st.lock() {
-                            g.open_session_picker(ids, &current);
+                            g.open_session_picker(entries, &current);
                         }
                     } else {
+                        let store = dcode_ai_runtime::session_store::SessionStore::new(
+                            self.runtime
+                                .workspace_root()
+                                .join(&self.runtime.config().session.history_dir),
+                        );
                         for id in ids {
-                            out.println(&id);
+                            match store.load_snapshot(&id).await {
+                                Ok(snapshot) => {
+                                    if let Some(name) = snapshot.session_name {
+                                        out.println(&format!("{name}\t{id}"));
+                                    } else {
+                                        out.println(&id);
+                                    }
+                                }
+                                Err(_) => out.println(&id),
+                            }
                         }
                     }
                 }
@@ -1614,8 +2023,11 @@ impl Repl {
             self.runtime.workspace_root().to_path_buf(),
             self.runtime.config().ui.code_line_numbers,
         )));
+        // In tmux, keep mouse capture on by default so wheel scrolling is reliable.
+        let effective_mouse_capture =
+            self.runtime.config().ui.mouse_capture || std::env::var_os("TMUX").is_some();
         if let Ok(mut g) = tui_state.lock() {
-            g.mouse_capture_on = self.runtime.config().ui.mouse_capture;
+            g.mouse_capture_on = effective_mouse_capture;
         }
 
         let log_path = self.runtime.event_log_path();
@@ -1713,7 +2125,7 @@ impl Repl {
         let st = tui_state.clone();
         let banner = self.run_mode;
         let cancel_flag = self.runtime.cancel_handle();
-        let mouse_capture = self.runtime.config().ui.mouse_capture;
+        let mouse_capture = effective_mouse_capture;
         let scroll_speed = self.runtime.config().ui.scroll_speed;
         let ui = tokio::task::spawn_blocking(move || {
             run_blocking(
@@ -2169,6 +2581,36 @@ impl Repl {
                         let _ = self.runtime.apply_dcode_ai_config(cfg);
                     }
                 }
+                TuiCmd::CompleteAnthropicOAuth {
+                    code_verifier,
+                    authorization_code,
+                } => {
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.blocks.push(DisplayBlock::System(
+                            "[login] completing anthropic OAuth exchange...".into(),
+                        ));
+                        g.touch_transcript();
+                    }
+                    match crate::oauth_login::finish_anthropic_login(
+                        &code_verifier,
+                        &authorization_code,
+                    )
+                    .await
+                    {
+                        Ok(()) => {
+                            self.apply_provider_after_oauth_login(
+                                OAuthProvider::Anthropic,
+                                &ReplOutput::Tui(&tui_state),
+                            )
+                            .await?;
+                        }
+                        Err(e) => {
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.push_error(format!("[login] {e}"));
+                            }
+                        }
+                    }
+                }
                 TuiCmd::ApplyTheme(name) => {
                     use crate::tui::theme;
                     let applied = theme::set_by_name(Some(&name));
@@ -2523,7 +2965,7 @@ fn provider_label(config: &dcode_ai_common::config::DcodeAiConfig, p: ProviderKi
             .to_ascii_lowercase()
             .contains("githubcopilot.com")
     {
-        "Copilot".to_string()
+        "OpenAI (Copilot endpoint)".to_string()
     } else {
         p.display_name().to_string()
     }
@@ -2574,6 +3016,25 @@ fn build_model_picker_entries(
             is_header: false,
         });
     }
+    let copilot_active = config.provider.default == ProviderKind::OpenAi
+        && config
+            .provider
+            .openai
+            .base_url
+            .to_ascii_lowercase()
+            .contains("githubcopilot.com");
+    let copilot_selected = if copilot_active { " [active]" } else { "" };
+    let copilot_status = if auth.copilot.is_some() {
+        "oauth ✓"
+    } else {
+        "not logged in"
+    };
+    entries.push(ModelPickerEntry {
+        label: format!("Copilot{}", copilot_selected),
+        detail: format!("{} ({copilot_status})", config.provider.openai.model),
+        action: ModelPickerAction::SwitchCopilot,
+        is_header: false,
+    });
 
     if !provider_models.is_empty() {
         entries.push(ModelPickerEntry {

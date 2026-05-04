@@ -130,6 +130,10 @@ impl SessionRuntime {
         self.supervisor.session_id()
     }
 
+    pub fn session_name(&self) -> Option<&str> {
+        self.supervisor.session_name()
+    }
+
     pub fn model(&self) -> &str {
         &self.supervisor.model
     }
@@ -204,6 +208,10 @@ impl SessionRuntime {
 
     pub fn set_session_summary(&mut self, summary: Option<String>) {
         self.supervisor.set_session_summary(summary);
+    }
+
+    pub fn set_session_name(&mut self, name: Option<String>) {
+        self.supervisor.set_session_name(name);
     }
 
     pub async fn append_memory_note(

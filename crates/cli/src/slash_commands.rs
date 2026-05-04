@@ -3,6 +3,7 @@
 pub const SLASH_COMMANDS: &[&str] = &[
     "/help",
     "/status",
+    "/session-name",
     "/agent",
     "/plan",
     "/review",

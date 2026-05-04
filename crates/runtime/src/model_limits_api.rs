@@ -570,9 +570,20 @@ async fn fetch_openai_model_ids(client: &reqwest::Client, config: &DcodeAiConfig
         return ids;
     }
 
-    let key = match config.provider.openai.resolve_api_key() {
-        Some(k) => k,
-        None => return Vec::new(),
+    let key = if let Some(k) = config.provider.openai.resolve_api_key() {
+        k
+    } else if let Ok(auth) = dcode_ai_common::auth::AuthStore::load() {
+        if let Some(oauth) = auth.openai_oauth {
+            oauth.access_token
+        } else {
+            let mut ids = openai_static_model_ids();
+            ids.sort();
+            return ids;
+        }
+    } else {
+        let mut ids = openai_static_model_ids();
+        ids.sort();
+        return ids;
     };
     let ttl = catalog_cache_ttl();
     let cache_key = format!("openai|{}|{:x}", base, api_key_tag(&key));
@@ -596,11 +607,19 @@ async fn fetch_openai_model_ids(client: &reqwest::Client, config: &DcodeAiConfig
     let url = format!("{base}/v1/models");
     let resp = match client.get(&url).bearer_auth(&key).send().await {
         Ok(r) if r.status().is_success() => r,
-        _ => return Vec::new(),
+        _ => {
+            let mut ids = openai_static_model_ids();
+            ids.sort();
+            return ids;
+        }
     };
     let v: serde_json::Value = match resp.json().await {
         Ok(v) => v,
-        Err(_) => return Vec::new(),
+        Err(_) => {
+            let mut ids = openai_static_model_ids();
+            ids.sort();
+            return ids;
+        }
     };
     let value = Arc::new(v);
     let mut ids = Vec::new();
@@ -620,7 +639,13 @@ async fn fetch_openai_model_ids(client: &reqwest::Client, config: &DcodeAiConfig
             });
         }
     }
-    ids
+    if ids.is_empty() {
+        let mut fallback = openai_static_model_ids();
+        fallback.sort();
+        fallback
+    } else {
+        ids
+    }
 }
 
 async fn fetch_opencodezen_model_ids(
@@ -707,6 +732,17 @@ fn copilot_model_ids() -> Vec<String> {
         "gemini-3-pro-preview".into(),
         "gemini-3.1-pro-preview".into(),
         "grok-code-fast-1".into(),
+    ]
+}
+
+fn openai_static_model_ids() -> Vec<String> {
+    vec![
+        "gpt-4o-mini".into(),
+        "gpt-4o".into(),
+        "gpt-4.1-mini".into(),
+        "gpt-4.1".into(),
+        "gpt-5".into(),
+        "gpt-5-mini".into(),
     ]
 }
 
