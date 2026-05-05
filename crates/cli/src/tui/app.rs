@@ -1391,10 +1391,16 @@ fn transcript_lines_and_hits(
                 }
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
-            DisplayBlock::ToolRunning { name, input, .. } => {
+            DisplayBlock::ToolRunning {
+                name,
+                input,
+                call_id,
+            } => {
                 push_section_gap(&mut lines, &mut hits);
                 let ui = tool_ui::metadata(name);
                 let preview = tool_input_preview(name, input);
+                let collapsed = state.is_tool_block_collapsed(call_id);
+                let fold_indicator = if collapsed { "▸" } else { "▾" };
                 let spans = vec![
                     Span::styled(
                         format!(" {} ", ui.icon),
@@ -1404,6 +1410,10 @@ fn transcript_lines_and_hits(
                             .add_modifier(Modifier::BOLD),
                     ),
                     Span::styled(" ", Style::default()),
+                    Span::styled(
+                        format!("{fold_indicator} "),
+                        Style::default().fg(theme::muted()),
+                    ),
                     Span::styled(
                         ui.label,
                         Style::default()
@@ -1423,7 +1433,7 @@ fn transcript_lines_and_hits(
                         .add_modifier(Modifier::BOLD),
                 ));
                 push_transcript_line(&mut lines, &mut hits, Line::from(header_spans), None);
-                if !preview.is_empty() {
+                if !collapsed && !preview.is_empty() {
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
@@ -1440,8 +1450,34 @@ fn transcript_lines_and_hits(
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::ApprovalPending(req) => {
+                // Full approval UI lives in a popup overlay; transcript only shows a
+                // compact placeholder so the user has visual continuity in scrollback.
                 push_section_gap(&mut lines, &mut hits);
-                render_approval_block(&mut lines, &mut hits, req, w);
+                let ui = tool_ui::metadata(&req.tool);
+                push_transcript_line(
+                    &mut lines,
+                    &mut hits,
+                    Line::from(vec![
+                        Span::styled(
+                            format!(" {} ", ui.icon),
+                            Style::default().fg(Color::Black).bg(theme::warn()).bold(),
+                        ),
+                        Span::styled(" ", Style::default()),
+                        Span::styled(
+                            ui.label,
+                            Style::default()
+                                .fg(theme::warn())
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            "  awaiting your approval (popup) — Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow",
+                            Style::default().fg(theme::muted()),
+                        ),
+                    ]),
+                    None,
+                );
+                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+                let _ = w; // width still consumed in popup renderer
             }
             DisplayBlock::ApprovalResolved { tool, approved } => {
                 push_section_gap(&mut lines, &mut hits);
@@ -1472,9 +1508,16 @@ fn transcript_lines_and_hits(
                 );
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
-            DisplayBlock::ToolDone { name, ok, detail } => {
+            DisplayBlock::ToolDone {
+                name,
+                call_id,
+                ok,
+                detail,
+            } => {
                 push_section_gap(&mut lines, &mut hits);
                 let ui = tool_ui::metadata(name);
+                let collapsed = state.is_tool_block_collapsed(call_id);
+                let fold_indicator = if collapsed { "▸" } else { "▾" };
                 let (icon, badge, badge_style) = if *ok {
                     (
                         "✓",
@@ -1498,6 +1541,10 @@ fn transcript_lines_and_hits(
                         ),
                         Span::styled(" ", Style::default()),
                         Span::styled(
+                            format!("{fold_indicator} "),
+                            Style::default().fg(theme::muted()),
+                        ),
+                        Span::styled(
                             ui.label,
                             Style::default()
                                 .fg(theme::tool())
@@ -1511,7 +1558,7 @@ fn transcript_lines_and_hits(
                     ]),
                     None,
                 );
-                if !detail.trim().is_empty() {
+                if !collapsed && !detail.trim().is_empty() {
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
@@ -1932,95 +1979,98 @@ fn push_wrapped_plain_lines_limited(
     }
 }
 
-fn render_approval_block(
-    lines: &mut Vec<Line<'static>>,
-    hits: &mut Vec<LineAnswerHit>,
-    req: &ApprovalRequest,
-    width: usize,
-) {
+/// Render the approval request as a centered popup overlay. The popup body
+/// reuses the same content layout as `render_approval_block` (icon + label,
+/// description, full input, action hint) but lives above the transcript so
+/// the user can't miss it while scrolling tool output.
+fn render_approval_popup(frame: &mut ratatui::Frame<'_>, area: Rect, req: &ApprovalRequest) {
+    let popup_w = area.width.saturating_mul(3) / 4;
+    let popup_w = popup_w.clamp(50, area.width.saturating_sub(2).max(50));
+    let popup_h =
+        (area.height.saturating_mul(3) / 4).clamp(14, area.height.saturating_sub(2).max(14));
+    let popup_area = centered_rect(area, popup_w, popup_h);
+
+    let inner_w = popup_area.width.saturating_sub(4) as usize;
     let ui = tool_ui::metadata(&req.tool);
     let preview = tool_input_preview(&req.tool, &req.input);
-    push_transcript_line(
-        lines,
-        hits,
-        Line::from(vec![
-            Span::styled(
-                format!(" {} ", ui.icon),
-                Style::default().fg(Color::Black).bg(theme::warn()).bold(),
-            ),
-            Span::styled(" ", Style::default()),
-            Span::styled(
-                ui.label,
-                Style::default()
-                    .fg(theme::warn())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!("  {} ", ui.family),
-                Style::default().fg(theme::muted()),
-            ),
-            Span::styled(
-                "approval required",
-                Style::default()
-                    .fg(theme::warn())
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
-        None,
-    );
-    if !preview.is_empty() {
-        push_transcript_line(
-            lines,
-            hits,
-            Line::from(vec![
-                Span::styled("  input  ", Style::default().fg(theme::muted())),
-                Span::styled(
-                    truncate_chars(&preview, width.saturating_sub(10).max(20)),
-                    Style::default().fg(theme::text()),
-                ),
-            ]),
-            None,
-        );
-    }
-    push_transcript_line(lines, hits, Line::default(), None);
-    for text_line in wrap_text(&req.description, width) {
-        push_transcript_line(
-            lines,
-            hits,
-            Line::from(Span::styled(text_line, Style::default().fg(theme::text()))),
-            None,
-        );
-    }
-    push_transcript_line(lines, hits, Line::default(), None);
-    push_transcript_line(
-        lines,
-        hits,
-        Line::from(Span::styled(
-            " Full Input ",
+
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled(
+            format!(" {} ", ui.icon),
+            Style::default().fg(Color::Black).bg(theme::warn()).bold(),
+        ),
+        Span::styled("  ", Style::default()),
+        Span::styled(
+            ui.label,
             Style::default()
-                .fg(theme::muted())
+                .fg(theme::warn())
                 .add_modifier(Modifier::BOLD),
-        )),
-        None,
-    );
-    push_wrapped_plain_lines_limited(
-        lines,
-        hits,
-        &req.input,
-        width,
-        Style::default().fg(theme::muted()),
-        16,
-    );
-    push_transcript_line(
-        lines,
-        hits,
-        Line::from(Span::styled(
-            " Reply: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny",
+        ),
+        Span::styled(
+            format!("  {}", ui.family),
             Style::default().fg(theme::muted()),
-        )),
-        None,
+        ),
+    ]));
+    lines.push(Line::default());
+    if !preview.is_empty() {
+        lines.push(Line::from(vec![
+            Span::styled("Input  ", Style::default().fg(theme::muted())),
+            Span::styled(
+                truncate_chars(&preview, inner_w.saturating_sub(8).max(20)),
+                Style::default().fg(theme::text()),
+            ),
+        ]));
+        lines.push(Line::default());
+    }
+    for text_line in wrap_text(&req.description, inner_w) {
+        lines.push(Line::from(Span::styled(
+            text_line,
+            Style::default().fg(theme::text()),
+        )));
+    }
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " Full Input ",
+        Style::default()
+            .fg(theme::muted())
+            .add_modifier(Modifier::BOLD),
+    )));
+    let mut full_lines: Vec<Line<'static>> = Vec::new();
+    let mut full_hits: Vec<LineAnswerHit> = Vec::new();
+    push_wrapped_plain_lines_limited(
+        &mut full_lines,
+        &mut full_hits,
+        &req.input,
+        inner_w,
+        Style::default().fg(theme::muted()),
+        12,
     );
-    push_transcript_line(lines, hits, Line::default(), None);
+    lines.extend(full_lines);
+    lines.push(Line::default());
+    lines.push(Line::from(Span::styled(
+        " Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny · Esc keep waiting",
+        Style::default()
+            .fg(theme::warn())
+            .add_modifier(Modifier::BOLD),
+    )));
+
+    frame.render_widget(ClearWidget, popup_area);
+    let popup = Paragraph::new(Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(theme::warn()))
+                .title(Span::styled(
+                    " Tool approval needed ",
+                    Style::default()
+                        .fg(theme::warn())
+                        .add_modifier(Modifier::BOLD),
+                )),
+        )
+        .style(Style::default().bg(theme::surface()))
+        .wrap(Wrap { trim: false });
+    frame.render_widget(popup, popup_area);
 }
 
 /// Parse user approval input (flexible: punctuation, synonyms, `/approve` style).
@@ -4661,6 +4711,16 @@ pub fn run_blocking(
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
                 }
+
+                // Approval popup overlay — drawn LAST so it sits above transcript &
+                // any other modal-less surface. Skipped while the connect modal owns
+                // the screen so onboarding flow isn't visually competing.
+                if let Some(req) = g.active_approval.clone()
+                    && !g.connect_modal_open
+                    && !g.onboarding_mode
+                {
+                    render_approval_popup(frame, area, &req);
+                }
             })?;
         }
 
@@ -5700,6 +5760,26 @@ pub fn run_blocking(
                                 g.should_exit = true;
                                 let _ = cmd_tx.send(TuiCmd::Exit);
                                 break;
+                            }
+                            KeyCode::Char('f') => {
+                                let toggled = g.toggle_last_tool_block();
+                                let msg = if toggled {
+                                    "Toggled latest tool block (collapsed/expanded)".to_string()
+                                } else {
+                                    "No tool blocks to toggle yet".to_string()
+                                };
+                                g.blocks.push(DisplayBlock::System(msg));
+                                g.touch_transcript();
+                            }
+                            KeyCode::Char('F') => {
+                                g.toggle_all_tool_blocks();
+                                let state_msg = if g.all_tools_collapsed {
+                                    "Collapsed all tool blocks (Ctrl+X F to expand)"
+                                } else {
+                                    "Expanded all tool blocks"
+                                };
+                                g.blocks.push(DisplayBlock::System(state_msg.into()));
+                                g.touch_transcript();
                             }
                             _ => {}
                         }

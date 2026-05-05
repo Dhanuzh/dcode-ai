@@ -24,6 +24,7 @@ pub enum DisplayBlock {
     },
     ToolDone {
         name: String,
+        call_id: String,
         ok: bool,
         detail: String,
     },
@@ -239,6 +240,12 @@ pub struct TuiSessionState {
     pub transcript_search_query: String,
     /// Selected match index within the current filtered match list.
     pub transcript_search_index: usize,
+    /// Per-tool-block collapse override keyed by `call_id`.
+    /// `Some(true)` = collapsed, `Some(false)` = expanded, absent = use default.
+    pub tool_block_collapsed: HashMap<String, bool>,
+    /// Global "collapse all tool blocks" toggle (z key). When true, `ToolDone`/
+    /// `ToolRunning` blocks render header only unless overridden in `tool_block_collapsed`.
+    pub all_tools_collapsed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -366,7 +373,45 @@ impl TuiSessionState {
             transcript_search_open: false,
             transcript_search_query: String::new(),
             transcript_search_index: 0,
+            tool_block_collapsed: HashMap::new(),
+            all_tools_collapsed: false,
         }
+    }
+
+    /// Returns true if the tool block with `call_id` should render header-only.
+    /// Per-block override wins over the global toggle; default is collapsed for
+    /// finished tools when global toggle on, otherwise expanded.
+    pub fn is_tool_block_collapsed(&self, call_id: &str) -> bool {
+        if let Some(v) = self.tool_block_collapsed.get(call_id) {
+            return *v;
+        }
+        self.all_tools_collapsed
+    }
+
+    /// Toggle the most recent tool block (ToolRunning or ToolDone) by call_id.
+    /// Returns true if a block was toggled.
+    pub fn toggle_last_tool_block(&mut self) -> bool {
+        let last_id = self.blocks.iter().rev().find_map(|b| match b {
+            DisplayBlock::ToolRunning { call_id, .. } => Some(call_id.clone()),
+            DisplayBlock::ToolDone { call_id, .. } => Some(call_id.clone()),
+            _ => None,
+        });
+        if let Some(id) = last_id {
+            let cur = self.is_tool_block_collapsed(&id);
+            self.tool_block_collapsed.insert(id, !cur);
+            self.transcript_rev = self.transcript_rev.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Toggle the global all-tools-collapsed flag and clear per-block overrides
+    /// so the global state takes effect uniformly.
+    pub fn toggle_all_tool_blocks(&mut self) {
+        self.all_tools_collapsed = !self.all_tools_collapsed;
+        self.tool_block_collapsed.clear();
+        self.transcript_rev = self.transcript_rev.wrapping_add(1);
     }
 
     pub fn open_theme_picker(&mut self, entries: Vec<String>, current_index: usize) {
@@ -764,10 +809,16 @@ impl TuiSessionState {
                     ) {
                         self.blocks.push(DisplayBlock::System(message));
                     }
-                    self.blocks[idx] = DisplayBlock::ToolDone { name, ok, detail };
+                    self.blocks[idx] = DisplayBlock::ToolDone {
+                        name,
+                        call_id: call_id.clone(),
+                        ok,
+                        detail,
+                    };
                 } else {
                     self.blocks.push(DisplayBlock::ToolDone {
                         name: "?".into(),
+                        call_id: call_id.clone(),
                         ok,
                         detail,
                     });

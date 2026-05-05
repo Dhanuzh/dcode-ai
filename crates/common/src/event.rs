@@ -31,7 +31,7 @@ impl BusyState {
             BusyState::Thinking => "thinking",
             BusyState::Streaming => "streaming",
             BusyState::ToolRunning => "tool",
-            BusyState::ApprovalPending => "approval",
+            BusyState::ApprovalPending => "your approval needed",
             BusyState::Error => "error",
         }
     }
