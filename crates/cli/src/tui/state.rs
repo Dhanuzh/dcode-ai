@@ -464,7 +464,7 @@ impl TuiSessionState {
         self.connect_search.clear();
         self.connect_menu_index = 0;
         self.connect_modal_scroll = 0;
-        self.connect_modal_ignore_enter_once = true;
+        self.connect_modal_ignore_enter_once = false;
     }
 
     pub fn close_connect_modal(&mut self) {
@@ -786,7 +786,7 @@ impl TuiSessionState {
                     .filter(|req| req.call_id != *call_id);
                 self.set_busy_state(BusyState::Thinking);
                 let detail = if ok {
-                    truncate(&output.output, 120)
+                    output.output.clone()
                 } else {
                     output.error.clone().unwrap_or_else(|| "failed".into())
                 };

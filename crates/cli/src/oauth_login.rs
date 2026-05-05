@@ -21,7 +21,7 @@ const COPILOT_DEVICE_CODE_URL: &str = "https://github.com/login/device/code";
 const COPILOT_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
-const ANTHROPIC_AUTHORIZE_URL: &str = "https://claude.ai/oauth/authorize";
+const ANTHROPIC_AUTHORIZE_URL: &str = "https://console.anthropic.com/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
 const ANTHROPIC_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference";
@@ -118,6 +118,13 @@ fn pad_status(s: &str) -> String {
 }
 
 pub fn logout(target: LogoutTarget) -> anyhow::Result<()> {
+    logout_with_output(target, |line| println!("{line}"))
+}
+
+pub fn logout_with_output<F>(target: LogoutTarget, mut emit: F) -> anyhow::Result<()>
+where
+    F: FnMut(&str),
+{
     let mut store = AuthStore::load().unwrap_or_default();
     match target {
         LogoutTarget::Anthropic => {
@@ -160,11 +167,18 @@ pub fn logout(target: LogoutTarget) -> anyhow::Result<()> {
         }
     }
     store.save()?;
-    println!("Logged out.");
+    emit("Logged out.");
     Ok(())
 }
 
 pub async fn login(provider: OAuthProvider) -> anyhow::Result<()> {
+    login_with_output(provider, |line| println!("{line}")).await
+}
+
+pub async fn login_with_output<F>(provider: OAuthProvider, mut emit: F) -> anyhow::Result<()>
+where
+    F: FnMut(&str),
+{
     let store = AuthStore::load().unwrap_or_default();
     let already = match provider {
         OAuthProvider::Anthropic => store.anthropic.is_some(),
@@ -174,52 +188,54 @@ pub async fn login(provider: OAuthProvider) -> anyhow::Result<()> {
         OAuthProvider::Opencodezen => store.opencodezen_oauth.is_some(),
     };
     if already {
-        println!("Already logged in. Use `dcode-ai logout ...` first if you want to re-login.");
+        emit("Already logged in. Use `dcode-ai logout ...` first if you want to re-login.");
         return Ok(());
     }
 
     match provider {
-        OAuthProvider::Anthropic => login_anthropic().await,
-        OAuthProvider::Openai => login_openai().await,
-        OAuthProvider::Copilot => login_copilot().await,
-        OAuthProvider::Antigravity => login_antigravity().await,
-        OAuthProvider::Opencodezen => login_opencodezen().await,
+        OAuthProvider::Anthropic => login_anthropic(&mut emit).await,
+        OAuthProvider::Openai => login_openai(&mut emit).await,
+        OAuthProvider::Copilot => login_copilot(&mut emit).await,
+        OAuthProvider::Antigravity => login_antigravity(&mut emit).await,
+        OAuthProvider::Opencodezen => login_opencodezen(&mut emit).await,
     }
 }
 
-async fn login_anthropic() -> anyhow::Result<()> {
+async fn login_anthropic<F>(emit: &mut F) -> anyhow::Result<()>
+where
+    F: FnMut(&str),
+{
     let prompt = begin_anthropic_login_prompt();
 
-    println!("\nAnthropic OAuth login\n");
+    emit("");
+    emit("Anthropic OAuth login");
     if !open_browser(&prompt.authorization_url) {
-        println!("Open this URL:\n{}\n", prompt.authorization_url);
+        emit("Open this URL:");
+        emit(&prompt.authorization_url);
+        emit("");
     }
     print!("Paste authorization code: ");
     io::stdout().flush()?;
     let mut code = String::new();
     io::stdin().lock().read_line(&mut code)?;
     finish_anthropic_login(&prompt.code_verifier, code.trim()).await?;
-    println!("Logged in to Anthropic ✓");
+    emit("Logged in to Anthropic ✓");
     Ok(())
 }
 
 pub fn begin_anthropic_login_prompt() -> AnthropicLoginPrompt {
     let pkce = generate_pkce();
-    let query = [
-        ("code", "true"),
-        ("response_type", "code"),
-        ("client_id", ANTHROPIC_CLIENT_ID),
-        ("redirect_uri", ANTHROPIC_REDIRECT_URI),
-        ("scope", ANTHROPIC_SCOPES),
-        ("code_challenge", &pkce.challenge),
-        ("code_challenge_method", "S256"),
-        ("state", &pkce.verifier),
-    ]
-    .iter()
-    .map(|(k, v)| format!("{k}={}", url_encode(v)))
-    .collect::<Vec<_>>()
-    .join("&");
-    let auth_url = format!("{ANTHROPIC_AUTHORIZE_URL}?{query}");
+    let mut url =
+        url::Url::parse(ANTHROPIC_AUTHORIZE_URL).expect("valid anthropic authorize URL constant");
+    url.query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", ANTHROPIC_CLIENT_ID)
+        .append_pair("redirect_uri", ANTHROPIC_REDIRECT_URI)
+        .append_pair("scope", ANTHROPIC_SCOPES)
+        .append_pair("code_challenge", &pkce.challenge)
+        .append_pair("code_challenge_method", "S256")
+        .append_pair("state", &pkce.verifier);
+    let auth_url = url.to_string();
     AnthropicLoginPrompt {
         authorization_url: auth_url,
         code_verifier: pkce.verifier,
@@ -234,7 +250,7 @@ pub async fn finish_anthropic_login(code_verifier: &str, raw_code: &str) -> anyh
 
     let body = format!(
         "grant_type=authorization_code&code={}&code_verifier={}&client_id={}&redirect_uri={}&state={}",
-        url_encode(code),
+        url_encode(&code),
         url_encode(code_verifier),
         url_encode(ANTHROPIC_CLIENT_ID),
         url_encode(ANTHROPIC_REDIRECT_URI),
@@ -271,7 +287,10 @@ pub async fn finish_anthropic_login(code_verifier: &str, raw_code: &str) -> anyh
     Ok(())
 }
 
-async fn login_openai() -> anyhow::Result<()> {
+async fn login_openai<F>(emit: &mut F) -> anyhow::Result<()>
+where
+    F: FnMut(&str),
+{
     #[derive(serde::Deserialize)]
     struct DeviceCodeResp {
         device_auth_id: String,
@@ -314,9 +333,10 @@ async fn login_openai() -> anyhow::Result<()> {
         data.verification_uri = "https://auth.openai.com/codex/device".to_string();
     }
 
-    println!("\nOpenAI login");
-    println!("  1. Open:  {}", data.verification_uri);
-    println!("  2. Enter: {}", data.user_code);
+    emit("");
+    emit("OpenAI login");
+    emit(&format!("  1. Open:  {}", data.verification_uri));
+    emit(&format!("  2. Enter: {}", data.user_code));
     let _ = open_browser(&data.verification_uri);
 
     let cancel = Arc::new(tokio::sync::Notify::new());
@@ -401,11 +421,14 @@ async fn login_openai() -> anyhow::Result<()> {
     });
     store.preferred_provider = Some(LoggedProvider::Openai);
     store.save()?;
-    println!("Logged in to OpenAI ✓");
+    emit("Logged in to OpenAI ✓");
     Ok(())
 }
 
-async fn login_copilot() -> anyhow::Result<()> {
+async fn login_copilot<F>(emit: &mut F) -> anyhow::Result<()>
+where
+    F: FnMut(&str),
+{
     #[derive(serde::Deserialize)]
     struct DeviceResp {
         device_code: String,
@@ -431,9 +454,10 @@ async fn login_copilot() -> anyhow::Result<()> {
         bail!("Copilot device-code failed: {}", start.status());
     }
     let d: DeviceResp = start.json().await?;
-    println!("\nGitHub Copilot login");
-    println!("  1. Open:  {}", d.verification_uri);
-    println!("  2. Enter: {}", d.user_code);
+    emit("");
+    emit("GitHub Copilot login");
+    emit(&format!("  1. Open:  {}", d.verification_uri));
+    emit(&format!("  2. Enter: {}", d.user_code));
     let _ = open_browser(&d.verification_uri);
 
     let cancel = Arc::new(tokio::sync::Notify::new());
@@ -490,11 +514,14 @@ async fn login_copilot() -> anyhow::Result<()> {
     });
     store.preferred_provider = Some(LoggedProvider::Copilot);
     store.save()?;
-    println!("Logged in to Copilot ✓");
+    emit("Logged in to Copilot ✓");
     Ok(())
 }
 
-async fn login_antigravity() -> anyhow::Result<()> {
+async fn login_antigravity<F>(emit: &mut F) -> anyhow::Result<()>
+where
+    F: FnMut(&str),
+{
     let client_id = std::env::var("DCODE_ANTIGRAVITY_CLIENT_ID")
         .context("Missing DCODE_ANTIGRAVITY_CLIENT_ID")?;
     let client_secret = std::env::var("DCODE_ANTIGRAVITY_CLIENT_SECRET")
@@ -519,11 +546,15 @@ async fn login_antigravity() -> anyhow::Result<()> {
         url_encode(&pkce.verifier)
     );
 
-    println!("\nAntigravity login\n");
+    emit("");
+    emit("Antigravity login");
+    emit("");
     if !open_browser(&auth_url) {
-        println!("Open this URL:\n{auth_url}\n");
+        emit("Open this URL:");
+        emit(&auth_url);
+        emit("");
     }
-    println!("Waiting for callback on http://localhost:51121/oauth-callback ...");
+    emit("Waiting for callback on http://localhost:51121/oauth-callback ...");
 
     let (code, state) = wait_for_callback().await?;
     if state != pkce.verifier {
@@ -573,7 +604,7 @@ async fn login_antigravity() -> anyhow::Result<()> {
     });
     store.preferred_provider = Some(LoggedProvider::Antigravity);
     store.save()?;
-    println!("Logged in to Antigravity ✓");
+    emit("Logged in to Antigravity ✓");
     Ok(())
 }
 
@@ -582,7 +613,10 @@ const OPENCODEZEN_REDIRECT_URI: &str = "http://localhost:51122/oauth-callback";
 const OPENCODEZEN_AUTH_URL: &str = "https://opencode.ai/auth/authorize";
 const OPENCODEZEN_TOKEN_URL: &str = "https://opencode.ai/auth/token";
 
-async fn login_opencodezen() -> anyhow::Result<()> {
+async fn login_opencodezen<F>(emit: &mut F) -> anyhow::Result<()>
+where
+    F: FnMut(&str),
+{
     let pkce = generate_pkce();
     let auth_url = format!(
         "{OPENCODEZEN_AUTH_URL}?client_id={OPENCODEZEN_CLIENT_ID}&redirect_uri={}&response_type=code&scope=openid%20profile%20email&code_challenge={}&code_challenge_method=S256&state={}",
@@ -591,11 +625,14 @@ async fn login_opencodezen() -> anyhow::Result<()> {
         url_encode(&pkce.verifier)
     );
 
-    println!("\nOpenCode Zen login");
+    emit("");
+    emit("OpenCode Zen login");
     if !open_browser(&auth_url) {
-        println!("Open this URL:\n{auth_url}\n");
+        emit("Open this URL:");
+        emit(&auth_url);
+        emit("");
     }
-    println!("Waiting for callback on http://localhost:51122/oauth-callback ...");
+    emit("Waiting for callback on http://localhost:51122/oauth-callback ...");
 
     let (code, state) = wait_for_opencodezen_callback().await?;
     if state != pkce.verifier {
@@ -645,7 +682,7 @@ async fn login_opencodezen() -> anyhow::Result<()> {
     });
     store.preferred_provider = Some(LoggedProvider::Opencodezen);
     store.save()?;
-    println!("Logged in to OpenCode Zen ✓");
+    emit("Logged in to OpenCode Zen ✓");
     Ok(())
 }
 
@@ -778,8 +815,53 @@ fn url_encode(s: &str) -> String {
     out
 }
 
-fn normalize_authorization_code(code: &str) -> &str {
-    code.trim().split('#').next().unwrap_or(code.trim())
+fn normalize_authorization_code(code: &str) -> String {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return String::new();
+    }
+    if let Ok(url) = url::Url::parse(trimmed)
+        && let Some(found) = url
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.to_string())
+    {
+        return found;
+    }
+
+    if let Some(found) = url::form_urlencoded::parse(trimmed.trim_start_matches('?').as_bytes())
+        .find(|(k, _)| k == "code")
+        .map(|(_, v)| v.into_owned())
+    {
+        return found;
+    }
+
+    trimmed.split('#').next().unwrap_or(trimmed).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_authorization_code;
+
+    #[test]
+    fn extracts_code_from_callback_url() {
+        let code = normalize_authorization_code(
+            "https://console.anthropic.com/oauth/code/callback?code=abc123&state=xyz",
+        );
+        assert_eq!(code, "abc123");
+    }
+
+    #[test]
+    fn extracts_code_from_query_string() {
+        let code = normalize_authorization_code("?code=abc123&state=xyz");
+        assert_eq!(code, "abc123");
+    }
+
+    #[test]
+    fn keeps_raw_code_when_already_clean() {
+        let code = normalize_authorization_code("abc123");
+        assert_eq!(code, "abc123");
+    }
 }
 
 fn de_string_or_u64<'de, D>(d: D) -> Result<Option<u64>, D::Error>

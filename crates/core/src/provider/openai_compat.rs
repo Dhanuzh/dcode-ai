@@ -9,6 +9,61 @@ use std::collections::BTreeMap;
 
 use super::{ProviderError, StreamChunk};
 
+fn extract_reasoning_text(value: &Value) -> Option<String> {
+    if let Some(text) = value.as_str()
+        && !text.is_empty()
+    {
+        return Some(text.to_string());
+    }
+
+    if let Some(obj) = value.as_object() {
+        for key in [
+            "text",
+            "content",
+            "reasoning",
+            "reasoning_content",
+            "thinking",
+        ] {
+            if let Some(v) = obj.get(key)
+                && let Some(found) = extract_reasoning_text(v)
+            {
+                return Some(found);
+            }
+        }
+    }
+
+    if let Some(items) = value.as_array() {
+        let merged = items
+            .iter()
+            .filter_map(extract_reasoning_text)
+            .collect::<String>();
+        if !merged.is_empty() {
+            return Some(merged);
+        }
+    }
+
+    None
+}
+
+fn extract_internal_reasoning_delta(delta: &Value) -> Option<String> {
+    for key in [
+        "reasoning_content",
+        "reasoning",
+        "thinking",
+        "thinking_content",
+        "reasoning_text",
+        "reasoning_delta",
+    ] {
+        let Some(value) = delta.get(key) else {
+            continue;
+        };
+        if let Some(text) = extract_reasoning_text(value) {
+            return Some(text);
+        }
+    }
+    None
+}
+
 pub fn openai_request_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -119,10 +174,10 @@ pub fn spawn_openai_stream(
 
                 for choice in choices {
                     let delta = &choice["delta"];
-                    if let Some(text) = delta["reasoning_content"].as_str()
-                        && !text.is_empty()
-                    {
-                        let _ = tx.send(StreamChunk::InternalDelta(text.to_string())).await;
+                    let reasoning = extract_internal_reasoning_delta(delta)
+                        .or_else(|| extract_internal_reasoning_delta(choice));
+                    if let Some(text) = reasoning {
+                        let _ = tx.send(StreamChunk::InternalDelta(text)).await;
                     }
                     if let Some(text) = delta["content"].as_str()
                         && !text.is_empty()
@@ -176,6 +231,44 @@ struct ToolCallAccumulator {
     id: String,
     name: String,
     arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reasoning_delta_accepts_multiple_shapes() {
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning_content":"r1"})),
+            Some("r1".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning":"r2"})),
+            Some("r2".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"thinking":{"text":"r3"}})),
+            Some("r3".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning":[{"text":"a"},{"text":"b"}]})),
+            Some("ab".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning":{"content":"r4"}})),
+            Some("r4".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning_delta":{"content":"r5"}})),
+            Some("r5".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"content":"assistant text only"})),
+            None
+        );
+    }
 }
 
 async fn flush_openai_tool_calls(
