@@ -2,7 +2,7 @@ use crate::file_mentions::{
     at_token_before_cursor, discover_workspace_files, expand_at_file_mentions_default,
     filter_paths_prefix,
 };
-use crate::oauth_login::OAuthProvider;
+use crate::oauth_login::{LogoutTarget, OAuthProvider};
 use crate::prompt::DcodeAiPrompt;
 use crate::runner::{SessionRuntime, dispatch_question_answer, dispatch_tool_approval};
 use crate::slash_commands::SLASH_COMMANDS;
@@ -104,6 +104,18 @@ fn parse_oauth_provider(value: &str) -> Option<OAuthProvider> {
         "copilot" | "github" => Some(OAuthProvider::Copilot),
         "antigravity" | "ag" => Some(OAuthProvider::Antigravity),
         "opencodezen" | "opencode" | "zen" => Some(OAuthProvider::Opencodezen),
+        _ => None,
+    }
+}
+
+fn parse_logout_target(value: &str) -> Option<LogoutTarget> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "anthropic" | "claude" => Some(LogoutTarget::Anthropic),
+        "openai" | "open-ai" | "gpt" | "codex" => Some(LogoutTarget::Openai),
+        "copilot" | "github" => Some(LogoutTarget::Copilot),
+        "antigravity" | "ag" => Some(LogoutTarget::Antigravity),
+        "opencodezen" | "opencode" | "zen" => Some(LogoutTarget::Opencodezen),
+        "all" | "*" => Some(LogoutTarget::All),
         _ => None,
     }
 }
@@ -779,6 +791,8 @@ impl Repl {
                     "  /models            Browse and select models".into(),
                     "  /connect           Connect LLM provider".into(),
                     "  /login             Alias of /connect".into(),
+                    "  /logout [target]   Logout provider auth".into(),
+                    "  /auth              Show auth/login status".into(),
                     "  /provider [name]   Provider connect/switch".into(),
                     "  /sidebar [mode]    Sidebar on/off/toggle (TUI)".into(),
                     "  /editor [seed]     Open external editor".into(),
@@ -1171,6 +1185,8 @@ impl Repl {
                 let provider_models =
                     dcode_ai_runtime::model_limits_api::fetch_provider_model_ids(self.runtime.config())
                         .await;
+                let auth = dcode_ai_common::auth::AuthStore::load().unwrap_or_default();
+                let connected = active_provider_connected(self.runtime.config(), &auth);
                 if let ReplOutput::Tui(st) = &out {
                     let entries = build_model_picker_entries(self.runtime.config(), &provider_models);
                     if let Ok(mut g) = st.lock() {
@@ -1193,8 +1209,16 @@ impl Repl {
                             self.runtime.config().provider.base_url_for(provider)
                         ));
                     }
-                    if !provider_models.is_empty() {
-                        out.println("active provider models:");
+                    if !connected {
+                        out.println("no provider connected for current selection; run /connect or /login");
+                    }
+                    if provider_models.is_empty() {
+                        out.println("no models available for current provider");
+                    } else {
+                        out.println(&format!(
+                            "active provider models ({}) :",
+                            active_surface_label(self.runtime.config())
+                        ));
                         for model in &provider_models {
                             out.println(&format!("  - {model}"));
                         }
@@ -1407,7 +1431,11 @@ impl Repl {
                             return Ok(true);
                         }
                         out.println(&format!("[login] starting {} OAuth flow…", provider_hint));
-                        match crate::oauth_login::login(oauth_provider).await {
+                        match crate::oauth_login::login_with_output(oauth_provider, |line| {
+                            out.println(line)
+                        })
+                        .await
+                        {
                             Ok(()) => {
                                 self.apply_provider_after_oauth_login(oauth_provider, &out)
                                     .await?;
@@ -1428,7 +1456,12 @@ impl Repl {
                                         "[login] {} uses OAuth. Running login flow…",
                                         p.display_name(),
                                     ));
-                                    match crate::oauth_login::login(oauth_provider).await {
+                                    match crate::oauth_login::login_with_output(
+                                        oauth_provider,
+                                        |line| out.println(line),
+                                    )
+                                    .await
+                                    {
                                         Ok(()) => {
                                             self.apply_provider_after_oauth_login(oauth_provider, &out)
                                             .await?;
@@ -1475,6 +1508,69 @@ impl Repl {
                     ));
                 }
             }
+            "/logout" => {
+                let target = rest.trim();
+                let parsed = if target.is_empty() {
+                    Some(LogoutTarget::All)
+                } else {
+                    parse_logout_target(target)
+                };
+                if let Some(target) = parsed {
+                    match crate::oauth_login::logout_with_output(target, |line| out.println(line))
+                    {
+                        Ok(()) => out.println("[logout] done"),
+                        Err(e) => out.eprintln(&format!("[logout] {e}")),
+                    }
+                } else {
+                    out.eprintln(
+                        "usage: /logout [anthropic|openai|copilot|antigravity|opencodezen|all]",
+                    );
+                }
+            }
+            "/auth" => {
+                let store = dcode_ai_common::auth::AuthStore::load().unwrap_or_default();
+                out.println("Auth status:");
+                out.println(&format!(
+                    "  anthropic:   {}",
+                    if store.anthropic.is_some() {
+                        "logged in"
+                    } else {
+                        "not logged in"
+                    }
+                ));
+                out.println(&format!(
+                    "  openai:      {}",
+                    if store.openai_oauth.is_some() {
+                        "logged in"
+                    } else {
+                        "not logged in"
+                    }
+                ));
+                out.println(&format!(
+                    "  copilot:     {}",
+                    if store.copilot.is_some() {
+                        "logged in"
+                    } else {
+                        "not logged in"
+                    }
+                ));
+                out.println(&format!(
+                    "  antigravity: {}",
+                    if store.antigravity.is_some() {
+                        "logged in"
+                    } else {
+                        "not logged in"
+                    }
+                ));
+                out.println(&format!(
+                    "  opencodezen: {}",
+                    if store.opencodezen_oauth.is_some() {
+                        "logged in"
+                    } else {
+                        "not logged in"
+                    }
+                ));
+            }
             "/sidebar" => {
                 let mode = rest.trim().to_ascii_lowercase();
                 if let ReplOutput::Tui(st) = &out {
@@ -1509,6 +1605,8 @@ impl Repl {
                     "Commands:".into(),
                     "  /connect           OpenCode-style provider picker".into(),
                     "  /login             Alias of /connect".into(),
+                    "  /logout [target]   Logout provider auth".into(),
+                    "  /auth              Show auth/login status".into(),
                     "  /models            Browse and select models".into(),
                     "  /provider [name]   Provider connect/switch".into(),
                     "  /session-name      Show/set manual session name".into(),
@@ -2023,9 +2121,8 @@ impl Repl {
             self.runtime.workspace_root().to_path_buf(),
             self.runtime.config().ui.code_line_numbers,
         )));
-        // In tmux, keep mouse capture on by default so wheel scrolling is reliable.
-        let effective_mouse_capture =
-            self.runtime.config().ui.mouse_capture || std::env::var_os("TMUX").is_some();
+        // Honor explicit UI config; users can toggle at runtime with F12.
+        let effective_mouse_capture = self.runtime.config().ui.mouse_capture;
         if let Ok(mut g) = tui_state.lock() {
             g.mouse_capture_on = effective_mouse_capture;
         }
@@ -2971,6 +3068,57 @@ fn provider_label(config: &dcode_ai_common::config::DcodeAiConfig, p: ProviderKi
     }
 }
 
+fn is_copilot_surface(config: &dcode_ai_common::config::DcodeAiConfig) -> bool {
+    config
+        .provider
+        .openai
+        .base_url
+        .to_ascii_lowercase()
+        .contains("githubcopilot.com")
+}
+
+fn active_provider_connected(
+    config: &dcode_ai_common::config::DcodeAiConfig,
+    auth: &dcode_ai_common::auth::AuthStore,
+) -> bool {
+    match config.provider.default {
+        ProviderKind::OpenAi => {
+            if is_copilot_surface(config) {
+                auth.copilot.is_some()
+            } else {
+                config.provider.api_key_present_for(ProviderKind::OpenAi)
+                    || auth.openai_oauth.is_some()
+            }
+        }
+        ProviderKind::Anthropic => {
+            config.provider.api_key_present_for(ProviderKind::Anthropic) || auth.anthropic.is_some()
+        }
+        ProviderKind::OpenRouter => config
+            .provider
+            .api_key_present_for(ProviderKind::OpenRouter),
+        ProviderKind::Antigravity => {
+            config
+                .provider
+                .api_key_present_for(ProviderKind::Antigravity)
+                || auth.antigravity.is_some()
+        }
+        ProviderKind::OpenCodeZen => {
+            config
+                .provider
+                .api_key_present_for(ProviderKind::OpenCodeZen)
+                || auth.opencodezen_oauth.is_some()
+        }
+    }
+}
+
+fn active_surface_label(config: &dcode_ai_common::config::DcodeAiConfig) -> String {
+    if config.provider.default == ProviderKind::OpenAi && is_copilot_surface(config) {
+        "Copilot".to_string()
+    } else {
+        provider_label(config, config.provider.default)
+    }
+}
+
 fn build_model_picker_entries(
     config: &dcode_ai_common::config::DcodeAiConfig,
     provider_models: &[String],
@@ -2985,26 +3133,18 @@ fn build_model_picker_entries(
     });
     for p in ProviderKind::ALL {
         let model = config.provider.model_for(p);
-        #[allow(clippy::if_same_then_else)]
         let key_status = if config.provider.api_key_present_for(p) {
             "key ✓"
-        } else if p == ProviderKind::OpenAi
-            && (auth.openai_oauth.is_some()
-                || (config
-                    .provider
-                    .openai
-                    .base_url
-                    .to_ascii_lowercase()
-                    .contains("githubcopilot.com")
-                    && auth.copilot.is_some()))
+        } else if (p == ProviderKind::OpenAi && auth.openai_oauth.is_some())
+            || (p == ProviderKind::Anthropic && auth.anthropic.is_some())
+            || (p == ProviderKind::Antigravity && auth.antigravity.is_some())
+            || (p == ProviderKind::OpenCodeZen && auth.opencodezen_oauth.is_some())
         {
             "oauth ✓"
-        } else if p == ProviderKind::Anthropic && auth.anthropic.is_some() {
-            "oauth ✓"
         } else {
-            "no key"
+            "not connected"
         };
-        let selected = if p == config.provider.default {
+        let selected = if p == config.provider.default && !is_copilot_surface(config) {
             " [active]"
         } else {
             ""
@@ -3031,18 +3171,35 @@ fn build_model_picker_entries(
     };
     entries.push(ModelPickerEntry {
         label: format!("Copilot{}", copilot_selected),
-        detail: format!("{} ({copilot_status})", config.provider.openai.model),
+        detail: if copilot_active {
+            format!("{} ({copilot_status})", config.provider.openai.model)
+        } else {
+            format!("separate model list ({copilot_status})")
+        },
         action: ModelPickerAction::SwitchCopilot,
         is_header: false,
     });
 
-    if !provider_models.is_empty() {
+    let active_connected = active_provider_connected(config, &auth);
+    entries.push(ModelPickerEntry {
+        label: format!("{} models", active_surface_label(config)),
+        detail: String::new(),
+        action: ModelPickerAction::ApplyModel(String::new()),
+        is_header: true,
+    });
+    if provider_models.is_empty() {
+        let fallback = if active_connected {
+            "No models available for active provider."
+        } else {
+            "No provider connected. Run /connect or /login."
+        };
         entries.push(ModelPickerEntry {
-            label: format!("{} models", provider_label(config, config.provider.default)),
+            label: fallback.to_string(),
             detail: String::new(),
             action: ModelPickerAction::ApplyModel(String::new()),
             is_header: true,
         });
+    } else {
         for model_id in provider_models {
             entries.push(ModelPickerEntry {
                 label: model_id.clone(),
@@ -3053,20 +3210,6 @@ fn build_model_picker_entries(
         }
     }
 
-    entries.push(ModelPickerEntry {
-        label: "Aliases".into(),
-        detail: String::new(),
-        action: ModelPickerAction::ApplyModel(String::new()),
-        is_header: true,
-    });
-    for (alias, target) in &config.model.aliases {
-        entries.push(ModelPickerEntry {
-            label: alias.clone(),
-            detail: format!("→ {target}"),
-            action: ModelPickerAction::ApplyModel(alias.clone()),
-            is_header: false,
-        });
-    }
     entries
 }
 
@@ -3123,5 +3266,30 @@ mod tests {
             Some(PermissionMode::BypassPermissions)
         );
         assert_eq!(parse_permission_mode("invalid"), None);
+    }
+
+    #[test]
+    fn parses_logout_aliases() {
+        assert!(matches!(
+            parse_logout_target("openai"),
+            Some(LogoutTarget::Openai)
+        ));
+        assert!(matches!(
+            parse_logout_target("codex"),
+            Some(LogoutTarget::Openai)
+        ));
+        assert!(matches!(
+            parse_logout_target("claude"),
+            Some(LogoutTarget::Anthropic)
+        ));
+        assert!(matches!(
+            parse_logout_target("opencode"),
+            Some(LogoutTarget::Opencodezen)
+        ));
+        assert!(matches!(
+            parse_logout_target("all"),
+            Some(LogoutTarget::All)
+        ));
+        assert!(parse_logout_target("nope").is_none());
     }
 }

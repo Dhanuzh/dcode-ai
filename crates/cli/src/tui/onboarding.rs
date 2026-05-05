@@ -25,7 +25,7 @@ struct OAuthChoice {
 const OAUTH_CHOICES: &[OAuthChoice] = &[
     OAuthChoice {
         title: "OpenAI",
-        subtitle: "OAuth device login (recommended)",
+        subtitle: "OAuth device login",
         oauth: OAuthProvider::Openai,
         runtime_provider: Some(ProviderKind::OpenAi),
     },
@@ -187,6 +187,10 @@ fn render(f: &mut Frame, selected: usize, status: Option<&str>) {
 }
 
 fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    const POPUP_W_PAD: u16 = 10;
+    const POPUP_H_PAD: u16 = 3;
+    let width = width.saturating_add(POPUP_W_PAD);
+    let height = height.saturating_add(POPUP_H_PAD);
     let x = area.x + area.width.saturating_sub(width) / 2;
     let y = area.y + area.height.saturating_sub(height) / 2;
     Rect {

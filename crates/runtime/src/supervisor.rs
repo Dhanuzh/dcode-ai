@@ -1251,6 +1251,156 @@ pub async fn cleanup_stale_sessions(session_store: &SessionStore) {
     }
 }
 
+/// Configuration for pruning sessions.
+#[derive(Debug, Clone)]
+pub struct PruneConfig {
+    /// Keep only this many most-recent sessions (by updated_at).
+    /// Sessions beyond this count are deleted. Set to 0 to delete all eligible.
+    pub keep_last: usize,
+    /// Delete sessions older than this duration.
+    pub older_than: chrono::Duration,
+    /// Only prune sessions matching these statuses. Empty = all statuses.
+    pub status_filter: Vec<SessionStatus>,
+    /// If true, only report what would be deleted without actually deleting.
+    pub dry_run: bool,
+    /// Also remove associated worktrees.
+    pub remove_worktrees: bool,
+}
+
+impl Default for PruneConfig {
+    fn default() -> Self {
+        Self {
+            keep_last: 20,
+            older_than: chrono::Duration::hours(7 * 24), // 7 days
+            status_filter: Vec::new(),
+            dry_run: false,
+            remove_worktrees: true,
+        }
+    }
+}
+
+/// Result of a prune operation.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct PruneResult {
+    pub deleted: Vec<String>,
+    pub skipped_running: Vec<String>,
+    pub worktrees_removed: Vec<String>,
+    pub dry_run: bool,
+}
+
+/// Prune sessions based on age and count limits.
+/// Always preserves Running sessions.
+pub async fn prune_sessions(
+    session_store: &SessionStore,
+    workspace_root: &Path,
+    cfg: &PruneConfig,
+) -> Result<PruneResult, String> {
+    let (snapshots, _unreadable) = session_store
+        .load_all_snapshots()
+        .await
+        .map_err(|e| e.to_string())?;
+
+    let now = Utc::now();
+
+    // Separate running sessions from the rest
+    let running_ids: Vec<String> = snapshots
+        .iter()
+        .filter(|s| s.status == SessionStatus::Running)
+        .map(|s| s.id.clone())
+        .collect();
+
+    // Sort non-running by updated_at descending (most recent first)
+    let mut candidates: Vec<_> = snapshots
+        .iter()
+        .filter(|s| s.status != SessionStatus::Running)
+        .collect();
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
+
+    // Apply status filter
+    let candidates: Vec<_> = if cfg.status_filter.is_empty() {
+        candidates
+    } else {
+        candidates
+            .into_iter()
+            .filter(|s| cfg.status_filter.contains(&s.status))
+            .collect()
+    };
+
+    // Apply age filter: keep sessions within the time window
+    let mut to_delete: Vec<String> = candidates
+        .iter()
+        .filter(|s| now.signed_duration_since(s.updated_at) > cfg.older_than)
+        .map(|s| s.id.clone())
+        .collect();
+
+    // Apply keep-last: the first N (most recent) are protected
+    if cfg.keep_last > 0 && candidates.len() > cfg.keep_last {
+        // Candidates are sorted newest-first; keep first N, delete the rest
+        let protected: std::collections::HashSet<String> = candidates
+            .iter()
+            .take(cfg.keep_last)
+            .map(|s| s.id.clone())
+            .collect();
+        to_delete.retain(|id| !protected.contains(id));
+        // Also add candidates beyond keep-last that aren't already in to_delete
+        for s in candidates.iter().skip(cfg.keep_last) {
+            if !to_delete.contains(&s.id) {
+                to_delete.push(s.id.clone());
+            }
+        }
+    }
+
+    // Deduplicate
+    to_delete.sort();
+    to_delete.dedup();
+
+    // Remove running sessions from delete list
+    let mut skipped_running = Vec::new();
+    to_delete.retain(|id| {
+        if running_ids.contains(id) {
+            skipped_running.push(id.clone());
+            false
+        } else {
+            true
+        }
+    });
+
+    if cfg.dry_run {
+        return Ok(PruneResult {
+            deleted: to_delete,
+            skipped_running,
+            worktrees_removed: Vec::new(),
+            dry_run: true,
+        });
+    }
+
+    // Perform deletion
+    let deleted = session_store
+        .delete_many(&to_delete)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Remove worktrees
+    let mut worktrees_removed = Vec::new();
+    if cfg.remove_worktrees {
+        let wt_mgr = crate::worktree::WorktreeManager::new(workspace_root);
+        for id in &deleted {
+            if let Err(e) = wt_mgr.remove_worktree(id, true) {
+                tracing::warn!("failed to remove worktree for session {id}: {e}");
+            } else {
+                worktrees_removed.push(id.clone());
+            }
+        }
+    }
+
+    Ok(PruneResult {
+        deleted,
+        skipped_running,
+        worktrees_removed,
+        dry_run: false,
+    })
+}
+
 /// Spawns a background task that consumes spawn requests from the sub-agent tool
 /// and runs child sessions. Each child session inherits parent context.
 pub fn spawn_subagent_consumer(
@@ -1834,6 +1984,170 @@ mod tests {
         ]);
         assert!(summary.contains("Need to fix context overflow"));
         assert!(summary.contains("Auto-compact before the next model request."));
+    }
+
+    // ─── Session Prune Tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn prune_sessions_dry_run_returns_candidates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path();
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+
+        // Write sessions: 2 recent (keep), 2 old (delete)
+        write_session_for_test(
+            workspace,
+            "session-recent-1",
+            now - Duration::hours(1),
+            "test",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-recent-2",
+            now - Duration::hours(2),
+            "test",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-old-1",
+            now - Duration::days(30),
+            "test",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-old-2",
+            now - Duration::days(60),
+            "test",
+            SessionStatus::Completed,
+        );
+
+        let cfg = PruneConfig {
+            keep_last: 2,
+            older_than: Duration::days(7),
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let result = prune_sessions(&store, workspace, &cfg)
+            .await
+            .expect("prune_sessions");
+
+        // Dry run: nothing actually deleted
+        assert!(result.dry_run);
+        assert_eq!(
+            result.deleted.len(),
+            2,
+            "should find 2 old sessions to delete"
+        );
+        assert!(
+            result.deleted.contains(&"session-old-1".to_string()),
+            "session-old-1 should be in delete list"
+        );
+        assert!(
+            result.deleted.contains(&"session-old-2".to_string()),
+            "session-old-2 should be in delete list"
+        );
+        // Verify files still exist
+        assert!(store.load("session-old-1").await.is_ok());
+        assert!(store.load("session-old-2").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn prune_sessions_actually_deletes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path();
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+
+        write_session_for_test(
+            workspace,
+            "session-old",
+            now - Duration::days(30),
+            "test",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-recent",
+            now - Duration::hours(1),
+            "test",
+            SessionStatus::Completed,
+        );
+
+        let result = prune_sessions(
+            &store,
+            workspace,
+            &PruneConfig {
+                keep_last: 1,
+                older_than: Duration::hours(1),
+                dry_run: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("prune_sessions");
+
+        assert!(!result.dry_run);
+        assert_eq!(result.deleted.len(), 1, "should delete 1 old session");
+        assert!(result.deleted.contains(&"session-old".to_string()));
+        // Verify deletion
+        assert!(store.load("session-old").await.is_err());
+        assert!(store.load("session-recent").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn prune_sessions_skips_running_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path();
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+
+        write_session_for_test(
+            workspace,
+            "session-running",
+            now - Duration::days(30),
+            "test",
+            SessionStatus::Running,
+        );
+        write_session_for_test(
+            workspace,
+            "session-old",
+            now - Duration::days(30),
+            "test",
+            SessionStatus::Completed,
+        );
+
+        let result = prune_sessions(
+            &store,
+            workspace,
+            &PruneConfig {
+                keep_last: 0,
+                older_than: Duration::hours(1),
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("prune_sessions");
+
+        assert!(
+            !result.deleted.contains(&"session-running".to_string()),
+            "should not include running session"
+        );
+        assert!(
+            result.deleted.contains(&"session-old".to_string()),
+            "should include old completed session"
+        );
     }
 
     // ─── Context Overflow Hardening Tests ──────────────────────────────────────

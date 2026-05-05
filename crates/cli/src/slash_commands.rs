@@ -23,6 +23,8 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/doctor",
     "/provider",
     "/login",
+    "/logout",
+    "/auth",
     "/sidebar",
     "/editor",
     "/set-editor",

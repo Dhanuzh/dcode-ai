@@ -163,6 +163,11 @@ fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
     }
 }
 
+fn paste_text_from_clipboard() -> Result<String, arboard::Error> {
+    let mut cb = Clipboard::new()?;
+    cb.get_text()
+}
+
 fn slash_panel_visible(buffer: &str) -> bool {
     buffer.starts_with('/') && !buffer.contains(' ')
 }
@@ -801,10 +806,14 @@ fn layout_with_sidebar(area: Rect, sidebar_open: bool) -> (Rect, Option<Rect>) {
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
-    let popup_w = width
+    const POPUP_W_PAD: u16 = 10;
+    const POPUP_H_PAD: u16 = 3;
+    let target_w = width.saturating_add(POPUP_W_PAD);
+    let target_h = height.saturating_add(POPUP_H_PAD);
+    let popup_w = target_w
         .min(area.width.saturating_sub(2).max(20))
         .min(area.width);
-    let popup_h = height
+    let popup_h = target_h
         .min(area.height.saturating_sub(2).max(6))
         .min(area.height);
     Rect::new(
@@ -880,6 +889,61 @@ fn strip_outer_quotes(s: &str) -> &str {
     t
 }
 
+fn normalize_file_url_path(raw: &str) -> Option<PathBuf> {
+    if !raw.starts_with("file://") {
+        return None;
+    }
+
+    if let Ok(url) = url::Url::parse(raw)
+        && url.scheme() == "file"
+        && let Ok(path) = url.to_file_path()
+    {
+        return Some(path);
+    }
+
+    let decoded = urlencoding::decode(raw.strip_prefix("file://")?)
+        .ok()?
+        .into_owned();
+    Some(PathBuf::from(decoded))
+}
+
+fn looks_like_windows_drive_path(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
+}
+
+fn windows_drive_path_to_wsl(raw: &str) -> Option<PathBuf> {
+    if !looks_like_windows_drive_path(raw) {
+        return None;
+    }
+    let drive = raw.chars().next()?.to_ascii_lowercase();
+    let rest = raw[3..].replace('\\', "/");
+    Some(PathBuf::from(format!("/mnt/{drive}/{rest}")))
+}
+
+fn unescape_shell_path(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\\'
+            && let Some(next) = chars.peek().copied()
+            && matches!(
+                next,
+                ' ' | '\'' | '"' | '`' | '(' | ')' | '[' | ']' | '{' | '}' | '\\'
+            )
+        {
+            out.push(next);
+            chars.next();
+            continue;
+        }
+        out.push(ch);
+    }
+    out
+}
+
 fn looks_like_image_path(path: &Path) -> bool {
     path.extension()
         .and_then(|s| s.to_str())
@@ -900,6 +964,104 @@ fn path_looks_explicit(raw: &str, path: &Path) -> bool {
         || raw.starts_with("../")
 }
 
+fn parse_candidate_image_path(raw_line: &str) -> Option<PathBuf> {
+    let raw = strip_outer_quotes(raw_line);
+    if raw.is_empty() {
+        return None;
+    }
+
+    let mut candidate = normalize_file_url_path(raw)
+        .or_else(|| windows_drive_path_to_wsl(raw))
+        .unwrap_or_else(|| PathBuf::from(unescape_shell_path(raw)));
+    if !looks_like_image_path(&candidate) {
+        return None;
+    }
+
+    let candidate_text = candidate.to_string_lossy().into_owned();
+    if !path_looks_explicit(raw, &candidate) && !path_looks_explicit(&candidate_text, &candidate) {
+        return None;
+    }
+
+    // Handle file:///C:/... URLs on Unix-like systems by mapping to /mnt/<drive>/...
+    if cfg!(not(windows))
+        && let Some(s) = candidate.to_str()
+        && s.len() >= 4
+        && s.starts_with('/')
+        && s.as_bytes()[1].is_ascii_alphabetic()
+        && s.as_bytes()[2] == b':'
+        && s.as_bytes()[3] == b'/'
+        && let Some(mapped) = windows_drive_path_to_wsl(&s[1..])
+    {
+        candidate = mapped;
+    }
+
+    Some(candidate)
+}
+
+fn extract_quoted_fragments(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for quote in ['"', '\'', '`'] {
+        let mut start: Option<usize> = None;
+        for (idx, ch) in line.char_indices() {
+            if ch == quote {
+                if let Some(s) = start.take() {
+                    if idx > s + 1 {
+                        out.push(line[s..=idx].to_string());
+                    }
+                } else {
+                    start = Some(idx);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn extract_embedded_path_fragments(line: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let image_exts = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+    let trimmed = line.trim();
+    if !trimmed.is_empty() {
+        out.push(trimmed.to_string());
+    }
+    out.extend(extract_quoted_fragments(trimmed));
+
+    let bytes = trimmed.as_bytes();
+    for (idx, b) in bytes.iter().enumerate() {
+        let looks_unix = *b == b'/';
+        let looks_windows = if idx + 2 < bytes.len() {
+            bytes[idx].is_ascii_alphabetic()
+                && bytes[idx + 1] == b':'
+                && matches!(bytes[idx + 2], b'\\' | b'/')
+        } else {
+            false
+        };
+        if !(looks_unix || looks_windows) {
+            continue;
+        }
+
+        for ext in image_exts {
+            let mut search_from = idx;
+            while let Some(found) = trimmed[search_from..].find(ext) {
+                let end = search_from + found + ext.len();
+                if end <= idx {
+                    search_from += found + ext.len();
+                    continue;
+                }
+                let candidate = trimmed[idx..end].trim().trim_end_matches(|c: char| {
+                    matches!(c, ')' | ']' | '}' | '"' | '\'' | '`' | ',' | ';' | ':')
+                });
+                if !candidate.is_empty() {
+                    out.push(candidate.to_string());
+                }
+                search_from += found + ext.len();
+            }
+        }
+    }
+
+    out
+}
+
 fn stage_pasted_image_paths(state: &mut TuiSessionState, pasted: &str) -> Result<usize, String> {
     let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
     let trimmed = normalized.trim();
@@ -911,28 +1073,32 @@ fn stage_pasted_image_paths(state: &mut TuiSessionState, pasted: &str) -> Result
     let mut tried_any = false;
     let mut first_error: Option<String> = None;
 
+    let mut seen: HashSet<String> = HashSet::new();
     for line in trimmed.lines() {
-        let raw = strip_outer_quotes(line);
-        if raw.is_empty() {
-            continue;
-        }
-        let raw = raw.strip_prefix("file://").unwrap_or(raw);
-        let src = Path::new(raw);
-        if !looks_like_image_path(src) || !path_looks_explicit(raw, src) {
-            continue;
-        }
+        for fragment in extract_embedded_path_fragments(line) {
+            let Some(src) = parse_candidate_image_path(&fragment) else {
+                continue;
+            };
+            let key = src.to_string_lossy().into_owned();
+            if !seen.insert(key) {
+                continue;
+            }
 
-        tried_any = true;
-        match crate::image_attach::import_image_file(&state.workspace_root, &state.session_id, src)
-        {
-            Ok(att) => {
-                staged += 1;
-                state.staged_image_attachments.push(att);
+            tried_any = true;
+            match crate::image_attach::import_image_file(
+                &state.workspace_root,
+                &state.session_id,
+                &src,
+            ) {
+                Ok(att) => {
+                    staged += 1;
+                    state.staged_image_attachments.push(att);
+                }
+                Err(e) if first_error.is_none() => {
+                    first_error = Some(e);
+                }
+                Err(_) => {}
             }
-            Err(e) if first_error.is_none() => {
-                first_error = Some(e);
-            }
-            Err(_) => {}
         }
     }
 
@@ -989,6 +1155,17 @@ fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
 
 fn mouse_left_activated(kind: MouseEventKind) -> bool {
     matches!(kind, MouseEventKind::Up(MouseButton::Left))
+}
+
+fn mouse_scroll_step(modifiers: KeyModifiers, viewport_lines: usize, base_step: usize) -> usize {
+    let base = base_step.max(1);
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        viewport_lines.max(1).saturating_mul(3).max(base)
+    } else if modifiers.contains(KeyModifiers::SHIFT) {
+        viewport_lines.max(1).max(base)
+    } else {
+        base
+    }
 }
 
 /// Run a git command synchronously and return stdout.
@@ -1559,18 +1736,7 @@ fn transcript_lines_and_hits(
                     None,
                 );
                 if !collapsed && !detail.trim().is_empty() {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(vec![
-                            Span::styled("  ↳ ", Style::default().fg(theme::muted())),
-                            Span::styled(
-                                truncate_chars(detail, 110),
-                                Style::default().fg(theme::muted()),
-                            ),
-                        ]),
-                        None,
-                    );
+                    push_tool_detail_lines(&mut lines, &mut hits, detail, w.saturating_sub(6), 80);
                 }
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
@@ -1972,6 +2138,103 @@ fn push_wrapped_plain_lines_limited(
             hits,
             Line::from(Span::styled(
                 format!(" … +{omitted} lines (truncated)"),
+                Style::default().fg(theme::muted()),
+            )),
+            None,
+        );
+    }
+}
+
+fn push_tool_detail_lines(
+    lines: &mut Vec<Line<'static>>,
+    hits: &mut Vec<LineAnswerHit>,
+    detail: &str,
+    width: usize,
+    max_lines: usize,
+) {
+    fn wrap_tool_detail_text(text: &str, width: usize) -> Vec<String> {
+        if width < 8 {
+            return vec![text.to_string()];
+        }
+        if text.contains(' ') || text.contains('\t') {
+            return wrap_text(text, width);
+        }
+        wrap_preformatted_line(text, width)
+    }
+
+    let mut rendered = 0usize;
+    let mut omitted = 0usize;
+    for source_line in detail.lines() {
+        let (lane, lane_style, text_style, payload) = if source_line.starts_with("+++")
+            || source_line.starts_with("---")
+            || source_line.starts_with("@@")
+            || source_line.starts_with("diff ")
+            || source_line.starts_with("index ")
+        {
+            (
+                "▌ ",
+                Style::default().fg(theme::warn()),
+                Style::default()
+                    .fg(theme::warn())
+                    .add_modifier(Modifier::BOLD),
+                source_line,
+            )
+        } else if source_line.starts_with('+') {
+            (
+                "▌ ",
+                Style::default().fg(theme::success()),
+                Style::default().fg(theme::success()),
+                source_line,
+            )
+        } else if source_line.starts_with('-') {
+            (
+                "▌ ",
+                Style::default().fg(theme::error()),
+                Style::default().fg(theme::error()),
+                source_line,
+            )
+        } else {
+            (
+                "│ ",
+                Style::default().fg(theme::muted()),
+                Style::default().fg(theme::text()),
+                source_line,
+            )
+        };
+        let wrapped = wrap_tool_detail_text(payload, width.max(8));
+        for (idx, line) in wrapped.into_iter().enumerate() {
+            if rendered < max_lines {
+                let cont_lane = if idx == 0 { lane } else { "  " };
+                push_transcript_line(
+                    lines,
+                    hits,
+                    Line::from(vec![
+                        Span::styled("  ", Style::default().fg(theme::muted())),
+                        Span::styled(cont_lane, lane_style),
+                        Span::styled(line, text_style),
+                    ]),
+                    None,
+                );
+            } else {
+                omitted += 1;
+            }
+            rendered += 1;
+        }
+        if source_line.is_empty() {
+            if rendered < max_lines {
+                push_transcript_line(lines, hits, Line::default(), None);
+            } else {
+                omitted += 1;
+            }
+            rendered += 1;
+        }
+    }
+    if omitted > 0 {
+        push_transcript_line(
+            lines,
+            hits,
+            Line::from(Span::styled(
+                format!("  … +{omitted} lines"),
                 Style::default().fg(theme::muted()),
             )),
             None,
@@ -3015,7 +3278,6 @@ pub fn run_blocking(
                             .border_style(Style::default().fg(theme::border()))
                             .title(Span::styled(title, Style::default().fg(theme::muted()))),
                     )
-                    .wrap(Wrap { trim: false })
                     .style(Style::default().bg(theme::bg()));
 
                 frame.render_widget(main, tr);
@@ -3246,6 +3508,24 @@ pub fn run_blocking(
                             .add_modifier(Modifier::BOLD)
                     },
                 );
+                let mouse_state = Span::styled(
+                    if g.mouse_capture_on {
+                        " mouse:on "
+                    } else {
+                        " mouse:off "
+                    },
+                    if g.mouse_capture_on {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::tool())
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::muted())
+                            .add_modifier(Modifier::BOLD)
+                    },
+                );
 
                 let status_top_row = st_r;
 
@@ -3339,6 +3619,8 @@ pub fn run_blocking(
                 }
                 status_spans.push(Span::raw(" │ "));
                 status_spans.push(sidebar_state);
+                status_spans.push(Span::raw(" │ "));
+                status_spans.push(mouse_state);
                 status_spans.push(Span::raw(" │ "));
                 status_spans.push(time_span);
                 let status = Line::from(status_spans);
@@ -3469,8 +3751,15 @@ pub fn run_blocking(
                         Style::default().fg(theme::tool()),
                     ))
                 } else if g.input_buffer.is_empty() {
+                    let mouse_hint = if g.mouse_capture_on {
+                        "mouse ON: wheel scroll + click copy"
+                    } else {
+                        "mouse OFF: drag-select + F6 copy"
+                    };
                     Line::from(Span::styled(
-                        "Enter send · Shift+Enter newline · Up/Down history · Ctrl+F find · Ctrl+K pin · Ctrl+; pins · Ctrl+G sub-agents · F6 copy last",
+                        format!(
+                            "Enter send · Shift+Enter newline · Up/Down history · Ctrl+F find · Ctrl+K pin · Ctrl+; pins · Ctrl+G sub-agents · {mouse_hint} · F12 toggle"
+                        ),
                         Style::default().fg(theme::muted()),
                     ))
                 } else {
@@ -4522,7 +4811,7 @@ pub fn run_blocking(
                     let dots = status_dots(anim_ms);
                     let body_lines = rows.len().max(1);
                     let popup_h = (body_lines as u16).saturating_add(9).clamp(11, 24);
-                    let popup_area = centered_rect(area, 58, popup_h);
+                    let popup_area = centered_rect(area, 66, popup_h);
                     let viewport_rows = popup_h.saturating_sub(8).max(1) as usize;
                     let max_scroll = rows.len().saturating_sub(viewport_rows);
                     if let Some(sr) = selected_row {
@@ -4573,67 +4862,54 @@ pub fn run_blocking(
                             .skip(list_start)
                             .take(viewport_rows)
                         {
-                            match row {
-                                ConnectRow::SectionHeader(h) => {
-                                    lines.push(Line::from(Span::styled(
-                                        format!(" {h}"),
-                                        Style::default()
-                                            .fg(theme::assistant())
-                                            .add_modifier(Modifier::BOLD),
-                                    )));
+                            let ConnectRow::Provider {
+                                kind,
+                                title,
+                                subtitle,
+                                oauth_login_slug,
+                            } = row;
+                            let is_sel = selected_row == Some(i);
+                            let main_st = if is_sel {
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(theme::user())
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(theme::text())
+                            };
+                            let sub_st = if is_sel {
+                                main_st
+                            } else {
+                                Style::default().fg(theme::muted())
+                            };
+                            let logged = if matches!(*title, "Copilot") {
+                                auth_store.copilot.is_some()
+                            } else {
+                                match kind {
+                                    ProviderKind::OpenAi => auth_store.openai_oauth.is_some(),
+                                    ProviderKind::Anthropic => auth_store.anthropic.is_some(),
+                                    ProviderKind::Antigravity => auth_store.antigravity.is_some(),
+                                    ProviderKind::OpenRouter => false,
+                                    ProviderKind::OpenCodeZen => auth_store.opencodezen_oauth.is_some(),
                                 }
-                                ConnectRow::Provider {
-                                    kind,
-                                    title,
-                                    subtitle,
-                                    oauth_login_slug,
-                                } => {
-                                    let is_sel = selected_row == Some(i);
-                                    let main_st = if is_sel {
-                                        Style::default()
-                                            .fg(Color::Black)
-                                            .bg(theme::user())
-                                            .add_modifier(Modifier::BOLD)
-                                    } else {
-                                        Style::default().fg(theme::text())
-                                    };
-                                    let sub_st = if is_sel {
-                                        main_st
-                                    } else {
-                                        Style::default().fg(theme::muted())
-                                    };
-                                    let logged = if matches!(*title, "Copilot") {
-                                        auth_store.copilot.is_some()
-                                    } else {
-                                        match kind {
-                                            ProviderKind::OpenAi => auth_store.openai_oauth.is_some(),
-                                            ProviderKind::Anthropic => auth_store.anthropic.is_some(),
-                                            ProviderKind::Antigravity => auth_store.antigravity.is_some(),
-                                            ProviderKind::OpenRouter => false,
-                                            ProviderKind::OpenCodeZen => {
-                                                auth_store.opencodezen_oauth.is_some()
-                                            }
-                                        }
-                                    };
-                                    let status = if logged {
-                                        " · logged in".to_string()
-                                    } else {
-                                        match oauth_login_slug {
-                                            Some(_) => format!(" · not logged in{dots}"),
-                                            None => String::new(),
-                                        }
-                                    };
-                                    let prefix = if is_sel {
-                                        cursor.to_string()
-                                    } else {
-                                        "  ".to_string()
-                                    };
-                                    lines.push(Line::from(vec![
-                                        Span::styled(format!(" {prefix}{title}"), main_st),
-                                        Span::styled(format!(" — {subtitle}{status}"), sub_st),
-                                    ]));
+                            };
+                            let status = if logged {
+                                " · logged in".to_string()
+                            } else {
+                                match oauth_login_slug {
+                                    Some(_) => format!(" · not logged in{dots}"),
+                                    None => String::new(),
                                 }
-                            }
+                            };
+                            let prefix = if is_sel {
+                                cursor.to_string()
+                            } else {
+                                "  ".to_string()
+                            };
+                            lines.push(Line::from(vec![
+                                Span::styled(format!(" {prefix}{title}"), main_st),
+                                Span::styled(format!(" — {subtitle}{status}"), sub_st),
+                            ]));
                         }
                         let remaining_below = rows.len().saturating_sub(list_end);
                         if remaining_below > 0 {
@@ -4669,7 +4945,7 @@ pub fn run_blocking(
                 }
 
                 if g.anthropic_oauth_modal_open {
-                    let popup_area = centered_rect(area, 84, 18);
+                    let popup_area = centered_rect(area, 92, 20);
                     let mut lines = vec![
                         Line::from(Span::styled(
                             " Open this URL in your browser, then paste the authorization code below. ",
@@ -4693,7 +4969,7 @@ pub fn run_blocking(
                     ]));
                     lines.push(Line::default());
                     lines.push(Line::from(Span::styled(
-                        " Enter confirm · Esc cancel ",
+                        " Paste: Ctrl+V / Shift+Insert · Enter confirm · Esc cancel ",
                         Style::default().fg(theme::muted()),
                     )));
                     frame.render_widget(ClearWidget, popup_area);
@@ -4748,6 +5024,7 @@ pub fn run_blocking(
             };
 
             match ev {
+                Event::Mouse(_) if !g.mouse_capture_on => continue,
                 Event::Mouse(_) if g.command_palette_open => continue,
                 Event::Mouse(_) if g.info_modal_open => continue,
                 Event::Mouse(_) if g.model_picker_open => continue,
@@ -4810,15 +5087,14 @@ pub fn run_blocking(
                         let total = lines.len();
                         let th = tr.height.saturating_sub(2) as usize;
                         let max_scroll = total.saturating_sub(th);
+                        let step = mouse_scroll_step(m.modifiers, th, scroll_speed as usize);
                         match m.kind {
                             MouseEventKind::ScrollUp => {
                                 g.transcript_follow_tail = false;
-                                g.scroll_lines =
-                                    g.scroll_lines.saturating_sub(scroll_speed as usize);
+                                g.scroll_lines = g.scroll_lines.saturating_sub(step);
                             }
                             MouseEventKind::ScrollDown => {
-                                g.scroll_lines =
-                                    (g.scroll_lines + scroll_speed as usize).min(max_scroll);
+                                g.scroll_lines = (g.scroll_lines + step).min(max_scroll);
                                 if g.scroll_lines >= max_scroll {
                                     g.transcript_follow_tail = true;
                                 }
@@ -4997,6 +5273,34 @@ pub fn run_blocking(
                             }
                             (KeyCode::Backspace, _) => {
                                 g.anthropic_oauth_code_input.pop();
+                            }
+                            (KeyCode::Insert, mods) if mods.contains(KeyModifiers::SHIFT) => {
+                                match paste_text_from_clipboard() {
+                                    Ok(pasted) => {
+                                        let normalized = pasted.replace('\r', "");
+                                        let value = normalized.trim_end_matches('\n');
+                                        g.anthropic_oauth_code_input.push_str(value);
+                                    }
+                                    Err(e) => {
+                                        g.push_error(format!("[login] clipboard paste failed: {e}"))
+                                    }
+                                }
+                            }
+                            (KeyCode::Char(c), mods)
+                                if c.eq_ignore_ascii_case(&'v')
+                                    && mods.contains(KeyModifiers::CONTROL)
+                                    && !mods.contains(KeyModifiers::ALT) =>
+                            {
+                                match paste_text_from_clipboard() {
+                                    Ok(pasted) => {
+                                        let normalized = pasted.replace('\r', "");
+                                        let value = normalized.trim_end_matches('\n');
+                                        g.anthropic_oauth_code_input.push_str(value);
+                                    }
+                                    Err(e) => {
+                                        g.push_error(format!("[login] clipboard paste failed: {e}"))
+                                    }
+                                }
                             }
                             (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                                 g.anthropic_oauth_code_input.push(c);
@@ -6160,6 +6464,9 @@ pub fn run_blocking(
                                 }
                                 continue;
                             }
+                            if let Err(e) = stage_pasted_image_paths(&mut g, &expanded) {
+                                g.push_error(format!("[image] {e}"));
+                            }
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::Submit(expanded));
                         }
@@ -6393,14 +6700,18 @@ mod approval_parse_tests {
     use super::{
         TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
         completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
-        escape_cancels_active_turn, filtered_branch_indices, parse_approval_verdict, parse_md_line,
+        escape_cancels_active_turn, extract_embedded_path_fragments, filtered_branch_indices,
+        mouse_scroll_step, parse_approval_verdict, parse_candidate_image_path, parse_md_line,
         pasted_lines_token, render_markdown_lines, render_markdown_lines_with_hits,
-        request_turn_cancel, transcript_lines_and_hits,
+        request_turn_cancel, stage_pasted_image_paths, transcript_lines_and_hits,
     };
     use crate::tui::state::TuiSessionState;
+    use crossterm::event::KeyModifiers;
     use dcode_ai_common::event::BusyState;
+    use std::fs;
     use std::path::PathBuf;
     use std::sync::{Arc, atomic::AtomicBool};
+    use tempfile::tempdir;
 
     #[test]
     fn parses_yes_with_punctuation_and_synonyms() {
@@ -6457,6 +6768,13 @@ mod approval_parse_tests {
         let branches = vec!["alpha".into(), "main".into(), "main-fix".into()];
         let cmd = branch_picker_enter_command(&branches, "mai", 1);
         assert!(matches!(cmd, Some(TuiCmd::SwitchBranch(name)) if name == "main-fix"));
+    }
+
+    #[test]
+    fn mouse_scroll_step_uses_modifier_acceleration() {
+        assert_eq!(mouse_scroll_step(KeyModifiers::NONE, 20, 3), 3);
+        assert_eq!(mouse_scroll_step(KeyModifiers::SHIFT, 20, 3), 20);
+        assert_eq!(mouse_scroll_step(KeyModifiers::CONTROL, 20, 3), 60);
     }
 
     #[test]
@@ -6690,6 +7008,65 @@ mod approval_parse_tests {
             Some("[pasted 3 lines #1]".into())
         );
         assert_eq!(pasted_lines_token("single line", 1), None);
+    }
+
+    #[test]
+    fn parse_candidate_image_path_supports_quoted_and_escaped_spaces() {
+        let parsed = parse_candidate_image_path("\"./assets/Screenshot\\ 2026-05-05.png\"")
+            .expect("image path should parse");
+        assert_eq!(
+            parsed.to_string_lossy(),
+            "./assets/Screenshot 2026-05-05.png"
+        );
+    }
+
+    #[test]
+    fn parse_candidate_image_path_supports_file_url_and_percent_decoding() {
+        let parsed = parse_candidate_image_path("file:///tmp/Screenshot%202026-05-05.png")
+            .expect("file URL should parse");
+        assert_eq!(parsed.to_string_lossy(), "/tmp/Screenshot 2026-05-05.png");
+    }
+
+    #[test]
+    fn parse_candidate_image_path_ignores_non_image_text() {
+        assert!(parse_candidate_image_path("just some notes").is_none());
+        assert!(parse_candidate_image_path("README.md").is_none());
+    }
+
+    #[test]
+    fn extract_embedded_path_fragments_finds_path_inside_sentence() {
+        let line = "please inspect this image: /tmp/Screenshot 2026-05-05 125529.png thanks";
+        let fragments = extract_embedded_path_fragments(line);
+        assert!(fragments.iter().any(|f| {
+            f == "/tmp/Screenshot 2026-05-05 125529.png"
+                || f == "/tmp/Screenshot 2026-05-05 125529.png thanks"
+        }));
+    }
+
+    #[test]
+    fn stage_pasted_image_paths_imports_single_path_line() {
+        let workspace = tempdir().expect("temp workspace");
+        let src_dir = workspace.path().join("assets");
+        fs::create_dir_all(&src_dir).expect("create src dir");
+        let src = src_dir.join("drop-test.png");
+        fs::write(&src, b"not-really-a-png").expect("write source image");
+
+        let mut state = TuiSessionState::new(
+            "s-test".into(),
+            "model".into(),
+            "@build".into(),
+            "AcceptEdits".into(),
+            workspace.path().to_path_buf(),
+            false,
+        );
+
+        let staged = stage_pasted_image_paths(&mut state, "./assets/drop-test.png")
+            .expect("staging should not error");
+        assert_eq!(staged, 1);
+        assert_eq!(state.staged_image_attachments.len(), 1);
+
+        let rel = &state.staged_image_attachments[0].path;
+        assert!(workspace.path().join(rel).is_file());
     }
 
     #[test]
