@@ -867,6 +867,7 @@ impl Repl {
                     "  /set-editor <cmd>  Persist editor command".into(),
                     "  /mcp               List MCP servers".into(),
                     "  /sessions          List/switch sessions".into(),
+                    "  /sessions-clean    Remove old empty sessions".into(),
                     "  /permissions [m]   Show or set permission mode".into(),
                     "  /config            Show runtime config".into(),
                     "  /doctor            Run config checks".into(),
@@ -2013,6 +2014,23 @@ impl Repl {
                 }
                 Err(error) => {
                     out.eprintln(&format!("failed to list sessions: {error}"));
+                }
+            },
+            "/sessions-clean" => match self.runtime.cleanup_empty_sessions().await {
+                Ok(deleted) => {
+                    if deleted.is_empty() {
+                        out.println("no empty sessions found");
+                    } else {
+                        out.println(&format!("removed {} empty sessions", deleted.len()));
+                        if !matches!(out, ReplOutput::Tui(_)) {
+                            for id in deleted {
+                                out.println(&id);
+                            }
+                        }
+                    }
+                }
+                Err(error) => {
+                    out.eprintln(&format!("failed to clean empty sessions: {error}"));
                 }
             },
             "/new" => {

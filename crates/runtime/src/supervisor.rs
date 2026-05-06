@@ -1343,6 +1343,56 @@ pub async fn list_sessions(session_store: &SessionStore) -> Result<Vec<String>, 
     session_store.list().await.map_err(|e| e.to_string())
 }
 
+/// Remove sessions that have no meaningful interaction history.
+/// Returns the deleted session IDs.
+pub async fn cleanup_empty_sessions(session_store: &SessionStore) -> Result<Vec<String>, String> {
+    let ids = session_store.list().await.map_err(|e| e.to_string())?;
+    let mut to_delete = Vec::new();
+    for id in ids {
+        let session = match session_store.load(&id).await {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if session.meta.status == SessionStatus::Running {
+            continue;
+        }
+        if !session_state_has_meaningful_interaction(&session) {
+            to_delete.push(id);
+        }
+    }
+    session_store
+        .delete_many(&to_delete)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+fn session_state_has_meaningful_interaction(session: &SessionState) -> bool {
+    let has_non_system_message = session.messages.iter().any(|m| {
+        !matches!(m.role, Role::System)
+            && match &m.content {
+                MessageContent::Text(text) => !text.trim().is_empty(),
+                MessageContent::Parts(parts) => !parts.is_empty(),
+            }
+    });
+    has_non_system_message
+        || session.total_input_tokens > 0
+        || session.total_output_tokens > 0
+        || session.estimated_cost_usd > 0.0
+        || session
+            .meta
+            .session_name
+            .as_ref()
+            .is_some_and(|name| !name.trim().is_empty())
+        || session
+            .meta
+            .session_summary
+            .as_ref()
+            .is_some_and(|summary| !summary.trim().is_empty())
+        || session.meta.parent_session_id.is_some()
+        || !session.meta.child_session_ids.is_empty()
+        || session.meta.orchestration.is_some()
+}
+
 /// Clean up stale sessions: sessions marked as Running whose PID is no longer alive
 /// and whose socket no longer exists. Marks them as Error.
 pub async fn cleanup_stale_sessions(session_store: &SessionStore) {
@@ -2056,6 +2106,113 @@ mod tests {
             !ids.iter().any(|id| id == "session-empty-exit"),
             "no-op session should not be persisted"
         );
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_sessions_removes_only_empty_non_running_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+
+        let empty_completed = SessionState {
+            meta: SessionMeta {
+                id: "empty-completed".into(),
+                session_name: None,
+                created_at: now,
+                updated_at: now,
+                workspace: workspace.clone(),
+                model: "gpt-5.2".into(),
+                status: SessionStatus::Completed,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![Message::system("You are dcode-ai")],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        store.save(&empty_completed).await.expect("save empty");
+
+        let meaningful = SessionState {
+            meta: SessionMeta {
+                id: "non-empty".into(),
+                session_name: None,
+                created_at: now,
+                updated_at: now,
+                workspace: workspace.clone(),
+                model: "gpt-5.2".into(),
+                status: SessionStatus::Completed,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![Message::user("hello")],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        store.save(&meaningful).await.expect("save meaningful");
+
+        let running_empty = SessionState {
+            meta: SessionMeta {
+                id: "running-empty".into(),
+                session_name: None,
+                created_at: now,
+                updated_at: now,
+                workspace: workspace.clone(),
+                model: "gpt-5.2".into(),
+                status: SessionStatus::Running,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        store
+            .save(&running_empty)
+            .await
+            .expect("save running empty");
+
+        let deleted = cleanup_empty_sessions(&store)
+            .await
+            .expect("cleanup empty sessions");
+        assert_eq!(deleted.len(), 1);
+        assert!(deleted.iter().any(|id| id == "empty-completed"));
+
+        let remaining = store.list().await.expect("list remaining");
+        assert!(remaining.iter().any(|id| id == "non-empty"));
+        assert!(remaining.iter().any(|id| id == "running-empty"));
     }
 
     #[tokio::test]
