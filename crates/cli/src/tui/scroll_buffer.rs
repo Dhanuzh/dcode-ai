@@ -34,9 +34,6 @@ impl ScrollBuffer {
         for line in lines {
             self.lines.push_back(line);
         }
-        while self.lines.len() > MAX_CACHE_LINES {
-            self.lines.pop_front();
-        }
         if self.sticky_bottom {
             self.scroll_offset = 0;
         } else {
