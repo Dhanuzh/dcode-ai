@@ -96,7 +96,7 @@ pub fn show_auth_status() -> anyhow::Result<()> {
         })
     );
     println!(
-        "  │ opencodezen   │ {} │",
+        "  │ minimax      │ {} │",
         pad_status(if store.opencodezen_oauth.is_some() {
             "✓ logged in"
         } else {
@@ -839,6 +839,30 @@ fn normalize_authorization_code(code: &str) -> String {
     trimmed.split('#').next().unwrap_or(trimmed).to_string()
 }
 
+fn de_string_or_u64<'de, D>(d: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(serde::Deserialize)]
+    #[serde(untagged)]
+    enum StrOrU64 {
+        Str(String),
+        Num(u64),
+    }
+
+    match Option::<StrOrU64>::deserialize(d)? {
+        None => Ok(None),
+        Some(StrOrU64::Num(n)) => Ok(Some(n)),
+        Some(StrOrU64::Str(s)) => s
+            .trim()
+            .parse::<u64>()
+            .map(Some)
+            .map_err(serde::de::Error::custom),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::normalize_authorization_code;
@@ -861,29 +885,5 @@ mod tests {
     fn keeps_raw_code_when_already_clean() {
         let code = normalize_authorization_code("abc123");
         assert_eq!(code, "abc123");
-    }
-}
-
-fn de_string_or_u64<'de, D>(d: D) -> Result<Option<u64>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-
-    #[derive(serde::Deserialize)]
-    #[serde(untagged)]
-    enum StrOrU64 {
-        Str(String),
-        Num(u64),
-    }
-
-    match Option::<StrOrU64>::deserialize(d)? {
-        None => Ok(None),
-        Some(StrOrU64::Num(n)) => Ok(Some(n)),
-        Some(StrOrU64::Str(s)) => s
-            .trim()
-            .parse::<u64>()
-            .map(Some)
-            .map_err(serde::de::Error::custom),
     }
 }

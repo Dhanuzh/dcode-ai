@@ -3430,10 +3430,11 @@ mod tests {
 
     #[test]
     fn recent_context_lines_include_roles_and_truncation() {
-        let mut messages = Vec::new();
-        messages.push(Message::system("setup"));
-        messages.push(Message::user("hello world"));
-        messages.push(Message::assistant("response body"));
+        let messages = vec![
+            Message::system("setup"),
+            Message::user("hello world"),
+            Message::assistant("response body"),
+        ];
         let lines = recent_context_lines(&messages, 5);
         assert!(
             lines

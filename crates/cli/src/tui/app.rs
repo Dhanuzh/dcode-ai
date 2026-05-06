@@ -3398,7 +3398,7 @@ pub fn run_blocking(
                 } else {
                     scroll_buffer.set_from_top(g.scroll_lines, transcript_h, inner_w as usize);
                 }
-                let (from_top, _) = scroll_buffer.from_top(transcript_h, inner_w as usize);
+                let (from_top, _) = scroll_buffer.scroll_position_from_top(transcript_h, inner_w as usize);
                 g.scroll_lines = from_top as usize;
                 let total = scroll_buffer.len();
                 let max_scroll = total.saturating_sub(transcript_h);
@@ -5331,7 +5331,8 @@ pub fn run_blocking(
                             }
                             _ => {}
                         }
-                        let (from_top, _) = scroll_buffer.from_top(th, inner_w as usize);
+                        let (from_top, _) =
+                            scroll_buffer.scroll_position_from_top(th, inner_w as usize);
                         g.scroll_lines = from_top as usize;
                         g.transcript_follow_tail = scroll_buffer.is_sticky();
                         continue;
@@ -5381,7 +5382,8 @@ pub fn run_blocking(
                                 } else if (m.row as usize) >= inner_top as usize + inner_h {
                                     scroll_buffer.scroll_down(1);
                                 }
-                                let (from_top, _) = scroll_buffer.from_top(inner_h, inner_w_eff);
+                                let (from_top, _) =
+                                    scroll_buffer.scroll_position_from_top(inner_h, inner_w_eff);
                                 g.scroll_lines = from_top as usize;
                                 g.transcript_follow_tail = scroll_buffer.is_sticky();
 
@@ -5414,40 +5416,41 @@ pub fn run_blocking(
                             }
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
-                            if let Some(sel) = g.mouse_selection.take() {
-                                if sel.anchor != sel.cursor && !is_click_jitter(&sel) {
-                                    let inner_w_eff = inner_w.max(1);
-                                    let (lines, _hits) =
-                                        transcript_cache.get_or_rebuild(&g, inner_w_eff as u16);
-                                    let gutter_widths = vec![0u16; lines.len()];
-                                    let (rows, gutters) =
-                                        crate::tui::mouse_select::build_all_visual_rows(
-                                            &lines,
-                                            &gutter_widths,
-                                            inner_w_eff,
-                                        );
-                                    let text = crate::tui::mouse_select::extract_selected_text(
-                                        &rows, &gutters, &sel,
+                            if let Some(sel) = g.mouse_selection.take()
+                                && sel.anchor != sel.cursor
+                                && !is_click_jitter(&sel)
+                            {
+                                let inner_w_eff = inner_w.max(1);
+                                let (lines, _hits) =
+                                    transcript_cache.get_or_rebuild(&g, inner_w_eff as u16);
+                                let gutter_widths = vec![0u16; lines.len()];
+                                let (rows, gutters) =
+                                    crate::tui::mouse_select::build_all_visual_rows(
+                                        lines,
+                                        &gutter_widths,
+                                        inner_w_eff,
                                     );
-                                    if !text.is_empty() {
-                                        let n = text.chars().count();
-                                        match crate::tui::mouse_select::copy_to_clipboard(&text) {
-                                            Ok(msg) => {
-                                                g.blocks.push(DisplayBlock::System(format!(
-                                                    " Copied {n} chars {msg}"
-                                                )));
-                                                g.touch_transcript();
-                                            }
-                                            Err(e) => {
-                                                g.push_error(format!("Clipboard copy failed: {e}"));
-                                            }
+                                let text = crate::tui::mouse_select::extract_selected_text(
+                                    &rows, &gutters, &sel,
+                                );
+                                if !text.is_empty() {
+                                    let n = text.chars().count();
+                                    match crate::tui::mouse_select::copy_to_clipboard(&text) {
+                                        Ok(msg) => {
+                                            g.blocks.push(DisplayBlock::System(format!(
+                                                " Copied {n} chars {msg}"
+                                            )));
+                                            g.touch_transcript();
                                         }
-                                        // Meaningful drag copy consumed the click.
-                                        continue;
+                                        Err(e) => {
+                                            g.push_error(format!("Clipboard copy failed: {e}"));
+                                        }
                                     }
+                                    // Meaningful drag copy consumed the click.
+                                    continue;
                                 }
-                                // Pure click (no drag): let click-hit logic run.
                             }
+                            // Pure click (no drag): let click-hit logic run.
                         }
                         _ => {}
                     }
@@ -6949,7 +6952,7 @@ pub fn run_blocking(
                                 scroll_buffer.set_from_top(g.scroll_lines, th, w);
                                 let step = th.max(scroll_speed as usize).max(1);
                                 scroll_buffer.scroll_up(step, w, th);
-                                let (from_top, _) = scroll_buffer.from_top(th, w);
+                                let (from_top, _) = scroll_buffer.scroll_position_from_top(th, w);
                                 g.scroll_lines = from_top as usize;
                                 g.transcript_follow_tail = scroll_buffer.is_sticky();
                             }
@@ -6980,7 +6983,7 @@ pub fn run_blocking(
                                 scroll_buffer.set_from_top(g.scroll_lines, th, w);
                                 let step = th.max(scroll_speed as usize).max(1);
                                 scroll_buffer.scroll_down(step);
-                                let (from_top, _) = scroll_buffer.from_top(th, w);
+                                let (from_top, _) = scroll_buffer.scroll_position_from_top(th, w);
                                 g.scroll_lines = from_top as usize;
                                 g.transcript_follow_tail = scroll_buffer.is_sticky();
                             }
@@ -7046,7 +7049,8 @@ pub fn run_blocking(
                                             scroll_buffer.replace_lines(lines.to_vec());
                                             scroll_buffer.set_from_top(g.scroll_lines, th, w);
                                             scroll_buffer.scroll_up(scroll_speed as usize, w, th);
-                                            let (from_top, _) = scroll_buffer.from_top(th, w);
+                                            let (from_top, _) =
+                                                scroll_buffer.scroll_position_from_top(th, w);
                                             g.scroll_lines = from_top as usize;
                                             g.transcript_follow_tail = scroll_buffer.is_sticky();
                                         }
@@ -7114,7 +7118,8 @@ pub fn run_blocking(
                                             scroll_buffer.replace_lines(lines.to_vec());
                                             scroll_buffer.set_from_top(g.scroll_lines, th, w);
                                             scroll_buffer.scroll_down(scroll_speed as usize);
-                                            let (from_top, _) = scroll_buffer.from_top(th, w);
+                                            let (from_top, _) =
+                                                scroll_buffer.scroll_position_from_top(th, w);
                                             g.scroll_lines = from_top as usize;
                                             g.transcript_follow_tail = scroll_buffer.is_sticky();
                                         }

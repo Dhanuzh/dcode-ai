@@ -18,7 +18,7 @@ impl Default for ScrollBuffer {
 
 impl ScrollBuffer {
     pub fn new(capacity: usize) -> Self {
-        let cap = capacity.max(1).min(MAX_CACHE_LINES);
+        let cap = capacity.clamp(1, MAX_CACHE_LINES);
         Self {
             lines: VecDeque::with_capacity(cap),
             scroll_offset: 0,
@@ -75,7 +75,7 @@ impl ScrollBuffer {
         self.lines.len()
     }
 
-    pub fn from_top(&self, viewport_height: usize, width: usize) -> (u16, u16) {
+    pub fn scroll_position_from_top(&self, viewport_height: usize, width: usize) -> (u16, u16) {
         let total = self.total_visual_lines(width.max(1));
         let from_top = total
             .saturating_sub(viewport_height)

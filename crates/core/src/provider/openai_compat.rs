@@ -233,44 +233,6 @@ struct ToolCallAccumulator {
     arguments: String,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    #[test]
-    fn reasoning_delta_accepts_multiple_shapes() {
-        assert_eq!(
-            extract_internal_reasoning_delta(&json!({"reasoning_content":"r1"})),
-            Some("r1".into())
-        );
-        assert_eq!(
-            extract_internal_reasoning_delta(&json!({"reasoning":"r2"})),
-            Some("r2".into())
-        );
-        assert_eq!(
-            extract_internal_reasoning_delta(&json!({"thinking":{"text":"r3"}})),
-            Some("r3".into())
-        );
-        assert_eq!(
-            extract_internal_reasoning_delta(&json!({"reasoning":[{"text":"a"},{"text":"b"}]})),
-            Some("ab".into())
-        );
-        assert_eq!(
-            extract_internal_reasoning_delta(&json!({"reasoning":{"content":"r4"}})),
-            Some("r4".into())
-        );
-        assert_eq!(
-            extract_internal_reasoning_delta(&json!({"reasoning_delta":{"content":"r5"}})),
-            Some("r5".into())
-        );
-        assert_eq!(
-            extract_internal_reasoning_delta(&json!({"content":"assistant text only"})),
-            None
-        );
-    }
-}
-
 async fn flush_openai_tool_calls(
     tx: &tokio::sync::mpsc::Sender<StreamChunk>,
     tool_calls: &mut BTreeMap<u64, ToolCallAccumulator>,
@@ -403,4 +365,42 @@ fn to_openai_messages(
     }
 
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn reasoning_delta_accepts_multiple_shapes() {
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning_content":"r1"})),
+            Some("r1".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning":"r2"})),
+            Some("r2".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"thinking":{"text":"r3"}})),
+            Some("r3".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning":[{"text":"a"},{"text":"b"}]})),
+            Some("ab".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning":{"content":"r4"}})),
+            Some("r4".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoning_delta":{"content":"r5"}})),
+            Some("r5".into())
+        );
+        assert_eq!(
+            extract_internal_reasoning_delta(&json!({"content":"assistant text only"})),
+            None
+        );
+    }
 }
