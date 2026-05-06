@@ -14,6 +14,7 @@ use crate::tui::{
 };
 use dcode_ai_common::config::{PermissionMode, ProviderKind};
 use dcode_ai_common::event::{EndReason, QuestionSelection};
+use dcode_ai_common::message::{Message, Role};
 use dcode_ai_core::skills::SkillCatalog;
 use dcode_ai_runtime::memory_store::MemoryStore;
 use reedline::{Completer, Emacs, FileBackedHistory, Reedline, Signal, Suggestion, Vi};
@@ -129,6 +130,73 @@ fn prefers_openai_default_model(model: &str) -> bool {
         || m.contains("big-pickle")
         || m.contains("kimi")
         || m.contains("glm")
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
+        out.push('…');
+        out
+    }
+}
+
+fn compact_ws_single_line(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn role_label(role: &Role) -> &'static str {
+    match role {
+        Role::User => "user",
+        Role::Assistant => "assistant",
+        Role::System => "system",
+        Role::Tool => "tool",
+    }
+}
+
+fn recent_context_lines(messages: &[Message], max_items: usize) -> Vec<String> {
+    if messages.is_empty() {
+        return vec!["Recent turns: none yet.".into()];
+    }
+
+    let take = max_items.max(1);
+    let start = messages.len().saturating_sub(take);
+    let mut lines = Vec::new();
+    if start > 0 {
+        lines.push(format!(
+            "Recent turns: last {} of {} message(s)",
+            messages.len() - start,
+            messages.len()
+        ));
+    } else {
+        lines.push(format!("Recent turns: {} message(s)", messages.len()));
+    }
+
+    for (idx, msg) in messages.iter().enumerate().skip(start) {
+        let mut preview = compact_ws_single_line(&msg.event_preview());
+        if preview.is_empty() {
+            preview = "[empty]".into();
+        }
+        if let Some(tool_calls) = msg.tool_calls.as_ref()
+            && !tool_calls.is_empty()
+        {
+            preview.push_str(&format!(" [tool_calls:{}]", tool_calls.len()));
+        }
+        if let Some(call_id) = msg.tool_call_id.as_ref()
+            && !call_id.is_empty()
+        {
+            preview.push_str(&format!(" [call_id:{call_id}]"));
+        }
+
+        lines.push(format!(
+            "  {:>4}. {:<9} {}",
+            idx + 1,
+            role_label(&msg.role),
+            truncate_chars(&preview, 220)
+        ));
+    }
+    lines
 }
 
 /// Special input prefixes
@@ -775,6 +843,7 @@ impl Repl {
                     "SLASH COMMANDS:".into(),
                     "  /help              Show this help".into(),
                     "  /status            Session status".into(),
+                    "  /context           Session context snapshot".into(),
                     "  /session-name      Show/set manual session name".into(),
                     "  /agent [profile]   Show or switch agent profile".into(),
                     "  /plan <task>       Planning-oriented turn".into(),
@@ -794,7 +863,6 @@ impl Repl {
                     "  /logout [target]   Logout provider auth".into(),
                     "  /auth              Show auth/login status".into(),
                     "  /provider [name]   Provider connect/switch".into(),
-                    "  /sidebar [mode]    Sidebar on/off/toggle (TUI)".into(),
                     "  /editor [seed]     Open external editor".into(),
                     "  /set-editor <cmd>  Persist editor command".into(),
                     "  /mcp               List MCP servers".into(),
@@ -811,17 +879,19 @@ impl Repl {
                     "  Tab          Cycle agent profile".into(),
                     "  Ctrl+P       Command palette".into(),
                     "  Ctrl+F       Transcript search (TUI)".into(),
+                    "  Ctrl+R       Composer history search (TUI)".into(),
                     "  Ctrl+K       Pin latest message (TUI)".into(),
-                    "  Ctrl+;       Pinned notes list (TUI)".into(),
+                    "  Ctrl+O       Pinned notes list (TUI)".into(),
                     "  Ctrl+G       Sub-agent dashboard (TUI)".into(),
-                    "  Shift+Enter  Insert newline (TUI)".into(),
+                    "  Shift+Enter  Insert newline (TUI, terminal-dependent)".into(),
+                    "  Ctrl+I/J     Insert newline (TUI, reliable fallback)".into(),
                     "  Ctrl+X M     Switch model".into(),
                     "  Ctrl+X E     Open editor".into(),
                     "  Ctrl+X L     Switch session".into(),
                     "  Ctrl+X N     New session".into(),
                     "  Ctrl+X C     Compact".into(),
                     "  Ctrl+X S     View status".into(),
-                    "  Ctrl+X B     Toggle right sidebar".into(),
+                    "  Ctrl+X B     View status".into(),
                     "  Ctrl+X A     Agent picker".into(),
                     "  Ctrl+X H     Help".into(),
                     "  Ctrl+X Q     Exit".into(),
@@ -863,6 +933,36 @@ impl Repl {
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
                         g.open_info_modal("status", lines);
+                    }
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
+                }
+            }
+            "/context" => {
+                let snapshot = self.runtime.snapshot();
+                let session_line = snapshot
+                    .session_name
+                    .as_ref()
+                    .map(|name| format!("Session:     {} ({})", name, snapshot.id))
+                    .unwrap_or_else(|| format!("Session:     {}", snapshot.id));
+                let mut lines = vec![
+                    session_line,
+                    format!("Model:       {}", self.runtime.model()),
+                    format!("Permission:  {:?}", self.runtime.permission_mode()),
+                    format!("Messages:    {}", self.runtime.messages().len()),
+                    format!("Children:    {}", snapshot.child_session_ids.len()),
+                ];
+                if let Some(summary) = &snapshot.session_summary {
+                    lines.push(String::new());
+                    lines.push(format!("Summary: {}", compact_ws_single_line(summary)));
+                }
+                lines.push(String::new());
+                lines.extend(recent_context_lines(self.runtime.messages(), 14));
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("context", lines);
                     }
                 } else {
                     for l in &lines {
@@ -988,10 +1088,18 @@ impl Repl {
                 out.println("[screen cleared]");
             }
             "/undo" => {
-                out.eprintln("[undo] Not yet implemented - use /compact to save session state");
+                match self.runtime.undo_last_turn() {
+                    Ok(Some(msg)) => out.println(&format!("[undo] {msg}")),
+                    Ok(None) => out.println("[undo] nothing to undo"),
+                    Err(e) => out.eprintln(&format!("[undo] {e}")),
+                }
             }
             "/redo" => {
-                out.eprintln("[redo] Not yet implemented");
+                match self.runtime.redo_last_turn() {
+                    Ok(Some(msg)) => out.println(&format!("[redo] {msg}")),
+                    Ok(None) => out.println("[redo] nothing to redo"),
+                    Err(e) => out.eprintln(&format!("[redo] {e}")),
+                }
             }
             "/diff" => {
                 // Show recent file changes via git
@@ -1572,26 +1680,8 @@ impl Repl {
                 ));
             }
             "/sidebar" => {
-                let mode = rest.trim().to_ascii_lowercase();
-                if let ReplOutput::Tui(st) = &out {
-                    if let Ok(mut g) = st.lock() {
-                        match mode.as_str() {
-                            "" | "toggle" => g.toggle_sidebar(),
-                            "on" | "open" | "show" => g.set_sidebar_open(true),
-                            "off" | "close" | "hide" => g.set_sidebar_open(false),
-                            _ => {
-                                out.println("usage: /sidebar [on|off|toggle]");
-                                return Ok(true);
-                            }
-                        }
-                        out.println(&format!(
-                            "[sidebar] {}",
-                            if g.sidebar_open { "on" } else { "off" }
-                        ));
-                    }
-                } else {
-                    out.println("[sidebar] available in TUI mode. Launch: dcode-ai");
-                }
+                let _ = rest;
+                out.println("[sidebar] removed in fullscreen TUI. Use /status, /config, /sessions, and /mcp for context.");
             }
             "/settings" => {
                 let lines = vec![
@@ -1607,12 +1697,12 @@ impl Repl {
                     "  /login             Alias of /connect".into(),
                     "  /logout [target]   Logout provider auth".into(),
                     "  /auth              Show auth/login status".into(),
+                    "  /context           Session context with recent turns".into(),
                     "  /models            Browse and select models".into(),
                     "  /provider [name]   Provider connect/switch".into(),
                     "  /session-name      Show/set manual session name".into(),
                     "  /editor [seed]     Open external editor".into(),
                     "  /set-editor <cmd>  Persist editor command".into(),
-                    "  /sidebar [mode]    Sidebar on/off/toggle (TUI)".into(),
                 ];
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
@@ -1764,8 +1854,7 @@ impl Repl {
                     Some(text) if !text.is_empty() => {
                         if let ReplOutput::Tui(st) = out {
                             if let Ok(mut g) = st.lock() {
-                                g.input_buffer = text;
-                                g.cursor_char_idx = g.input_buffer.chars().count();
+                                g.set_input_text(text);
                             }
                             out.println("[editor] loaded into composer — press Enter to send");
                         } else {
@@ -1940,6 +2029,11 @@ impl Repl {
                     && let Ok(mut g) = st.lock()
                 {
                     g.blocks.clear();
+                    g.blocks
+                        .push(DisplayBlock::System(crate::tui::app::session_start_banner()));
+                    g.blocks.push(DisplayBlock::System(
+                        "New session ready — enter a prompt below.".into(),
+                    ));
                     g.streaming_assistant = None;
                     g.scroll_lines = 0;
                     g.transcript_follow_tail = true;
@@ -1949,6 +2043,7 @@ impl Repl {
                     g.output_tokens = 0;
                     g.cost_usd = 0.0;
                     g.started = std::time::Instant::now();
+                    g.touch_transcript();
                 }
                 out.println(&format!("new session started: {new_id}"));
             }
@@ -2121,10 +2216,19 @@ impl Repl {
             self.runtime.workspace_root().to_path_buf(),
             self.runtime.config().ui.code_line_numbers,
         )));
-        // Honor explicit UI config; users can toggle at runtime with F12.
-        let effective_mouse_capture = self.runtime.config().ui.mouse_capture;
+        // Koda-style fullscreen behavior: mouse capture is always on for
+        // wheel scroll + in-app drag-select copy.
+        let effective_mouse_capture = true;
         if let Ok(mut g) = tui_state.lock() {
             g.mouse_capture_on = effective_mouse_capture;
+            g.mcp_server_count = self
+                .runtime
+                .config()
+                .mcp
+                .servers
+                .iter()
+                .filter(|s| s.enabled)
+                .count();
         }
 
         let log_path = self.runtime.event_log_path();
@@ -2265,6 +2369,12 @@ impl Repl {
             if let Ok(mut g) = tui_state.lock() {
                 g.queued_steering = queued_steering.len();
                 g.queued_followup = queued_followup.len();
+                g.queue_preview_items = queued_followup
+                    .iter()
+                    .chain(queued_steering.iter())
+                    .take(6)
+                    .map(|s| truncate_chars(s, 80))
+                    .collect();
             }
 
             let cmd = if let Some(cmd) = pending_cmds.pop_front() {
@@ -2273,12 +2383,24 @@ impl Repl {
                 if let Ok(mut g) = tui_state.lock() {
                     g.queued_steering = queued_steering.len();
                     g.queued_followup = queued_followup.len();
+                    g.queue_preview_items = queued_followup
+                        .iter()
+                        .chain(queued_steering.iter())
+                        .take(6)
+                        .map(|s| truncate_chars(s, 80))
+                        .collect();
                 }
                 TuiCmd::Submit(line)
             } else if let Some(line) = queued_followup.pop_front() {
                 if let Ok(mut g) = tui_state.lock() {
                     g.queued_steering = queued_steering.len();
                     g.queued_followup = queued_followup.len();
+                    g.queue_preview_items = queued_followup
+                        .iter()
+                        .chain(queued_steering.iter())
+                        .take(6)
+                        .map(|s| truncate_chars(s, 80))
+                        .collect();
                 }
                 TuiCmd::Submit(line)
             } else {
@@ -2291,6 +2413,12 @@ impl Repl {
                     if let Ok(mut g) = tui_state.lock() {
                         g.queued_steering = queued_steering.len();
                         g.queued_followup = queued_followup.len();
+                        g.queue_preview_items = queued_followup
+                            .iter()
+                            .chain(queued_steering.iter())
+                            .take(6)
+                            .map(|s| truncate_chars(s, 80))
+                            .collect();
                     }
                     continue;
                 }
@@ -2299,6 +2427,12 @@ impl Repl {
                     if let Ok(mut g) = tui_state.lock() {
                         g.queued_steering = queued_steering.len();
                         g.queued_followup = queued_followup.len();
+                        g.queue_preview_items = queued_followup
+                            .iter()
+                            .chain(queued_steering.iter())
+                            .take(6)
+                            .map(|s| truncate_chars(s, 80))
+                            .collect();
                     }
                     continue;
                 }
@@ -3250,6 +3384,7 @@ fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dcode_ai_common::message::Message;
 
     #[test]
     fn parses_permission_aliases() {
@@ -3291,5 +3426,21 @@ mod tests {
             Some(LogoutTarget::All)
         ));
         assert!(parse_logout_target("nope").is_none());
+    }
+
+    #[test]
+    fn recent_context_lines_include_roles_and_truncation() {
+        let mut messages = Vec::new();
+        messages.push(Message::system("setup"));
+        messages.push(Message::user("hello world"));
+        messages.push(Message::assistant("response body"));
+        let lines = recent_context_lines(&messages, 5);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Recent turns: 3 message(s)"))
+        );
+        assert!(lines.iter().any(|l| l.contains("user")));
+        assert!(lines.iter().any(|l| l.contains("assistant")));
     }
 }

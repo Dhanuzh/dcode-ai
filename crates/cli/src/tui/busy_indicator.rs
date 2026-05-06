@@ -1,7 +1,6 @@
 //! Advanced animated busy indicator (Claude-style).
 
 use dcode_ai_common::event::BusyState;
-use ratatui::style::Color;
 use std::time::Instant;
 
 /// Animation frames for different busy states.
@@ -31,18 +30,6 @@ fn frame_interval_ms(state: BusyState) -> u128 {
         BusyState::ToolRunning => 100,
         BusyState::ApprovalPending => 280,
         _ => 120,
-    }
-}
-
-/// Get the color for a given busy state.
-pub fn color_for_state(state: BusyState) -> Color {
-    match state {
-        BusyState::Idle => Color::Rgb(74, 222, 128),     // Green
-        BusyState::Thinking => Color::Rgb(180, 120, 80), // Brown
-        BusyState::Streaming => Color::Rgb(255, 165, 0), // Orange
-        BusyState::ToolRunning => Color::Rgb(94, 234, 212), // Cyan/Teal
-        BusyState::ApprovalPending => Color::Rgb(251, 191, 36), // Amber/Yellow
-        BusyState::Error => Color::Rgb(248, 113, 113),   // Red
     }
 }
 
@@ -86,24 +73,6 @@ pub fn render_indicator(state: BusyState, state_since: Instant) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn color_for_idle_is_green() {
-        let c = color_for_state(BusyState::Idle);
-        assert_eq!(c, Color::Rgb(74, 222, 128));
-    }
-
-    #[test]
-    fn color_for_thinking_is_brown() {
-        let c = color_for_state(BusyState::Thinking);
-        assert_eq!(c, Color::Rgb(180, 120, 80));
-    }
-
-    #[test]
-    fn color_for_streaming_is_orange() {
-        let c = color_for_state(BusyState::Streaming);
-        assert_eq!(c, Color::Rgb(255, 165, 0));
-    }
 
     #[test]
     fn frame_cycles_through_thinking_frames() {

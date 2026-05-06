@@ -137,30 +137,21 @@ pub enum TuiCmd {
 use super::theme;
 
 const SLASH_PANEL_MAX_ROWS: usize = 8;
-const SIDEBAR_WIDTH: u16 = 32;
-const SIDEBAR_MIN_TOTAL_WIDTH: u16 = 110;
 const COMMAND_PALETTE_WIDTH: u16 = 48;
 const COMMAND_PALETTE_MAX_ROWS: usize = 10;
 
-/// Copy text to clipboard. On X11/Wayland the selection is owned by the process —
-/// dropping `Clipboard` immediately can race clipboard managers, so on Linux we
-/// hand the clipboard to a background thread that blocks on `.wait()` until
-/// another app takes ownership.
-fn copy_to_clipboard(text: String) -> Result<(), arboard::Error> {
-    #[cfg(target_os = "linux")]
-    {
-        use arboard::SetExtLinux;
-        let mut cb = Clipboard::new()?;
-        std::thread::spawn(move || {
-            let _ = cb.set().wait().text(text);
-        });
-        Ok(())
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        let mut cb = Clipboard::new()?;
-        cb.set_text(text)
-    }
+pub fn session_start_banner() -> String {
+    [
+        "      _~^~^~_",
+        "  \\) /  o o  \\ (/",
+        "    '_  -  _'    dcode-ai",
+        "    / '---' \\",
+    ]
+    .join("\n")
+}
+
+fn copy_to_clipboard(text: &str) -> Result<String, String> {
+    crate::tui::clipboard::copy_to_clipboard(text)
 }
 
 fn paste_text_from_clipboard() -> Result<String, arboard::Error> {
@@ -633,10 +624,6 @@ const PALETTE_CATALOG: &[PaletteRow] = &[
         shortcut: "ctrl+x s",
     },
     PaletteRow::Entry {
-        label: "Toggle sidebar",
-        shortcut: "ctrl+x b",
-    },
-    PaletteRow::Entry {
         label: "Config",
         shortcut: "",
     },
@@ -688,7 +675,6 @@ fn palette_command_for_label(label: &str) -> &'static str {
         "Toggle thinking" => "/thinking",
         "Switch provider" => "/provider",
         "View status" => "/status",
-        "Toggle sidebar" => "/sidebar toggle",
         "Config" => "/config",
         "Doctor" => "/doctor",
         "Help" => "/help",
@@ -754,30 +740,15 @@ fn slash_panel_height(filtered_len: usize) -> u16 {
         .min(14)
 }
 
-fn layout_chunks(area: Rect, slash_h: u16, input_h: u16) -> (Rect, Rect, Option<Rect>, Rect) {
-    let input_h = input_h.max(3);
-    if slash_h > 0 {
-        let c = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),
-                Constraint::Length(1),
-                Constraint::Length(slash_h),
-                Constraint::Length(input_h),
-            ])
-            .split(area);
-        (c[0], c[1], Some(c[2]), c[3])
-    } else {
-        let c = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Min(4),
-                Constraint::Length(1),
-                Constraint::Length(input_h),
-            ])
-            .split(area);
-        (c[0], c[1], None, c[2])
-    }
+fn layout_chunks(
+    area: Rect,
+    slash_h: u16,
+    input_h: u16,
+    queue_total: usize,
+    activity_total: usize,
+) -> (Rect, Rect, Option<Rect>, Rect) {
+    let vp = crate::tui::tui_viewport::layout(area, slash_h, input_h, queue_total, activity_total);
+    (vp.transcript, vp.status, vp.slash, vp.input)
 }
 
 fn sidebar_fit(s: &str, max_chars: usize) -> String {
@@ -794,15 +765,10 @@ fn sidebar_fit(s: &str, max_chars: usize) -> String {
     }
 }
 
-fn layout_with_sidebar(area: Rect, sidebar_open: bool) -> (Rect, Option<Rect>) {
-    if !sidebar_open || area.width < SIDEBAR_MIN_TOTAL_WIDTH {
-        return (area, None);
-    }
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(60), Constraint::Length(SIDEBAR_WIDTH)])
-        .split(area);
-    (chunks[0], Some(chunks[1]))
+fn layout_with_sidebar(area: Rect, _sidebar_open: bool) -> (Rect, Option<Rect>) {
+    // Fullscreen-only layout: right sidebar removed.
+    // Context/session details are command-driven (/status, /config, etc.).
+    (area, None)
 }
 
 fn centered_rect(area: Rect, width: u16, height: u16) -> Rect {
@@ -829,11 +795,47 @@ fn toolbar_permission_is_bypass(mode: &str) -> bool {
     mode.contains("BypassPermissions")
 }
 
+fn menu_content_for_state(state: &TuiSessionState) -> crate::tui::tui_types::MenuContent {
+    use crate::tui::tui_types::MenuContent;
+    if state.command_palette_open {
+        MenuContent::CommandPalette
+    } else if state.info_modal_open {
+        MenuContent::Info
+    } else if state.model_picker_open {
+        MenuContent::ModelPicker
+    } else if state.session_picker_open {
+        MenuContent::SessionPicker
+    } else if state.connect_modal_open {
+        MenuContent::Connect
+    } else if state.transcript_search_open {
+        MenuContent::TranscriptSearch
+    } else if state.composer_history_search_open {
+        MenuContent::ComposerHistorySearch
+    } else if state.question_modal_open {
+        MenuContent::Question
+    } else if state.active_approval.is_some() {
+        MenuContent::Approval
+    } else if state.pins_modal_open {
+        MenuContent::Pins
+    } else if state.subagent_modal_open {
+        MenuContent::SubAgents
+    } else if slash_panel_visible(&state.input_buffer) {
+        MenuContent::Slash
+    } else if at_completion_active(&state.input_buffer, state.cursor_char_idx) {
+        MenuContent::FileMention
+    } else {
+        MenuContent::None
+    }
+}
+
 fn escape_cancels_active_turn(state: &TuiSessionState) -> bool {
     matches!(
         state.current_busy_state,
-        BusyState::Thinking | BusyState::Streaming | BusyState::ToolRunning
-    )
+        BusyState::Thinking
+            | BusyState::Streaming
+            | BusyState::ToolRunning
+            | BusyState::ApprovalPending
+    ) || state.active_approval.is_some()
 }
 
 fn request_turn_cancel(
@@ -1129,13 +1131,7 @@ fn insert_pasted_text(state: &mut TuiSessionState, slash_entries: &[SlashEntry],
     if insert_text.is_empty() {
         return;
     }
-    let idx = state.cursor_char_idx;
-    let mut cs: Vec<char> = state.input_buffer.chars().collect();
-    let ins: Vec<char> = insert_text.chars().collect();
-    let ins_len = ins.len();
-    cs.splice(idx..idx, ins);
-    state.input_buffer = cs.into_iter().collect();
-    state.cursor_char_idx += ins_len;
+    state.insert_input_str(&insert_text);
     if slash_panel_visible(&state.input_buffer) {
         let f = filter_slash_entries(slash_entries, &state.input_buffer);
         if !f.is_empty() {
@@ -1155,6 +1151,11 @@ fn rect_contains(r: Rect, col: u16, row: u16) -> bool {
 
 fn mouse_left_activated(kind: MouseEventKind) -> bool {
     matches!(kind, MouseEventKind::Up(MouseButton::Left))
+}
+
+fn is_click_jitter(selection: &crate::tui::mouse_select::Selection) -> bool {
+    selection.anchor.row == selection.cursor.row
+        && selection.anchor.col.abs_diff(selection.cursor.col) <= 1
 }
 
 fn mouse_scroll_step(modifiers: KeyModifiers, viewport_lines: usize, base_step: usize) -> usize {
@@ -1222,10 +1223,11 @@ pub fn setup_terminal(mouse_capture: bool) -> anyhow::Result<Terminal<CrosstermB
         let _ = execute!(out, EnableBracketedPaste);
         use std::io::Write;
         if mouse_capture {
-            // Enable click+scroll tracking (?1000h) with SGR extended coords (?1006h).
-            // Omit ?1002h/?1003h (motion tracking) so Shift+drag bypasses capture for
-            // native text selection in all modern terminals (Windows Terminal, iTerm2, etc.).
-            out.write_all(b"\x1b[?1000h\x1b[?1006h")
+            // Koda-style selective mouse capture:
+            // - ?1002h button-event tracking (includes drag with button held)
+            // - ?1006h SGR extended coordinates
+            // This enables click-drag range selection in the in-app transcript.
+            out.write_all(b"\x1b[?1002h\x1b[?1006h")
                 .map_err(|e| anyhow::anyhow!("mouse enable: {e}"))?;
         }
         let _ = out.flush();
@@ -1244,25 +1246,10 @@ pub fn restore_terminal(_mouse_capture: bool) {
     let _ = execute!(out, Show);
     let _ = execute!(out, DisableBracketedPaste);
     use std::io::Write;
-    let _ = out.write_all(b"\x1b[?1000l\x1b[?1006l");
+    let _ = out.write_all(b"\x1b[?1002l\x1b[?1006l");
     let _ = out.flush();
     let _ = execute!(out, LeaveAlternateScreen);
     let _ = disable_raw_mode();
-}
-
-/// Runtime toggle for mouse capture (button+wheel tracking).
-/// When `on`, scroll-wheel works but native terminal selection is intercepted.
-/// When `off`, terminal owns mouse → user can click-drag to select + copy.
-pub fn set_mouse_capture(on: bool) {
-    use std::io::Write;
-    let mut out = stdout();
-    let bytes: &[u8] = if on {
-        b"\x1b[?1000h\x1b[?1006h"
-    } else {
-        b"\x1b[?1000l\x1b[?1006l"
-    };
-    let _ = out.write_all(bytes);
-    let _ = out.flush();
 }
 
 #[inline]
@@ -1442,7 +1429,7 @@ fn transcript_lines_and_hits(
                 ),
                 Span::styled(
                     format!(
-                        " {} item(s) · Ctrl+; list · Ctrl+K pin last",
+                        " {} item(s) · Ctrl+O list · Ctrl+K pin last",
                         state.pinned_notes.len()
                     ),
                     Style::default().fg(theme::muted()),
@@ -1540,16 +1527,6 @@ fn transcript_lines_and_hits(
                                 .fg(theme::assistant())
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            if state.mouse_capture_on {
-                                " · click to copy"
-                            } else {
-                                " · F12 enables click copy"
-                            },
-                            Style::default()
-                                .fg(theme::muted())
-                                .add_modifier(Modifier::UNDERLINED),
-                        ),
                     ]),
                     Some(LineClickHit::CopyText(content.clone())),
                 );
@@ -1603,6 +1580,8 @@ fn transcript_lines_and_hits(
                     ),
                 ];
                 let mut header_spans = spans;
+                header_spans.push(Span::styled(" ", Style::default()));
+                header_spans.push(tool_effect_badge(name));
                 header_spans.push(Span::styled(
                     "  running",
                     Style::default()
@@ -1646,8 +1625,10 @@ fn transcript_lines_and_hits(
                                 .fg(theme::warn())
                                 .add_modifier(Modifier::BOLD),
                         ),
+                        Span::styled(" ", Style::default()),
+                        tool_effect_badge(&req.tool),
                         Span::styled(
-                            "  awaiting your approval (popup) — Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow",
+                            "  awaiting approval — see popup",
                             Style::default().fg(theme::muted()),
                         ),
                     ]),
@@ -1731,6 +1712,8 @@ fn transcript_lines_and_hits(
                             format!("  {} ", ui.family),
                             Style::default().fg(theme::muted()),
                         ),
+                        Span::styled(" ", Style::default()),
+                        tool_effect_badge(name),
                         Span::styled(badge, badge_style.add_modifier(Modifier::BOLD)),
                     ]),
                     None,
@@ -1741,17 +1724,30 @@ fn transcript_lines_and_hits(
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::System(s) => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(Span::styled(
-                        format!("  • {s}"),
-                        Style::default().fg(theme::muted()),
-                    )),
-                    None,
-                );
+                let mut rendered_any = false;
+                for (idx, part) in s.split('\n').enumerate() {
+                    if part.is_empty() {
+                        push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+                        continue;
+                    }
+                    let prefix = if idx == 0 { "  • " } else { "    " };
+                    push_transcript_line(
+                        &mut lines,
+                        &mut hits,
+                        Line::from(Span::styled(
+                            format!("{prefix}{part}"),
+                            Style::default().fg(theme::muted()),
+                        )),
+                        None,
+                    );
+                    rendered_any = true;
+                }
+                if !rendered_any {
+                    push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+                }
             }
             DisplayBlock::Question(q) => {
+                let selected_answer = state.answered_questions.get(&q.question_id);
                 push_section_gap(&mut lines, &mut hits);
                 push_transcript_line(
                     &mut lines,
@@ -1771,58 +1767,153 @@ fn transcript_lines_and_hits(
                     None,
                 );
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-                for text_line in wrap_text(&q.prompt, w) {
+                for text_line in wrap_text(&q.prompt, w.saturating_sub(2)) {
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
-                        Line::from(Span::styled(text_line, Style::default().fg(theme::text()))),
+                        Line::from(vec![
+                            Span::styled("  ", Style::default().fg(theme::muted())),
+                            Span::styled(text_line, Style::default().fg(theme::text())),
+                        ]),
                         None,
                     );
                 }
                 // When the modal is open, skip inline options — the popup handles selection.
                 if !state.question_modal_open {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(vec![
-                            Span::styled(
-                                format!("  [0] suggested: {} ", q.suggested_answer),
-                                Style::default()
-                                    .fg(theme::success())
-                                    .add_modifier(Modifier::UNDERLINED),
-                            ),
-                            Span::styled("(click)", Style::default().fg(theme::muted())),
-                        ]),
-                        Some(LineClickHit::Question(QuestionSelection::Suggested)),
-                    );
-                    for (i, o) in q.options.iter().enumerate() {
+                    let suggested_selected =
+                        matches!(selected_answer, Some(QuestionSelection::Suggested));
+                    for (idx, row) in wrap_text(
+                        &format!("suggested: {}", q.suggested_answer),
+                        w.saturating_sub(12).max(20),
+                    )
+                    .into_iter()
+                    .enumerate()
+                    {
+                        let row_style = if suggested_selected {
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(theme::success())
+                                .add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(theme::success())
+                        };
+                        let prefix_style = if suggested_selected {
+                            row_style
+                        } else {
+                            Style::default()
+                                .fg(theme::success())
+                                .add_modifier(Modifier::BOLD)
+                        };
+                        let line = if idx == 0 {
+                            Line::from(vec![
+                                Span::styled("  [0] ", prefix_style),
+                                Span::styled(row, row_style),
+                                Span::styled(
+                                    "  (click)",
+                                    if suggested_selected {
+                                        row_style
+                                    } else {
+                                        Style::default().fg(theme::muted())
+                                    },
+                                ),
+                            ])
+                        } else {
+                            Line::from(vec![
+                                Span::styled("      ", Style::default().fg(theme::muted())),
+                                Span::styled(row, row_style),
+                            ])
+                        };
                         push_transcript_line(
                             &mut lines,
                             &mut hits,
-                            Line::from(vec![
-                                Span::styled(
-                                    format!("  [{}] ({}) {} ", i + 1, o.id, o.label),
-                                    Style::default()
-                                        .fg(theme::text())
-                                        .add_modifier(Modifier::UNDERLINED),
-                                ),
-                                Span::styled("(click)", Style::default().fg(theme::muted())),
-                            ]),
-                            Some(LineClickHit::Question(QuestionSelection::Option {
-                                option_id: o.id.clone(),
-                            })),
+                            line,
+                            Some(LineClickHit::Question(QuestionSelection::Suggested)),
                         );
                     }
+                    for (i, o) in q.options.iter().enumerate() {
+                        let opt_selected = matches!(
+                            selected_answer,
+                            Some(QuestionSelection::Option { option_id }) if option_id == &o.id
+                        );
+                        let choice_text = format!("({}) {}", o.id, o.label);
+                        for (idx, row) in wrap_text(&choice_text, w.saturating_sub(12).max(20))
+                            .into_iter()
+                            .enumerate()
+                        {
+                            let row_style = if opt_selected {
+                                Style::default()
+                                    .fg(Color::Black)
+                                    .bg(theme::user())
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(theme::text())
+                            };
+                            let prefix_style = if opt_selected {
+                                row_style
+                            } else {
+                                Style::default()
+                                    .fg(theme::assistant())
+                                    .add_modifier(Modifier::BOLD)
+                            };
+                            let line = if idx == 0 {
+                                Line::from(vec![
+                                    Span::styled(format!("  [{}] ", i + 1), prefix_style),
+                                    Span::styled(row, row_style),
+                                    Span::styled(
+                                        "  (click)",
+                                        if opt_selected {
+                                            row_style
+                                        } else {
+                                            Style::default().fg(theme::muted())
+                                        },
+                                    ),
+                                ])
+                            } else {
+                                Line::from(vec![
+                                    Span::styled("      ", Style::default().fg(theme::muted())),
+                                    Span::styled(row, row_style),
+                                ])
+                            };
+                            push_transcript_line(
+                                &mut lines,
+                                &mut hits,
+                                line,
+                                Some(LineClickHit::Question(QuestionSelection::Option {
+                                    option_id: o.id.clone(),
+                                })),
+                            );
+                        }
+                    }
                     if q.allow_custom {
+                        let custom_selected =
+                            matches!(selected_answer, Some(QuestionSelection::Custom { .. }));
                         push_transcript_line(
                             &mut lines,
                             &mut hits,
                             Line::from(Span::styled(
                                 "  [c] type your own answer below, then Enter",
-                                Style::default().fg(theme::muted()),
+                                if custom_selected {
+                                    Style::default()
+                                        .fg(Color::Black)
+                                        .bg(theme::assistant())
+                                        .add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(theme::muted())
+                                },
                             )),
                             None,
                         );
+                        if let Some(QuestionSelection::Custom { text }) = selected_answer {
+                            push_transcript_line(
+                                &mut lines,
+                                &mut hits,
+                                Line::from(Span::styled(
+                                    format!("      selected: {}", truncate_chars(text, 80)),
+                                    Style::default().fg(theme::assistant()),
+                                )),
+                                None,
+                            );
+                        }
                     }
                     push_transcript_line(
                         &mut lines,
@@ -1957,16 +2048,6 @@ fn transcript_lines_and_hits(
                     Style::default().fg(Color::Black).bg(theme::assistant()),
                 ),
                 Span::styled(" streaming ", Style::default().fg(theme::muted())),
-                Span::styled(
-                    if state.mouse_capture_on {
-                        " · click to copy"
-                    } else {
-                        " · F12 enables click copy"
-                    },
-                    Style::default()
-                        .fg(theme::muted())
-                        .add_modifier(Modifier::UNDERLINED),
-                ),
             ]),
             Some(LineClickHit::CopyText(stream.clone())),
         );
@@ -2005,7 +2086,7 @@ fn transcript_lines_and_hits(
             &mut lines,
             &mut hits,
             Line::from(Span::styled(
-                "Tab agent · Shift+Enter newline · Ctrl+P palette · Ctrl+F find · Ctrl+K pin · Ctrl+G sub-agents · Ctrl+V image · F12 mouse",
+                "Tab agent · Shift+Enter/Ctrl+I/Ctrl+J newline · Ctrl+P palette · Ctrl+F find · Ctrl+K pin · Ctrl+O pins · Ctrl+G sub-agents · Ctrl+V image",
                 Style::default().fg(theme::muted()),
             )),
             None,
@@ -2026,9 +2107,75 @@ fn truncate_chars(s: &str, max: usize) -> String {
     }
 }
 
+fn char_window(s: &str, start: usize, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    s.chars().skip(start).take(width).collect()
+}
+
+fn tool_effect_badge(name: &str) -> Span<'static> {
+    use crate::tui::tool_classify::ToolEffect;
+    let effect = crate::tui::tool_classify::classify_tool(name);
+    let display = effect.display();
+    let style = match effect {
+        ToolEffect::ReadOnly => Style::default().fg(Color::Black).bg(theme::success()),
+        ToolEffect::RemoteAction => Style::default().fg(Color::Black).bg(theme::assistant()),
+        ToolEffect::LocalMutation => Style::default().fg(Color::Black).bg(theme::warn()),
+        ToolEffect::Destructive => Style::default().fg(Color::Black).bg(theme::error()),
+    }
+    .add_modifier(Modifier::BOLD);
+    Span::styled(format!(" {}:{} ", display.badge, display.label), style)
+}
+
 /// Extract a compact single-line preview of a tool call input for the transcript.
 /// Tries common argument keys (path/file_path/command/pattern) from JSON first.
 fn tool_input_preview(name: &str, input: &str) -> String {
+    let trimmed = input.trim();
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed) {
+        use crate::tui::tool_summary::{ToolCallKind, ToolCallSummary};
+        let summary = ToolCallSummary::from_call(name, &value);
+        let out = match summary.kind {
+            ToolCallKind::Bash { command } => {
+                if command.is_empty() {
+                    String::new()
+                } else {
+                    format!("cmd: {}", truncate_chars(&command, 110))
+                }
+            }
+            ToolCallKind::Path { path } => {
+                if path.is_empty() {
+                    String::new()
+                } else {
+                    format!("path: {path}")
+                }
+            }
+            ToolCallKind::Grep { pattern, dir } => {
+                format!(
+                    "grep `{}` in {}",
+                    truncate_chars(&pattern, 60),
+                    truncate_chars(&dir, 40)
+                )
+            }
+            ToolCallKind::Glob { pattern, base } => {
+                if let Some(base) = base {
+                    format!(
+                        "glob `{}` in {}",
+                        truncate_chars(&pattern, 60),
+                        truncate_chars(&base, 40)
+                    )
+                } else {
+                    format!("glob `{}`", truncate_chars(&pattern, 60))
+                }
+            }
+            ToolCallKind::List { dir } => format!("list {dir}"),
+            ToolCallKind::WebFetch { url } => format!("url: {}", truncate_chars(&url, 110)),
+            ToolCallKind::Generic { value } => value.unwrap_or_default(),
+        };
+        if !out.trim().is_empty() {
+            return out;
+        }
+    }
     tool_ui::preview_from_display_input(name, input)
 }
 
@@ -2312,10 +2459,18 @@ fn render_approval_popup(frame: &mut ratatui::Frame<'_>, area: Rect, req: &Appro
     lines.extend(full_lines);
     lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        " Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny · Esc keep waiting",
+        " Decision ",
         Style::default()
             .fg(theme::warn())
             .add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        " [y] Ctrl+Y approve   [n] Ctrl+N deny   [u] Ctrl+U always allow pattern",
+        Style::default().fg(theme::text()),
+    )));
+    lines.push(Line::from(Span::styled(
+        " /approve or /deny in input · Esc keeps request pending",
+        Style::default().fg(theme::muted()),
     )));
 
     frame.render_widget(ClearWidget, popup_area);
@@ -2789,9 +2944,16 @@ fn render_markdown_lines_with_hits(
             MdEvent::End(_) => {
                 let ended = open.pop();
                 match ended {
-                    Some(MdOpenTag::Paragraph)
-                    | Some(MdOpenTag::Heading)
-                    | Some(MdOpenTag::Item) => {
+                    Some(MdOpenTag::Paragraph) => {
+                        if !current.is_empty() {
+                            flush_md_render_line(&mut out, &mut hits, &mut current);
+                        }
+                        // Add extra vertical rhythm between top-level paragraphs.
+                        if list_stack.is_empty() && quote_depth == 0 {
+                            push_markdown_blank_line_if_needed(&mut out, &mut hits);
+                        }
+                    }
+                    Some(MdOpenTag::Heading) | Some(MdOpenTag::Item) => {
                         if !current.is_empty() {
                             flush_md_render_line(&mut out, &mut hits, &mut current);
                         }
@@ -2888,6 +3050,14 @@ fn render_markdown_lines_with_hits(
 #[cfg(test)]
 fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
     render_markdown_lines_with_hits(markdown, false).0
+}
+
+fn push_markdown_blank_line_if_needed(out: &mut Vec<Line<'static>>, hits: &mut Vec<LineAnswerHit>) {
+    if out.last().is_some_and(|line| line.spans.is_empty()) {
+        return;
+    }
+    out.push(Line::default());
+    hits.push(None);
 }
 
 #[allow(dead_code)]
@@ -3131,7 +3301,7 @@ fn parse_tui_question_answer(
 
 /// `question_answer_tx`: when `Some`, answers are sent there so they unblock `ask_question` while
 /// the async loop is stuck in `run_turn` (that task does not poll `cmd_rx` until the turn ends).
-/// `mouse_capture`: enables terminal mouse capture for scroll and click events.
+/// `mouse_capture`: retained for API compatibility; fullscreen TUI always enables mouse capture.
 /// `scroll_speed`: lines per scroll event.
 #[allow(clippy::too_many_arguments)]
 pub fn run_blocking(
@@ -3141,9 +3311,10 @@ pub fn run_blocking(
     approval_answer_tx: Option<UnboundedSender<ApprovalAnswer>>,
     show_run_banner: bool,
     cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
-    mouse_capture: bool,
+    _mouse_capture: bool,
     scroll_speed: u16,
 ) -> anyhow::Result<()> {
+    let mouse_capture = true;
     let mut terminal = setup_terminal(mouse_capture)?;
 
     // Load slash entries once: hardcoded commands + discovered skills
@@ -3155,16 +3326,30 @@ pub fn run_blocking(
     let slash_entries = load_slash_entries(&workspace_root, &skill_dirs);
     let workspace_files = file_mentions::discover_workspace_files(&workspace_root);
     let mut transcript_cache = TranscriptRenderCache::default();
+    let mut scroll_buffer = crate::tui::scroll_buffer::ScrollBuffer::default();
     let mut composer_history: Vec<String> = Vec::new();
     let mut composer_history_index: Option<usize> = None;
     let mut composer_history_draft = String::new();
+    let mut ctrl_c_armed_at: Option<std::time::Instant> = None;
 
-    if show_run_banner && let Ok(mut g) = state.lock() {
-        g.blocks.push(DisplayBlock::System(
-            "Interactive run — type a message, Tab cycles agent profile, Ctrl+P opens commands."
-                .into(),
-        ));
-        g.touch_transcript();
+    if let Ok(mut g) = state.lock() {
+        // Show logo on fresh sessions (empty transcript) and in explicit run mode.
+        let should_show_banner = show_run_banner || g.blocks.is_empty();
+        if should_show_banner {
+            let banner = session_start_banner();
+            let already_present = g
+                .blocks
+                .iter()
+                .any(|b| matches!(b, DisplayBlock::System(s) if s == &banner));
+            if !already_present {
+                g.blocks.push(DisplayBlock::System(banner));
+                g.blocks.push(DisplayBlock::System(
+                    "Interactive run — type a message, Tab cycles agent profile, Ctrl+P opens commands."
+                        .into(),
+                ));
+                g.touch_transcript();
+            }
+        }
     }
 
     loop {
@@ -3183,23 +3368,34 @@ pub fn run_blocking(
                 &g.input_buffer,
                 g.cursor_char_idx,
             );
+            g.menu_content = menu_content_for_state(&g);
 
             terminal.draw(|frame| {
                 let area = frame.area();
                 let (main_area, sidebar_opt) = layout_with_sidebar(area, g.sidebar_open);
                 let input_h = composer_input_height(&g, main_area.width);
-                let (tr, st_r, slash_opt, inp_r) = layout_chunks(main_area, chrome_h, input_h);
+                let vp = crate::tui::tui_viewport::layout(
+                    main_area,
+                    chrome_h,
+                    input_h,
+                    g.queue_preview_items.len(),
+                    g.subagents.len(),
+                );
+                let (tr, st_r, slash_opt, inp_r) = (vp.transcript, vp.status, vp.slash, vp.input);
 
                 let transcript_h = tr.height.saturating_sub(2) as usize;
                 let inner_w = tr.width.saturating_sub(2);
                 let (lines, _hits) = transcript_cache.get_or_rebuild(&g, inner_w);
-                let total = lines.len();
-                let max_scroll = total.saturating_sub(transcript_h);
+                scroll_buffer.replace_lines(lines.to_vec());
                 if g.transcript_follow_tail {
-                    g.scroll_lines = max_scroll;
+                    scroll_buffer.scroll_to_bottom();
                 } else {
-                    g.scroll_lines = g.scroll_lines.min(max_scroll);
+                    scroll_buffer.set_from_top(g.scroll_lines, transcript_h, inner_w as usize);
                 }
+                let (from_top, _) = scroll_buffer.from_top(transcript_h, inner_w as usize);
+                g.scroll_lines = from_top as usize;
+                let total = scroll_buffer.len();
+                let max_scroll = total.saturating_sub(transcript_h);
 
                 let search_matches = transcript_search_matches(lines, &g.transcript_search_query);
                 if !search_matches.is_empty() {
@@ -3210,6 +3406,11 @@ pub fn run_blocking(
                         if target < g.scroll_lines {
                             g.scroll_lines = target;
                             g.transcript_follow_tail = false;
+                            scroll_buffer.set_from_top(
+                                g.scroll_lines,
+                                transcript_h,
+                                inner_w as usize,
+                            );
                         } else {
                             let bottom = g.scroll_lines.saturating_add(transcript_h.max(1));
                             if target >= bottom {
@@ -3217,6 +3418,11 @@ pub fn run_blocking(
                                     .saturating_sub(transcript_h.saturating_sub(1))
                                     .min(max_scroll);
                                 g.transcript_follow_tail = false;
+                                scroll_buffer.set_from_top(
+                                    g.scroll_lines,
+                                    transcript_h,
+                                    inner_w as usize,
+                                );
                             }
                         }
                     }
@@ -3252,6 +3458,39 @@ pub fn run_blocking(
                     }
                 }
 
+                // Apply mouse-selection highlight, if any. Selection rows are
+                // in buffer-space; shift into the visible slice's local coords
+                // before delegating to mouse_select::apply_selection_highlight.
+                if let Some(ref sel) = g.mouse_selection {
+                    let (sel_start, sel_end) = sel.ordered();
+                    let visible_start = start;
+                    let visible_end = end.saturating_sub(1);
+                    let overlaps_visible = (sel_end.row as usize) >= visible_start
+                        && (sel_start.row as usize) <= visible_end;
+                    if overlaps_visible {
+                        let inner_w = tr.width.saturating_sub(2) as usize;
+                        let start_u16 = start.min(u16::MAX as usize) as u16;
+                        let local_anchor = sel.anchor.row.saturating_sub(start_u16);
+                        let local_cursor = sel.cursor.row.saturating_sub(start_u16);
+                        let local_sel = crate::tui::mouse_select::Selection {
+                            anchor: crate::tui::mouse_select::VisualPos {
+                                row: local_anchor,
+                                col: sel.anchor.col,
+                            },
+                            cursor: crate::tui::mouse_select::VisualPos {
+                                row: local_cursor,
+                                col: sel.cursor.col,
+                            },
+                            scroll_from_top: sel.scroll_from_top,
+                        };
+                        visible = crate::tui::mouse_select::apply_selection_highlight(
+                            visible,
+                            &local_sel,
+                            inner_w.max(1),
+                        );
+                    }
+                }
+
                 let scroll_info = if g.scroll_lines > 0 || !g.transcript_follow_tail {
                     format!(" lines {}–{} of {} ", start + 1, end.min(total), total)
                 } else {
@@ -3274,13 +3513,36 @@ pub fn run_blocking(
                 let main = Paragraph::new(Text::from(visible))
                     .block(
                         Block::default()
-                            .borders(Borders::ALL)
+                            .borders(Borders::TOP | Borders::LEFT | Borders::RIGHT)
                             .border_style(Style::default().fg(theme::border()))
                             .title(Span::styled(title, Style::default().fg(theme::muted()))),
                     )
                     .style(Style::default().bg(theme::bg()));
 
                 frame.render_widget(main, tr);
+
+                let activity_rows = g
+                    .subagents
+                    .iter()
+                    .map(|row| crate::tui::widgets::child_activity_overlay::ActivityRow {
+                        id: row.id.clone(),
+                        phase: row.phase.clone(),
+                        detail: row.detail.clone(),
+                        running: row.running,
+                    })
+                    .collect::<Vec<_>>();
+                crate::tui::tui_viewport::render_activity_overlay(
+                    frame,
+                    vp.activity_overlay,
+                    &activity_rows,
+                    g.subagents.len(),
+                );
+                crate::tui::tui_viewport::render_queue_preview(
+                    frame,
+                    vp.queue_preview,
+                    &g.queue_preview_items,
+                    g.queue_preview_items.len(),
+                );
 
                 if let Some(sidebar) = sidebar_opt {
                     let sections = Layout::default()
@@ -3444,204 +3706,35 @@ pub fn run_blocking(
                     g.current_busy_state,
                     g.busy_state_since,
                 );
-                let indicator_color =
-                    crate::tui::busy_indicator::color_for_state(g.current_busy_state);
-                let busy = Span::styled(indicator_text, Style::default().fg(indicator_color));
-                let approval_hint = if g.active_approval.is_some() {
-                    Span::styled(" !approve ", Style::default().fg(theme::error()))
-                } else {
-                    Span::raw("")
+                let status_top_row = st_r;
+                let tokens_total = g.input_tokens.saturating_add(g.output_tokens);
+                let context_pct = ((tokens_total.saturating_mul(100)) / 128_000).min(100) as u32;
+                let status_bar = crate::tui::widgets::status_bar::StatusBar {
+                    model: &g.model,
+                    agent: &g.agent_profile,
+                    branch: &g.current_branch,
+                    busy_label: &indicator_text,
+                    context_pct,
+                    elapsed_secs: elapsed,
+                    mcp_servers: g.mcp_server_count,
+                    sandbox_status: None,
+                    last_turn: None,
                 };
-                let q_hint = if g.active_question.is_some() {
-                    Span::styled(" ?answer ", Style::default().fg(theme::warn()))
-                } else {
-                    Span::raw("")
-                };
-                let queue_hint = if g.queued_steering > 0 || g.queued_followup > 0 {
-                    Span::styled(
-                        format!(
-                            " queue s:{} f:{} ",
-                            g.queued_steering, g.queued_followup
-                        ),
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::tool())
-                            .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    Span::raw("")
-                };
-                // Session / tokens / cost live in the sidebar; keep the bar short and obvious about bypass.
-                let perm_span = if toolbar_permission_is_bypass(&g.permission_mode) {
-                    Span::styled(
+
+                crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
+                if toolbar_permission_is_bypass(&g.permission_mode) {
+                    let warn = Paragraph::new(Line::from(Span::styled(
                         " BYPASS — tools run without approval ",
                         Style::default()
                             .fg(Color::Black)
                             .bg(theme::error())
                             .add_modifier(Modifier::BOLD),
-                    )
-                } else {
-                    Span::styled(
-                        format!(" perm:{} ", g.permission_mode),
-                        Style::default().fg(theme::muted()),
-                    )
-                };
-                let time_span = Span::styled(
-                    format!("{:02}:{:02}", elapsed / 60, elapsed % 60),
-                    Style::default().fg(theme::muted()),
-                );
-                let sidebar_state = Span::styled(
-                    if g.sidebar_open {
-                        " sidebar:on "
-                    } else {
-                        " sidebar:off "
-                    },
-                    if g.sidebar_open {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::success())
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::muted())
-                            .add_modifier(Modifier::BOLD)
-                    },
-                );
-                let mouse_state = Span::styled(
-                    if g.mouse_capture_on {
-                        " mouse:on "
-                    } else {
-                        " mouse:off "
-                    },
-                    if g.mouse_capture_on {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::tool())
-                            .add_modifier(Modifier::BOLD)
-                    } else {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::muted())
-                            .add_modifier(Modifier::BOLD)
-                    },
-                );
-
-                let status_top_row = st_r;
-
-                let cancel_hint_text = " Esc cancel ";
-                let cancel_hint = escape_cancels_active_turn(&g).then(|| {
-                    Span::styled(
-                        cancel_hint_text,
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::warn())
-                            .add_modifier(Modifier::BOLD),
-                    )
-                });
-                let status_rect = if cancel_hint.is_some()
-                    && status_top_row.width > cancel_hint_text.len() as u16
-                {
-                    Layout::default()
-                        .direction(Direction::Horizontal)
-                        .constraints([
-                            Constraint::Min(0),
-                            Constraint::Length(cancel_hint_text.len() as u16),
-                        ])
-                        .split(status_top_row)[0]
-                } else {
-                    status_top_row
-                };
-
-                // Compute the character-cell x-offset before any borrow of `g` escapes into `status_spans`.
-                let branch_char_offset = 4 + g.model.len() + 4 + g.agent_profile.len() + 4;
-                let branch_text = if g.current_branch.is_empty() {
-                    String::new()
-                } else {
-                    format!("⎇ {}", g.current_branch)
-                };
-                let branch_span_style = Style::default()
-                    .fg(theme::tool())
-                    .add_modifier(Modifier::UNDERLINED);
-
-                // Store the branch chip bounds for click hit-testing.
-                if status_rect.width > branch_char_offset as u16 && !branch_text.is_empty() {
-                    let chip_len = branch_text.len() as u16;
-                    g.branch_chip_bounds = Some(Rect::new(
-                        status_rect.x + branch_char_offset as u16,
-                        status_rect.y,
-                        chip_len.min(status_rect.width - branch_char_offset as u16),
-                        1,
-                    ));
-                } else {
-                    g.branch_chip_bounds = None;
+                    )))
+                    .style(Style::default().bg(theme::surface()));
+                    frame.render_widget(warn, status_top_row);
                 }
-
-                let mut status_spans = vec![
-                    busy,
-                    approval_hint,
-                    q_hint,
-                    queue_hint,
-                    Span::raw(" │ "),
-                    Span::styled(&g.model, Style::default().fg(theme::user())),
-                    Span::raw(" │ "),
-                    Span::styled(&g.agent_profile, Style::default().fg(theme::assistant())),
-                    Span::raw(" │ "),
-                    // branch_text borrow ends before next mutable use of `g` below
-                    Span::styled(branch_text, branch_span_style),
-                    Span::raw(" │ "),
-                    perm_span,
-                ];
-                // Sidebar is hidden on narrow terminals — put session/tokens/cost back on the bar.
-                if sidebar_opt.is_none() {
-                    status_spans.push(Span::raw(" │ "));
-                    status_spans.push(Span::styled(
-                        g.session_id[..8.min(g.session_id.len())].to_string(),
-                        Style::default().fg(theme::muted()),
-                    ));
-                    status_spans.extend([
-                        Span::raw(" │ in:"),
-                        Span::styled(
-                            format!("{}", g.input_tokens),
-                            Style::default().fg(theme::text()),
-                        ),
-                        Span::raw(" out:"),
-                        Span::styled(
-                            format!("{}", g.output_tokens),
-                            Style::default().fg(theme::text()),
-                        ),
-                        Span::raw(" │ $"),
-                        Span::styled(
-                            format!("{:.4}", g.cost_usd),
-                            Style::default().fg(theme::success()),
-                        ),
-                    ]);
-                }
-                status_spans.push(Span::raw(" │ "));
-                status_spans.push(sidebar_state);
-                status_spans.push(Span::raw(" │ "));
-                status_spans.push(mouse_state);
-                status_spans.push(Span::raw(" │ "));
-                status_spans.push(time_span);
-                let status = Line::from(status_spans);
-                let bar = Paragraph::new(status).style(Style::default().bg(theme::surface()));
-                frame.render_widget(bar, status_rect);
+                g.branch_chip_bounds = None;
                 g.sidebar_toggle_bounds = None;
-
-                if let Some(cancel_hint) = cancel_hint {
-                    let hint_width = cancel_hint_text.len() as u16;
-                    if status_top_row.width > hint_width {
-                        let hint_rect = Rect::new(
-                            status_top_row.x + status_top_row.width.saturating_sub(hint_width),
-                            status_top_row.y,
-                            hint_width,
-                            1,
-                        );
-                        let hint_bar = Paragraph::new(Line::from(cancel_hint))
-                            .style(Style::default().bg(theme::surface()));
-                        frame.render_widget(hint_bar, hint_rect);
-                    }
-                }
 
                 if let Some(sr) = slash_opt {
                     if slash_panel_visible(&g.input_buffer) && !slash_filtered.is_empty() {
@@ -3751,15 +3844,8 @@ pub fn run_blocking(
                         Style::default().fg(theme::tool()),
                     ))
                 } else if g.input_buffer.is_empty() {
-                    let mouse_hint = if g.mouse_capture_on {
-                        "mouse ON: wheel scroll + click copy"
-                    } else {
-                        "mouse OFF: drag-select + F6 copy"
-                    };
                     Line::from(Span::styled(
-                        format!(
-                            "Enter send · Shift+Enter newline · Up/Down history · Ctrl+F find · Ctrl+K pin · Ctrl+; pins · Ctrl+G sub-agents · {mouse_hint} · F12 toggle"
-                        ),
+                        "Enter send · Shift+Enter/Ctrl+I/Ctrl+J newline · Up/Down history · Ctrl+F find · Ctrl+K pin · Ctrl+O pins · Ctrl+G sub-agents · Ctrl+C twice exit · wheel scroll · drag-select copy",
                         Style::default().fg(theme::muted()),
                     ))
                 } else {
@@ -3945,6 +4031,73 @@ pub fn run_blocking(
                     frame.render_widget(popup, popup_area);
                 }
 
+                if g.composer_history_search_open {
+                    let needle = g.composer_history_search_query.to_ascii_lowercase();
+                    let mut matches: Vec<String> = composer_history
+                        .iter()
+                        .rev()
+                        .filter(|entry| {
+                            needle.is_empty() || entry.to_ascii_lowercase().contains(&needle)
+                        })
+                        .take(8)
+                        .cloned()
+                        .collect();
+                    if matches.is_empty() {
+                        matches.push("no matches".to_string());
+                    }
+                    let pick = g
+                        .composer_history_search_index
+                        .min(matches.len().saturating_sub(1));
+                    let popup_area = centered_rect(area, 72, 12);
+                    let mut lines = vec![Line::from(vec![
+                        Span::styled(
+                            " Query ",
+                            Style::default()
+                                .fg(theme::muted())
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                        Span::styled(
+                            if g.composer_history_search_query.is_empty() {
+                                "type to search composer history"
+                            } else {
+                                g.composer_history_search_query.as_str()
+                            },
+                            Style::default().fg(theme::text()),
+                        ),
+                    ])];
+                    lines.push(Line::default());
+                    for (idx, entry) in matches.iter().enumerate() {
+                        let st = if idx == pick {
+                            Style::default().fg(Color::Black).bg(theme::user())
+                        } else {
+                            Style::default().fg(theme::text())
+                        };
+                        lines.push(Line::from(Span::styled(
+                            format!(" {} {}", if idx == pick { "▸" } else { " " }, truncate_chars(entry, 62)),
+                            st,
+                        )));
+                    }
+                    lines.push(Line::default());
+                    lines.push(Line::from(Span::styled(
+                        " Enter use · ↑↓ select · Backspace edit · Esc close ",
+                        Style::default().fg(theme::muted()),
+                    )));
+                    frame.render_widget(ClearWidget, popup_area);
+                    let popup = Paragraph::new(Text::from(lines))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(theme::border()))
+                                .title(Span::styled(
+                                    " composer history search (ctrl+r) ",
+                                    Style::default().fg(theme::muted()),
+                                )),
+                        )
+                        .style(Style::default().bg(theme::surface()))
+                        .wrap(Wrap { trim: false });
+                    frame.render_widget(popup, popup_area);
+                }
+
                 // Branch picker popup.
                 if g.branch_picker_open {
                     let branches = &g.branch_picker_branches;
@@ -4063,27 +4216,46 @@ pub fn run_blocking(
                 }
 
                 if g.permission_picker_open {
-                    const PERM_LABELS: &[&str] = &["Default", "Plan", "AcceptEdits", "DontAsk", "BypassPermissions"];
-                    let rows = (PERM_LABELS.len() as u16).saturating_add(6).max(8);
-                    let popup_area = centered_rect(area, 40, rows);
+                    const PERM_ROWS: &[(&str, &str)] = &[
+                        ("Default", "ask before risky actions"),
+                        ("Plan", "planning-first interaction"),
+                        ("AcceptEdits", "approve file edits, prompt for dangerous"),
+                        ("DontAsk", "auto-approve most tool actions"),
+                        ("BypassPermissions", "no approvals (unsafe)"),
+                    ];
+                    let rows = (PERM_ROWS.len() as u16).saturating_add(8).max(10);
+                    let popup_area = centered_rect(area, 78, rows);
                     let mut lines: Vec<Line> = vec![
                         Line::from(Span::styled(
                             " Permission mode ",
                             Style::default().fg(theme::muted()).add_modifier(Modifier::BOLD),
                         )),
+                        Line::from(Span::styled(
+                            format!(" current: {}", g.permission_mode),
+                            Style::default().fg(theme::assistant()),
+                        )),
                         Line::default(),
                     ];
-                    for (i, name) in PERM_LABELS.iter().enumerate() {
-                        let st = if i == g.permission_picker_index {
+                    for (i, (name, desc)) in PERM_ROWS.iter().enumerate() {
+                        let selected = i == g.permission_picker_index;
+                        let st = if selected {
                             Style::default().fg(Color::Black).bg(theme::user()).add_modifier(Modifier::BOLD)
                         } else {
                             Style::default().fg(theme::text())
                         };
-                        lines.push(Line::from(Span::styled(format!(" {name}"), st)));
+                        let desc_st = if selected {
+                            Style::default().fg(Color::Black).bg(theme::user())
+                        } else {
+                            Style::default().fg(theme::muted())
+                        };
+                        lines.push(Line::from(vec![
+                            Span::styled(format!(" [{}] {:<16}", i, name), st),
+                            Span::styled(format!(" {desc}"), desc_st),
+                        ]));
                     }
                     lines.push(Line::default());
                     lines.push(Line::from(Span::styled(
-                        " Enter apply · Esc cancel ",
+                        " ↑↓ select · Enter apply · Esc close ",
                         Style::default().fg(theme::muted()),
                     )));
                     frame.render_widget(ClearWidget, popup_area);
@@ -4202,26 +4374,34 @@ pub fn run_blocking(
                 {
                         let has_chat_option = q.allow_custom;
                         let total_items = 1 + q.options.len() + if has_chat_option { 1 } else { 0 };
-                        // +4 for: title line, blank, blank before footer, footer
-                        let rows = (total_items as u16).saturating_add(6).max(8);
-                        let popup_w = 60u16.min(area.width.saturating_sub(4));
+                        let rows = (total_items as u16).saturating_add(12).max(12);
+                        let popup_w = 82u16.min(area.width.saturating_sub(4));
                         let popup_area = centered_rect(area, popup_w, rows);
 
                         let mut lines: Vec<Line> = vec![
                             Line::from(Span::styled(
-                                format!(" {} ", q.prompt),
+                                " Pick one option ",
                                 Style::default()
-                                    .fg(theme::assistant())
+                                    .fg(theme::warn())
                                     .add_modifier(Modifier::BOLD),
                             )),
                             Line::default(),
                         ];
+                        for text_line in wrap_text(&q.prompt, popup_w.saturating_sub(8) as usize) {
+                            lines.push(Line::from(Span::styled(
+                                format!(" {text_line}"),
+                                Style::default()
+                                    .fg(theme::assistant())
+                                    .add_modifier(Modifier::BOLD),
+                            )));
+                        }
+                        lines.push(Line::default());
 
                         // Suggested answer (index 0)
-                        let suggested_label = format!(" Suggested: {} ", q.suggested_answer);
+                        let suggested_label = format!("suggested: {}", q.suggested_answer);
                         if g.question_modal_index == 0 {
                             lines.push(Line::from(Span::styled(
-                                format!(" ► {}", suggested_label.trim()),
+                                format!(" [0] {suggested_label}"),
                                 Style::default()
                                     .fg(Color::Black)
                                     .bg(theme::user())
@@ -4229,7 +4409,7 @@ pub fn run_blocking(
                             )));
                         } else {
                             lines.push(Line::from(Span::styled(
-                                format!("   {}", suggested_label.trim()),
+                                format!(" [0] {suggested_label}"),
                                 Style::default().fg(theme::text()),
                             )));
                         }
@@ -4237,10 +4417,10 @@ pub fn run_blocking(
                         // Options (index 1..n)
                         for (i, o) in q.options.iter().enumerate() {
                             let item_idx = i + 1;
-                            let label = format!("{} ", o.label);
+                            let label = format!("({}) {}", o.id, o.label);
                             if g.question_modal_index == item_idx {
                                 lines.push(Line::from(Span::styled(
-                                    format!(" ► {}", label.trim()),
+                                    format!(" [{item_idx}] {label}"),
                                     Style::default()
                                         .fg(Color::Black)
                                         .bg(theme::user())
@@ -4248,7 +4428,7 @@ pub fn run_blocking(
                                 )));
                             } else {
                                 lines.push(Line::from(Span::styled(
-                                    format!("   {}", label.trim()),
+                                    format!(" [{item_idx}] {label}"),
                                     Style::default().fg(theme::text()),
                                 )));
                             }
@@ -4259,7 +4439,7 @@ pub fn run_blocking(
                             let chat_idx = 1 + q.options.len();
                             if g.question_modal_index == chat_idx {
                                 lines.push(Line::from(Span::styled(
-                                    " ► Chat about this",
+                                    " [c] Chat about this in composer",
                                     Style::default()
                                         .fg(Color::Black)
                                         .bg(theme::user())
@@ -4267,7 +4447,7 @@ pub fn run_blocking(
                                 )));
                             } else {
                                 lines.push(Line::from(Span::styled(
-                                    "   Chat about this",
+                                    " [c] Chat about this in composer",
                                     Style::default()
                                         .fg(theme::muted())
                                         .add_modifier(Modifier::ITALIC),
@@ -4278,7 +4458,7 @@ pub fn run_blocking(
                         // Footer
                         lines.push(Line::default());
                         let footer_text = if has_chat_option {
-                            " ↑↓ select · Enter confirm · Esc chat "
+                            " ↑↓ select · Enter confirm · Esc switch to composer input "
                         } else {
                             " ↑↓ select · Enter confirm "
                         };
@@ -4614,25 +4794,59 @@ pub fn run_blocking(
 
                 // Generic info modal (read-only scrollable popup).
                 if g.info_modal_open {
-                    let max_vis = 16usize;
+                    let max_vis = area.height.saturating_sub(8).clamp(8, 30) as usize;
                     let n_lines = g.info_modal_lines.len();
                     let popup_h = (n_lines.min(max_vis) as u16).saturating_add(6).max(8);
-                    let popup_area = centered_rect(area, 70, popup_h);
-                    let n_show = n_lines.min(max_vis);
+                    let max_line_chars = g
+                        .info_modal_lines
+                        .iter()
+                        .map(|line| line.chars().count())
+                        .max()
+                        .unwrap_or(40);
+                    let max_popup_w = area.width.saturating_sub(2).max(32);
+                    let min_popup_w = 64u16.min(max_popup_w);
+                    let popup_w = (max_line_chars.min(320) as u16)
+                        .saturating_add(6)
+                        .clamp(min_popup_w, max_popup_w);
+                    let popup_area = centered_rect(area, popup_w, popup_h);
+                    let n_show = n_lines.min(max_vis).max(1);
+                    let content_w = popup_w.saturating_sub(4) as usize;
+                    g.info_modal_view_rows = n_show;
+                    g.info_modal_view_cols = content_w.max(1);
                     let max_scroll = n_lines.saturating_sub(n_show);
                     g.info_modal_scroll = g.info_modal_scroll.min(max_scroll);
+                    let max_hscroll = max_line_chars.saturating_sub(content_w.max(1));
+                    g.info_modal_hscroll = g.info_modal_hscroll.min(max_hscroll);
                     let start = g.info_modal_scroll;
                     let end = (start + n_show).min(n_lines);
                     let mut lines: Vec<Line> = Vec::new();
                     for line in &g.info_modal_lines[start..end] {
                         lines.push(Line::from(Span::styled(
-                            format!(" {line}"),
+                            format!(
+                                " {}",
+                                char_window(line, g.info_modal_hscroll, content_w.max(1))
+                            ),
                             Style::default().fg(theme::text()),
                         )));
                     }
                     if n_lines > max_vis {
                         lines.push(Line::from(Span::styled(
-                            format!(" ─ {}/{} · ↑↓ scroll", start + 1, n_lines),
+                            format!(
+                                " ─ {}/{} · ↑↓ vertical · ←→ horizontal ({}/{})",
+                                start + 1,
+                                n_lines,
+                                g.info_modal_hscroll + 1,
+                                max_hscroll + 1
+                            ),
+                            Style::default().fg(theme::muted()),
+                        )));
+                    } else {
+                        lines.push(Line::from(Span::styled(
+                            format!(
+                                " ─ ←→ horizontal ({}/{})",
+                                g.info_modal_hscroll + 1,
+                                max_hscroll + 1
+                            ),
                             Style::default().fg(theme::muted()),
                         )));
                     }
@@ -5024,7 +5238,6 @@ pub fn run_blocking(
             };
 
             match ev {
-                Event::Mouse(_) if !g.mouse_capture_on => continue,
                 Event::Mouse(_) if g.command_palette_open => continue,
                 Event::Mouse(_) if g.info_modal_open => continue,
                 Event::Mouse(_) if g.model_picker_open => continue,
@@ -5075,7 +5288,13 @@ pub fn run_blocking(
                         g.cursor_char_idx,
                     );
                     let input_h = composer_input_height(&g, main_area.width);
-                    let (tr, _, slash_r, _) = layout_chunks(main_area, sh, input_h);
+                    let (tr, _, slash_r, _) = layout_chunks(
+                        main_area,
+                        sh,
+                        input_h,
+                        g.queue_preview_items.len(),
+                        g.subagents.len(),
+                    );
 
                     // Mouse scroll works anywhere on the screen, not just inside the transcript.
                     if matches!(
@@ -5084,24 +5303,140 @@ pub fn run_blocking(
                     ) {
                         let inner_w = tr.width.saturating_sub(2);
                         let (lines, _hits) = transcript_cache.get_or_rebuild(&g, inner_w);
-                        let total = lines.len();
                         let th = tr.height.saturating_sub(2) as usize;
-                        let max_scroll = total.saturating_sub(th);
+                        scroll_buffer.replace_lines(lines.to_vec());
+                        scroll_buffer.set_from_top(g.scroll_lines, th, inner_w as usize);
                         let step = mouse_scroll_step(m.modifiers, th, scroll_speed as usize);
+                        // Scrolling clears any active mouse text selection.
+                        g.mouse_selection = None;
                         match m.kind {
                             MouseEventKind::ScrollUp => {
-                                g.transcript_follow_tail = false;
-                                g.scroll_lines = g.scroll_lines.saturating_sub(step);
+                                scroll_buffer.scroll_up(step, inner_w as usize, th);
                             }
                             MouseEventKind::ScrollDown => {
-                                g.scroll_lines = (g.scroll_lines + step).min(max_scroll);
-                                if g.scroll_lines >= max_scroll {
-                                    g.transcript_follow_tail = true;
-                                }
+                                scroll_buffer.scroll_down(step);
                             }
                             _ => {}
                         }
+                        let (from_top, _) = scroll_buffer.from_top(th, inner_w as usize);
+                        g.scroll_lines = from_top as usize;
+                        g.transcript_follow_tail = scroll_buffer.is_sticky();
                         continue;
+                    }
+
+                    // ── Mouse text selection within transcript ──────────────
+                    // Down(Left) anchors a selection; Drag(Left) extends it;
+                    // Up(Left) with a non-empty drag copies to clipboard.
+                    // This stays active even if drag/release leaves the panel.
+                    let inner_top = tr.y.saturating_add(1);
+                    let inner_left = tr.x.saturating_add(1);
+                    let inner_w = tr.width.saturating_sub(2) as usize;
+                    let inner_h = tr.height.saturating_sub(2) as usize;
+                    let in_transcript_inner = m.row >= inner_top
+                        && (m.row as usize) < inner_top as usize + inner_h
+                        && m.column >= inner_left
+                        && (m.column as usize) < inner_left as usize + inner_w;
+                    g.history_rect = Some((tr.x, tr.y, tr.width, tr.height));
+
+                    match m.kind {
+                        MouseEventKind::Down(MouseButton::Left) if in_transcript_inner => {
+                            let row_in_area = (m.row - inner_top) as usize;
+                            let col_in_area = (m.column - inner_left) as usize;
+                            let buf_row =
+                                (g.scroll_lines + row_in_area).min(u16::MAX as usize) as u16;
+                            g.mouse_selection = Some(crate::tui::mouse_select::Selection {
+                                anchor: crate::tui::mouse_select::VisualPos {
+                                    row: buf_row,
+                                    col: col_in_area.min(u16::MAX as usize) as u16,
+                                },
+                                cursor: crate::tui::mouse_select::VisualPos {
+                                    row: buf_row,
+                                    col: col_in_area.min(u16::MAX as usize) as u16,
+                                },
+                                scroll_from_top: g.scroll_lines.min(u16::MAX as usize) as u16,
+                            });
+                        }
+                        MouseEventKind::Drag(MouseButton::Left) => {
+                            if g.mouse_selection.is_some() && inner_h > 0 {
+                                let inner_w_eff = inner_w.max(1);
+                                let (lines, _hits) =
+                                    transcript_cache.get_or_rebuild(&g, inner_w_eff as u16);
+                                scroll_buffer.replace_lines(lines.to_vec());
+                                scroll_buffer.set_from_top(g.scroll_lines, inner_h, inner_w_eff);
+                                if m.row < inner_top {
+                                    scroll_buffer.scroll_up(1, inner_w_eff, inner_h);
+                                } else if (m.row as usize) >= inner_top as usize + inner_h {
+                                    scroll_buffer.scroll_down(1);
+                                }
+                                let (from_top, _) = scroll_buffer.from_top(inner_h, inner_w_eff);
+                                g.scroll_lines = from_top as usize;
+                                g.transcript_follow_tail = scroll_buffer.is_sticky();
+
+                                let clamped_row = if m.row < inner_top {
+                                    0usize
+                                } else if (m.row as usize) >= inner_top as usize + inner_h {
+                                    inner_h.saturating_sub(1)
+                                } else {
+                                    (m.row - inner_top) as usize
+                                };
+                                let clamped_col = if m.column < inner_left {
+                                    0usize
+                                } else if (m.column as usize) >= inner_left as usize + inner_w_eff {
+                                    inner_w_eff.saturating_sub(1)
+                                } else {
+                                    (m.column - inner_left) as usize
+                                };
+
+                                let scroll_from_top = g.scroll_lines.min(u16::MAX as usize) as u16;
+                                if let Some(ref mut sel) = g.mouse_selection {
+                                    sel.scroll_from_top = scroll_from_top;
+                                    let buf_row = (sel.scroll_from_top as usize + clamped_row)
+                                        .min(u16::MAX as usize)
+                                        as u16;
+                                    sel.cursor = crate::tui::mouse_select::VisualPos {
+                                        row: buf_row,
+                                        col: clamped_col.min(u16::MAX as usize) as u16,
+                                    };
+                                }
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            if let Some(sel) = g.mouse_selection.take() {
+                                if sel.anchor != sel.cursor && !is_click_jitter(&sel) {
+                                    let inner_w_eff = inner_w.max(1);
+                                    let (lines, _hits) =
+                                        transcript_cache.get_or_rebuild(&g, inner_w_eff as u16);
+                                    let gutter_widths = vec![0u16; lines.len()];
+                                    let (rows, gutters) =
+                                        crate::tui::mouse_select::build_all_visual_rows(
+                                            &lines,
+                                            &gutter_widths,
+                                            inner_w_eff,
+                                        );
+                                    let text = crate::tui::mouse_select::extract_selected_text(
+                                        &rows, &gutters, &sel,
+                                    );
+                                    if !text.is_empty() {
+                                        let n = text.chars().count();
+                                        match crate::tui::mouse_select::copy_to_clipboard(&text) {
+                                            Ok(msg) => {
+                                                g.blocks.push(DisplayBlock::System(format!(
+                                                    " Copied {n} chars {msg}"
+                                                )));
+                                                g.touch_transcript();
+                                            }
+                                            Err(e) => {
+                                                g.push_error(format!("Clipboard copy failed: {e}"));
+                                            }
+                                        }
+                                        // Meaningful drag copy consumed the click.
+                                        continue;
+                                    }
+                                }
+                                // Pure click (no drag): let click-hit logic run.
+                            }
+                        }
+                        _ => {}
                     }
 
                     // Transcript click targets (left-click on question options / code blocks).
@@ -5140,7 +5475,7 @@ pub fn run_blocking(
                                                     }
                                                 }
                                                 LineClickHit::CopyText(text) => {
-                                                    let feedback = match copy_to_clipboard(text) {
+                                                    let feedback = match copy_to_clipboard(&text) {
                                                         Ok(_) => " Copied code block to clipboard"
                                                             .to_string(),
                                                         Err(e) => {
@@ -5176,8 +5511,7 @@ pub fn run_blocking(
                             if (inner_y as usize) < n_show {
                                 let idx = list_scroll + inner_y as usize;
                                 if idx < slash_filtered.len() {
-                                    g.input_buffer = slash_filtered[idx].command_str();
-                                    g.cursor_char_idx = g.input_buffer.chars().count();
+                                    g.set_input_text(slash_filtered[idx].command_str());
                                     g.slash_menu_index = idx;
                                 }
                             }
@@ -5194,8 +5528,7 @@ pub fn run_blocking(
                                     let cur = g.cursor_char_idx;
                                     let (buf, cidx) =
                                         apply_at_completion(&g.input_buffer, cur, choice);
-                                    g.input_buffer = buf;
-                                    g.cursor_char_idx = cidx;
+                                    g.set_input_text_with_cursor(buf, cidx);
                                 }
                             }
                         }
@@ -5207,14 +5540,6 @@ pub fn run_blocking(
                         && mouse_left_activated(m.kind)
                     {
                         let _ = cmd_tx.send(TuiCmd::OpenBranchPicker);
-                    }
-
-                    // Check click on sidebar toggle chip in status bar.
-                    if let Some(bounds) = g.sidebar_toggle_bounds
-                        && rect_contains(bounds, m.column, m.row)
-                        && mouse_left_activated(m.kind)
-                    {
-                        g.toggle_sidebar();
                     }
                 }
                 Event::Paste(pasted) => {
@@ -5245,6 +5570,43 @@ pub fn run_blocking(
                 Event::Key(key) => {
                     if !matches!(key.kind, KeyEventKind::Press) {
                         continue;
+                    }
+
+                    // Any keystroke clears active mouse text selection.
+                    if g.mouse_selection.is_some() {
+                        g.mouse_selection = None;
+                    }
+
+                    // Ctrl+C behavior:
+                    // 1) If a turn is active, cancel it.
+                    // 2) If idle, require a second Ctrl+C within 1.5s to exit.
+                    let is_ctrl_c = matches!(key.code, KeyCode::Char('c'))
+                        && key.modifiers.contains(KeyModifiers::CONTROL)
+                        && !key.modifiers.contains(KeyModifiers::ALT);
+                    if is_ctrl_c {
+                        if escape_cancels_active_turn(&g) {
+                            request_turn_cancel(&mut g, cancel_flag.as_ref(), &cmd_tx);
+                            ctrl_c_armed_at = None;
+                        } else {
+                            let now = std::time::Instant::now();
+                            let armed = ctrl_c_armed_at.is_some_and(|t| {
+                                now.duration_since(t) <= Duration::from_millis(1500)
+                            });
+                            if armed {
+                                g.should_exit = true;
+                                let _ = cmd_tx.send(TuiCmd::Exit);
+                                break;
+                            }
+                            ctrl_c_armed_at = Some(now);
+                            g.blocks.push(DisplayBlock::System(
+                                "Press Ctrl+C again within 1.5s to exit.".into(),
+                            ));
+                            g.touch_transcript();
+                            g.transcript_follow_tail = true;
+                        }
+                        continue;
+                    } else {
+                        ctrl_c_armed_at = None;
                     }
 
                     if g.anthropic_oauth_modal_open {
@@ -5337,8 +5699,7 @@ pub fn run_blocking(
                                     && let PaletteRow::Entry { label, .. } = filtered[abs_idx]
                                 {
                                     let cmd = palette_command_for_label(label);
-                                    g.input_buffer = cmd.to_string();
-                                    g.cursor_char_idx = g.input_buffer.chars().count();
+                                    g.set_input_text(cmd.to_string());
                                 }
                                 g.command_palette_open = false;
                                 g.command_palette_query.clear();
@@ -5373,17 +5734,32 @@ pub fn run_blocking(
                                 g.info_modal_scroll = g.info_modal_scroll.saturating_sub(1);
                             }
                             (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                                let max_vis = 16usize;
+                                let max_vis = g.info_modal_view_rows.max(1);
                                 let max_scroll = g.info_modal_lines.len().saturating_sub(max_vis);
                                 g.info_modal_scroll = (g.info_modal_scroll + 1).min(max_scroll);
                             }
+                            (KeyCode::Left, _) | (KeyCode::Char('h'), KeyModifiers::NONE) => {
+                                g.info_modal_hscroll = g.info_modal_hscroll.saturating_sub(4);
+                            }
+                            (KeyCode::Right, _) | (KeyCode::Char('l'), KeyModifiers::NONE) => {
+                                g.info_modal_hscroll = g.info_modal_hscroll.saturating_add(4);
+                            }
                             (KeyCode::Home, _) => {
                                 g.info_modal_scroll = 0;
+                                g.info_modal_hscroll = 0;
                             }
                             (KeyCode::End, _) => {
-                                let max_vis = 16usize;
+                                let max_vis = g.info_modal_view_rows.max(1);
                                 g.info_modal_scroll =
                                     g.info_modal_lines.len().saturating_sub(max_vis);
+                                let max_line_chars = g
+                                    .info_modal_lines
+                                    .iter()
+                                    .map(|line| line.chars().count())
+                                    .max()
+                                    .unwrap_or(0);
+                                g.info_modal_hscroll =
+                                    max_line_chars.saturating_sub(g.info_modal_view_cols.max(1));
                             }
                             _ => {}
                         }
@@ -5903,7 +6279,7 @@ pub fn run_blocking(
 
                     if g.pins_modal_open {
                         match (key.code, key.modifiers) {
-                            (KeyCode::Esc, _) | (KeyCode::Char(';'), KeyModifiers::CONTROL) => {
+                            (KeyCode::Esc, _) | (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
                                 g.close_pins_modal();
                             }
                             (KeyCode::Up, _) => {
@@ -5935,7 +6311,7 @@ pub fn run_blocking(
                             (KeyCode::F(6), _) => {
                                 let msg = if let Some(note) = g.pinned_notes.get(g.pins_modal_index)
                                 {
-                                    match copy_to_clipboard(note.body.clone()) {
+                                    match copy_to_clipboard(&note.body) {
                                         Ok(_) => "Copied pinned note".to_string(),
                                         Err(e) => format!("Clipboard copy failed: {e}"),
                                     }
@@ -6021,6 +6397,62 @@ pub fn run_blocking(
                         continue;
                     }
 
+                    if g.composer_history_search_open {
+                        let needle = g.composer_history_search_query.to_ascii_lowercase();
+                        let matches: Vec<String> = composer_history
+                            .iter()
+                            .rev()
+                            .filter(|entry| {
+                                needle.is_empty() || entry.to_ascii_lowercase().contains(&needle)
+                            })
+                            .take(64)
+                            .cloned()
+                            .collect();
+                        match (key.code, key.modifiers) {
+                            (KeyCode::Esc, _) | (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                                g.composer_history_search_open = false;
+                                g.composer_history_search_query.clear();
+                                g.composer_history_search_index = 0;
+                            }
+                            (KeyCode::Backspace, _) => {
+                                g.composer_history_search_query.pop();
+                                g.composer_history_search_index = 0;
+                            }
+                            (KeyCode::Up, _) => {
+                                if !matches.is_empty() {
+                                    g.composer_history_search_index =
+                                        g.composer_history_search_index.saturating_sub(1);
+                                }
+                            }
+                            (KeyCode::Down, _) => {
+                                if !matches.is_empty() {
+                                    g.composer_history_search_index =
+                                        (g.composer_history_search_index + 1)
+                                            .min(matches.len().saturating_sub(1));
+                                }
+                            }
+                            (KeyCode::Enter, _) => {
+                                if !matches.is_empty() {
+                                    let pick = g
+                                        .composer_history_search_index
+                                        .min(matches.len().saturating_sub(1));
+                                    if let Some(entry) = matches.get(pick) {
+                                        g.set_input_text(entry.clone());
+                                    }
+                                }
+                                g.composer_history_search_open = false;
+                                g.composer_history_search_query.clear();
+                                g.composer_history_search_index = 0;
+                            }
+                            (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
+                                g.composer_history_search_query.push(c);
+                                g.composer_history_search_index = 0;
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+
                     // Ctrl+X leader key dispatch.
                     if g.leader_pending {
                         g.leader_pending = false;
@@ -6050,7 +6482,8 @@ pub fn run_blocking(
                                 let _ = cmd_tx.send(TuiCmd::OpenStatus);
                             }
                             KeyCode::Char('b') | KeyCode::Char('B') => {
-                                g.toggle_sidebar();
+                                drop(g);
+                                let _ = cmd_tx.send(TuiCmd::OpenStatus);
                             }
                             KeyCode::Char('a') | KeyCode::Char('A') => {
                                 drop(g);
@@ -6101,7 +6534,7 @@ pub fn run_blocking(
                         }
                         (KeyCode::F(6), _) => {
                             let msg = if let Some(text) = latest_copyable_text(&g) {
-                                match copy_to_clipboard(text) {
+                                match copy_to_clipboard(&text) {
                                     Ok(_) => "Copied latest assistant response".to_string(),
                                     Err(e) => format!("Clipboard copy failed: {e}"),
                                 }
@@ -6113,13 +6546,7 @@ pub fn run_blocking(
                             g.transcript_follow_tail = true;
                         }
                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
-                            if escape_cancels_active_turn(&g) {
-                                request_turn_cancel(&mut g, cancel_flag.as_ref(), &cmd_tx);
-                            } else {
-                                g.should_exit = true;
-                                let _ = cmd_tx.send(TuiCmd::Exit);
-                                break;
-                            }
+                            // Handled earlier in Event::Key with double-press semantics.
                         }
                         (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                             g.blocks.clear();
@@ -6136,7 +6563,7 @@ pub fn run_blocking(
                             g.command_palette_query.clear();
                             g.palette_index = 0;
                         }
-                        (KeyCode::Char(';'), KeyModifiers::CONTROL) => {
+                        (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
                             if g.pinned_notes.is_empty() {
                                 g.blocks.push(DisplayBlock::System(
                                     "No pinned notes yet. Use Ctrl+K to pin the latest response."
@@ -6181,8 +6608,14 @@ pub fn run_blocking(
                         (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                             g.open_transcript_search();
                         }
+                        (KeyCode::Char('r'), KeyModifiers::CONTROL) => {
+                            g.composer_history_search_open = true;
+                            g.composer_history_search_query.clear();
+                            g.composer_history_search_index = 0;
+                        }
                         (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
-                            g.toggle_sidebar();
+                            drop(g);
+                            let _ = cmd_tx.send(TuiCmd::OpenStatus);
                         }
                         (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
                             g.leader_pending = true;
@@ -6222,6 +6655,19 @@ pub fn run_blocking(
                                 }
                             }
                         }
+                        (KeyCode::Char('i'), KeyModifiers::CONTROL) => {
+                            composer_history_index = None;
+                            composer_history_draft.clear();
+                            g.insert_input_char('\n');
+                        }
+                        (KeyCode::Tab, mods)
+                            if mods.contains(KeyModifiers::CONTROL)
+                                && !mods.contains(KeyModifiers::ALT) =>
+                        {
+                            composer_history_index = None;
+                            composer_history_draft.clear();
+                            g.insert_input_char('\n');
+                        }
                         (KeyCode::Tab, _) => {
                             if let Some((buf, cidx)) = apply_selected_at_completion(
                                 &workspace_files,
@@ -6230,8 +6676,7 @@ pub fn run_blocking(
                                 g.at_menu_index,
                                 false,
                             ) {
-                                g.input_buffer = buf;
-                                g.cursor_char_idx = cidx;
+                                g.set_input_text_with_cursor(buf, cidx);
                             } else {
                                 let slash_filtered =
                                     filter_slash_entries(&slash_entries, &g.input_buffer);
@@ -6239,8 +6684,7 @@ pub fn run_blocking(
                                     && slash_panel_visible(&g.input_buffer)
                                 {
                                     let pick = g.slash_menu_index % slash_filtered.len();
-                                    g.input_buffer = slash_filtered[pick].command_str();
-                                    g.cursor_char_idx = g.input_buffer.chars().count();
+                                    g.set_input_text(slash_filtered[pick].command_str());
                                 } else {
                                     drop(g);
                                     let _ = cmd_tx.send(TuiCmd::CycleAgent);
@@ -6255,23 +6699,10 @@ pub fn run_blocking(
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::CycleModel(false));
                         }
-                        (KeyCode::F(12), _) => {
-                            g.mouse_capture_on = !g.mouse_capture_on;
-                            let now_on = g.mouse_capture_on;
-                            set_mouse_capture(now_on);
-                            let msg = if now_on {
-                                "mouse capture ON — wheel scrolls transcript (F12 to toggle)"
-                            } else {
-                                "mouse capture OFF — click-drag select, F6 copies latest response (F12 toggles)"
-                            };
-                            g.blocks.push(DisplayBlock::System(msg.to_string()));
-                            g.touch_transcript();
-                        }
                         (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
                             if let Some(req) = g.active_approval.clone() {
                                 let call_id = req.call_id.clone();
-                                g.input_buffer.clear();
-                                g.cursor_char_idx = 0;
+                                g.clear_input();
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
                                     let _ = tx.send(ApprovalAnswer::Verdict {
@@ -6285,8 +6716,7 @@ pub fn run_blocking(
                         (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
                             if let Some(req) = g.active_approval.clone() {
                                 let call_id = req.call_id.clone();
-                                g.input_buffer.clear();
-                                g.cursor_char_idx = 0;
+                                g.clear_input();
                                 drop(g);
                                 if let Some(ref tx) = approval_answer_tx {
                                     let _ = tx.send(ApprovalAnswer::Verdict {
@@ -6303,8 +6733,7 @@ pub fn run_blocking(
                                     serde_json::from_str(&req.input).unwrap_or_default();
                                 let pattern = suggest_allow_pattern(&req.tool, &input_json);
                                 let call_id = req.call_id.clone();
-                                g.input_buffer.clear();
-                                g.cursor_char_idx = 0;
+                                g.clear_input();
                                 g.blocks.push(DisplayBlock::System(format!(
                                     "Always allowing: {pattern}"
                                 )));
@@ -6324,11 +6753,7 @@ pub fn run_blocking(
                             {
                                 composer_history_index = None;
                                 composer_history_draft.clear();
-                                let idx = g.cursor_char_idx;
-                                let mut cs: Vec<char> = g.input_buffer.chars().collect();
-                                cs.insert(idx, '\n');
-                                g.input_buffer = cs.into_iter().collect();
-                                g.cursor_char_idx += 1;
+                                g.insert_input_char('\n');
                                 continue;
                             }
                             if let Some((buf, cidx)) = apply_selected_at_completion(
@@ -6338,12 +6763,10 @@ pub fn run_blocking(
                                 g.at_menu_index,
                                 true,
                             ) {
-                                g.input_buffer = buf;
-                                g.cursor_char_idx = cidx;
+                                g.set_input_text_with_cursor(buf, cidx);
                                 continue;
                             }
-                            let line = std::mem::take(&mut g.input_buffer);
-                            g.cursor_char_idx = 0;
+                            let line = g.take_input_text();
                             g.slash_menu_index = 0;
                             let active_approval = g.active_approval.clone();
                             let active_q = g.active_question.clone();
@@ -6470,18 +6893,22 @@ pub fn run_blocking(
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::Submit(expanded));
                         }
+                        (KeyCode::Char('j'), KeyModifiers::CONTROL) => {
+                            composer_history_index = None;
+                            composer_history_draft.clear();
+                            g.insert_input_char('\n');
+                        }
                         (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-                            g.cursor_char_idx = 0;
+                            g.move_input_home();
                         }
                         (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
-                            g.cursor_char_idx = g.input_buffer.chars().count();
+                            g.move_input_end();
                         }
                         (KeyCode::Left, _) => {
-                            g.cursor_char_idx = g.cursor_char_idx.saturating_sub(1);
+                            g.move_input_left();
                         }
                         (KeyCode::Right, _) => {
-                            let max = g.input_buffer.chars().count();
-                            g.cursor_char_idx = (g.cursor_char_idx + 1).min(max);
+                            g.move_input_right();
                         }
                         (KeyCode::PageUp, _) => {
                             if let Ok(sz) = terminal.size() {
@@ -6494,16 +6921,24 @@ pub fn run_blocking(
                                     g.cursor_char_idx,
                                 );
                                 let input_h = composer_input_height(&g, main_area.width);
-                                let (tr, _, _, _) = layout_chunks(main_area, sh, input_h);
+                                let (tr, _, _, _) = layout_chunks(
+                                    main_area,
+                                    sh,
+                                    input_h,
+                                    g.queue_preview_items.len(),
+                                    g.subagents.len(),
+                                );
                                 let (lines, _hits) =
                                     transcript_cache.get_or_rebuild(&g, tr.width.saturating_sub(2));
-                                let total = lines.len();
                                 let th = tr.height.saturating_sub(2) as usize;
-                                let max_scroll = total.saturating_sub(th);
+                                let w = tr.width.saturating_sub(2) as usize;
+                                scroll_buffer.replace_lines(lines.to_vec());
+                                scroll_buffer.set_from_top(g.scroll_lines, th, w);
                                 let step = th.max(scroll_speed as usize).max(1);
-                                g.transcript_follow_tail = false;
-                                g.scroll_lines =
-                                    g.scroll_lines.saturating_sub(step).min(max_scroll);
+                                scroll_buffer.scroll_up(step, w, th);
+                                let (from_top, _) = scroll_buffer.from_top(th, w);
+                                g.scroll_lines = from_top as usize;
+                                g.transcript_follow_tail = scroll_buffer.is_sticky();
                             }
                         }
                         (KeyCode::PageDown, _) => {
@@ -6517,17 +6952,24 @@ pub fn run_blocking(
                                     g.cursor_char_idx,
                                 );
                                 let input_h = composer_input_height(&g, main_area.width);
-                                let (tr, _, _, _) = layout_chunks(main_area, sh, input_h);
+                                let (tr, _, _, _) = layout_chunks(
+                                    main_area,
+                                    sh,
+                                    input_h,
+                                    g.queue_preview_items.len(),
+                                    g.subagents.len(),
+                                );
                                 let (lines, _hits) =
                                     transcript_cache.get_or_rebuild(&g, tr.width.saturating_sub(2));
-                                let total = lines.len();
                                 let th = tr.height.saturating_sub(2) as usize;
-                                let max_scroll = total.saturating_sub(th);
+                                let w = tr.width.saturating_sub(2) as usize;
+                                scroll_buffer.replace_lines(lines.to_vec());
+                                scroll_buffer.set_from_top(g.scroll_lines, th, w);
                                 let step = th.max(scroll_speed as usize).max(1);
-                                g.scroll_lines = (g.scroll_lines + step).min(max_scroll);
-                                if g.scroll_lines >= max_scroll {
-                                    g.transcript_follow_tail = true;
-                                }
+                                scroll_buffer.scroll_down(step);
+                                let (from_top, _) = scroll_buffer.from_top(th, w);
+                                g.scroll_lines = from_top as usize;
+                                g.transcript_follow_tail = scroll_buffer.is_sticky();
                             }
                         }
                         (KeyCode::Up, _) => {
@@ -6562,13 +7004,39 @@ pub fn run_blocking(
                                         if let Some(idx) = composer_history_index
                                             && let Some(entry) = composer_history.get(idx)
                                         {
-                                            g.input_buffer = entry.clone();
-                                            g.cursor_char_idx = g.input_buffer.chars().count();
+                                            g.set_input_text(entry.clone());
                                         }
                                     } else {
-                                        g.transcript_follow_tail = false;
-                                        g.scroll_lines =
-                                            g.scroll_lines.saturating_sub(scroll_speed as usize);
+                                        if let Ok(sz) = terminal.size() {
+                                            let area = Rect::new(0, 0, sz.width, sz.height);
+                                            let (main_area, _) =
+                                                layout_with_sidebar(area, g.sidebar_open);
+                                            let sh = composer_chrome_height(
+                                                &slash_entries,
+                                                &workspace_files,
+                                                &g.input_buffer,
+                                                g.cursor_char_idx,
+                                            );
+                                            let input_h =
+                                                composer_input_height(&g, main_area.width);
+                                            let (tr, _, _, _) = layout_chunks(
+                                                main_area,
+                                                sh,
+                                                input_h,
+                                                g.queue_preview_items.len(),
+                                                g.subagents.len(),
+                                            );
+                                            let (lines, _hits) = transcript_cache
+                                                .get_or_rebuild(&g, tr.width.saturating_sub(2));
+                                            let th = tr.height.saturating_sub(2) as usize;
+                                            let w = tr.width.saturating_sub(2) as usize;
+                                            scroll_buffer.replace_lines(lines.to_vec());
+                                            scroll_buffer.set_from_top(g.scroll_lines, th, w);
+                                            scroll_buffer.scroll_up(scroll_speed as usize, w, th);
+                                            let (from_top, _) = scroll_buffer.from_top(th, w);
+                                            g.scroll_lines = from_top as usize;
+                                            g.transcript_follow_tail = scroll_buffer.is_sticky();
+                                        }
                                     }
                                 }
                             }
@@ -6599,13 +7067,11 @@ pub fn run_blocking(
                                             if let Some(entry) =
                                                 composer_history.get(idx.saturating_add(1))
                                             {
-                                                g.input_buffer = entry.clone();
-                                                g.cursor_char_idx = g.input_buffer.chars().count();
+                                                g.set_input_text(entry.clone());
                                             }
                                         } else {
                                             composer_history_index = None;
-                                            g.input_buffer = composer_history_draft.clone();
-                                            g.cursor_char_idx = g.input_buffer.chars().count();
+                                            g.set_input_text(composer_history_draft.clone());
                                         }
                                     } else {
                                         let sz = terminal.size().ok();
@@ -6621,19 +7087,23 @@ pub fn run_blocking(
                                             );
                                             let input_h =
                                                 composer_input_height(&g, main_area.width);
-                                            let (tr, _, _, _) =
-                                                layout_chunks(main_area, sh, input_h);
+                                            let (tr, _, _, _) = layout_chunks(
+                                                main_area,
+                                                sh,
+                                                input_h,
+                                                g.queue_preview_items.len(),
+                                                g.subagents.len(),
+                                            );
                                             let (lines, _hits) = transcript_cache
                                                 .get_or_rebuild(&g, tr.width.saturating_sub(2));
-                                            let total = lines.len();
                                             let th = tr.height.saturating_sub(2) as usize;
-                                            let max_scroll = total.saturating_sub(th);
-                                            g.scroll_lines = (g.scroll_lines
-                                                + scroll_speed as usize)
-                                                .min(max_scroll);
-                                            if g.scroll_lines >= max_scroll {
-                                                g.transcript_follow_tail = true;
-                                            }
+                                            let w = tr.width.saturating_sub(2) as usize;
+                                            scroll_buffer.replace_lines(lines.to_vec());
+                                            scroll_buffer.set_from_top(g.scroll_lines, th, w);
+                                            scroll_buffer.scroll_down(scroll_speed as usize);
+                                            let (from_top, _) = scroll_buffer.from_top(th, w);
+                                            g.scroll_lines = from_top as usize;
+                                            g.transcript_follow_tail = scroll_buffer.is_sticky();
                                         }
                                     }
                                 }
@@ -6646,14 +7116,9 @@ pub fn run_blocking(
                                 if let Some((buf, cidx)) =
                                     delete_completed_at_mention(&g.input_buffer, g.cursor_char_idx)
                                 {
-                                    g.input_buffer = buf;
-                                    g.cursor_char_idx = cidx;
+                                    g.set_input_text_with_cursor(buf, cidx);
                                 } else {
-                                    let idx = g.cursor_char_idx;
-                                    let mut cs: Vec<char> = g.input_buffer.chars().collect();
-                                    cs.remove(idx - 1);
-                                    g.input_buffer = cs.into_iter().collect();
-                                    g.cursor_char_idx -= 1;
+                                    g.backspace_input();
                                 }
                                 if slash_panel_visible(&g.input_buffer) {
                                     let f = filter_slash_entries(&slash_entries, &g.input_buffer);
@@ -6666,14 +7131,15 @@ pub fn run_blocking(
                                 }
                             }
                         }
+                        (KeyCode::Delete, _) => {
+                            composer_history_index = None;
+                            composer_history_draft.clear();
+                            g.delete_input();
+                        }
                         (KeyCode::Char(c), KeyModifiers::NONE | KeyModifiers::SHIFT) => {
                             composer_history_index = None;
                             composer_history_draft.clear();
-                            let idx = g.cursor_char_idx;
-                            let mut cs: Vec<char> = g.input_buffer.chars().collect();
-                            cs.insert(idx, c);
-                            g.input_buffer = cs.into_iter().collect();
-                            g.cursor_char_idx += 1;
+                            g.insert_input_char(c);
                             if slash_panel_visible(&g.input_buffer) {
                                 let f = filter_slash_entries(&slash_entries, &g.input_buffer);
                                 if !f.is_empty() {
@@ -6701,8 +7167,8 @@ mod approval_parse_tests {
         TuiCmd, apply_selected_at_completion, branch_picker_enter_command,
         completed_at_mention_range_before_cursor, composer_line, delete_completed_at_mention,
         escape_cancels_active_turn, extract_embedded_path_fragments, filtered_branch_indices,
-        mouse_scroll_step, parse_approval_verdict, parse_candidate_image_path, parse_md_line,
-        pasted_lines_token, render_markdown_lines, render_markdown_lines_with_hits,
+        is_click_jitter, mouse_scroll_step, parse_approval_verdict, parse_candidate_image_path,
+        parse_md_line, pasted_lines_token, render_markdown_lines, render_markdown_lines_with_hits,
         request_turn_cancel, stage_pasted_image_paths, transcript_lines_and_hits,
     };
     use crate::tui::state::TuiSessionState;
@@ -6778,6 +7244,23 @@ mod approval_parse_tests {
     }
 
     #[test]
+    fn click_jitter_allows_single_column_drift() {
+        let sel = crate::tui::mouse_select::Selection {
+            anchor: crate::tui::mouse_select::VisualPos { row: 4, col: 10 },
+            cursor: crate::tui::mouse_select::VisualPos { row: 4, col: 11 },
+            scroll_from_top: 0,
+        };
+        assert!(is_click_jitter(&sel));
+
+        let sel_row_change = crate::tui::mouse_select::Selection {
+            anchor: crate::tui::mouse_select::VisualPos { row: 4, col: 10 },
+            cursor: crate::tui::mouse_select::VisualPos { row: 5, col: 10 },
+            scroll_from_top: 0,
+        };
+        assert!(!is_click_jitter(&sel_row_change));
+    }
+
+    #[test]
     fn enter_accepts_selected_at_mention_without_submitting() {
         let workspace_files = vec![
             "crates/cli/src/file_mentions.rs".into(),
@@ -6831,7 +7314,7 @@ mod approval_parse_tests {
     }
 
     #[test]
-    fn escape_only_cancels_active_turn_states() {
+    fn escape_cancels_active_turn_states_including_approval() {
         let mut state = TuiSessionState::new(
             "session".into(),
             "model".into(),
@@ -6852,7 +7335,7 @@ mod approval_parse_tests {
         assert!(escape_cancels_active_turn(&state));
 
         state.set_busy_state(BusyState::ApprovalPending);
-        assert!(!escape_cancels_active_turn(&state));
+        assert!(escape_cancels_active_turn(&state));
     }
 
     #[test]
