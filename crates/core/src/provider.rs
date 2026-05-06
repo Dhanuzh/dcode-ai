@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod anthropic_compat;
 pub mod factory;
+pub mod minimax;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
@@ -137,7 +138,6 @@ mod tests {
             supports_thinking_stream: true,
             supports_native_images: true,
             supports_video: false,
-            ..Default::default()
         };
         let model = "o1-preview";
         let model_lower = model.to_ascii_lowercase();

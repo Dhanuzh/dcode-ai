@@ -41,8 +41,8 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
     },
     CatalogEntry {
         kind: ProviderKind::OpenCodeZen,
-        title: "OpenCode Zen",
-        subtitle: "Big Pickle, Kimi, GLM (free)",
+        title: "MiniMax (OpenCode Zen)",
+        subtitle: "MiniMax M2.5, Kimi, GLM",
         oauth_login_slug: Some("opencodezen"),
     },
     CatalogEntry {
@@ -170,10 +170,10 @@ mod tests {
         let rows = build_connect_rows("opencode");
         let found = rows.into_iter().find_map(|row| match row {
             ConnectRow::Provider {
-                title,
+                title: "OpenCode Zen",
                 oauth_login_slug,
                 ..
-            } if title == "OpenCode Zen" => oauth_login_slug,
+            } => oauth_login_slug,
             _ => None,
         });
         assert_eq!(found, Some("opencodezen"));
