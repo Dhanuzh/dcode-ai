@@ -40,7 +40,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear as ClearWidget, Paragraph, Wrap},
+    widgets::{Block, Borders, Clear as ClearWidget, Padding, Paragraph, Wrap},
 };
 use std::io::{Stdout, stdout};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -142,10 +142,12 @@ const COMMAND_PALETTE_MAX_ROWS: usize = 10;
 
 pub fn session_start_banner() -> String {
     [
-        "      _~^~^~_",
-        "  \\) /  o o  \\ (/",
-        "    '_  -  _'    dcode-ai",
-        "    / '---' \\",
+        "   ___",
+        "  /   \\",
+        " | x x |",
+        " |  ^  |   dcode-ai",
+        " |_____|",
+        "  |   |",
     ]
     .join("\n")
 }
@@ -232,8 +234,8 @@ fn composer_chrome_height(
 }
 
 fn composer_input_height(state: &TuiSessionState, area_width: u16) -> u16 {
-    let inner_w = area_width.saturating_sub(2).max(1) as usize;
-    let prompt_w = 2usize; // "❯ "
+    let inner_w = area_width.saturating_sub(4).max(1) as usize;
+    let prompt_w = 2usize; // "› "
     let raw_lines: Vec<&str> = state.input_buffer.split('\n').collect();
     let mut wrapped_input_lines = 0usize;
     for (idx, line) in raw_lines.iter().enumerate() {
@@ -248,12 +250,23 @@ fn composer_input_height(state: &TuiSessionState, area_width: u16) -> u16 {
     }
     let show_hint = state.active_approval.is_some()
         || (state.active_question.is_some() && !state.question_modal_open)
-        || state.input_buffer.is_empty();
+        || state.busy
+        || !matches!(state.current_busy_state, BusyState::Idle);
     if show_hint {
         content_lines = content_lines.saturating_add(1);
     }
 
-    content_lines.saturating_add(2).clamp(3, 10)
+    content_lines.saturating_add(2).clamp(3, 11)
+}
+
+fn should_hide_composer_when_scrolling(state: &TuiSessionState) -> bool {
+    !state.transcript_follow_tail
+        && state.input_buffer.trim().is_empty()
+        && state.staged_image_attachments.is_empty()
+        && state.active_approval.is_none()
+        && state.active_question.is_none()
+        && !state.busy
+        && matches!(state.current_busy_state, BusyState::Idle)
 }
 
 /// Replace `@prefix` before cursor with `@choice` (relative path).
@@ -355,7 +368,8 @@ fn push_styled_run(
 }
 
 fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
-    let prompt = Span::styled("❯ ", Style::default().fg(theme::user()).bold());
+    let prompt = Span::styled("› ", Style::default().fg(theme::user()).bold());
+    let placeholder = "Ask anything... (Shift+Enter for newline, / for commands, /keymaps)";
     let chars: Vec<char> = buffer.chars().collect();
     let mention_ranges = at_mention_char_ranges(buffer);
     let cursor_char_idx = cursor_char_idx.min(chars.len());
@@ -413,6 +427,12 @@ fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
 
     if !run.is_empty() {
         spans.push(Span::styled(run, run_style.unwrap_or_default()));
+    }
+    if buffer.is_empty() {
+        spans.push(Span::styled(
+            placeholder.to_string(),
+            Style::default().fg(theme::muted()),
+        ));
     }
 
     Line::from(spans)
@@ -636,6 +656,10 @@ const PALETTE_CATALOG: &[PaletteRow] = &[
         shortcut: "ctrl+x h",
     },
     PaletteRow::Entry {
+        label: "Keymaps",
+        shortcut: "",
+    },
+    PaletteRow::Entry {
         label: "Permissions",
         shortcut: "",
     },
@@ -678,6 +702,7 @@ fn palette_command_for_label(label: &str) -> &'static str {
         "Config" => "/config",
         "Doctor" => "/doctor",
         "Help" => "/help",
+        "Keymaps" => "/keymaps",
         "Permissions" => "/permissions",
         "Memory" => "/memory",
         "Logs" => "/logs",
@@ -1552,57 +1577,31 @@ fn transcript_lines_and_hits(
             } => {
                 push_section_gap(&mut lines, &mut hits);
                 let ui = tool_ui::metadata(name);
-                let preview = tool_input_preview(name, input);
                 let collapsed = state.is_tool_block_collapsed(call_id);
                 let fold_indicator = if collapsed { "▸" } else { "▾" };
-                let spans = vec![
-                    Span::styled(
-                        format!(" {} ", ui.icon),
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::tool())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::styled(" ", Style::default()),
+                let mut header_spans = vec![
                     Span::styled(
                         format!("{fold_indicator} "),
                         Style::default().fg(theme::muted()),
                     ),
+                    Span::styled("◉ ", tool_dot_style(name)),
                     Span::styled(
                         ui.label,
                         Style::default()
                             .fg(theme::tool())
                             .add_modifier(Modifier::BOLD),
                     ),
-                    Span::styled(
-                        format!("  {} ", ui.family),
-                        Style::default().fg(theme::muted()),
-                    ),
                 ];
-                let mut header_spans = spans;
-                header_spans.push(Span::styled(" ", Style::default()));
-                header_spans.push(tool_effect_badge(name));
-                header_spans.push(Span::styled(
-                    "  running",
-                    Style::default()
-                        .fg(theme::warn())
-                        .add_modifier(Modifier::BOLD),
-                ));
-                push_transcript_line(&mut lines, &mut hits, Line::from(header_spans), None);
-                if !collapsed && !preview.is_empty() {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(vec![
-                            Span::styled("  ↳ ", Style::default().fg(theme::muted())),
-                            Span::styled(
-                                truncate_chars(&preview, 110),
-                                Style::default().fg(theme::muted()),
-                            ),
-                        ]),
-                        None,
-                    );
+                let detail_spans = tool_header_detail_spans(name, input);
+                if !detail_spans.is_empty() {
+                    header_spans.push(Span::raw(" · "));
+                    header_spans.extend(detail_spans);
                 }
+                header_spans.push(Span::raw("  "));
+                header_spans.push(tool_effect_badge(name));
+                header_spans.push(Span::raw(" "));
+                header_spans.push(tool_status_chip("RUNNING", theme::warn()));
+                push_transcript_line(&mut lines, &mut hits, Line::from(header_spans), None);
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::ApprovalPending(req) => {
@@ -1676,45 +1675,30 @@ fn transcript_lines_and_hits(
                 let ui = tool_ui::metadata(name);
                 let collapsed = state.is_tool_block_collapsed(call_id);
                 let fold_indicator = if collapsed { "▸" } else { "▾" };
-                let (icon, badge, badge_style) = if *ok {
-                    (
-                        "✓",
-                        " done ",
-                        Style::default().fg(Color::Black).bg(theme::success()),
-                    )
+                let status_chip = if *ok {
+                    tool_status_chip("DONE", theme::success())
                 } else {
-                    (
-                        "!",
-                        " failed ",
-                        Style::default().fg(Color::Black).bg(theme::error()),
-                    )
+                    tool_status_chip("FAILED", theme::error())
                 };
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
                     Line::from(vec![
                         Span::styled(
-                            format!(" {icon} "),
-                            badge_style.add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" ", Style::default()),
-                        Span::styled(
                             format!("{fold_indicator} "),
                             Style::default().fg(theme::muted()),
                         ),
+                        Span::styled("◉ ", tool_dot_style(name)),
                         Span::styled(
                             ui.label,
                             Style::default()
                                 .fg(theme::tool())
                                 .add_modifier(Modifier::BOLD),
                         ),
-                        Span::styled(
-                            format!("  {} ", ui.family),
-                            Style::default().fg(theme::muted()),
-                        ),
-                        Span::styled(" ", Style::default()),
+                        Span::raw("  "),
                         tool_effect_badge(name),
-                        Span::styled(badge, badge_style.add_modifier(Modifier::BOLD)),
+                        Span::raw(" "),
+                        status_chip,
                     ]),
                     None,
                 );
@@ -2092,7 +2076,7 @@ fn transcript_lines_and_hits(
             &mut lines,
             &mut hits,
             Line::from(Span::styled(
-                "Tab agent · Shift+Enter/Ctrl+I/Ctrl+J newline · Ctrl+P palette · Ctrl+F find · Ctrl+K pin · Ctrl+O pins · Ctrl+G sub-agents · Ctrl+V image",
+                "Tab agent · Shift+Enter/Ctrl+I/Ctrl+J newline · Ctrl+P palette · /keymaps · Ctrl+V image",
                 Style::default().fg(theme::muted()),
             )),
             None,
@@ -2125,13 +2109,123 @@ fn tool_effect_badge(name: &str) -> Span<'static> {
     let effect = crate::tui::tool_classify::classify_tool(name);
     let display = effect.display();
     let style = match effect {
-        ToolEffect::ReadOnly => Style::default().fg(Color::Black).bg(theme::success()),
-        ToolEffect::RemoteAction => Style::default().fg(Color::Black).bg(theme::assistant()),
-        ToolEffect::LocalMutation => Style::default().fg(Color::Black).bg(theme::warn()),
-        ToolEffect::Destructive => Style::default().fg(Color::Black).bg(theme::error()),
+        ToolEffect::ReadOnly => Style::default().fg(theme::success()),
+        ToolEffect::RemoteAction => Style::default().fg(theme::assistant()),
+        ToolEffect::LocalMutation => Style::default().fg(theme::warn()),
+        ToolEffect::Destructive => Style::default().fg(theme::error()),
     }
     .add_modifier(Modifier::BOLD);
-    Span::styled(format!(" {}:{} ", display.badge, display.label), style)
+    Span::styled(format!("[{} {}]", display.badge, display.label), style)
+}
+
+fn tool_dot_style(name: &str) -> Style {
+    use crate::tui::tool_classify::ToolEffect;
+    match crate::tui::tool_classify::classify_tool(name) {
+        ToolEffect::ReadOnly => Style::default().fg(theme::muted()),
+        ToolEffect::RemoteAction => Style::default().fg(theme::assistant()),
+        ToolEffect::LocalMutation => Style::default().fg(theme::warn()),
+        ToolEffect::Destructive => Style::default().fg(theme::error()),
+    }
+}
+
+fn tool_status_chip(label: &str, color: Color) -> Span<'static> {
+    Span::styled(
+        format!("[{label}]"),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    )
+}
+
+fn tool_header_detail_spans(name: &str, input: &str) -> Vec<Span<'static>> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(input) else {
+        let preview = tool_input_preview(name, input);
+        return if preview.is_empty() {
+            Vec::new()
+        } else {
+            vec![Span::styled(
+                truncate_chars(&preview, 100),
+                Style::default().fg(theme::muted()),
+            )]
+        };
+    };
+
+    use crate::tui::tool_summary::{ToolCallKind, ToolCallSummary};
+    let summary = ToolCallSummary::from_call(name, &value);
+    match summary.kind {
+        ToolCallKind::Bash { command } => {
+            if command.is_empty() {
+                Vec::new()
+            } else {
+                vec![Span::styled(
+                    truncate_chars(&command, 100),
+                    Style::default().fg(theme::warn()),
+                )]
+            }
+        }
+        ToolCallKind::Path { path } => {
+            if path.is_empty() {
+                Vec::new()
+            } else {
+                vec![Span::styled(
+                    truncate_chars(&path, 100),
+                    Style::default()
+                        .fg(theme::assistant())
+                        .add_modifier(Modifier::UNDERLINED),
+                )]
+            }
+        }
+        ToolCallKind::Grep { pattern, dir } => vec![
+            Span::styled(
+                format!("\"{}\"", truncate_chars(&pattern, 48)),
+                Style::default()
+                    .fg(theme::warn())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" in ", Style::default().fg(theme::muted())),
+            Span::styled(
+                truncate_chars(&dir, 44),
+                Style::default()
+                    .fg(theme::assistant())
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ],
+        ToolCallKind::Glob { pattern, base } => {
+            let mut spans = vec![Span::styled(
+                truncate_chars(&pattern, 56),
+                Style::default().fg(theme::assistant()),
+            )];
+            if let Some(base) = base {
+                spans.push(Span::styled(" in ", Style::default().fg(theme::muted())));
+                spans.push(Span::styled(
+                    truncate_chars(&base, 40),
+                    Style::default()
+                        .fg(theme::assistant())
+                        .add_modifier(Modifier::UNDERLINED),
+                ));
+            }
+            spans
+        }
+        ToolCallKind::List { dir } => vec![Span::styled(
+            truncate_chars(&dir, 100),
+            Style::default()
+                .fg(theme::assistant())
+                .add_modifier(Modifier::UNDERLINED),
+        )],
+        ToolCallKind::WebFetch { url } => vec![Span::styled(
+            truncate_chars(&url, 100),
+            Style::default()
+                .fg(theme::assistant())
+                .add_modifier(Modifier::UNDERLINED),
+        )],
+        ToolCallKind::Generic { value } => value
+            .filter(|v| !v.trim().is_empty())
+            .map(|v| {
+                vec![Span::styled(
+                    truncate_chars(&v, 100),
+                    Style::default().fg(theme::muted()),
+                )]
+            })
+            .unwrap_or_default(),
+    }
 }
 
 /// Extract a compact single-line preview of a tool call input for the transcript.
@@ -2309,61 +2403,165 @@ fn push_tool_detail_lines(
         if width < 8 {
             return vec![text.to_string()];
         }
-        if text.contains(' ') || text.contains('\t') {
-            return wrap_text(text, width);
-        }
+        // Preserve code/diff alignment (Ironclaw/Koda style):
+        // tool-detail lanes use hard wrapping, never word-wrap.
         wrap_preformatted_line(text, width)
     }
 
     let mut rendered = 0usize;
     let mut omitted = 0usize;
+    let mut diff_old_line: Option<usize> = None;
+    let mut diff_new_line: Option<usize> = None;
+    let has_diff_payload = detail.lines().any(|l| {
+        l.starts_with("diff ")
+            || l.starts_with("@@")
+            || l.starts_with("+++")
+            || l.starts_with("---")
+            || (l.starts_with('+') && !l.starts_with("+++"))
+            || (l.starts_with('-') && !l.starts_with("---"))
+    });
     for source_line in detail.lines() {
-        let (lane, lane_style, text_style, payload) = if source_line.starts_with("+++")
+        if let Some((old_start, new_start)) = parse_unified_hunk_header(source_line) {
+            diff_old_line = Some(old_start);
+            diff_new_line = Some(new_start);
+        }
+        let is_note = source_line.starts_with("Wrote ")
+            || source_line.starts_with("Edited ")
+            || source_line.starts_with("Patched ")
+            || source_line.starts_with("Replaced match at ");
+        if has_diff_payload && is_note {
+            continue;
+        }
+        let is_meta = source_line.starts_with("+++")
             || source_line.starts_with("---")
             || source_line.starts_with("@@")
             || source_line.starts_with("diff ")
             || source_line.starts_with("index ")
-        {
+            || source_line.starts_with("new file mode ")
+            || source_line.starts_with("deleted file mode ")
+            || source_line.starts_with("rename from ")
+            || source_line.starts_with("rename to ");
+        let is_add = source_line.starts_with('+') && !source_line.starts_with("+++");
+        let is_del = source_line.starts_with('-') && !source_line.starts_with("---");
+        let is_ctx = source_line.starts_with(' ');
+        let (lane, lane_style, text_style, payload) = if is_note {
             (
-                "▌ ",
+                "▎ ",
+                Style::default().fg(theme::assistant()),
+                Style::default()
+                    .fg(theme::assistant())
+                    .add_modifier(Modifier::BOLD),
+                source_line.to_string(),
+            )
+        } else if is_meta {
+            (
+                "┆ ",
                 Style::default().fg(theme::warn()),
                 Style::default()
                     .fg(theme::warn())
                     .add_modifier(Modifier::BOLD),
-                source_line,
+                source_line.to_string(),
             )
-        } else if source_line.starts_with('+') {
+        } else if is_add {
             (
-                "▌ ",
+                "+ ",
+                Style::default()
+                    .fg(theme::success())
+                    .add_modifier(Modifier::BOLD),
                 Style::default().fg(theme::success()),
-                Style::default().fg(theme::success()),
-                source_line,
+                source_line
+                    .strip_prefix('+')
+                    .unwrap_or(source_line)
+                    .to_string(),
             )
-        } else if source_line.starts_with('-') {
+        } else if is_del {
             (
-                "▌ ",
+                "- ",
+                Style::default()
+                    .fg(theme::error())
+                    .add_modifier(Modifier::BOLD),
                 Style::default().fg(theme::error()),
-                Style::default().fg(theme::error()),
-                source_line,
+                source_line
+                    .strip_prefix('-')
+                    .unwrap_or(source_line)
+                    .to_string(),
+            )
+        } else if is_ctx {
+            (
+                "  ",
+                Style::default().fg(theme::muted()),
+                Style::default().fg(theme::text()),
+                source_line
+                    .strip_prefix(' ')
+                    .unwrap_or(source_line)
+                    .to_string(),
             )
         } else {
             (
                 "│ ",
                 Style::default().fg(theme::muted()),
                 Style::default().fg(theme::text()),
-                source_line,
+                source_line.to_string(),
             )
         };
-        let wrapped = wrap_tool_detail_text(payload, width.max(8));
+        let wrapped = wrap_tool_detail_text(&payload, width.max(8));
         for (idx, line) in wrapped.into_iter().enumerate() {
             if rendered < max_lines {
                 let cont_lane = if idx == 0 { lane } else { "  " };
+                let gutter = if idx == 0 {
+                    if is_add {
+                        let g = format!(
+                            "{:>4} {:>4} ",
+                            "",
+                            diff_new_line.map(|n| n.to_string()).unwrap_or_default()
+                        );
+                        if let Some(n) = diff_new_line.as_mut() {
+                            *n += 1;
+                        }
+                        g
+                    } else if is_del {
+                        let g = format!(
+                            "{:>4} {:>4} ",
+                            diff_old_line.map(|n| n.to_string()).unwrap_or_default(),
+                            ""
+                        );
+                        if let Some(n) = diff_old_line.as_mut() {
+                            *n += 1;
+                        }
+                        g
+                    } else if is_ctx {
+                        let g = format!(
+                            "{:>4} {:>4} ",
+                            diff_old_line.map(|n| n.to_string()).unwrap_or_default(),
+                            diff_new_line.map(|n| n.to_string()).unwrap_or_default()
+                        );
+                        if let Some(n) = diff_old_line.as_mut() {
+                            *n += 1;
+                        }
+                        if let Some(n) = diff_new_line.as_mut() {
+                            *n += 1;
+                        }
+                        g
+                    } else {
+                        "          ".to_string()
+                    }
+                } else {
+                    "          ".to_string()
+                };
                 push_transcript_line(
                     lines,
                     hits,
                     Line::from(vec![
                         Span::styled("  ", Style::default().fg(theme::muted())),
-                        Span::styled(cont_lane, lane_style),
+                        Span::styled(gutter, Style::default().fg(theme::muted())),
+                        Span::styled(
+                            cont_lane,
+                            if idx == 0 {
+                                lane_style
+                            } else {
+                                Style::default().fg(theme::muted())
+                            },
+                        ),
                         Span::styled(line, text_style),
                     ]),
                     None,
@@ -2393,6 +2591,33 @@ fn push_tool_detail_lines(
             None,
         );
     }
+}
+
+fn parse_unified_hunk_header(line: &str) -> Option<(usize, usize)> {
+    // @@ -old_start,old_count +new_start,new_count @@
+    let trimmed = line.trim();
+    if !trimmed.starts_with("@@") {
+        return None;
+    }
+    let rest = trimmed.strip_prefix("@@")?.trim_start();
+    let end = rest.find("@@")?;
+    let body = rest[..end].trim();
+    let mut parts = body.split_whitespace();
+    let old = parts.next()?;
+    let new = parts.next()?;
+    let old_start = old
+        .strip_prefix('-')?
+        .split(',')
+        .next()?
+        .parse::<usize>()
+        .ok()?;
+    let new_start = new
+        .strip_prefix('+')?
+        .split(',')
+        .next()?
+        .parse::<usize>()
+        .ok()?;
+    Some((old_start, new_start))
 }
 
 /// Render the approval request as a centered popup overlay. The popup body
@@ -3350,8 +3575,7 @@ pub fn run_blocking(
             if !already_present {
                 g.blocks.push(DisplayBlock::System(banner));
                 g.blocks.push(DisplayBlock::System(
-                    "Interactive run — type a message, Tab cycles agent profile, Ctrl+P opens commands."
-                        .into(),
+                    "Interactive run — type a message. Ctrl+P commands, /keymaps shortcuts.".into(),
                 ));
                 g.touch_transcript();
             }
@@ -3379,7 +3603,11 @@ pub fn run_blocking(
             terminal.draw(|frame| {
                 let area = frame.area();
                 let (main_area, sidebar_opt) = layout_with_sidebar(area, g.sidebar_open);
-                let input_h = composer_input_height(&g, main_area.width);
+                let input_h = if should_hide_composer_when_scrolling(&g) {
+                    0
+                } else {
+                    composer_input_height(&g, main_area.width)
+                };
                 let vp = crate::tui::tui_viewport::layout(
                     main_area,
                     chrome_h,
@@ -3718,7 +3946,6 @@ pub fn run_blocking(
                 let status_bar = crate::tui::widgets::status_bar::StatusBar {
                     model: &g.model,
                     agent: &g.agent_profile,
-                    branch: &g.current_branch,
                     busy_label: &indicator_text,
                     context_pct,
                     elapsed_secs: elapsed,
@@ -3842,35 +4069,22 @@ pub fn run_blocking(
                 let input_line = composer_line(&g.input_buffer, g.cursor_char_idx);
 
                 let hint = if g.active_approval.is_some() {
-                    Line::from(Span::styled(
-                        "Approval: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny · other /commands still work",
+                    Some(Line::from(Span::styled(
+                        "Approval: y/n · Ctrl+Y approve · Ctrl+N deny · Ctrl+U always allow · /approve · /deny",
                         Style::default().fg(theme::error()),
-                    ))
+                    )))
                 } else if g.active_question.is_some() && !g.question_modal_open {
-                    Line::from(Span::styled(
-                        "Enter/0 suggested · 1–n option · click option · /auto-answer",
+                    Some(Line::from(Span::styled(
+                        "Enter/0 suggested · 1-n option · click option · /auto-answer",
                         Style::default().fg(theme::warn()),
-                    ))
+                    )))
                 } else if g.busy || !matches!(g.current_busy_state, BusyState::Idle) {
-                    Line::from(Span::styled(
-                        "Busy: Enter queue steer · Alt+Enter queue follow-up · Esc cancel",
+                    Some(Line::from(Span::styled(
+                        "Busy: Enter queue · Alt+Enter follow-up · Esc cancel",
                         Style::default().fg(theme::tool()),
-                    ))
-                } else if g.input_buffer.is_empty() {
-                    Line::from(Span::styled(
-                        "Enter send · Shift+Enter/Ctrl+I/Ctrl+J newline · Up/Down history · Ctrl+F find · Ctrl+K pin · Ctrl+O pins · Ctrl+G sub-agents · Ctrl+C twice exit · wheel scroll · drag-select copy",
-                        Style::default().fg(theme::muted()),
-                    ))
+                    )))
                 } else {
-                    Line::default()
-                };
-
-                let input_title = if g.active_approval.is_some() {
-                    " approval "
-                } else if g.active_question.is_some() {
-                    " answer "
-                } else {
-                    " message "
+                    None
                 };
                 let mut input_lines = vec![input_line];
                 if !g.staged_image_attachments.is_empty() {
@@ -3882,13 +4096,15 @@ pub fn run_blocking(
                         Style::default().fg(theme::success()),
                     )));
                 }
-                input_lines.push(hint);
+                if let Some(hint) = hint {
+                    input_lines.push(hint);
+                }
                 let input_block = Paragraph::new(Text::from(input_lines))
                     .block(
                         Block::default()
-                            .borders(Borders::ALL)
+                            .borders(Borders::TOP)
                             .border_style(Style::default().fg(theme::border()))
-                            .title(Span::styled(input_title, Style::default().fg(theme::muted()))),
+                            .padding(Padding::new(2, 2, 0, 1)),
                     )
                     .style(Style::default().bg(theme::surface()))
                     .wrap(Wrap { trim: false });
@@ -5303,7 +5519,11 @@ pub fn run_blocking(
                         &g.input_buffer,
                         g.cursor_char_idx,
                     );
-                    let input_h = composer_input_height(&g, main_area.width);
+                    let input_h = if should_hide_composer_when_scrolling(&g) {
+                        0
+                    } else {
+                        composer_input_height(&g, main_area.width)
+                    };
                     let (tr, _, slash_r, _) = layout_chunks(
                         main_area,
                         sh,
@@ -6939,7 +7159,11 @@ pub fn run_blocking(
                                     &g.input_buffer,
                                     g.cursor_char_idx,
                                 );
-                                let input_h = composer_input_height(&g, main_area.width);
+                                let input_h = if should_hide_composer_when_scrolling(&g) {
+                                    0
+                                } else {
+                                    composer_input_height(&g, main_area.width)
+                                };
                                 let (tr, _, _, _) = layout_chunks(
                                     main_area,
                                     sh,
@@ -6970,7 +7194,11 @@ pub fn run_blocking(
                                     &g.input_buffer,
                                     g.cursor_char_idx,
                                 );
-                                let input_h = composer_input_height(&g, main_area.width);
+                                let input_h = if should_hide_composer_when_scrolling(&g) {
+                                    0
+                                } else {
+                                    composer_input_height(&g, main_area.width)
+                                };
                                 let (tr, _, _, _) = layout_chunks(
                                     main_area,
                                     sh,
@@ -7036,8 +7264,12 @@ pub fn run_blocking(
                                                 &g.input_buffer,
                                                 g.cursor_char_idx,
                                             );
-                                            let input_h =
-                                                composer_input_height(&g, main_area.width);
+                                            let input_h = if should_hide_composer_when_scrolling(&g)
+                                            {
+                                                0
+                                            } else {
+                                                composer_input_height(&g, main_area.width)
+                                            };
                                             let (tr, _, _, _) = layout_chunks(
                                                 main_area,
                                                 sh,
@@ -7105,8 +7337,12 @@ pub fn run_blocking(
                                                 &g.input_buffer,
                                                 g.cursor_char_idx,
                                             );
-                                            let input_h =
-                                                composer_input_height(&g, main_area.width);
+                                            let input_h = if should_hide_composer_when_scrolling(&g)
+                                            {
+                                                0
+                                            } else {
+                                                composer_input_height(&g, main_area.width)
+                                            };
                                             let (tr, _, _, _) = layout_chunks(
                                                 main_area,
                                                 sh,

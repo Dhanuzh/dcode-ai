@@ -67,6 +67,15 @@ fn line_body(segment: &str) -> &str {
         .unwrap_or_else(|| segment.strip_suffix('\n').unwrap_or(segment))
 }
 
+fn format_diff(old: &str, new: &str, path: &std::path::Path) -> String {
+    let label = path.display().to_string();
+    let diff = similar::TextDiff::from_lines(old, new);
+    diff.unified_diff()
+        .context_radius(3)
+        .header(&format!("before/{label}"), &format!("after/{label}"))
+        .to_string()
+}
+
 #[async_trait::async_trait]
 impl ToolExecutor for ReplaceMatchTool {
     fn definition(&self) -> ToolDefinition {
@@ -210,18 +219,30 @@ impl ToolExecutor for ReplaceMatchTool {
             };
         }
 
+        let original_content = content.clone();
         content.replace_range(absolute_start..absolute_end, new_text);
-        match tokio::fs::write(&canonical, content).await {
+        let diff = format_diff(&original_content, &content, &canonical);
+        match tokio::fs::write(&canonical, &content).await {
             Ok(()) => ToolResult {
                 call_id: call.id.clone(),
                 success: true,
-                output: format!(
-                    "Replaced match at {}:{}:{} ({} total occurrence(s) of old_text in file)",
-                    canonical.display(),
-                    line,
-                    column,
-                    total_occurrences
-                ),
+                output: if diff.trim().is_empty() {
+                    format!(
+                        "Replaced match at {}:{}:{} ({} total occurrence(s) of old_text in file, no changes)",
+                        canonical.display(),
+                        line,
+                        column,
+                        total_occurrences
+                    )
+                } else {
+                    format!(
+                        "Replaced match at {}:{}:{} ({} total occurrence(s) of old_text in file)",
+                        canonical.display(),
+                        line,
+                        column,
+                        total_occurrences
+                    ) + &format!("\n\n{diff}")
+                },
                 error: None,
             },
             Err(err) => ToolResult {

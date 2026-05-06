@@ -21,44 +21,46 @@ pub fn layout(
     queue_total: usize,
     activity_total: usize,
 ) -> ViewportLayout {
-    let input_h = input_h.max(3);
+    let input_h = input_h.min(area.height);
     let queue_h = QueuePreview::height_for(queue_total);
     let activity_h = ChildActivityOverlay::height_for(activity_total);
 
     if slash_h > 0 {
         let c = Layout::vertical([
             Constraint::Min(4),
-            Constraint::Length(1),
             Constraint::Length(activity_h),
             Constraint::Length(queue_h),
             Constraint::Length(slash_h),
             Constraint::Length(input_h),
+            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
         ViewportLayout {
             transcript: c[0],
-            status: c[1],
-            activity_overlay: c[2],
-            queue_preview: c[3],
-            slash: Some(c[4]),
-            input: c[5],
+            activity_overlay: c[1],
+            queue_preview: c[2],
+            slash: Some(c[3]),
+            input: c[4],
+            status: c[5],
         }
     } else {
         let c = Layout::vertical([
             Constraint::Min(4),
-            Constraint::Length(1),
             Constraint::Length(activity_h),
             Constraint::Length(queue_h),
             Constraint::Length(input_h),
+            Constraint::Length(1),
+            Constraint::Length(2),
         ])
         .split(area);
         ViewportLayout {
             transcript: c[0],
-            status: c[1],
-            activity_overlay: c[2],
-            queue_preview: c[3],
+            activity_overlay: c[1],
+            queue_preview: c[2],
+            input: c[3],
+            status: c[4],
             slash: None,
-            input: c[4],
         }
     }
 }

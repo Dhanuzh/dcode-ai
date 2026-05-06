@@ -2,6 +2,15 @@ use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
 
+fn format_diff(old: &str, new: &str, path: &std::path::Path) -> String {
+    let label = path.display().to_string();
+    let diff = similar::TextDiff::from_lines(old, new);
+    diff.unified_diff()
+        .context_radius(3)
+        .header(&format!("before/{label}"), &format!("after/{label}"))
+        .to_string()
+}
+
 pub struct EditFileTool {
     workspace_root: std::path::PathBuf,
 }
@@ -109,16 +118,26 @@ impl ToolExecutor for EditFileTool {
             };
         };
 
-        match tokio::fs::write(&canonical, updated).await {
+        let diff = format_diff(&content, &updated, &canonical);
+        match tokio::fs::write(&canonical, &updated).await {
             Ok(()) => ToolResult {
                 call_id: call.id.clone(),
                 success: true,
-                output: format!(
-                    "Edited {} (replaced {} occurrence{})",
-                    canonical.display(),
-                    occurrence_count,
-                    if occurrence_count == 1 { "" } else { "s" }
-                ),
+                output: if diff.trim().is_empty() {
+                    format!(
+                        "Edited {} (replaced {} occurrence{}, no changes)",
+                        canonical.display(),
+                        occurrence_count,
+                        if occurrence_count == 1 { "" } else { "s" }
+                    )
+                } else {
+                    format!(
+                        "Edited {} (replaced {} occurrence{})",
+                        canonical.display(),
+                        occurrence_count,
+                        if occurrence_count == 1 { "" } else { "s" }
+                    ) + &format!("\n\n{diff}")
+                },
                 error: None,
             },
             Err(err) => ToolResult {

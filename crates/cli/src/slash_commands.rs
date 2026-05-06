@@ -2,6 +2,7 @@
 
 pub const SLASH_COMMANDS: &[&str] = &[
     "/help",
+    "/keymaps",
     "/status",
     "/context",
     "/session-name",

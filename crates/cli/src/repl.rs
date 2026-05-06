@@ -199,6 +199,47 @@ fn recent_context_lines(messages: &[Message], max_items: usize) -> Vec<String> {
     lines
 }
 
+fn keymaps_help_lines() -> Vec<String> {
+    vec![
+        "KEYMAPS".into(),
+        String::new(),
+        "Core".into(),
+        "  Enter        Send".into(),
+        "  Shift+Enter  Newline (terminal-dependent)".into(),
+        "  Ctrl+I / J   Newline (reliable fallback)".into(),
+        "  Up / Down    Composer history".into(),
+        "  Tab          Cycle agent profile".into(),
+        String::new(),
+        "Navigation".into(),
+        "  Ctrl+P       Command palette".into(),
+        "  Ctrl+F       Transcript search (TUI)".into(),
+        "  Ctrl+R       Composer history search (TUI)".into(),
+        "  Wheel        Transcript scroll".into(),
+        "  Drag         Select transcript text".into(),
+        String::new(),
+        "Session".into(),
+        "  Ctrl+K       Pin latest message".into(),
+        "  Ctrl+O       Pinned notes list".into(),
+        "  Ctrl+G       Sub-agent dashboard".into(),
+        "  Ctrl+V       Paste image / stage image".into(),
+        "  Ctrl+L       Clear screen".into(),
+        "  Ctrl+C       Cancel current turn".into(),
+        String::new(),
+        "Leader (Ctrl+X)".into(),
+        "  Ctrl+X M     Switch model".into(),
+        "  Ctrl+X E     Open editor".into(),
+        "  Ctrl+X L     Switch session".into(),
+        "  Ctrl+X N     New session".into(),
+        "  Ctrl+X C     Compact".into(),
+        "  Ctrl+X S     View status".into(),
+        "  Ctrl+X A     Agent picker".into(),
+        "  Ctrl+X H     Help".into(),
+        "  Ctrl+X Q     Exit".into(),
+        String::new(),
+        "Also available: /help, /keymaps".into(),
+    ]
+}
+
 /// Special input prefixes
 #[allow(dead_code)]
 const INPUT_PREFIXES: &[&str] = &[
@@ -842,6 +883,7 @@ impl Repl {
                     String::new(),
                     "SLASH COMMANDS:".into(),
                     "  /help              Show this help".into(),
+                    "  /keymaps           Show keyboard shortcuts".into(),
                     "  /status            Session status".into(),
                     "  /context           Session context snapshot".into(),
                     "  /session-name      Show/set manual session name".into(),
@@ -877,30 +919,7 @@ impl Repl {
                     "  /exit              Exit repl".into(),
                     String::new(),
                     "KEYBOARD SHORTCUTS:".into(),
-                    "  Tab          Cycle agent profile".into(),
-                    "  Ctrl+P       Command palette".into(),
-                    "  Ctrl+F       Transcript search (TUI)".into(),
-                    "  Ctrl+R       Composer history search (TUI)".into(),
-                    "  Ctrl+K       Pin latest message (TUI)".into(),
-                    "  Ctrl+O       Pinned notes list (TUI)".into(),
-                    "  Ctrl+G       Sub-agent dashboard (TUI)".into(),
-                    "  Shift+Enter  Insert newline (TUI, terminal-dependent)".into(),
-                    "  Ctrl+I/J     Insert newline (TUI, reliable fallback)".into(),
-                    "  Ctrl+X M     Switch model".into(),
-                    "  Ctrl+X E     Open editor".into(),
-                    "  Ctrl+X L     Switch session".into(),
-                    "  Ctrl+X N     New session".into(),
-                    "  Ctrl+X C     Compact".into(),
-                    "  Ctrl+X S     View status".into(),
-                    "  Ctrl+X B     View status".into(),
-                    "  Ctrl+X A     Agent picker".into(),
-                    "  Ctrl+X H     Help".into(),
-                    "  Ctrl+X Q     Exit".into(),
-                    "  Ctrl+C       Cancel request".into(),
-                    "  Ctrl+L       Clear screen".into(),
-                    "  F6           Copy latest assistant response (TUI)".into(),
-                    "  Ctrl+V       Paste image (TUI)".into(),
-                    "  F2           Cycle recent models".into(),
+                    "  Use /keymaps for the complete keymap list.".into(),
                 ];
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
@@ -908,6 +927,18 @@ impl Repl {
                     }
                 } else {
                     for l in &help_lines {
+                        out.println(l);
+                    }
+                }
+            }
+            "/keymaps" => {
+                let lines = keymaps_help_lines();
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("keymaps", lines);
+                    }
+                } else {
+                    for l in &lines {
                         out.println(l);
                     }
                 }
