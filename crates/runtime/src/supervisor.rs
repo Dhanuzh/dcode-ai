@@ -10,7 +10,7 @@ use dcode_ai_common::config::DcodeAiConfig;
 use dcode_ai_common::event::{
     AgentCommand, AgentEvent, EndReason, EventEnvelope, QuestionSelection,
 };
-use dcode_ai_common::message::{Message, Role};
+use dcode_ai_common::message::{Message, MessageContent, Role};
 use dcode_ai_common::session::{
     OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
 };
@@ -122,7 +122,7 @@ impl SupervisorHandle {
 
 impl Supervisor {
     /// Create a new supervised session. This sets up the agent loop, IPC server,
-    /// event channels, and persists initial session metadata.
+    /// and event channels.
     pub async fn create(cfg: SupervisorConfig) -> Result<Self, ProviderError> {
         let workspace_root = cfg
             .workspace_root
@@ -259,10 +259,6 @@ impl Supervisor {
             context_manager,
             last_summary_at_tokens: 0,
         };
-        sup.save().await.map_err(ProviderError::Other)?;
-        sup.update_last_session()
-            .await
-            .map_err(ProviderError::Other)?;
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
             .await;
         Ok(sup)
@@ -675,12 +671,19 @@ impl Supervisor {
             }),
         )
         .await;
-        let _ = self.save().await;
-        // Always update last session on finish so stale pointers are avoided.
-        let _ = self.update_last_session().await;
+        if self.should_persist_session() {
+            let _ = self.save().await;
+            let _ = self.update_last_session().await;
+        } else {
+            // Session had no meaningful interaction; remove no-op artifacts.
+            let _ = self.session_store.delete(&self.session_id).await;
+        }
     }
 
     pub async fn save(&self) -> Result<(), String> {
+        if !self.should_persist_session() {
+            return Ok(());
+        }
         let session = self.current_session_state(Utc::now());
         self.session_store
             .save(&session)
@@ -689,7 +692,7 @@ impl Supervisor {
     }
 
     /// Mark this session as the last active session for the workspace.
-    /// Called on create, resume, run_turn, and finish to keep the pointer fresh.
+    /// Called after meaningful activity (resume/run_turn/finish) to keep the pointer fresh.
     pub async fn update_last_session(&self) -> Result<(), String> {
         let store = LastSessionStore::new(
             self.workspace_root
@@ -728,6 +731,28 @@ impl Supervisor {
             total_output_tokens: self.agent.cost_tracker.output_tokens,
             estimated_cost_usd: self.agent.cost_tracker.estimated_cost_usd(),
         }
+    }
+
+    fn should_persist_session(&self) -> bool {
+        // Ignore seed/system bootstrap content.
+        let has_non_system_message = self.agent.messages.iter().any(|m| {
+            !matches!(m.role, Role::System)
+                && match &m.content {
+                    MessageContent::Text(text) => !text.trim().is_empty(),
+                    MessageContent::Parts(parts) => !parts.is_empty(),
+                }
+        });
+
+        has_non_system_message
+            || self.agent.cost_tracker.input_tokens > 0
+            || self.agent.cost_tracker.output_tokens > 0
+            || self
+                .session_name
+                .as_ref()
+                .is_some_and(|name| !name.trim().is_empty())
+            || self.parent_session_id.is_some()
+            || !self.child_session_ids.is_empty()
+            || self.orchestration.is_some()
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -1998,6 +2023,39 @@ mod tests {
         );
         let content = std::fs::read_to_string(&last_session_path).unwrap();
         assert_eq!(content.trim(), "session-newest");
+    }
+
+    #[tokio::test]
+    async fn empty_start_and_exit_session_is_not_persisted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+
+        let mut config = dcode_ai_common::config::DcodeAiConfig::default();
+        config.provider.default = dcode_ai_common::config::ProviderKind::OpenAi;
+        config.provider.openai.api_key = Some("test-key".into());
+        config.memory.context.auto_detect_context_window = false;
+        config.memory.context.query_provider_models_api = false;
+
+        let mut sup = Supervisor::create(SupervisorConfig {
+            config: config.clone(),
+            workspace_root: workspace.clone(),
+            safe_mode: false,
+            interactive_approvals: false,
+            session_id: Some("session-empty-exit".into()),
+            approval_handler: None,
+            orchestration_context: None,
+        })
+        .await
+        .expect("create supervisor");
+
+        sup.finish(EndReason::UserExit).await;
+
+        let store = SessionStore::new(workspace.join(&config.session.history_dir));
+        let ids = store.list().await.expect("list sessions");
+        assert!(
+            !ids.iter().any(|id| id == "session-empty-exit"),
+            "no-op session should not be persisted"
+        );
     }
 
     #[tokio::test]
