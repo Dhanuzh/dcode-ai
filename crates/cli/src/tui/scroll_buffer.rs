@@ -8,6 +8,7 @@ pub struct ScrollBuffer {
     scroll_offset: usize,
     sticky_bottom: bool,
     cached_width: usize,
+    cached_viewport_height: usize,
 }
 
 impl Default for ScrollBuffer {
@@ -24,6 +25,7 @@ impl ScrollBuffer {
             scroll_offset: 0,
             sticky_bottom: true,
             cached_width: 80,
+            cached_viewport_height: 1,
         }
     }
 
@@ -38,7 +40,7 @@ impl ScrollBuffer {
         if self.sticky_bottom {
             self.scroll_offset = 0;
         } else {
-            let max_offset = self.max_offset(1);
+            let max_offset = self.max_offset(self.cached_viewport_height.max(1));
             self.scroll_offset = self.scroll_offset.min(max_offset);
         }
     }
@@ -53,12 +55,19 @@ impl ScrollBuffer {
 
     pub fn scroll_up(&mut self, n: usize, width: usize, viewport_height: usize) {
         self.cached_width = width.max(1);
+        self.cached_viewport_height = viewport_height.max(1);
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.max_offset(self.cached_viewport_height));
         let max_offset = self.max_offset(viewport_height);
         self.scroll_offset = (self.scroll_offset + n).min(max_offset);
         self.sticky_bottom = false;
     }
 
     pub fn scroll_down(&mut self, n: usize) {
+        self.scroll_offset = self
+            .scroll_offset
+            .min(self.max_offset(self.cached_viewport_height.max(1)));
         self.scroll_offset = self.scroll_offset.saturating_sub(n);
         if self.scroll_offset == 0 {
             self.sticky_bottom = true;
@@ -77,13 +86,17 @@ impl ScrollBuffer {
 
     pub fn scroll_position_from_top(&self, viewport_height: usize, width: usize) -> (u16, u16) {
         let total = self.total_visual_lines(width.max(1));
+        let clamped_offset = self
+            .scroll_offset
+            .min(self.max_offset(viewport_height.max(1)));
         let from_top = total
             .saturating_sub(viewport_height)
-            .saturating_sub(self.scroll_offset);
+            .saturating_sub(clamped_offset);
         (from_top.min(u16::MAX as usize) as u16, 0)
     }
 
     pub fn set_from_top(&mut self, from_top: usize, viewport_height: usize, width: usize) {
+        self.cached_viewport_height = viewport_height.max(1);
         let total = self.total_visual_lines(width.max(1));
         let max_from_top = total.saturating_sub(viewport_height);
         let clamped = from_top.min(max_from_top);
