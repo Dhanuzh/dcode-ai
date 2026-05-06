@@ -1,3 +1,4 @@
+use dcode_ai_common::config::PermissionMode;
 use dcode_ai_common::event::{AgentEvent, BusyState};
 use dcode_ai_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
 use dcode_ai_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
@@ -377,6 +378,14 @@ impl AgentLoop {
                         .await;
                         if let ApprovalVerdict::AllowPattern(pattern) = &verdict {
                             self.approval.add_session_allow(pattern.clone());
+                        }
+                        if approved
+                            && call.name == "execute_bash"
+                            && self.approval.mode() == PermissionMode::BypassPermissions
+                        {
+                            // In bypass mode, the first explicit shell approval enables
+                            // the rest of the session's shell calls.
+                            self.approval.add_session_allow("execute_bash:*".into());
                         }
 
                         if approved {

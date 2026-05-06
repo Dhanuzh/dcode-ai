@@ -190,7 +190,15 @@ impl ApprovalPolicy {
         );
         let destructive = matches!(tool_name, "delete_path");
         match self.config.mode {
-            PermissionMode::BypassPermissions => PermissionTier::Allowed,
+            PermissionMode::BypassPermissions => {
+                // Keep bypass permissive for workspace reads/edits, but require
+                // one explicit approval for shell execution per session.
+                if tool_name == "execute_bash" && !explicitly_allowed {
+                    PermissionTier::Ask
+                } else {
+                    PermissionTier::Allowed
+                }
+            }
             PermissionMode::Plan => {
                 if readonly {
                     PermissionTier::Allowed
@@ -439,5 +447,34 @@ mod tests {
             &serde_json::json!({"command": "rm -rf /"}).to_string(),
         );
         assert_eq!(tier, PermissionTier::Denied);
+    }
+
+    #[test]
+    fn bypass_permissions_asks_for_bash_before_session_allow() {
+        let config = PermissionConfig {
+            mode: PermissionMode::BypassPermissions,
+            ..Default::default()
+        };
+        let policy = ApprovalPolicy::new(config);
+        let tier = policy.check(
+            "execute_bash",
+            &serde_json::json!({"command": "echo hi"}).to_string(),
+        );
+        assert_eq!(tier, PermissionTier::Ask);
+    }
+
+    #[test]
+    fn bypass_permissions_allows_bash_after_session_allow_pattern() {
+        let config = PermissionConfig {
+            mode: PermissionMode::BypassPermissions,
+            ..Default::default()
+        };
+        let mut policy = ApprovalPolicy::new(config);
+        policy.add_session_allow("execute_bash:*".into());
+        let tier = policy.check(
+            "execute_bash",
+            &serde_json::json!({"command": "echo hi"}).to_string(),
+        );
+        assert_eq!(tier, PermissionTier::Allowed);
     }
 }

@@ -120,7 +120,7 @@ fn permission_mode_section(mode: PermissionMode) -> Option<String> {
                 .into(),
         ),
         PermissionMode::BypassPermissions => Some(
-            "Permission Mode: bypass-permissions\n- Tools are broadly available, but still work carefully and verify before claiming success."
+            "Permission Mode: bypass-permissions\n- Read/edit tools are broadly available.\n- Shell execution asks once, then is allowed for the rest of the session."
                 .into(),
         ),
         PermissionMode::Default => None,
