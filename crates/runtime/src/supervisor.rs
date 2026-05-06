@@ -10,6 +10,7 @@ use dcode_ai_common::config::DcodeAiConfig;
 use dcode_ai_common::event::{
     AgentCommand, AgentEvent, EndReason, EventEnvelope, QuestionSelection,
 };
+use dcode_ai_common::message::{Message, Role};
 use dcode_ai_common::session::{
     OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
 };
@@ -24,7 +25,7 @@ use dcode_ai_core::tools::InvokeSkillTool;
 use dcode_ai_core::tools::ToolRegistry;
 use dcode_ai_core::tools::mcp::load_mcp_tools;
 use dcode_ai_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -277,22 +278,53 @@ impl Supervisor {
         session_id: &str,
         approval_handler: Option<Arc<dyn ApprovalHandler>>,
     ) -> Result<Self, ProviderError> {
+        let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let mut loaded = store
+            .load(session_id)
+            .await
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        // Self-heal for sessions that were previously overwritten on resume:
+        // if the snapshot has no non-system messages, recover user/assistant
+        // turns from the persisted event log so model context is restored.
+        let non_system_messages = loaded
+            .messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .count();
+        if non_system_messages == 0 {
+            let recovered = recover_messages_from_event_log(
+                &store
+                    .sessions_dir()
+                    .join(format!("{session_id}.events.jsonl")),
+            )
+            .await;
+            if !recovered.is_empty() {
+                let mut merged: Vec<Message> = loaded
+                    .messages
+                    .iter()
+                    .take_while(|m| m.role == Role::System)
+                    .cloned()
+                    .collect();
+                merged.extend(recovered);
+                loaded.messages = merged;
+            }
+        }
+
+        // Bootstrap runtime/IPC infrastructure with a fresh ephemeral session ID,
+        // then swap in the loaded persisted state. Never call `create()` with the
+        // target resume ID directly: `create()` saves immediately, which would
+        // overwrite the persisted session before we load it.
         let mut sup = Self::create(SupervisorConfig {
             config: config.clone(),
             workspace_root: workspace_root.to_path_buf(),
             safe_mode,
             interactive_approvals,
-            session_id: Some(session_id.into()),
+            session_id: None,
             approval_handler,
             orchestration_context: None,
         })
         .await?;
-
-        let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
-        let loaded = store
-            .load(session_id)
-            .await
-            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        let bootstrap_id = sup.session_id.clone();
 
         sup.session_id = loaded.meta.id.clone();
         sup.session_name = loaded.meta.session_name.clone();
@@ -314,6 +346,12 @@ impl Supervisor {
         sup.session_summary = loaded.meta.session_summary;
         sup.orchestration = loaded.meta.orchestration;
         sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
+
+        // Best-effort cleanup of the bootstrap snapshot created by `create()`.
+        // Ignore failures here because it is non-critical.
+        let _ = sup.session_store.delete(&bootstrap_id).await;
+        // Keep last-session pointer consistent with the resumed session.
+        let _ = sup.update_last_session().await;
         Ok(sup)
     }
 
@@ -775,6 +813,14 @@ impl Supervisor {
         self.session_name = session_name.and_then(|name| normalize_session_name(&name));
     }
 
+    pub fn undo_last_turn(&mut self) -> Result<Option<String>, String> {
+        self.agent.undo_last_turn()
+    }
+
+    pub fn redo_last_turn(&mut self) -> Result<Option<String>, String> {
+        self.agent.redo_last_turn()
+    }
+
     pub fn status(&self) -> &SessionStatus {
         &self.status
     }
@@ -877,6 +923,62 @@ impl Supervisor {
             hooks.run_best_effort(event, None, &payload).await;
         }
     }
+}
+
+fn parse_json_values_on_line(line: &str) -> Vec<Value> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let de = serde_json::Deserializer::from_str(trimmed);
+    for res in de.into_iter::<Value>() {
+        match res {
+            Ok(v) => out.push(v),
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+fn value_to_event(v: Value) -> Option<AgentEvent> {
+    if v.get("event").is_some() {
+        serde_json::from_value::<EventEnvelope>(v)
+            .ok()
+            .map(|env| env.event)
+    } else {
+        serde_json::from_value::<AgentEvent>(v).ok()
+    }
+}
+
+async fn recover_messages_from_event_log(path: &Path) -> Vec<Message> {
+    let Ok(raw) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+
+    let mut recovered = Vec::new();
+    for line in raw.lines() {
+        for v in parse_json_values_on_line(line) {
+            let Some(event) = value_to_event(v) else {
+                continue;
+            };
+            if let AgentEvent::MessageReceived { role, content } = event {
+                match role.as_str() {
+                    "user" => recovered.push(Message::user(content)),
+                    "assistant" => recovered.push(Message::assistant(content)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut dedup = Vec::new();
+    for msg in recovered {
+        if dedup.last() != Some(&msg) {
+            dedup.push(msg);
+        }
+    }
+    dedup
 }
 
 fn truncate_child_detail(s: &str, max_chars: usize) -> String {
@@ -1896,6 +1998,175 @@ mod tests {
         );
         let content = std::fs::read_to_string(&last_session_path).unwrap();
         assert_eq!(content.trim(), "session-newest");
+    }
+
+    #[tokio::test]
+    async fn resume_preserves_existing_session_messages_instead_of_overwriting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+        let session_id = "resume-target";
+        let now = Utc::now();
+        let session = SessionState {
+            meta: SessionMeta {
+                id: session_id.to_string(),
+                session_name: Some("resume target".into()),
+                created_at: now - Duration::minutes(5),
+                updated_at: now - Duration::minutes(1),
+                workspace: workspace.clone(),
+                model: "gpt-5.2".to_string(),
+                status: SessionStatus::Completed,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![
+                Message::system("You are dcode-ai"),
+                Message::user("hello"),
+                Message::assistant("world"),
+            ],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        std::fs::write(
+            sessions_dir.join(format!("{session_id}.json")),
+            serde_json::to_string_pretty(&session).expect("serialize session"),
+        )
+        .expect("write session");
+
+        let mut config = dcode_ai_common::config::DcodeAiConfig::default();
+        config.provider.default = dcode_ai_common::config::ProviderKind::OpenAi;
+        config.provider.openai.api_key = Some("test-key".into());
+        config.memory.context.auto_detect_context_window = false;
+
+        let sup = Supervisor::resume(config, &workspace, false, false, session_id, None)
+            .await
+            .expect("resume should load existing session");
+
+        let previews: Vec<String> = sup
+            .agent
+            .messages
+            .iter()
+            .map(|m| m.content.event_preview())
+            .collect();
+        assert!(
+            previews.iter().any(|m| m == "world"),
+            "expected resumed messages to include prior assistant reply, got: {previews:?}"
+        );
+
+        let store = SessionStore::new(sessions_dir);
+        let persisted = store
+            .load(session_id)
+            .await
+            .expect("load persisted session");
+        let persisted_previews: Vec<String> = persisted
+            .messages
+            .iter()
+            .map(|m| m.content.event_preview())
+            .collect();
+        assert!(
+            persisted_previews.iter().any(|m| m == "world"),
+            "resume must not overwrite persisted session before loading"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_recovers_context_from_event_log_when_snapshot_has_no_turns() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+        let session_id = "resume-recover";
+        let now = Utc::now();
+        let session = SessionState {
+            meta: SessionMeta {
+                id: session_id.to_string(),
+                session_name: Some("resume recover".into()),
+                created_at: now - Duration::minutes(5),
+                updated_at: now - Duration::minutes(1),
+                workspace: workspace.clone(),
+                model: "gpt-5.2".to_string(),
+                status: SessionStatus::Completed,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![Message::system("You are dcode-ai")],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        std::fs::write(
+            sessions_dir.join(format!("{session_id}.json")),
+            serde_json::to_string_pretty(&session).expect("serialize session"),
+        )
+        .expect("write session");
+
+        let log_path = sessions_dir.join(format!("{session_id}.events.jsonl"));
+        let user = EventEnvelope::new(
+            1,
+            AgentEvent::MessageReceived {
+                role: "user".into(),
+                content: "hello".into(),
+            },
+        );
+        let assistant = EventEnvelope::new(
+            2,
+            AgentEvent::MessageReceived {
+                role: "assistant".into(),
+                content: "world".into(),
+            },
+        );
+        let mut lines = String::new();
+        lines.push_str(&serde_json::to_string(&user).expect("serialize user event"));
+        lines.push('\n');
+        lines.push_str(&serde_json::to_string(&assistant).expect("serialize assistant event"));
+        lines.push('\n');
+        std::fs::write(&log_path, lines).expect("write event log");
+
+        let mut config = dcode_ai_common::config::DcodeAiConfig::default();
+        config.provider.default = dcode_ai_common::config::ProviderKind::OpenAi;
+        config.provider.openai.api_key = Some("test-key".into());
+        config.memory.context.auto_detect_context_window = false;
+
+        let sup = Supervisor::resume(config, &workspace, false, false, session_id, None)
+            .await
+            .expect("resume should recover context from event log");
+
+        let previews: Vec<String> = sup
+            .agent
+            .messages
+            .iter()
+            .map(|m| m.content.event_preview())
+            .collect();
+        assert!(
+            previews.iter().any(|m| m == "hello"),
+            "expected recovered user turn, got: {previews:?}"
+        );
+        assert!(
+            previews.iter().any(|m| m == "world"),
+            "expected recovered assistant turn, got: {previews:?}"
+        );
     }
 
     #[tokio::test]

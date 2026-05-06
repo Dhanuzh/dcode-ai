@@ -36,7 +36,12 @@ pub fn model_accepts_native_images(kind: ProviderKind, model: &str) -> bool {
                 || m.contains("qwen-vl")
         }
         ProviderKind::OpenCodeZen => {
-            m.contains("vision") || m.contains("gpt-4o") || m.contains("qwen-vl")
+            m.contains("minimax")
+                || m.contains("big-pickle")
+                || m.contains("kimi")
+                || m.contains("glm")
+                || m.contains("vision")
+                || m.contains("qwen-vl")
         }
     }
 }

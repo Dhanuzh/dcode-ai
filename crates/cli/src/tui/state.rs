@@ -2,7 +2,9 @@
 
 use crate::{activity, tool_ui};
 use dcode_ai_common::config::ProviderKind;
-use dcode_ai_common::event::{AgentEvent, BusyState, InteractiveQuestionPayload};
+use dcode_ai_common::event::{
+    AgentEvent, BusyState, InteractiveQuestionPayload, QuestionSelection,
+};
 use dcode_ai_common::message::ImageAttachment;
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -82,7 +84,11 @@ pub struct TuiSessionState {
     pub streaming_assistant: Option<String>,
     /// In-progress thinking/reasoning tokens from the model.
     pub streaming_thinking: Option<String>,
+    /// Composer input engine (Koda-style textarea state object).
+    pub composer: crate::tui::composer::TextArea,
+    /// Compatibility mirror for existing render/search code paths.
     pub input_buffer: String,
+    /// Compatibility mirror for existing render/search code paths.
     pub cursor_char_idx: usize,
     /// Scroll offset in *lines* (flattened transcript).
     pub scroll_lines: usize,
@@ -124,6 +130,9 @@ pub struct TuiSessionState {
     pub active_approval: Option<ApprovalRequest>,
     /// When set, the composer answers this question (see status hint).
     pub active_question: Option<InteractiveQuestionPayload>,
+    /// Resolved answers keyed by `question_id`, used to render selected choice
+    /// highlight in transcript question blocks.
+    pub answered_questions: HashMap<String, QuestionSelection>,
     /// Current git branch name (updated on branch switch).
     pub current_branch: String,
     /// Branch picker popup state.
@@ -175,6 +184,9 @@ pub struct TuiSessionState {
     pub info_modal_title: String,
     pub info_modal_lines: Vec<String>,
     pub info_modal_scroll: usize,
+    pub info_modal_hscroll: usize,
+    pub info_modal_view_rows: usize,
+    pub info_modal_view_cols: usize,
     /// Model picker popup (searchable model/provider list).
     pub model_picker_open: bool,
     pub model_picker_search: String,
@@ -211,6 +223,10 @@ pub struct TuiSessionState {
     pub queued_steering: usize,
     /// Queued follow-up messages (Alt+Enter while busy).
     pub queued_followup: usize,
+    /// Preview rows for queued messages rendered above the status bar.
+    pub queue_preview_items: Vec<String>,
+    /// Number of enabled MCP servers (status bar segment).
+    pub mcp_server_count: usize,
     /// Render fenced code blocks with line numbers in assistant markdown.
     pub code_line_numbers: bool,
     /// Monotonic revision for transcript render caching.
@@ -220,8 +236,8 @@ pub struct TuiSessionState {
     pub paste_store: HashMap<String, String>,
     /// Counter for generating unique paste tokens.
     pub paste_counter: u32,
-    /// Runtime mouse-capture state. When true, wheel scroll works but native
-    /// terminal selection is intercepted. Toggled by F12.
+    /// Runtime mouse-capture state for fullscreen TUI mouse handling.
+    /// Kept true for koda-style wheel + drag-select behavior.
     pub mouse_capture_on: bool,
     /// Theme picker popup state.
     pub theme_picker_open: bool,
@@ -229,7 +245,7 @@ pub struct TuiSessionState {
     pub theme_picker_entries: Vec<String>,
     /// Pinned notes shown at transcript top.
     pub pinned_notes: Vec<PinnedNote>,
-    /// Pins modal popup (`Ctrl+;`).
+    /// Pins modal popup (`Ctrl+O`).
     pub pins_modal_open: bool,
     pub pins_modal_index: usize,
     /// Sub-agent details modal popup (`Ctrl+G`).
@@ -240,12 +256,24 @@ pub struct TuiSessionState {
     pub transcript_search_query: String,
     /// Selected match index within the current filtered match list.
     pub transcript_search_index: usize,
+    /// Composer history search overlay (`Ctrl+R` in fullscreen TUI).
+    pub composer_history_search_open: bool,
+    pub composer_history_search_query: String,
+    pub composer_history_search_index: usize,
+    /// Typed menu state used by viewport rendering.
+    pub menu_content: crate::tui::tui_types::MenuContent,
     /// Per-tool-block collapse override keyed by `call_id`.
     /// `Some(true)` = collapsed, `Some(false)` = expanded, absent = use default.
     pub tool_block_collapsed: HashMap<String, bool>,
     /// Global "collapse all tool blocks" toggle (z key). When true, `ToolDone`/
     /// `ToolRunning` blocks render header only unless overridden in `tool_block_collapsed`.
     pub all_tools_collapsed: bool,
+    /// Active mouse text-selection. `Some` while user is dragging or after
+    /// release until input/scroll clears it.
+    pub mouse_selection: Option<crate::tui::mouse_select::Selection>,
+    /// History panel viewport rect captured each frame, used to translate
+    /// raw mouse coordinates → buffer-space rows for selection.
+    pub history_rect: Option<(u16, u16, u16, u16)>,
 }
 
 #[derive(Debug, Clone)]
@@ -276,6 +304,7 @@ impl TuiSessionState {
             blocks: Vec::new(),
             streaming_assistant: None,
             streaming_thinking: None,
+            composer: crate::tui::composer::TextArea::default(),
             input_buffer: String::new(),
             cursor_char_idx: 0,
             scroll_lines: 0,
@@ -303,6 +332,7 @@ impl TuiSessionState {
             command_palette_query: String::new(),
             active_approval: None,
             active_question: None,
+            answered_questions: HashMap::new(),
             current_branch: String::new(),
             branch_picker_open: false,
             branch_picker_query: String::new(),
@@ -334,6 +364,9 @@ impl TuiSessionState {
             info_modal_title: String::new(),
             info_modal_lines: Vec::new(),
             info_modal_scroll: 0,
+            info_modal_hscroll: 0,
+            info_modal_view_rows: 16,
+            info_modal_view_cols: 80,
             model_picker_open: false,
             model_picker_search: String::new(),
             model_picker_index: 0,
@@ -357,11 +390,13 @@ impl TuiSessionState {
             validation_status: None,
             queued_steering: 0,
             queued_followup: 0,
+            queue_preview_items: Vec::new(),
+            mcp_server_count: 0,
             code_line_numbers,
             transcript_rev: 0,
             paste_store: HashMap::new(),
             paste_counter: 0,
-            mouse_capture_on: false,
+            mouse_capture_on: true,
             theme_picker_open: false,
             theme_picker_index: 0,
             theme_picker_entries: Vec::new(),
@@ -373,8 +408,14 @@ impl TuiSessionState {
             transcript_search_open: false,
             transcript_search_query: String::new(),
             transcript_search_index: 0,
+            composer_history_search_open: false,
+            composer_history_search_query: String::new(),
+            composer_history_search_index: 0,
+            menu_content: crate::tui::tui_types::MenuContent::None,
             tool_block_collapsed: HashMap::new(),
             all_tools_collapsed: false,
+            mouse_selection: None,
+            history_rect: None,
         }
     }
 
@@ -386,6 +427,73 @@ impl TuiSessionState {
             return *v;
         }
         self.all_tools_collapsed
+    }
+
+    pub fn sync_legacy_from_composer(&mut self) {
+        self.input_buffer = self.composer.text().to_string();
+        self.cursor_char_idx = self.composer.cursor_char_idx();
+    }
+
+    pub fn set_input_text(&mut self, text: impl Into<String>) {
+        self.composer.set_text(text.into());
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn set_input_text_with_cursor(&mut self, text: impl Into<String>, cursor_char_idx: usize) {
+        self.composer
+            .set_text_with_cursor(text.into(), cursor_char_idx);
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn clear_input(&mut self) {
+        self.composer.clear();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn take_input_text(&mut self) -> String {
+        let out = self.composer.take_text();
+        self.sync_legacy_from_composer();
+        out
+    }
+
+    pub fn insert_input_char(&mut self, ch: char) {
+        self.composer.insert_char(ch);
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn insert_input_str(&mut self, s: &str) {
+        self.composer.insert_str(s);
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_left(&mut self) {
+        self.composer.move_left();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_right(&mut self) {
+        self.composer.move_right();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_home(&mut self) {
+        self.composer.move_home();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_end(&mut self) {
+        self.composer.move_end();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn backspace_input(&mut self) {
+        self.composer.backspace();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn delete_input(&mut self) {
+        self.composer.delete();
+        self.sync_legacy_from_composer();
     }
 
     /// Toggle the most recent tool block (ToolRunning or ToolDone) by call_id.
@@ -517,6 +625,9 @@ impl TuiSessionState {
         self.info_modal_title = title.into();
         self.info_modal_lines = lines;
         self.info_modal_scroll = 0;
+        self.info_modal_hscroll = 0;
+        self.info_modal_view_rows = 16;
+        self.info_modal_view_cols = 80;
     }
 
     pub fn close_info_modal(&mut self) {
@@ -524,6 +635,9 @@ impl TuiSessionState {
         self.info_modal_title.clear();
         self.info_modal_lines.clear();
         self.info_modal_scroll = 0;
+        self.info_modal_hscroll = 0;
+        self.info_modal_view_rows = 16;
+        self.info_modal_view_cols = 80;
     }
 
     pub fn open_model_picker(&mut self, entries: Vec<ModelPickerEntry>) {
@@ -678,14 +792,6 @@ impl TuiSessionState {
     fn set_process(&mut self, title: impl Into<String>, detail: impl Into<String>) {
         self.process_title = title.into();
         self.process_detail = detail.into();
-    }
-
-    pub fn toggle_sidebar(&mut self) {
-        self.sidebar_open = !self.sidebar_open;
-    }
-
-    pub fn set_sidebar_open(&mut self, open: bool) {
-        self.sidebar_open = open;
     }
 
     fn flush_stream_before_tool(&mut self) {
@@ -917,6 +1023,8 @@ impl TuiSessionState {
                 question_id,
                 selection,
             } => {
+                self.answered_questions
+                    .insert(question_id.clone(), selection.clone());
                 self.active_question = None;
                 self.close_question_modal();
                 self.blocks.push(DisplayBlock::System(format!(
@@ -1136,7 +1244,7 @@ mod tests {
     }
 
     #[test]
-    fn tui_state_defaults_mouse_capture_off() {
+    fn tui_state_defaults_mouse_capture_on() {
         let st = TuiSessionState::new(
             "session-x".into(),
             "m".into(),
@@ -1145,7 +1253,7 @@ mod tests {
             PathBuf::from("/tmp"),
             false,
         );
-        assert!(!st.mouse_capture_on);
+        assert!(st.mouse_capture_on);
     }
 
     #[test]

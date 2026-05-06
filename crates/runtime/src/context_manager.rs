@@ -133,15 +133,13 @@ impl ContextManager {
         }
     }
 
-    /// Find the system message(s) in the message list.
-    /// System messages should always be preserved.
-    fn find_system_messages(messages: &[Message]) -> Vec<usize> {
+    /// Find the contiguous leading system-message prefix.
+    /// These messages are preserved during compaction.
+    fn leading_system_prefix_len(messages: &[Message]) -> usize {
         messages
             .iter()
-            .enumerate()
-            .filter(|(_, m)| m.role == Role::System)
-            .map(|(i, _)| i)
-            .collect()
+            .take_while(|m| m.role == Role::System)
+            .count()
     }
 
     /// Adjust a cutoff index so it never lands inside a tool_use/tool_result group.
@@ -160,6 +158,28 @@ impl ContextManager {
         cutoff
     }
 
+    /// Find the earliest index that retains the last `keep_non_system`
+    /// non-system messages while preserving order.
+    fn recent_start_by_non_system(
+        messages: &[Message],
+        prefix_len: usize,
+        keep_non_system: usize,
+    ) -> usize {
+        if keep_non_system == 0 {
+            return messages.len();
+        }
+        let mut seen = 0usize;
+        for idx in (prefix_len..messages.len()).rev() {
+            if messages[idx].role != Role::System {
+                seen += 1;
+                if seen == keep_non_system {
+                    return idx;
+                }
+            }
+        }
+        prefix_len
+    }
+
     /// Check if the context needs compaction.
     pub fn needs_compaction(&self, messages: &[Message]) -> bool {
         let stats = self.stats(messages);
@@ -174,35 +194,44 @@ impl ContextManager {
     /// 2. Keep recent messages up to max_retained_messages
     /// 3. Mark older messages for summarization
     pub fn get_compaction_plan(&self, messages: &[Message]) -> CompactionPlan {
-        let system_indices: Vec<usize> = Self::find_system_messages(messages);
-        let system_count = system_indices.len();
+        let prefix_len = Self::leading_system_prefix_len(messages);
+        let non_system_count = messages[prefix_len..]
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .count();
 
-        // Calculate how many non-system messages we can keep
-        let non_system_count = messages.len().saturating_sub(system_count);
-        let keep_non_system = non_system_count.saturating_sub(self.config.max_retained_messages);
-
-        // If we need to compact, find the boundary
-        if keep_non_system > 0 {
-            // Keep last max_retained_messages non-system messages
-            let cutoff_index = messages.len() - self.config.max_retained_messages;
-
-            CompactionPlan {
-                keep_indices: (0..cutoff_index)
-                    .rev()
-                    .take(self.config.max_retained_messages)
-                    .collect(),
-                summarize_range: Some(SummarizeRange {
-                    start: system_count,
-                    end: cutoff_index,
-                }),
-                preserve_system: true,
-            }
-        } else {
-            CompactionPlan {
+        if non_system_count <= self.config.max_retained_messages {
+            return CompactionPlan {
                 keep_indices: (0..messages.len()).collect(),
                 summarize_range: None,
                 preserve_system: true,
-            }
+            };
+        }
+
+        let recent_start = Self::recent_start_by_non_system(
+            messages,
+            prefix_len,
+            self.config.max_retained_messages,
+        );
+        let recent_start = Self::adjust_cutoff_for_tool_groups(messages, recent_start, prefix_len);
+
+        if recent_start <= prefix_len {
+            return CompactionPlan {
+                keep_indices: (0..messages.len()).collect(),
+                summarize_range: None,
+                preserve_system: true,
+            };
+        }
+
+        let mut keep_indices: Vec<usize> = (0..prefix_len).collect();
+        keep_indices.extend(recent_start..messages.len());
+        CompactionPlan {
+            keep_indices,
+            summarize_range: Some(SummarizeRange {
+                start: prefix_len,
+                end: recent_start,
+            }),
+            preserve_system: true,
         }
     }
 
@@ -212,11 +241,13 @@ impl ContextManager {
         let plan = self.get_compaction_plan(messages);
 
         if let Some(range) = plan.summarize_range {
-            // Skip system messages, get the middle-old messages
-            let system_count = Self::find_system_messages(messages).len();
-            let start = (range.start).max(system_count);
-
-            messages[start..range.end].to_vec()
+            let start = range.start.min(messages.len());
+            let end = range.end.min(messages.len());
+            if start >= end {
+                Vec::new()
+            } else {
+                messages[start..end].to_vec()
+            }
         } else {
             Vec::new()
         }
@@ -226,7 +257,7 @@ impl ContextManager {
     /// Returns the new message list with the summary inserted.
     pub fn apply_summary(&self, messages: &[Message], summary: &str) -> Vec<Message> {
         let plan = self.get_compaction_plan(messages);
-        let system_count = Self::find_system_messages(messages).len();
+        let prefix_len = Self::leading_system_prefix_len(messages);
 
         // If there's nothing to summarize, just return the original messages
         let Some(range) = plan.summarize_range else {
@@ -235,13 +266,13 @@ impl ContextManager {
 
         // Get recent messages to keep (everything after the summarize range).
         // Adjust to avoid splitting tool_use/tool_result groups.
-        let recent_start = Self::adjust_cutoff_for_tool_groups(messages, range.end, system_count);
+        let recent_start = Self::adjust_cutoff_for_tool_groups(messages, range.end, prefix_len);
 
         // Build new message list: system + summary + recent
-        let mut result = Vec::with_capacity(system_count + 10);
+        let mut result = Vec::with_capacity(prefix_len + 10);
 
         // Add system messages
-        result.extend(messages.iter().take(system_count).cloned());
+        result.extend(messages.iter().take(prefix_len).cloned());
 
         // Insert summary as a special system message
         if !summary.trim().is_empty() {
@@ -271,19 +302,21 @@ impl ContextManager {
         messages: &[Message],
         max_messages: Option<usize>,
     ) -> Vec<Message> {
-        let max = max_messages.unwrap_or(self.config.max_retained_messages);
-        let system_count = Self::find_system_messages(messages).len();
+        let keep_non_system = max_messages.unwrap_or(self.config.max_retained_messages);
+        let prefix_len = Self::leading_system_prefix_len(messages);
+        let non_system_count = messages[prefix_len..]
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .count();
 
-        if messages.len() <= max {
+        if non_system_count <= keep_non_system {
             return messages.to_vec();
         }
 
-        // Keep system messages + last (max - system_count) messages
-        let keep_count = max.saturating_sub(system_count);
-        let cutoff = messages.len() - keep_count;
-        let cutoff = Self::adjust_cutoff_for_tool_groups(messages, cutoff, system_count);
+        let cutoff = Self::recent_start_by_non_system(messages, prefix_len, keep_non_system);
+        let cutoff = Self::adjust_cutoff_for_tool_groups(messages, cutoff, prefix_len);
 
-        let mut result: Vec<Message> = messages[..system_count].to_vec();
+        let mut result: Vec<Message> = messages[..prefix_len].to_vec();
         result.extend_from_slice(&messages[cutoff..]);
 
         result
@@ -320,17 +353,22 @@ impl ContextManager {
         let prepared = self.prepare_for_summary(messages);
         let stats = self.stats(&prepared);
         let conversation = render_summary_conversation(&prepared);
+        let max_words = (self.config.context_window_target / 200).clamp(120, 450);
 
         format!(
-            r#"Please summarize the following conversation concisely.
+            r#"Please summarize the following conversation for context compaction.
 
 The summary should:
 1. Capture the key topics and goals discussed
 2. Note any important decisions or findings
 3. Preserve critical context (file paths, variable names, errors, etc.)
-4. Be written as if you're continuing the conversation
+4. Capture unresolved tasks, pending approvals, and open questions
+5. Be written so the assistant can continue without re-asking context
 
-Keep the summary under 500 words.
+Format requirements:
+- Use sections: Goals, Decisions, Important Artifacts, Open Work
+- Keep the summary under {} words
+- Prefer concise bullet points
 
 Current context stats:
 - Messages: {}
@@ -342,6 +380,7 @@ Conversation to summarize:
 
 {}
 "#,
+            max_words,
             stats.message_count,
             stats.estimated_tokens,
             self.config.context_window_target,
@@ -508,6 +547,58 @@ mod tests {
         );
     }
 
+    #[test]
+    fn compaction_plan_keeps_latest_non_system_messages() {
+        let config = ContextManagerConfig {
+            context_window_target: 32_000,
+            max_retained_messages: 3,
+            auto_summarize_threshold: 75,
+            enable_auto_summarize: true,
+            max_message_chars_for_summary: 10_000,
+        };
+        let manager = ContextManager::new(config, "test-model".to_string());
+        let messages = vec![
+            make_message(Role::System, "system"),
+            make_message(Role::User, "u1"),
+            make_message(Role::Assistant, "a1"),
+            make_message(Role::User, "u2"),
+            make_message(Role::Assistant, "a2"),
+            make_message(Role::User, "u3"),
+            make_message(Role::Assistant, "a3"),
+        ];
+
+        let plan = manager.get_compaction_plan(&messages);
+        let range = plan.summarize_range.expect("expected summarize range");
+        assert_eq!(range.start, 1);
+        assert_eq!(range.end, 4);
+        assert!(plan.keep_indices.contains(&0));
+        assert!(plan.keep_indices.contains(&4));
+        assert!(plan.keep_indices.contains(&6));
+    }
+
+    #[test]
+    fn compaction_plan_noop_when_within_limit() {
+        let config = ContextManagerConfig {
+            context_window_target: 32_000,
+            max_retained_messages: 5,
+            auto_summarize_threshold: 75,
+            enable_auto_summarize: true,
+            max_message_chars_for_summary: 10_000,
+        };
+        let manager = ContextManager::new(config, "test-model".to_string());
+        let messages = vec![
+            make_message(Role::System, "system"),
+            make_message(Role::User, "u1"),
+            make_message(Role::Assistant, "a1"),
+            make_message(Role::User, "u2"),
+            make_message(Role::Assistant, "a2"),
+        ];
+
+        let plan = manager.get_compaction_plan(&messages);
+        assert!(plan.summarize_range.is_none());
+        assert_eq!(plan.keep_indices.len(), messages.len());
+    }
+
     use dcode_ai_common::message::MessageToolCall;
 
     fn make_tool_call(id: &str, name: &str) -> MessageToolCall {
@@ -668,5 +759,6 @@ mod tests {
         assert!(prompt.contains("Let's compact earlier history first."));
         assert!(prompt.contains("[1] User:"));
         assert!(prompt.contains("[2] Assistant:"));
+        assert!(prompt.contains("Goals, Decisions, Important Artifacts, Open Work"));
     }
 }

@@ -19,14 +19,27 @@ impl SessionStore {
 
     pub async fn save(&self, session: &SessionState) -> Result<(), SessionStoreError> {
         let path = self.sessions_dir.join(format!("{}.json", session.meta.id));
-        let json = serde_json::to_string_pretty(session)
-            .map_err(|e| SessionStoreError::Serialize(e.to_string()))?;
+        let tmp_path = self
+            .sessions_dir
+            .join(format!("{}.json.tmp", session.meta.id));
+        let json =
+            serde_json::to_vec(session).map_err(|e| SessionStoreError::Serialize(e.to_string()))?;
 
         tokio::fs::create_dir_all(&self.sessions_dir)
             .await
             .map_err(|e| SessionStoreError::Io(e.to_string()))?;
 
-        tokio::fs::write(&path, json)
+        if let Ok(existing) = tokio::fs::read(&path).await
+            && existing == json
+        {
+            return Ok(());
+        }
+
+        tokio::fs::write(&tmp_path, &json)
+            .await
+            .map_err(|e| SessionStoreError::Io(e.to_string()))?;
+
+        tokio::fs::rename(&tmp_path, &path)
             .await
             .map_err(|e| SessionStoreError::Io(e.to_string()))?;
 
@@ -184,6 +197,22 @@ mod tests {
             total_output_tokens: 0,
             estimated_cost_usd: 0.0,
         }
+    }
+
+    #[tokio::test]
+    async fn save_skips_rewrite_when_bytes_are_unchanged() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        let session = make_session_state("session-stable");
+
+        store.save(&session).await.expect("first save");
+        let path = dir.path().join("session-stable.json");
+        let first = tokio::fs::read(&path).await.expect("read first");
+
+        store.save(&session).await.expect("second save");
+        let second = tokio::fs::read(&path).await.expect("read second");
+
+        assert_eq!(first, second, "unchanged session should not rewrite bytes");
     }
 
     #[tokio::test]

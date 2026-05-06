@@ -16,7 +16,7 @@ use reqwest::StatusCode;
 
 /// Validate an API key by making a lightweight request to the provider.
 ///
-/// - OpenAI / OpenRouter / Antigravity: `GET /v1/models`
+/// - OpenAI / OpenRouter / Antigravity / MiniMax (OpenCode Zen): `GET /v1/models`
 /// - Anthropic: `POST /v1/messages` with minimal body
 pub async fn validate_api_key(
     provider: ProviderKind,

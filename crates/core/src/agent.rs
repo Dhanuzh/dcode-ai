@@ -14,6 +14,7 @@ use crate::cost::CostTracker;
 use crate::hooks::{HookEventKind, HookRunner};
 use crate::provider::{Provider, ProviderError, StreamChunk};
 use crate::tools::ToolRegistry;
+use crate::undo::UndoManager;
 
 /// Drives the multi-turn conversation and tool-use loop.
 pub struct AgentLoop {
@@ -29,6 +30,7 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     hooks: Option<HookRunner>,
+    undo: UndoManager,
 }
 
 impl AgentLoop {
@@ -57,6 +59,7 @@ impl AgentLoop {
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             hooks,
+            undo: UndoManager::default(),
         }
     }
 
@@ -94,6 +97,7 @@ impl AgentLoop {
         attachments: &[ImageAttachment],
     ) -> Result<String, ProviderError> {
         self.cancel_flag.store(false, Ordering::SeqCst);
+        self.undo.begin_turn();
         let user_msg = if attachments.is_empty() {
             Message::user(user_input)
         } else {
@@ -139,10 +143,12 @@ impl AgentLoop {
                     message: "Run cancelled".into(),
                 })
                 .await;
+                self.undo.abort_turn();
                 return Err(ProviderError::Other("run cancelled".into()));
             }
             turn += 1;
             if turn > self.max_turns {
+                self.undo.abort_turn();
                 return Err(ProviderError::Other(format!(
                     "turn budget exceeded (max {})",
                     self.max_turns
@@ -187,6 +193,7 @@ impl AgentLoop {
                                 message: "Run cancelled while streaming model output".into(),
                             })
                             .await;
+                            self.undo.abort_turn();
                             return Err(ProviderError::Other("run cancelled".into()));
                         }
                         continue;
@@ -238,6 +245,7 @@ impl AgentLoop {
                             message: message.clone(),
                         })
                         .await;
+                        self.undo.abort_turn();
                         return Err(ProviderError::RequestFailed(message));
                     }
                     StreamChunk::Done => break,
@@ -265,6 +273,7 @@ impl AgentLoop {
                         message: "Provider returned empty response with no tool calls".into(),
                     })
                     .await;
+                    self.undo.abort_turn();
                     return Err(ProviderError::Other(
                         "Provider returned empty response with no tool calls after retries".into(),
                     ));
@@ -296,6 +305,7 @@ impl AgentLoop {
             );
 
             if tool_calls.len() as u32 > self.max_tool_calls_per_turn {
+                self.undo.abort_turn();
                 return Err(ProviderError::Other(format!(
                     "tool-call budget exceeded in turn {turn} ({} > {})",
                     tool_calls.len(),
@@ -317,6 +327,7 @@ impl AgentLoop {
                     message: "Run cancelled before tool execution".into(),
                 })
                 .await;
+                self.undo.abort_turn();
                 return Err(ProviderError::Other("run cancelled".into()));
             }
 
@@ -401,6 +412,7 @@ impl AgentLoop {
                                     message: message.clone(),
                                 })
                                 .await;
+                                self.undo.abort_turn();
                                 return Err(ProviderError::Other(message));
                             }
                             tickets.push(Ticket::Resolved(ToolResult {
@@ -465,6 +477,10 @@ impl AgentLoop {
                 })
                 .collect();
 
+            for (_, call) in &to_execute {
+                self.undo.record_tool_call(call, workspace_root);
+            }
+
             if !to_execute.is_empty() {
                 let futs = to_execute.iter().map(|(i, call)| {
                     let fut = self.tools.execute(call);
@@ -487,6 +503,7 @@ impl AgentLoop {
             for result in results.into_iter().flatten() {
                 final_results.push(result);
             }
+            self.undo.note_results(&tool_calls, &final_results);
 
             if let Some(hooks) = &self.hooks {
                 for result in &final_results {
@@ -583,7 +600,18 @@ impl AgentLoop {
             state: BusyState::Idle,
         })
         .await;
+        if let Err(error) = self.undo.finalize_turn() {
+            tracing::warn!("undo finalize failed: {error}");
+        }
         Ok(final_text)
+    }
+
+    pub fn undo_last_turn(&mut self) -> Result<Option<String>, String> {
+        self.undo.undo_last()
+    }
+
+    pub fn redo_last_turn(&mut self) -> Result<Option<String>, String> {
+        self.undo.redo_last()
     }
 
     fn tool_definitions(&self) -> Vec<ToolDefinition> {

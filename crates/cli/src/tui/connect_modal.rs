@@ -170,7 +170,7 @@ mod tests {
         let rows = build_connect_rows("opencode");
         let found = rows.into_iter().find_map(|row| match row {
             ConnectRow::Provider {
-                title: "OpenCode Zen",
+                title: "MiniMax (OpenCode Zen)",
                 oauth_login_slug,
                 ..
             } => oauth_login_slug,

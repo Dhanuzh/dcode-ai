@@ -214,6 +214,14 @@ impl SessionRuntime {
         self.supervisor.set_session_name(name);
     }
 
+    pub fn undo_last_turn(&mut self) -> Result<Option<String>, String> {
+        self.supervisor.undo_last_turn()
+    }
+
+    pub fn redo_last_turn(&mut self) -> Result<Option<String>, String> {
+        self.supervisor.redo_last_turn()
+    }
+
     pub async fn append_memory_note(
         &self,
         kind: &str,
