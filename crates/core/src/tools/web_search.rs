@@ -8,6 +8,10 @@ use super::ToolExecutor;
 pub struct WebSearchTool {
     client: reqwest::Client,
     config: WebConfig,
+    result_selector: Option<Selector>,
+    title_selector: Option<Selector>,
+    snippet_selector: Option<Selector>,
+    body_selector: Option<Selector>,
 }
 
 impl WebSearchTool {
@@ -17,7 +21,14 @@ impl WebSearchTool {
             .user_agent(config.user_agent.clone())
             .build()
             .unwrap_or_else(|_| reqwest::Client::new());
-        Self { client, config }
+        Self {
+            client,
+            config,
+            result_selector: Selector::parse(".result").ok(),
+            title_selector: Selector::parse(".result__title a, a.result__a").ok(),
+            snippet_selector: Selector::parse(".result__snippet").ok(),
+            body_selector: Selector::parse("body").ok(),
+        }
     }
 }
 
@@ -85,15 +96,24 @@ impl ToolExecutor for WebSearchTool {
         };
 
         let document = Html::parse_document(&body);
-        let result_selector = Selector::parse(".result").unwrap();
-        let title_selector = Selector::parse(".result__title a, a.result__a").unwrap();
-        let snippet_selector = Selector::parse(".result__snippet").unwrap();
+        let (Some(result_selector), Some(title_selector), Some(snippet_selector)) = (
+            self.result_selector.as_ref(),
+            self.title_selector.as_ref(),
+            self.snippet_selector.as_ref(),
+        ) else {
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some("web search parser unavailable".into()),
+            };
+        };
 
         let mut rows = Vec::new();
-        for result in document.select(&result_selector).take(limit) {
-            let title_node = result.select(&title_selector).next();
+        for result in document.select(result_selector).take(limit) {
+            let title_node = result.select(title_selector).next();
             let snippet = result
-                .select(&snippet_selector)
+                .select(snippet_selector)
                 .next()
                 .map(|node| clean_text(&node.text().collect::<Vec<_>>().join(" ")))
                 .unwrap_or_default();
@@ -112,7 +132,7 @@ impl ToolExecutor for WebSearchTool {
         }
 
         if rows.is_empty() {
-            let fallback = clean_text(&extract_text(&document));
+            let fallback = clean_text(&extract_text(&document, self.body_selector.as_ref()));
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
@@ -138,11 +158,9 @@ fn clean_href(href: &str) -> String {
     }
 }
 
-fn extract_text(document: &Html) -> String {
-    let body_selector = Selector::parse("body").unwrap();
-    document
-        .select(&body_selector)
-        .next()
+fn extract_text(document: &Html, body_selector: Option<&Selector>) -> String {
+    body_selector
+        .and_then(|selector| document.select(selector).next())
         .map(|node| node.text().collect::<Vec<_>>().join(" "))
         .unwrap_or_default()
 }

@@ -1,6 +1,7 @@
 use dcode_ai_common::config::{DcodeAiConfig, ProviderKind};
 
 use super::anthropic::AnthropicProvider;
+use super::minimax::MiniMaxProvider;
 use super::openai::OpenAiProvider;
 use super::openrouter::OpenRouterProvider;
 use super::{Provider, ProviderError};
@@ -8,15 +9,12 @@ use super::{Provider, ProviderError};
 /// Build the configured provider for the current workspace.
 pub fn build_provider(config: &DcodeAiConfig) -> Result<Box<dyn Provider>, ProviderError> {
     match config.provider.default {
+        ProviderKind::OpenCodeZen => Ok(Box::new(MiniMaxProvider::from_config(config)?)),
         ProviderKind::OpenRouter => Ok(Box::new(OpenRouterProvider::from_config(config)?)),
         ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_config(config)?)),
         ProviderKind::OpenAi | ProviderKind::Antigravity => Ok(Box::new(
             OpenAiProvider::from_config(config, config.provider.default)?,
         )),
-        ProviderKind::OpenCodeZen => Ok(Box::new(OpenAiProvider::from_config(
-            config,
-            config.provider.default,
-        )?)),
     }
 }
 

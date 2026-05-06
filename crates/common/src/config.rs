@@ -206,6 +206,10 @@ impl DcodeAiConfig {
             self.provider.openrouter.app_name = Some(app_name);
         }
 
+        if let Ok(api_key) = env::var("OPENCODE_API_KEY") {
+            self.provider.opencodezen.api_key = Some(api_key);
+        }
+
         if let Ok(api_key) = env::var("OPENCODEZEN_API_KEY") {
             self.provider.opencodezen.api_key = Some(api_key);
         }
@@ -532,7 +536,7 @@ impl Default for ProviderConfig {
                 api_key_env: "OPENCODE_API_KEY".into(),
                 api_key: None,
                 base_url: "https://opencode.ai/zen/v1".into(),
-                model: "big-pickle".into(),
+                model: "MiniMax-M2.5".into(),
                 temperature: 0.7,
             },
         }
@@ -641,11 +645,11 @@ pub enum ProviderKind {
 
 impl ProviderKind {
     pub const ALL: [ProviderKind; 5] = [
+        ProviderKind::OpenCodeZen,
         ProviderKind::OpenAi,
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::Antigravity,
-        ProviderKind::OpenCodeZen,
     ];
 
     /// Parse user/CLI input (slash commands, TUI pickers).
@@ -655,7 +659,7 @@ impl ProviderKind {
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openrouter" | "open-router" => Some(Self::OpenRouter),
             "antigravity" | "ag" => Some(Self::Antigravity),
-            "opencode" | "opencodezen" | "zen" => Some(Self::OpenCodeZen),
+            "opencode" | "opencodezen" | "zen" | "minimax" => Some(Self::OpenCodeZen),
             _ => None,
         }
     }
@@ -666,7 +670,7 @@ impl ProviderKind {
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAi,
             "antigravity" => Self::Antigravity,
-            "opencodezen" | "opencode" | "zen" => Self::OpenCodeZen,
+            "opencodezen" | "opencode" | "zen" | "minimax" => Self::OpenCodeZen,
             _ => Self::OpenAi,
         }
     }
@@ -677,7 +681,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::OpenAi => "OpenAI",
             ProviderKind::Antigravity => "Antigravity",
-            ProviderKind::OpenCodeZen => "OpenCode Zen",
+            ProviderKind::OpenCodeZen => "MiniMax (OpenCode Zen)",
         }
     }
 
@@ -863,7 +867,7 @@ pub struct ModelConfig {
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
-            default_model: "gpt-4o-mini".into(),
+            default_model: "MiniMax-M2.5".into(),
             max_tokens: 8192,
             enable_thinking: false,
             thinking_budget: 5120,
@@ -1308,6 +1312,7 @@ struct PartialProviderConfig {
     openai: Option<PartialOpenAiConfig>,
     anthropic: Option<PartialAnthropicConfig>,
     openrouter: Option<PartialOpenRouterConfig>,
+    #[serde(alias = "minimax")]
     opencodezen: Option<PartialOpenAiConfig>,
 }
 
@@ -1435,9 +1440,12 @@ fn default_max_memory_notes() -> usize {
 
 fn default_model_aliases() -> BTreeMap<String, String> {
     BTreeMap::from([
-        ("default".into(), "gpt-4o-mini".into()),
+        ("default".into(), "MiniMax-M2.5".into()),
         ("coding".into(), "claude-3-7-sonnet-latest".into()),
         ("reasoning".into(), "claude-3-7-sonnet-latest".into()),
+        ("smart".into(), "MiniMax-M2.5".into()),
+        ("minimax".into(), "MiniMax-M2.5".into()),
+        ("m2.5".into(), "MiniMax-M2.5".into()),
         ("openai".into(), "gpt-4o-mini".into()),
         ("gpt4o".into(), "gpt-4o".into()),
         ("gpt4omini".into(), "gpt-4o-mini".into()),

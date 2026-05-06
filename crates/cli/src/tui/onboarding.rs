@@ -48,8 +48,8 @@ const OAUTH_CHOICES: &[OAuthChoice] = &[
         runtime_provider: None,
     },
     OAuthChoice {
-        title: "OpenCode Zen",
-        subtitle: "Big Pickle, Kimi, GLM models (free)",
+        title: "MiniMax (OpenCode Zen)",
+        subtitle: "MiniMax M2.5, Kimi, GLM models",
         oauth: OAuthProvider::Opencodezen,
         runtime_provider: Some(ProviderKind::OpenCodeZen),
     },

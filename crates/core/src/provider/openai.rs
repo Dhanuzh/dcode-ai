@@ -20,6 +20,15 @@ const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OPENAI_CODE_EXCHANGE_URL: &str = "https://auth.openai.com/oauth/token";
 
 impl OpenAiProvider {
+    fn provider_label(provider: ProviderKind) -> &'static str {
+        match provider {
+            ProviderKind::OpenAi => "OpenAI",
+            ProviderKind::Antigravity => "Antigravity",
+            ProviderKind::OpenCodeZen => "MiniMax (OpenCode Zen)",
+            _ => "OpenAI-compatible",
+        }
+    }
+
     pub fn from_config(
         config: &DcodeAiConfig,
         provider: ProviderKind,
@@ -50,7 +59,7 @@ impl OpenAiProvider {
             let oauth = auth_store.openai_oauth.ok_or_else(|| {
                 ProviderError::Configuration(format!(
                     "missing {} API key; set {} or provide `provider.{}.api_key` in config (or run `dcode-ai login openai`)",
-                    provider.display_name(),
+                    Self::provider_label(provider),
                     openai.api_key_env,
                     provider.to_config_key()
                 ))
@@ -61,7 +70,7 @@ impl OpenAiProvider {
         } else {
             return Err(ProviderError::Configuration(format!(
                 "missing {} API key; set {} or provide `provider.{}.api_key` in config (or run `dcode-ai login opencodezen`)",
-                provider.display_name(),
+                Self::provider_label(provider),
                 openai.api_key_env,
                 provider.to_config_key()
             )));
@@ -275,17 +284,28 @@ async fn fetch_copilot_access_token(github_token: String) -> Result<String, Prov
 #[async_trait::async_trait]
 impl Provider for OpenAiProvider {
     fn capabilities(&self) -> ProviderCapabilities {
-        // OpenAI o-series: o1, o3, o4, etc.
-        // Also: deepseek-r1, qwen-qwq, etc.
         let model = &self.config.model;
         let model_lower = model.to_ascii_lowercase();
-        let supports_thinking_stream = model_lower.starts_with('o')
+        let is_minimax_surface = self
+            .config
+            .base_url
+            .to_ascii_lowercase()
+            .contains("opencode.ai/zen")
+            || model_lower.contains("minimax")
+            || model_lower.contains("big-pickle")
+            || model_lower.contains("kimi")
+            || model_lower.contains("glm");
+        let supports_thinking_stream = is_minimax_surface
+            || model_lower.starts_with('o')
             || model_lower.contains("deepseek-r1")
             || model_lower.contains("qwq")
             || model_lower.contains("reasoning");
         ProviderCapabilities {
             supports_thinking_stream,
-            supports_native_images: true,
+            supports_native_images: is_minimax_surface
+                || model_lower.contains("vision")
+                || model_lower.contains("qwen-vl")
+                || model_lower.contains("gpt-4o"),
             supports_video: model_lower.starts_with("gpt-4.1"),
         }
     }

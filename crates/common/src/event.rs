@@ -4,6 +4,9 @@ use std::path::PathBuf;
 
 use crate::tool::ToolResult;
 
+/// Stable event envelope schema version used across disk logs, IPC, and stdout NDJSON.
+pub const EVENT_ENVELOPE_SCHEMA_VERSION: u32 = 1;
+
 /// Real-time busy state indicator for CLI rendering.
 /// Reflects the current processing state of the agent.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +43,8 @@ impl BusyState {
 /// Envelope for events written to disk, with stable id and timestamp for ordering.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EventEnvelope {
+    #[serde(default = "default_event_envelope_schema_version")]
+    pub schema_version: u32,
     #[serde(default)]
     pub id: u64,
     #[serde(default)]
@@ -50,11 +55,16 @@ pub struct EventEnvelope {
 impl EventEnvelope {
     pub fn new(id: u64, event: AgentEvent) -> Self {
         Self {
+            schema_version: EVENT_ENVELOPE_SCHEMA_VERSION,
             id,
             ts: Some(Utc::now()),
             event,
         }
     }
+}
+
+fn default_event_envelope_schema_version() -> u32 {
+    EVENT_ENVELOPE_SCHEMA_VERSION
 }
 
 /// Events emitted by the agent runtime, broadcast over IPC to the CLI.
