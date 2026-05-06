@@ -183,6 +183,13 @@ impl SessionRuntime {
         store.list().await.map_err(|err| err.to_string())
     }
 
+    pub async fn cleanup_empty_sessions(&self) -> Result<Vec<String>, String> {
+        let store = dcode_ai_runtime::session_store::SessionStore::new(
+            self.workspace_root().join(&self.config.session.history_dir),
+        );
+        dcode_ai_runtime::supervisor::cleanup_empty_sessions(&store).await
+    }
+
     pub fn config(&self) -> &DcodeAiConfig {
         &self.config
     }

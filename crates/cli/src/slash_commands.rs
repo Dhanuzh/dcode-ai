@@ -33,6 +33,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/permissions",
     "/permission-bypass",
     "/sessions",
+    "/sessions-clean",
     "/new",
     "/export",
     "/thinking",
