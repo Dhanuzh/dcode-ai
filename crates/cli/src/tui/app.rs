@@ -4234,7 +4234,10 @@ pub fn run_blocking(
                         ("Plan", "planning-first interaction"),
                         ("AcceptEdits", "approve file edits, prompt for dangerous"),
                         ("DontAsk", "auto-approve most tool actions"),
-                        ("BypassPermissions", "no approvals (unsafe)"),
+                        (
+                            "BypassPermissions",
+                            "read/edit auto; first bash asks once per session",
+                        ),
                     ];
                     let rows = (PERM_ROWS.len() as u16).saturating_add(8).max(10);
                     let popup_area = centered_rect(area, 78, rows);

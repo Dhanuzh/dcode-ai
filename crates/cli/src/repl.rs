@@ -1198,7 +1198,7 @@ impl Repl {
                     "off" | "disable" | "no" | "0" => PermissionMode::Default,
                     _ => {
                         out.println(
-                            "usage: /permission-bypass [on|off|toggle] — default toggles bypass ↔ default",
+                            "usage: /permission-bypass [on|off|toggle] — bypass auto-allows file tools; first bash asks once",
                         );
                         return Ok(true);
                     }
