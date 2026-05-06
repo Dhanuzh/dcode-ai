@@ -16,7 +16,6 @@ pub struct TurnStats {
 pub struct StatusBar<'a> {
     pub model: &'a str,
     pub agent: &'a str,
-    pub branch: &'a str,
     pub busy_label: &'a str,
     pub context_pct: u32,
     pub elapsed_secs: u64,
@@ -31,54 +30,115 @@ impl Widget for StatusBar<'_> {
             return;
         }
 
-        let _ = (self.context_pct, self.mcp_servers, self.sandbox_status);
+        let sep = Span::styled(" │ ", Style::default().fg(Color::Rgb(70, 70, 70)));
+        let bar_width: u32 = 10;
+        let filled = (self.context_pct.min(100) * bar_width / 100).min(bar_width);
+        let empty = bar_width - filled;
+        let ctx_color = if self.context_pct >= 90 {
+            Color::Red
+        } else if self.context_pct >= 75 {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+        let model_display = truncate_chars(self.model, 20);
+        let (busy_icon, busy_color) = busy_badge(self.busy_label);
+        let version = env!("CARGO_PKG_VERSION");
 
         let mut spans = vec![
             Span::styled(
-                format!(" {} ", self.busy_label),
-                Style::default().fg(Color::Rgb(120, 220, 140)),
+                format!(" {busy_icon} {} ", self.busy_label.to_ascii_uppercase()),
+                Style::default().fg(busy_color).add_modifier(Modifier::BOLD),
             ),
-            Span::raw(" │ "),
-            Span::styled(self.model, Style::default().fg(Color::Rgb(120, 200, 255))),
-            Span::raw(" │ "),
-            Span::styled(self.agent, Style::default().fg(Color::Rgb(200, 150, 255))),
+            sep.clone(),
+            Span::styled(
+                format!(" /{} ", model_display),
+                Style::default().fg(Color::Rgb(170, 170, 170)),
+            ),
+            sep.clone(),
+            Span::styled(
+                format!(" {} ", truncate_chars(self.agent, 16)),
+                Style::default().fg(Color::Rgb(185, 150, 230)),
+            ),
+            sep.clone(),
+            Span::styled(
+                format!(
+                    " [{}{}] {}% ",
+                    "█".repeat(filled as usize),
+                    " ".repeat(empty as usize),
+                    self.context_pct.min(100)
+                ),
+                Style::default().fg(ctx_color),
+            ),
         ];
 
-        if !self.branch.is_empty() {
-            spans.push(Span::raw(" │ "));
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            format!(" {}s ", self.elapsed_secs),
+            Style::default().fg(Color::Rgb(150, 150, 150)),
+        ));
+
+        if self.mcp_servers > 0 {
+            spans.push(sep.clone());
             spans.push(Span::styled(
-                format!("⎇ {}", self.branch),
-                Style::default()
-                    .fg(Color::Rgb(120, 220, 220))
-                    .add_modifier(Modifier::UNDERLINED),
+                format!(" ⚡{} ", self.mcp_servers),
+                Style::default().fg(Color::Rgb(110, 210, 170)),
+            ));
+        }
+
+        if let Some(sandboxed) = self.sandbox_status {
+            spans.push(sep.clone());
+            let (icon, label, color) = if sandboxed {
+                ("🛡", "sandboxed", Color::Green)
+            } else {
+                ("⚠", "unsandboxed", Color::Yellow)
+            };
+            spans.push(Span::styled(
+                format!(" {icon} {label} "),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
             ));
         }
 
         if let Some(turn) = self.last_turn {
-            spans.extend([
-                Span::raw(" │ "),
-                Span::styled(
-                    format!(
-                        "last in:{} out:{} {}s",
-                        turn.tokens_in, turn.tokens_out, turn.elapsed_secs
-                    ),
-                    Style::default().fg(Color::Rgb(140, 140, 140)),
+            spans.push(sep.clone());
+            spans.push(Span::styled(
+                format!(
+                    " in:{} out:{} {}s ",
+                    turn.tokens_in, turn.tokens_out, turn.elapsed_secs
                 ),
-            ]);
+                Style::default().fg(Color::Rgb(135, 135, 135)),
+            ));
         }
 
-        spans.extend([
-            Span::raw(" │ "),
-            Span::styled(
-                format!(
-                    "{:02}:{:02}",
-                    self.elapsed_secs / 60,
-                    self.elapsed_secs % 60
-                ),
-                Style::default().fg(Color::Rgb(130, 130, 130)),
-            ),
-        ]);
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            format!(" v{} ", version),
+            Style::default().fg(Color::Rgb(145, 145, 145)),
+        ));
 
         Line::from(spans).render(area, buf);
+    }
+}
+
+fn busy_badge(label: &str) -> (&'static str, Color) {
+    let lower = label.to_ascii_lowercase();
+    if lower.contains("error") {
+        ("✖", Color::Red)
+    } else if lower.contains("idle") {
+        ("•", Color::DarkGray)
+    } else if lower.contains("wait") || lower.contains("tool") {
+        ("◐", Color::Yellow)
+    } else {
+        ("•", Color::Green)
+    }
+}
+
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out = s.chars().take(max.saturating_sub(1)).collect::<String>();
+        out.push('…');
+        out
     }
 }

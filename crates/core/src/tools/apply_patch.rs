@@ -2,6 +2,15 @@ use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
 
+fn format_diff(old: &str, new: &str, path: &std::path::Path) -> String {
+    let label = path.display().to_string();
+    let diff = similar::TextDiff::from_lines(old, new);
+    diff.unified_diff()
+        .context_radius(3)
+        .header(&format!("before/{label}"), &format!("after/{label}"))
+        .to_string()
+}
+
 pub struct ApplyPatchTool {
     workspace_root: std::path::PathBuf,
 }
@@ -70,6 +79,7 @@ impl ToolExecutor for ApplyPatchTool {
                 };
             }
         };
+        let original_content = content.clone();
 
         let Some(edits) = call.input["edits"].as_array() else {
             return ToolResult {
@@ -128,11 +138,16 @@ impl ToolExecutor for ApplyPatchTool {
             }
         }
 
-        match tokio::fs::write(&canonical, content).await {
+        let diff = format_diff(&original_content, &content, &canonical);
+        match tokio::fs::write(&canonical, &content).await {
             Ok(()) => ToolResult {
                 call_id: call.id.clone(),
                 success: true,
-                output: format!("Patched {}", canonical.display()),
+                output: if diff.trim().is_empty() {
+                    format!("Patched {} (no changes)", canonical.display())
+                } else {
+                    format!("Patched {}\n\n{diff}", canonical.display())
+                },
                 error: None,
             },
             Err(err) => ToolResult {

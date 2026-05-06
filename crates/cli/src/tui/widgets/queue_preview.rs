@@ -1,7 +1,7 @@
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Style},
+    style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Widget,
 };
@@ -34,39 +34,74 @@ impl Widget for QueuePreview<'_> {
             return;
         }
 
+        let max_text_w = area.width.saturating_sub(8) as usize; // "  📋 N  "
         let visible = self
             .items
             .iter()
             .take(Self::MAX_VISIBLE)
             .collect::<Vec<_>>();
-        for (i, item) in visible.iter().enumerate() {
-            if i as u16 >= area.height.saturating_sub(1) {
+        for (row, item) in visible.iter().enumerate() {
+            let y = area.y + row as u16;
+            if y >= area.y + area.height {
                 break;
             }
-            let text = format!("  📋 {}  {}", i + 1, item);
-            Line::from(Span::styled(
-                text,
-                Style::default().fg(Color::Rgb(140, 140, 140)),
-            ))
-            .render(Rect::new(area.x, area.y + i as u16, area.width, 1), buf);
+
+            let flat = item.replace('\n', " ");
+            let preview = truncate_with_ellipsis(&flat, max_text_w);
+            let line = Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled("📋 ", Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{}  ", row + 1),
+                    Style::default()
+                        .fg(Color::DarkGray)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(preview, Style::default().fg(Color::Gray)),
+            ]);
+            line.render(Rect::new(area.x, y, area.width, 1), buf);
         }
 
-        let mut hint = String::from("  ↑ pop · Ctrl+U clear");
-        if self.total > Self::MAX_VISIBLE {
-            hint.push_str(&format!(" · +{} more", self.total - Self::MAX_VISIBLE));
+        let overflow = self.total.saturating_sub(Self::MAX_VISIBLE);
+        let hint_y = area.y + visible.len() as u16;
+        if hint_y >= area.y + area.height {
+            return;
         }
-        Line::from(Span::styled(
-            hint,
-            Style::default().fg(Color::Rgb(110, 110, 110)),
-        ))
-        .render(
-            Rect::new(
-                area.x,
-                area.y + area.height.saturating_sub(1),
-                area.width,
-                1,
-            ),
-            buf,
-        );
+        if overflow > 0 {
+            let line = Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    format!("+ {overflow} more"),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(
+                    "  ·  ↑ pop  ·  Ctrl+U clear",
+                    Style::default().fg(Color::Rgb(80, 80, 80)),
+                ),
+            ]);
+            line.render(Rect::new(area.x, hint_y, area.width, 1), buf);
+        } else {
+            let line = Line::from(vec![
+                Span::styled("  ", Style::default()),
+                Span::styled(
+                    "↑ pop  ·  Ctrl+U clear",
+                    Style::default().fg(Color::Rgb(80, 80, 80)),
+                ),
+            ]);
+            line.render(Rect::new(area.x, hint_y, area.width, 1), buf);
+        }
+    }
+}
+
+fn truncate_with_ellipsis(s: &str, max: usize) -> String {
+    if max == 0 {
+        return String::new();
+    }
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let mut out = s.chars().take(max.saturating_sub(1)).collect::<String>();
+        out.push('…');
+        out
     }
 }
