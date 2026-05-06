@@ -1724,26 +1724,32 @@ fn transcript_lines_and_hits(
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::System(s) => {
-                let mut rendered_any = false;
-                for (idx, part) in s.split('\n').enumerate() {
-                    if part.is_empty() {
-                        push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-                        continue;
+                // Multiline system blocks (e.g. startup logo) render as raw rows
+                // without bullet prefixes so ASCII art alignment is preserved.
+                if s.contains('\n') {
+                    for part in s.split('\n') {
+                        push_transcript_line(
+                            &mut lines,
+                            &mut hits,
+                            Line::from(Span::styled(
+                                part.to_string(),
+                                Style::default().fg(theme::muted()),
+                            )),
+                            None,
+                        );
                     }
-                    let prefix = if idx == 0 { "  • " } else { "    " };
+                } else if s.is_empty() {
+                    push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+                } else {
                     push_transcript_line(
                         &mut lines,
                         &mut hits,
                         Line::from(Span::styled(
-                            format!("{prefix}{part}"),
+                            format!("  • {s}"),
                             Style::default().fg(theme::muted()),
                         )),
                         None,
                     );
-                    rendered_any = true;
-                }
-                if !rendered_any {
-                    push_transcript_line(&mut lines, &mut hits, Line::default(), None);
                 }
             }
             DisplayBlock::Question(q) => {
@@ -3723,15 +3729,22 @@ pub fn run_blocking(
 
                 crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
                 if toolbar_permission_is_bypass(&g.permission_mode) {
+                    let warn_text = " BYPASS ";
                     let warn = Paragraph::new(Line::from(Span::styled(
-                        " BYPASS — tools run without approval ",
+                        warn_text,
                         Style::default()
                             .fg(Color::Black)
                             .bg(theme::error())
                             .add_modifier(Modifier::BOLD),
                     )))
                     .style(Style::default().bg(theme::surface()));
-                    frame.render_widget(warn, status_top_row);
+                    let warn_rect = Rect {
+                        x: status_top_row.x,
+                        y: status_top_row.y,
+                        width: warn_text.chars().count() as u16,
+                        height: 1,
+                    };
+                    frame.render_widget(warn, warn_rect);
                 }
                 g.branch_chip_bounds = None;
                 g.sidebar_toggle_bounds = None;
