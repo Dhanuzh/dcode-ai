@@ -23,6 +23,8 @@ const COPILOT_ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_to
 const ANTHROPIC_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const ANTHROPIC_AUTHORIZE_URL: &str = "https://console.anthropic.com/oauth/authorize";
 const ANTHROPIC_TOKEN_URL: &str = "https://console.anthropic.com/v1/oauth/token";
+const ANTHROPIC_CREATE_API_KEY_URL: &str =
+    "https://api.anthropic.com/api/oauth/claude_cli/create_api_key";
 const ANTHROPIC_REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 const ANTHROPIC_SCOPES: &str = "org:create_api_key user:profile user:inference";
 const ANTHROPIC_USER_AGENT: &str = "dcode-ai/0.1";
@@ -273,18 +275,56 @@ pub async fn finish_anthropic_login(code_verifier: &str, raw_code: &str) -> anyh
         );
     }
     let v: serde_json::Value = resp.json().await?;
-    let token = v
+    let access_token = v
         .get("access_token")
         .and_then(|x| x.as_str())
         .ok_or_else(|| anyhow::anyhow!("missing access_token"))?;
+
+    let key_resp = client
+        .post(ANTHROPIC_CREATE_API_KEY_URL)
+        .header("Authorization", format!("Bearer {access_token}"))
+        .header("User-Agent", ANTHROPIC_USER_AGENT)
+        .header("Accept", "application/json, text/plain, */*")
+        .header("Content-Type", "application/x-www-form-urlencoded")
+        .send()
+        .await
+        .context("anthropic api key bootstrap")?;
+    let key_status = key_resp.status();
+    let key_text = key_resp.text().await.unwrap_or_default();
+    if !key_status.is_success() {
+        bail!(
+            "Anthropic API key bootstrap failed {}: {}",
+            key_status,
+            key_text
+        );
+    }
+    let key_json: serde_json::Value = serde_json::from_str(&key_text).with_context(|| {
+        format!("invalid Anthropic key bootstrap response (expected JSON): {key_text}")
+    })?;
+    let api_key = parse_anthropic_raw_key(&key_json)?;
+
     let mut store = AuthStore::load().unwrap_or_default();
     store.anthropic = Some(ProviderAuth {
-        token: token.to_string(),
+        token: api_key,
         expires_at: None,
     });
     store.preferred_provider = Some(LoggedProvider::Anthropic);
     store.save()?;
     Ok(())
+}
+
+fn parse_anthropic_raw_key(v: &serde_json::Value) -> anyhow::Result<String> {
+    let raw_key = v
+        .get("raw_key")
+        .and_then(|x| x.as_str())
+        .or_else(|| v.get("api_key").and_then(|x| x.as_str()))
+        .ok_or_else(|| anyhow::anyhow!("missing raw_key in Anthropic API key bootstrap response"))?
+        .trim()
+        .to_string();
+    if !raw_key.starts_with("sk-ant-") {
+        bail!("unexpected Anthropic key format returned by API key bootstrap");
+    }
+    Ok(raw_key)
 }
 
 async fn login_openai<F>(emit: &mut F) -> anyhow::Result<()>
@@ -865,7 +905,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::normalize_authorization_code;
+    use super::{normalize_authorization_code, parse_anthropic_raw_key};
 
     #[test]
     fn extracts_code_from_callback_url() {
@@ -885,5 +925,22 @@ mod tests {
     fn keeps_raw_code_when_already_clean() {
         let code = normalize_authorization_code("abc123");
         assert_eq!(code, "abc123");
+    }
+
+    #[test]
+    fn parses_bootstrapped_anthropic_raw_key() {
+        let value = serde_json::json!({"raw_key":"sk-ant-api03-test"});
+        let key = parse_anthropic_raw_key(&value).expect("valid raw_key");
+        assert_eq!(key, "sk-ant-api03-test");
+    }
+
+    #[test]
+    fn rejects_bootstrapped_non_anthropic_key() {
+        let value = serde_json::json!({"raw_key":"not-an-anthropic-key"});
+        let err = parse_anthropic_raw_key(&value).expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("unexpected Anthropic key format returned by API key bootstrap")
+        );
     }
 }

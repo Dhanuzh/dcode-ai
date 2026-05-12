@@ -128,6 +128,8 @@ pub struct TuiSessionState {
     pub command_palette_query: String,
     /// Approval request currently waiting for a local TUI answer.
     pub active_approval: Option<ApprovalRequest>,
+    /// Selected action in approval popup: 0=approve, 1=always approve, 2=deny.
+    pub approval_option_index: usize,
     /// When set, the composer answers this question (see status hint).
     pub active_question: Option<InteractiveQuestionPayload>,
     /// Resolved answers keyed by `question_id`, used to render selected choice
@@ -331,6 +333,7 @@ impl TuiSessionState {
             command_palette_open: false,
             command_palette_query: String::new(),
             active_approval: None,
+            approval_option_index: 0,
             active_question: None,
             answered_questions: HashMap::new(),
             current_branch: String::new(),
@@ -745,17 +748,27 @@ impl TuiSessionState {
     /// keep the input box in approval/answer mode.
     pub fn clear_replayed_interaction_state(&mut self) {
         self.active_approval = None;
+        self.approval_option_index = 0;
         self.active_question = None;
         self.close_question_modal();
     }
 
     pub fn clear_active_approval_if_matches(&mut self, call_id: &str) {
+        let mut cleared = false;
         if self
             .active_approval
             .as_ref()
             .is_some_and(|req| req.call_id == call_id)
         {
             self.active_approval = None;
+            self.approval_option_index = 0;
+            cleared = true;
+        }
+        let before = self.blocks.len();
+        self.blocks
+            .retain(|b| !matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == call_id));
+        if cleared || self.blocks.len() != before {
+            self.touch_transcript();
         }
     }
 
@@ -947,6 +960,11 @@ impl TuiSessionState {
                 tool,
                 description,
             } => {
+                // Idempotency: if we receive duplicate approval events for the same call,
+                // keep only one pending prompt row in transcript state.
+                self.blocks.retain(
+                    |b| !matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == *call_id),
+                );
                 let input = self
                     .blocks
                     .iter()
@@ -965,12 +983,12 @@ impl TuiSessionState {
                     input,
                 };
                 self.active_approval = Some(req.clone());
+                self.approval_option_index = 0;
                 self.set_busy_state(BusyState::ApprovalPending);
                 if let Some(idx) = self.blocks.iter().rposition(
                     |b| matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id),
                 ) {
-                    self.blocks.remove(idx);
-                    self.blocks.push(DisplayBlock::ApprovalPending(req));
+                    self.blocks[idx] = DisplayBlock::ApprovalPending(req);
                 } else {
                     self.blocks.push(DisplayBlock::ApprovalPending(req));
                 }
@@ -996,6 +1014,10 @@ impl TuiSessionState {
                     .active_approval
                     .take()
                     .filter(|req| req.call_id != *call_id);
+                self.approval_option_index = 0;
+                self.blocks.retain(
+                    |b| !matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == *call_id),
+                );
                 self.blocks.push(DisplayBlock::ApprovalResolved {
                     tool,
                     approved: *approved,
@@ -1278,14 +1300,18 @@ mod tests {
         });
 
         assert!(st.active_approval.is_some());
-        match st.blocks.last() {
-            Some(DisplayBlock::ApprovalPending(req)) => {
-                assert_eq!(req.tool, "execute_bash");
-                assert!(req.input.contains("command"));
-                assert!(req.input.contains("ls -la"));
-            }
-            other => panic!("expected approval block, got {other:?}"),
-        }
+        let req = st
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|block| match block {
+                DisplayBlock::ApprovalPending(req) if req.call_id == "call-1" => Some(req),
+                _ => None,
+            })
+            .expect("expected approval block for call-1");
+        assert_eq!(req.tool, "execute_bash");
+        assert!(req.input.contains("command"));
+        assert!(req.input.contains("ls -la"));
     }
 
     #[test]

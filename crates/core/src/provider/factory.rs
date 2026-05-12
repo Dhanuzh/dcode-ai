@@ -1,6 +1,9 @@
 use dcode_ai_common::config::{DcodeAiConfig, ProviderKind};
+use dcode_ai_common::provider_runtime::has_claude_cli;
 
 use super::anthropic::AnthropicProvider;
+use super::anthropic_with_claude_fallback::AnthropicWithClaudeFallbackProvider;
+use super::claude_cli::ClaudeCliProvider;
 use super::minimax::MiniMaxProvider;
 use super::openai::OpenAiProvider;
 use super::openrouter::OpenRouterProvider;
@@ -11,11 +14,41 @@ pub fn build_provider(config: &DcodeAiConfig) -> Result<Box<dyn Provider>, Provi
     match config.provider.default {
         ProviderKind::OpenCodeZen => Ok(Box::new(MiniMaxProvider::from_config(config)?)),
         ProviderKind::OpenRouter => Ok(Box::new(OpenRouterProvider::from_config(config)?)),
-        ProviderKind::Anthropic => Ok(Box::new(AnthropicProvider::from_config(config)?)),
+        ProviderKind::Anthropic => match AnthropicProvider::from_config(config) {
+            Ok(provider) => {
+                if has_claude_cli() {
+                    let cli = ClaudeCliProvider::from_config(config)?;
+                    Ok(Box::new(AnthropicWithClaudeFallbackProvider::new(
+                        provider, cli,
+                    )))
+                } else {
+                    Ok(Box::new(provider))
+                }
+            }
+            Err(ProviderError::Configuration(message))
+                if should_fallback_to_claude_cli(config, &message) =>
+            {
+                Ok(Box::new(ClaudeCliProvider::from_config(config)?))
+            }
+            Err(error) => Err(error),
+        },
         ProviderKind::OpenAi | ProviderKind::Antigravity => Ok(Box::new(
             OpenAiProvider::from_config(config, config.provider.default)?,
         )),
     }
+}
+
+fn should_fallback_to_claude_cli(config: &DcodeAiConfig, message: &str) -> bool {
+    if !has_claude_cli() {
+        return false;
+    }
+    if config.provider.anthropic.resolve_api_key().is_some() {
+        return false;
+    }
+    let lower = message.to_ascii_lowercase();
+    lower.contains("missing anthropic api key")
+        || lower.contains("requires an anthropic api key")
+        || lower.contains("oauth/subscription tokens are not valid")
 }
 
 #[cfg(test)]
@@ -32,7 +65,7 @@ mod tests {
                     config.provider.openai.api_key = Some("openai-key".into());
                 }
                 ProviderKind::Anthropic => {
-                    config.provider.anthropic.api_key = Some("anthropic-key".into());
+                    config.provider.anthropic.api_key = Some("sk-ant-api03-test".into());
                 }
                 ProviderKind::OpenRouter => {
                     config.provider.openrouter.api_key = Some("openrouter-key".into());

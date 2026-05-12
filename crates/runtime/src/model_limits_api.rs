@@ -484,7 +484,11 @@ async fn fetch_anthropic_model_ids(
 ) -> Vec<String> {
     let key = match config.provider.anthropic.resolve_api_key() {
         Some(k) => k,
-        None => return Vec::new(),
+        None => {
+            let mut ids = anthropic_static_model_ids();
+            ids.sort();
+            return ids;
+        }
     };
     let base = config.provider.anthropic.base_url.trim_end_matches('/');
     let ttl = catalog_cache_ttl();
@@ -559,8 +563,27 @@ async fn fetch_anthropic_model_ids(
     ids
 }
 
+fn anthropic_static_model_ids() -> Vec<String> {
+    vec![
+        "claude-haiku-4.5".into(),
+        "claude-sonnet-4".into(),
+        "claude-sonnet-4.5".into(),
+        "claude-sonnet-4.6".into(),
+        "claude-opus-4.5".into(),
+        "claude-opus-4.6".into(),
+        "claude-3-7-sonnet-latest".into(),
+    ]
+}
+
 async fn fetch_openai_model_ids(client: &reqwest::Client, config: &DcodeAiConfig) -> Vec<String> {
     let base = config.provider.openai.base_url.trim_end_matches('/');
+    let codex_mode = matches!(config.provider.default, ProviderKind::OpenAi)
+        && config
+            .provider
+            .openai
+            .model
+            .to_ascii_lowercase()
+            .contains("codex");
 
     // Copilot uses an OpenAI-compatible chat path but a different auth/token flow.
     // Expose a stable model list in `/models` even without an OpenAI API key.
@@ -570,16 +593,35 @@ async fn fetch_openai_model_ids(client: &reqwest::Client, config: &DcodeAiConfig
         return ids;
     }
 
-    let key = if let Some(k) = config.provider.openai.resolve_api_key() {
-        k
-    } else if let Ok(auth) = dcode_ai_common::auth::AuthStore::load() {
-        if let Some(oauth) = auth.openai_oauth {
-            oauth.access_token
+    let auth = dcode_ai_common::auth::AuthStore::load().ok();
+    let oauth_access = auth
+        .as_ref()
+        .and_then(|store| store.openai_oauth.as_ref())
+        .map(|oauth| oauth.access_token.clone());
+
+    if codex_mode
+        && let Some(token) = oauth_access.as_ref()
+        && let Some(mut ids) = fetch_chatgpt_codex_model_ids(client, token).await
+        && !ids.is_empty()
+    {
+        ids.sort();
+        return ids;
+    }
+
+    let key = if codex_mode {
+        if let Some(token) = oauth_access {
+            token
+        } else if let Some(k) = config.provider.openai.resolve_api_key() {
+            k
         } else {
             let mut ids = openai_static_model_ids();
             ids.sort();
             return ids;
         }
+    } else if let Some(k) = config.provider.openai.resolve_api_key() {
+        k
+    } else if let Some(token) = oauth_access {
+        token
     } else {
         let mut ids = openai_static_model_ids();
         ids.sort();
@@ -646,6 +688,30 @@ async fn fetch_openai_model_ids(client: &reqwest::Client, config: &DcodeAiConfig
     } else {
         ids
     }
+}
+
+async fn fetch_chatgpt_codex_model_ids(
+    client: &reqwest::Client,
+    access_token: &str,
+) -> Option<Vec<String>> {
+    let url = "https://chatgpt.com/backend-api/codex/models?client_version=0.111.0";
+    let resp = client
+        .get(url)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .ok()?;
+    if !resp.status().is_success() {
+        return None;
+    }
+    let value: serde_json::Value = resp.json().await.ok()?;
+    let models = value.get("models")?.as_array()?;
+    let mut ids: Vec<String> = models
+        .iter()
+        .filter_map(|m| m.get("slug").and_then(|v| v.as_str()).map(String::from))
+        .collect();
+    ids.sort();
+    Some(ids)
 }
 
 async fn fetch_opencodezen_model_ids(
@@ -743,6 +809,8 @@ fn openai_static_model_ids() -> Vec<String> {
         "gpt-4.1".into(),
         "gpt-5".into(),
         "gpt-5-mini".into(),
+        "gpt-5-codex".into(),
+        "gpt-5.3-codex".into(),
     ]
 }
 
@@ -786,5 +854,19 @@ mod tests {
         });
         assert_eq!(openai_context_from_catalog(&v, "gpt-4o"), Some(128_000));
         assert_eq!(openai_context_from_catalog(&v, "gpt-4o-mini"), None);
+    }
+
+    #[test]
+    fn openai_static_ids_include_codex_models() {
+        let ids = openai_static_model_ids();
+        assert!(ids.iter().any(|m| m == "gpt-5-codex"));
+        assert!(ids.iter().any(|m| m == "gpt-5.3-codex"));
+    }
+
+    #[test]
+    fn anthropic_static_ids_include_sonnet_and_opus() {
+        let ids = anthropic_static_model_ids();
+        assert!(ids.iter().any(|m| m == "claude-sonnet-4.6"));
+        assert!(ids.iter().any(|m| m == "claude-opus-4.6"));
     }
 }

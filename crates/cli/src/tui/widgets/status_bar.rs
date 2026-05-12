@@ -17,11 +17,11 @@ pub struct StatusBar<'a> {
     pub model: &'a str,
     pub agent: &'a str,
     pub busy_label: &'a str,
-    pub context_pct: u32,
     pub elapsed_secs: u64,
     pub mcp_servers: usize,
     pub sandbox_status: Option<bool>,
     pub last_turn: Option<&'a TurnStats>,
+    pub permission_bypass: bool,
 }
 
 impl Widget for StatusBar<'_> {
@@ -31,16 +31,6 @@ impl Widget for StatusBar<'_> {
         }
 
         let sep = Span::styled(" │ ", Style::default().fg(Color::Rgb(70, 70, 70)));
-        let bar_width: u32 = 10;
-        let filled = (self.context_pct.min(100) * bar_width / 100).min(bar_width);
-        let empty = bar_width - filled;
-        let ctx_color = if self.context_pct >= 90 {
-            Color::Red
-        } else if self.context_pct >= 75 {
-            Color::Yellow
-        } else {
-            Color::DarkGray
-        };
         let model_display = truncate_chars(self.model, 20);
         let (busy_icon, busy_color) = busy_badge(self.busy_label);
         let version = env!("CARGO_PKG_VERSION");
@@ -59,16 +49,6 @@ impl Widget for StatusBar<'_> {
             Span::styled(
                 format!(" {} ", truncate_chars(self.agent, 16)),
                 Style::default().fg(Color::Rgb(185, 150, 230)),
-            ),
-            sep.clone(),
-            Span::styled(
-                format!(
-                    " [{}{}] {}% ",
-                    "█".repeat(filled as usize),
-                    " ".repeat(empty as usize),
-                    self.context_pct.min(100)
-                ),
-                Style::default().fg(ctx_color),
             ),
         ];
 
@@ -107,6 +87,17 @@ impl Widget for StatusBar<'_> {
                     turn.tokens_in, turn.tokens_out, turn.elapsed_secs
                 ),
                 Style::default().fg(Color::Rgb(135, 135, 135)),
+            ));
+        }
+
+        if self.permission_bypass {
+            spans.push(sep.clone());
+            spans.push(Span::styled(
+                " BYPASS ",
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Rgb(255, 120, 140))
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 

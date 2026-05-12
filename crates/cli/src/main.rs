@@ -21,6 +21,7 @@ use dcode_ai_common::auth::{AuthStore, LoggedProvider};
 use dcode_ai_common::config::{DcodeAiConfig, PermissionMode, ProviderKind};
 use dcode_ai_common::event::EndReason;
 use dcode_ai_common::event::{AgentCommand, EventEnvelope};
+use dcode_ai_common::provider_runtime::has_claude_cli;
 use dcode_ai_common::session::{OrchestrationContext, SessionSnapshot, SessionStatus};
 use dcode_ai_core::skills::SkillCatalog;
 use dcode_ai_runtime::memory_store::{MemoryNote, MemoryStore};
@@ -285,7 +286,7 @@ enum IndexCmd {
 enum AutoresearchCmd {
     /// Run the program's metric shell command once and print the parsed metric.
     Once {
-        /// Path to research program markdown (e.g. `docs/research/cli-dx-research.md`)
+        /// Path to research program markdown (e.g. `research/cli-dx-research.md`)
         program: PathBuf,
         /// Working directory (defaults to current directory)
         #[arg(long)]
@@ -1919,7 +1920,7 @@ fn default_provider_ready(config: &DcodeAiConfig) -> bool {
                 || (is_copilot_base_url(&config.provider.openai.base_url)
                     && store.copilot.is_some())
         }
-        ProviderKind::Anthropic => store.anthropic.is_some(),
+        ProviderKind::Anthropic => store.anthropic.is_some() || has_claude_cli(),
         ProviderKind::Antigravity => store.antigravity.is_some(),
         ProviderKind::OpenRouter => false,
         ProviderKind::OpenCodeZen => store.opencodezen_oauth.is_some(),

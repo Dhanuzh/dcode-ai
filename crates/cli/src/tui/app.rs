@@ -9,7 +9,7 @@ use crate::file_mentions;
 use crate::slash_commands::SLASH_COMMANDS;
 use crate::tool_ui;
 use crate::tui::connect_modal::{
-    ConnectRow, build_connect_rows, clamp_selection, provider_at_selection,
+    ConnectAction, ConnectRow, build_connect_rows, clamp_selection, provider_at_selection,
     row_index_for_selection, selectable_row_indices, selection_pulse, status_dots, title_sparkle,
 };
 use crate::tui::state::{
@@ -31,6 +31,7 @@ use crossterm::{
 use dcode_ai_common::auth::AuthStore;
 use dcode_ai_common::config::ProviderKind;
 use dcode_ai_common::event::{BusyState, QuestionSelection};
+use dcode_ai_common::provider_runtime::has_claude_cli;
 use dcode_ai_core::approval::suggest_allow_pattern;
 use dcode_ai_core::skills::{SkillCatalog, SkillSource};
 use pulldown_cmark::{Alignment, CodeBlockKind, Event as MdEvent, Options, Parser, Tag, TagEnd};
@@ -137,7 +138,7 @@ pub enum TuiCmd {
 use super::theme;
 
 const SLASH_PANEL_MAX_ROWS: usize = 8;
-const COMMAND_PALETTE_WIDTH: u16 = 48;
+const COMMAND_PALETTE_WIDTH: u16 = 56;
 const COMMAND_PALETTE_MAX_ROWS: usize = 10;
 
 pub fn session_start_banner() -> String {
@@ -172,6 +173,28 @@ fn oauth_login_provider_slug(kind: ProviderKind) -> Option<&'static str> {
         ProviderKind::Antigravity => Some("antigravity"),
         // Copilot uses the OpenAI provider surface at runtime, but auth is a distinct login flow.
         ProviderKind::OpenCodeZen | ProviderKind::OpenRouter => None,
+    }
+}
+
+fn oauth_logged_in_for_slug(store: &AuthStore, slug: &str) -> bool {
+    match slug {
+        "openai" => store.openai_oauth.is_some(),
+        "anthropic" => store.anthropic.is_some() || has_claude_cli(),
+        "copilot" => store.copilot.is_some(),
+        "antigravity" => store.antigravity.is_some(),
+        "opencodezen" => store.opencodezen_oauth.is_some(),
+        _ => false,
+    }
+}
+
+fn oauth_switch_command_for_slug(slug: &str) -> Option<&'static str> {
+    match slug {
+        "openai" => Some("/provider codex"),
+        "copilot" => Some("/provider copilot"),
+        "anthropic" => Some("/provider anthropic"),
+        "antigravity" => Some("/provider antigravity"),
+        "opencodezen" => Some("/provider opencodezen"),
+        _ => None,
     }
 }
 
@@ -2350,48 +2373,6 @@ fn wrap_preformatted_line(line: &str, width: usize) -> Vec<String> {
     out
 }
 
-fn push_wrapped_plain_lines_limited(
-    lines: &mut Vec<Line<'static>>,
-    hits: &mut Vec<LineAnswerHit>,
-    text: &str,
-    width: usize,
-    style: Style,
-    max_lines: usize,
-) {
-    let mut rendered = 0usize;
-    let mut omitted = 0usize;
-    for source_line in text.lines() {
-        let wrapped = wrap_preformatted_line(source_line, width);
-        for line in wrapped {
-            if rendered < max_lines {
-                push_transcript_line(lines, hits, Line::from(Span::styled(line, style)), None);
-            } else {
-                omitted += 1;
-            }
-            rendered += 1;
-        }
-        if source_line.is_empty() {
-            if rendered < max_lines {
-                push_transcript_line(lines, hits, Line::default(), None);
-            } else {
-                omitted += 1;
-            }
-            rendered += 1;
-        }
-    }
-    if omitted > 0 {
-        push_transcript_line(
-            lines,
-            hits,
-            Line::from(Span::styled(
-                format!(" … +{omitted} lines (truncated)"),
-                Style::default().fg(theme::muted()),
-            )),
-            None,
-        );
-    }
-}
-
 fn push_tool_detail_lines(
     lines: &mut Vec<Line<'static>>,
     hits: &mut Vec<LineAnswerHit>,
@@ -2624,83 +2605,80 @@ fn parse_unified_hunk_header(line: &str) -> Option<(usize, usize)> {
 /// reuses the same content layout as `render_approval_block` (icon + label,
 /// description, full input, action hint) but lives above the transcript so
 /// the user can't miss it while scrolling tool output.
-fn render_approval_popup(frame: &mut ratatui::Frame<'_>, area: Rect, req: &ApprovalRequest) {
+fn render_approval_popup(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    req: &ApprovalRequest,
+    selected: usize,
+) {
     let popup_w = area.width.saturating_mul(3) / 4;
     let popup_w = popup_w.clamp(50, area.width.saturating_sub(2).max(50));
     let popup_h =
         (area.height.saturating_mul(3) / 4).clamp(14, area.height.saturating_sub(2).max(14));
     let popup_area = centered_rect(area, popup_w, popup_h);
 
+    let selected = selected.min(2);
     let inner_w = popup_area.width.saturating_sub(4) as usize;
     let ui = tool_ui::metadata(&req.tool);
     let preview = tool_input_preview(&req.tool, &req.input);
 
     let mut lines: Vec<Line<'static>> = Vec::new();
     lines.push(Line::from(vec![
-        Span::styled(
-            format!(" {} ", ui.icon),
-            Style::default().fg(Color::Black).bg(theme::warn()).bold(),
-        ),
-        Span::styled("  ", Style::default()),
+        Span::styled("◆ ", Style::default().fg(theme::success())),
         Span::styled(
             ui.label,
             Style::default()
-                .fg(theme::warn())
+                .fg(theme::success())
                 .add_modifier(Modifier::BOLD),
         ),
+        Span::styled(" requires approval", Style::default().fg(theme::muted())),
+    ]));
+    lines.push(Line::default());
+    lines.push(Line::from(vec![
+        Span::styled("name:", Style::default().fg(theme::success())),
+        Span::styled(" ", Style::default()),
         Span::styled(
-            format!("  {}", ui.family),
-            Style::default().fg(theme::muted()),
+            format!("\"{}\"", req.tool),
+            Style::default().fg(theme::text()),
         ),
     ]));
     lines.push(Line::default());
+
+    let option_row = |idx: usize, label: &str| -> Line<'static> {
+        let active = selected == idx;
+        let marker = if active { "● " } else { "○ " };
+        let mut style = Style::default().fg(theme::muted());
+        if active {
+            style = Style::default()
+                .fg(theme::success())
+                .add_modifier(Modifier::BOLD);
+        }
+        Line::from(vec![
+            Span::styled(marker, style),
+            Span::styled(label.to_string(), style),
+        ])
+    };
+    lines.push(option_row(0, "Approve (y)"));
+    lines.push(option_row(1, "Always approve (a)"));
+    lines.push(option_row(2, "Deny (n)"));
+    lines.push(Line::default());
+
     if !preview.is_empty() {
-        lines.push(Line::from(vec![
-            Span::styled("Input  ", Style::default().fg(theme::muted())),
-            Span::styled(
-                truncate_chars(&preview, inner_w.saturating_sub(8).max(20)),
-                Style::default().fg(theme::text()),
-            ),
-        ]));
-        lines.push(Line::default());
-    }
-    for text_line in wrap_text(&req.description, inner_w) {
         lines.push(Line::from(Span::styled(
-            text_line,
-            Style::default().fg(theme::text()),
+            truncate_chars(
+                &format!("input: {preview}"),
+                inner_w.saturating_sub(2).max(24),
+            ),
+            Style::default().fg(theme::muted()),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            truncate_chars(&req.description, inner_w.saturating_sub(2).max(24)),
+            Style::default().fg(theme::muted()),
         )));
     }
-    lines.push(Line::default());
     lines.push(Line::from(Span::styled(
-        " Full Input ",
-        Style::default()
-            .fg(theme::muted())
-            .add_modifier(Modifier::BOLD),
-    )));
-    let mut full_lines: Vec<Line<'static>> = Vec::new();
-    let mut full_hits: Vec<LineAnswerHit> = Vec::new();
-    push_wrapped_plain_lines_limited(
-        &mut full_lines,
-        &mut full_hits,
-        &req.input,
-        inner_w,
-        Style::default().fg(theme::muted()),
-        12,
-    );
-    lines.extend(full_lines);
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        " Decision ",
-        Style::default()
-            .fg(theme::warn())
-            .add_modifier(Modifier::BOLD),
-    )));
-    lines.push(Line::from(Span::styled(
-        " [y] Ctrl+Y approve   [n] Ctrl+N deny   [u] Ctrl+U always allow pattern",
-        Style::default().fg(theme::text()),
-    )));
-    lines.push(Line::from(Span::styled(
-        " /approve or /deny in input · Esc keeps request pending",
+        "↑↓ select  Enter confirm  Esc cancel",
         Style::default().fg(theme::muted()),
     )));
 
@@ -2711,7 +2689,7 @@ fn render_approval_popup(frame: &mut ratatui::Frame<'_>, area: Rect, req: &Appro
                 .borders(Borders::ALL)
                 .border_style(Style::default().fg(theme::warn()))
                 .title(Span::styled(
-                    " Tool approval needed ",
+                    " Tool Approval ",
                     Style::default()
                         .fg(theme::warn())
                         .add_modifier(Modifier::BOLD),
@@ -3913,10 +3891,6 @@ pub fn run_blocking(
                         Style::default().fg(theme::user()),
                     )));
                     todo_lines.push(Line::from(Span::styled(
-                        "docs/research/",
-                        Style::default().fg(theme::user()),
-                    )));
-                    todo_lines.push(Line::from(Span::styled(
                         "Ctrl+P commands",
                         Style::default().fg(theme::muted()),
                     )));
@@ -3941,38 +3915,18 @@ pub fn run_blocking(
                     g.busy_state_since,
                 );
                 let status_top_row = st_r;
-                let tokens_total = g.input_tokens.saturating_add(g.output_tokens);
-                let context_pct = ((tokens_total.saturating_mul(100)) / 128_000).min(100) as u32;
                 let status_bar = crate::tui::widgets::status_bar::StatusBar {
                     model: &g.model,
                     agent: &g.agent_profile,
                     busy_label: &indicator_text,
-                    context_pct,
                     elapsed_secs: elapsed,
                     mcp_servers: g.mcp_server_count,
                     sandbox_status: None,
                     last_turn: None,
+                    permission_bypass: toolbar_permission_is_bypass(&g.permission_mode),
                 };
 
                 crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
-                if toolbar_permission_is_bypass(&g.permission_mode) {
-                    let warn_text = " BYPASS ";
-                    let warn = Paragraph::new(Line::from(Span::styled(
-                        warn_text,
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::error())
-                            .add_modifier(Modifier::BOLD),
-                    )))
-                    .style(Style::default().bg(theme::surface()));
-                    let warn_rect = Rect {
-                        x: status_top_row.x,
-                        y: status_top_row.y,
-                        width: warn_text.chars().count() as u16,
-                        height: 1,
-                    };
-                    frame.render_widget(warn, warn_rect);
-                }
                 g.branch_chip_bounds = None;
                 g.sidebar_toggle_bounds = None;
 
@@ -4119,14 +4073,20 @@ pub fn run_blocking(
                     } else {
                         selectable[g.palette_index.min(selectable.len().saturating_sub(1))]
                     };
+                    let anim_ms = g.started.elapsed().as_millis();
+                    let cursor = selection_pulse(anim_ms);
+                    let total_cmds = selectable.len();
                     let total_vis = filtered.len().clamp(1, COMMAND_PALETTE_MAX_ROWS);
-                    let popup_area = centered_rect(area, COMMAND_PALETTE_WIDTH, (total_vis as u16).saturating_add(6));
+                    let mut popup_area =
+                        centered_rect(area, COMMAND_PALETTE_WIDTH, (total_vis as u16).saturating_add(9));
+                    // Slight downward nudge for visual center against the composer/footer.
+                    popup_area.y = popup_area.y.saturating_add(1);
                     let list_scroll = pick_abs.saturating_sub(COMMAND_PALETTE_MAX_ROWS / 2);
                     let list_end = (list_scroll + COMMAND_PALETTE_MAX_ROWS).min(filtered.len());
                     let mut popup_lines = vec![
                         Line::from(vec![
                             Span::styled(
-                                "  Search ",
+                                "  Filter ",
                                 Style::default()
                                     .fg(theme::muted())
                                     .add_modifier(Modifier::BOLD),
@@ -4139,7 +4099,13 @@ pub fn run_blocking(
                                 },
                                 Style::default().fg(theme::text()),
                             ),
+                            Span::styled("  ·  ", Style::default().fg(theme::muted())),
+                            Span::styled(
+                                format!("{total_cmds} commands"),
+                                Style::default().fg(theme::tool()),
+                            ),
                         ]),
+                        Line::default(),
                         Line::default(),
                     ];
                     if selectable.is_empty() {
@@ -4148,40 +4114,72 @@ pub fn run_blocking(
                             Style::default().fg(theme::muted()),
                         )));
                     } else {
-                        for &idx in &filtered[list_scroll..list_end] {
+                        if list_scroll > 0 {
+                            popup_lines.push(Line::from(Span::styled(
+                                format!("  ▲ {} above", list_scroll),
+                                Style::default().fg(theme::muted()),
+                            )));
+                        }
+                        for abs in list_scroll..list_end {
+                            let idx = filtered[abs];
                             match idx {
                                 PaletteRow::Section(name) => {
                                     popup_lines.push(Line::from(Span::styled(
-                                        format!("  {name}"),
-                                        Style::default().fg(theme::muted()).add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+                                        format!("  ─ {} ─", name.to_ascii_uppercase()),
+                                        Style::default()
+                                            .fg(theme::muted())
+                                            .add_modifier(Modifier::BOLD),
                                     )));
                                 }
                                 PaletteRow::Entry { label, shortcut } => {
-                                    let global = filtered.iter().position(|r| std::ptr::eq(*r, idx)).unwrap_or(0);
-                                    let is_selected = global == pick_abs;
+                                    let is_selected = abs == pick_abs;
                                     let label_style = if is_selected {
-                                        Style::default().fg(Color::Black).bg(theme::user()).add_modifier(Modifier::BOLD)
+                                        Style::default()
+                                            .fg(Color::Black)
+                                            .bg(theme::user())
+                                            .add_modifier(Modifier::BOLD)
                                     } else {
                                         Style::default().fg(theme::text())
                                     };
-                                    let shortcut_style = if is_selected {
-                                        Style::default().fg(Color::Black).bg(theme::user())
+                                    let cmd = palette_command_for_label(label);
+                                    let cmd_style = if is_selected {
+                                        Style::default()
+                                            .fg(Color::Black)
+                                            .bg(theme::user())
                                     } else {
                                         Style::default().fg(theme::muted())
                                     };
-                                    let pad = 36usize.saturating_sub(label.len()).saturating_sub(2);
-                                    let mut spans = vec![Span::styled(format!("  {label}"), label_style)];
+                                    let prefix = if is_selected { cursor } else { "  " };
+                                    let mut spans = vec![
+                                        Span::styled(format!(" {prefix}{label}"), label_style),
+                                        Span::styled(format!("  {cmd}"), cmd_style),
+                                    ];
                                     if !shortcut.is_empty() {
-                                        spans.push(Span::styled(format!("{:>pad$}", shortcut, pad = pad), shortcut_style));
+                                        spans.push(Span::styled("  ", Style::default().fg(theme::muted())));
+                                        spans.push(Span::styled(
+                                            format!(" {shortcut} "),
+                                            Style::default()
+                                                .fg(Color::Black)
+                                                .bg(theme::assistant())
+                                                .add_modifier(Modifier::BOLD),
+                                        ));
                                     }
                                     popup_lines.push(Line::from(spans));
                                 }
                             }
                         }
+                        let remaining_below = filtered.len().saturating_sub(list_end);
+                        if remaining_below > 0 {
+                            popup_lines.push(Line::from(Span::styled(
+                                format!("  ▼ {} more", remaining_below),
+                                Style::default().fg(theme::muted()),
+                            )));
+                        }
                     }
                     popup_lines.push(Line::default());
+                    popup_lines.push(Line::default());
                     popup_lines.push(Line::from(Span::styled(
-                        " Enter apply · Esc close ",
+                        " ↑↓ move · Enter apply · Esc close ",
                         Style::default().fg(theme::muted()),
                     )));
                     frame.render_widget(ClearWidget, popup_area);
@@ -4190,6 +4188,7 @@ pub fn run_blocking(
                             Block::default()
                                 .borders(Borders::ALL)
                                 .border_style(Style::default().fg(theme::border()))
+                                .padding(Padding::new(1, 1, 0, 0))
                                 .title(Span::styled(
                                     " command palette (ctrl+p) ",
                                     Style::default().fg(theme::muted()),
@@ -5249,15 +5248,15 @@ pub fn run_blocking(
                 // OpenCode-style "Connect a provider" (`/connect`).
                 if g.connect_modal_open {
                     let rows = build_connect_rows(&g.connect_search);
+                    let total_providers = selectable_row_indices(&rows).len();
                     let sel = clamp_selection(g.connect_menu_index, &rows);
                     let selected_row = row_index_for_selection(&rows, sel);
                     let anim_ms = g.started.elapsed().as_millis();
                     let cursor = selection_pulse(anim_ms);
                     let sparkle = title_sparkle(anim_ms);
-                    let dots = status_dots(anim_ms);
                     let body_lines = rows.len().max(1);
-                    let popup_h = (body_lines as u16).saturating_add(9).clamp(11, 24);
-                    let popup_area = centered_rect(area, 66, popup_h);
+                    let popup_h = (body_lines as u16).saturating_add(10).clamp(13, 25);
+                    let popup_area = centered_rect(area, 74, popup_h);
                     let viewport_rows = popup_h.saturating_sub(8).max(1) as usize;
                     let max_scroll = rows.len().saturating_sub(viewport_rows);
                     if let Some(sr) = selected_row {
@@ -5274,7 +5273,7 @@ pub fn run_blocking(
                     let mut lines: Vec<Line> = vec![
                         Line::from(vec![
                             Span::styled(
-                                "Search ",
+                                "Filter ",
                                 Style::default()
                                     .fg(theme::muted())
                                     .add_modifier(Modifier::BOLD),
@@ -5286,6 +5285,11 @@ pub fn run_blocking(
                                     g.connect_search.as_str()
                                 },
                                 Style::default().fg(theme::text()),
+                            ),
+                            Span::styled("  ·  ", Style::default().fg(theme::muted())),
+                            Span::styled(
+                                format!("{total_providers} providers"),
+                                Style::default().fg(theme::tool()),
                             ),
                         ]),
                         Line::default(),
@@ -5308,54 +5312,96 @@ pub fn run_blocking(
                             .skip(list_start)
                             .take(viewport_rows)
                         {
-                            let ConnectRow::Provider {
-                                kind,
-                                title,
-                                subtitle,
-                                oauth_login_slug,
-                            } = row;
-                            let is_sel = selected_row == Some(i);
-                            let main_st = if is_sel {
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(theme::user())
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(theme::text())
-                            };
-                            let sub_st = if is_sel {
-                                main_st
-                            } else {
-                                Style::default().fg(theme::muted())
-                            };
-                            let logged = if matches!(*title, "Copilot") {
-                                auth_store.copilot.is_some()
-                            } else {
-                                match kind {
-                                    ProviderKind::OpenAi => auth_store.openai_oauth.is_some(),
-                                    ProviderKind::Anthropic => auth_store.anthropic.is_some(),
-                                    ProviderKind::Antigravity => auth_store.antigravity.is_some(),
-                                    ProviderKind::OpenRouter => false,
-                                    ProviderKind::OpenCodeZen => auth_store.opencodezen_oauth.is_some(),
+                            match row {
+                                ConnectRow::Section { title } => {
+                                    lines.push(Line::from(vec![
+                                        Span::styled(
+                                            "  ─ ",
+                                            Style::default().fg(theme::muted()),
+                                        ),
+                                        Span::styled(
+                                            format!("{} ", title.to_ascii_uppercase()),
+                                            Style::default()
+                                                .fg(theme::muted())
+                                                .add_modifier(Modifier::BOLD),
+                                        ),
+                                        Span::styled("─", Style::default().fg(theme::muted())),
+                                    ]));
                                 }
-                            };
-                            let status = if logged {
-                                " · logged in".to_string()
-                            } else {
-                                match oauth_login_slug {
-                                    Some(_) => format!(" · not logged in{dots}"),
-                                    None => String::new(),
+                                ConnectRow::Provider {
+                                    kind: _,
+                                    title,
+                                    subtitle,
+                                    action,
+                                } => {
+                                    let is_sel = selected_row == Some(i);
+                                    let main_st = if is_sel {
+                                        Style::default()
+                                            .fg(theme::user())
+                                            .add_modifier(Modifier::BOLD)
+                                    } else {
+                                        Style::default().fg(theme::text())
+                                    };
+                                    let sub_st = Style::default().fg(theme::muted());
+                                    let (chip, chip_st) = match action {
+                                        ConnectAction::OAuthLogin(slug) => {
+                                            if oauth_logged_in_for_slug(&auth_store, slug) {
+                                                (
+                                                    " connected ".to_string(),
+                                                    Style::default()
+                                                        .fg(Color::Black)
+                                                        .bg(theme::success())
+                                                        .add_modifier(Modifier::BOLD),
+                                                )
+                                            } else {
+                                                (
+                                                    format!(" login{} ", status_dots(anim_ms)),
+                                                    Style::default()
+                                                        .fg(Color::Black)
+                                                        .bg(theme::warn())
+                                                        .add_modifier(Modifier::BOLD),
+                                                )
+                                            }
+                                        }
+                                        ConnectAction::PromptApiKey(ProviderKind::OpenRouter) => {
+                                            (
+                                                " api key ".to_string(),
+                                                Style::default()
+                                                    .fg(Color::Black)
+                                                    .bg(theme::warn())
+                                                    .add_modifier(Modifier::BOLD),
+                                            )
+                                        }
+                                        ConnectAction::PromptApiKey(_) => (
+                                            " api key ".to_string(),
+                                            Style::default()
+                                                .fg(Color::Black)
+                                                .bg(theme::warn())
+                                                .add_modifier(Modifier::BOLD),
+                                        ),
+                                        ConnectAction::Submit(_) => {
+                                            (
+                                                " local ".to_string(),
+                                                Style::default()
+                                                    .fg(Color::Black)
+                                                    .bg(theme::tool())
+                                                    .add_modifier(Modifier::BOLD),
+                                            )
+                                        }
+                                    };
+                                    let prefix = if is_sel {
+                                        cursor.to_string()
+                                    } else {
+                                        "  ".to_string()
+                                    };
+                                    lines.push(Line::from(vec![
+                                        Span::styled(format!(" {prefix}{title}"), main_st),
+                                        Span::styled(" ", Style::default().fg(theme::muted())),
+                                        Span::styled(chip, chip_st),
+                                        Span::styled(format!("  {subtitle}"), sub_st),
+                                    ]));
                                 }
-                            };
-                            let prefix = if is_sel {
-                                cursor.to_string()
-                            } else {
-                                "  ".to_string()
-                            };
-                            lines.push(Line::from(vec![
-                                Span::styled(format!(" {prefix}{title}"), main_st),
-                                Span::styled(format!(" — {subtitle}{status}"), sub_st),
-                            ]));
+                            }
                         }
                         let remaining_below = rows.len().saturating_sub(list_end);
                         if remaining_below > 0 {
@@ -5367,7 +5413,7 @@ pub fn run_blocking(
                     }
                     lines.push(Line::default());
                     lines.push(Line::from(Span::styled(
-                        " ↑↓ select · Enter connect · Esc close ",
+                        " ↑↓ move · Enter connect · Esc close ",
                         Style::default().fg(theme::muted()),
                     )));
                     frame.render_widget(ClearWidget, popup_area);
@@ -5441,7 +5487,7 @@ pub fn run_blocking(
                     && !g.connect_modal_open
                     && !g.onboarding_mode
                 {
-                    render_approval_popup(frame, area, &req);
+                    render_approval_popup(frame, area, &req, g.approval_option_index);
                 }
             })?;
         }
@@ -6112,18 +6158,36 @@ pub fn run_blocking(
                             }
                             (KeyCode::Enter, _) => {
                                 g.connect_modal_ignore_enter_once = false;
-                                if let Some((p, _title, oauth_login_slug)) =
+                                if let Some((_p, _title, action)) =
                                     provider_at_selection(&rows, g.connect_menu_index)
                                 {
                                     g.close_connect_modal();
                                     drop(g);
-                                    if let Some(slug) =
-                                        oauth_login_slug.or_else(|| oauth_login_provider_slug(p))
-                                    {
-                                        let _ =
-                                            cmd_tx.send(TuiCmd::Submit(format!("/login {slug}")));
-                                    } else {
-                                        let _ = cmd_tx.send(TuiCmd::PromptApiKey(p, true));
+                                    match action {
+                                        ConnectAction::OAuthLogin(slug) => {
+                                            let store = AuthStore::load().unwrap_or_default();
+                                            if oauth_logged_in_for_slug(&store, slug) {
+                                                if let Some(cmd) =
+                                                    oauth_switch_command_for_slug(slug)
+                                                {
+                                                    let _ = cmd_tx
+                                                        .send(TuiCmd::Submit(cmd.to_string()));
+                                                } else {
+                                                    let _ = cmd_tx.send(TuiCmd::Submit(format!(
+                                                        "/login {slug}"
+                                                    )));
+                                                }
+                                            } else {
+                                                let _ = cmd_tx
+                                                    .send(TuiCmd::Submit(format!("/login {slug}")));
+                                            }
+                                        }
+                                        ConnectAction::PromptApiKey(p) => {
+                                            let _ = cmd_tx.send(TuiCmd::PromptApiKey(p, true));
+                                        }
+                                        ConnectAction::Submit(cmd) => {
+                                            let _ = cmd_tx.send(TuiCmd::Submit(cmd.to_string()));
+                                        }
                                     }
                                 }
                             }
@@ -6938,6 +7002,70 @@ pub fn run_blocking(
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::CycleModel(false));
                         }
+                        (KeyCode::Up, KeyModifiers::NONE) => {
+                            if g.active_approval.is_some() {
+                                g.approval_option_index = g.approval_option_index.saturating_sub(1);
+                                g.touch_transcript();
+                                continue;
+                            }
+                        }
+                        (KeyCode::Down, KeyModifiers::NONE) => {
+                            if g.active_approval.is_some() {
+                                g.approval_option_index = (g.approval_option_index + 1).min(2);
+                                g.touch_transcript();
+                                continue;
+                            }
+                        }
+                        (KeyCode::Char('y'), KeyModifiers::NONE)
+                        | (KeyCode::Char('Y'), KeyModifiers::NONE) => {
+                            if let Some(req) = g.active_approval.clone() {
+                                let call_id = req.call_id.clone();
+                                g.clear_input();
+                                drop(g);
+                                if let Some(ref tx) = approval_answer_tx {
+                                    let _ = tx.send(ApprovalAnswer::Verdict {
+                                        call_id,
+                                        approved: true,
+                                    });
+                                }
+                                continue;
+                            }
+                        }
+                        (KeyCode::Char('n'), KeyModifiers::NONE)
+                        | (KeyCode::Char('N'), KeyModifiers::NONE) => {
+                            if let Some(req) = g.active_approval.clone() {
+                                let call_id = req.call_id.clone();
+                                g.clear_input();
+                                drop(g);
+                                if let Some(ref tx) = approval_answer_tx {
+                                    let _ = tx.send(ApprovalAnswer::Verdict {
+                                        call_id,
+                                        approved: false,
+                                    });
+                                }
+                                continue;
+                            }
+                        }
+                        (KeyCode::Char('a'), KeyModifiers::NONE)
+                        | (KeyCode::Char('A'), KeyModifiers::NONE) => {
+                            if let Some(req) = g.active_approval.clone() {
+                                let input_json: serde_json::Value =
+                                    serde_json::from_str(&req.input).unwrap_or_default();
+                                let pattern = suggest_allow_pattern(&req.tool, &input_json);
+                                let call_id = req.call_id.clone();
+                                g.clear_input();
+                                g.blocks.push(DisplayBlock::System(format!(
+                                    "Always allowing: {pattern}"
+                                )));
+                                g.touch_transcript();
+                                drop(g);
+                                if let Some(ref tx) = approval_answer_tx {
+                                    let _ =
+                                        tx.send(ApprovalAnswer::AllowPattern { call_id, pattern });
+                                }
+                                continue;
+                            }
+                        }
                         (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
                             if let Some(req) = g.active_approval.clone() {
                                 let call_id = req.call_id.clone();
@@ -7012,11 +7140,38 @@ pub fn run_blocking(
                             if let Some(req) = active_approval {
                                 let t = line.trim();
                                 if t.is_empty() {
-                                    g.blocks.push(DisplayBlock::System(
-                                        "Empty line — type y or n (or yes/no, ok, deny). Ctrl+Y = approve, Ctrl+N = deny."
-                                            .into(),
-                                    ));
-                                    g.touch_transcript();
+                                    let call_id = req.call_id.clone();
+                                    let selection = g.approval_option_index.min(2);
+                                    drop(g);
+                                    if let Some(ref tx) = approval_answer_tx {
+                                        match selection {
+                                            0 => {
+                                                let _ = tx.send(ApprovalAnswer::Verdict {
+                                                    call_id,
+                                                    approved: true,
+                                                });
+                                            }
+                                            1 => {
+                                                let input_json: serde_json::Value =
+                                                    serde_json::from_str(&req.input)
+                                                        .unwrap_or_default();
+                                                let pattern =
+                                                    suggest_allow_pattern(&req.tool, &input_json);
+                                                let _ = tx.send(ApprovalAnswer::AllowPattern {
+                                                    call_id,
+                                                    pattern,
+                                                });
+                                            }
+                                            _ => {
+                                                let _ = tx.send(ApprovalAnswer::Verdict {
+                                                    call_id,
+                                                    approved: false,
+                                                });
+                                            }
+                                        }
+                                    } else {
+                                        let _ = cmd_tx.send(TuiCmd::CancelTurn);
+                                    }
                                     continue;
                                 }
                                 if t.starts_with('/') {

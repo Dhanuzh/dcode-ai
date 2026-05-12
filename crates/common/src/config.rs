@@ -1447,6 +1447,7 @@ fn default_model_aliases() -> BTreeMap<String, String> {
         ("minimax".into(), "MiniMax-M2.5".into()),
         ("m2.5".into(), "MiniMax-M2.5".into()),
         ("openai".into(), "gpt-4o-mini".into()),
+        ("codex".into(), "gpt-5-codex".into()),
         ("gpt4o".into(), "gpt-4o".into()),
         ("gpt4omini".into(), "gpt-4o-mini".into()),
         ("claude".into(), "claude-3-7-sonnet-latest".into()),

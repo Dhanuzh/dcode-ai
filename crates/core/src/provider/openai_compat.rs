@@ -105,6 +105,61 @@ pub fn openai_request_body(
     }))
 }
 
+pub fn openai_responses_request_body(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    max_tokens: u32,
+    temperature: f32,
+    stream: bool,
+    codex_chatgpt_backend: bool,
+    workspace_root: &Path,
+) -> Result<Value, ProviderError> {
+    let mut instructions = Vec::new();
+    let mut input_items = Vec::new();
+
+    for message in messages {
+        match message.role {
+            Role::System => instructions.push(tool_content_string(&message.content)),
+            _ => input_items.extend(message_to_responses_input_items(message, workspace_root)?),
+        }
+    }
+
+    let mut body = json!({
+        "model": model,
+        "input": input_items,
+        "stream": stream,
+        "store": false,
+    });
+    if !codex_chatgpt_backend {
+        body["max_output_tokens"] = json!(max_tokens);
+        body["temperature"] = json!(temperature);
+    }
+
+    if !instructions.is_empty() {
+        body["instructions"] = json!(instructions.join("\n\n"));
+    }
+
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(
+            tools
+                .iter()
+                .map(|tool| {
+                    json!({
+                        "type": "function",
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    })
+                })
+                .collect(),
+        );
+        body["tool_choice"] = json!("auto");
+    }
+
+    Ok(body)
+}
+
 pub fn spawn_openai_stream(
     response: reqwest::Response,
     provider_name: &'static str,
@@ -215,6 +270,243 @@ pub fn spawn_openai_stream(
     rx
 }
 
+pub fn spawn_openai_responses_stream(
+    response: reqwest::Response,
+    provider_name: &'static str,
+    streaming: bool,
+) -> tokio::sync::mpsc::Receiver<StreamChunk> {
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+
+    tokio::spawn(async move {
+        if streaming {
+            let mut byte_stream = response.bytes_stream();
+            let mut buffer = String::new();
+            let mut current_event = String::new();
+            let mut tool_calls: BTreeMap<String, ToolCallAccumulator> = BTreeMap::new();
+
+            while let Some(item) = byte_stream.next().await {
+                let chunk = match item {
+                    Ok(chunk) => chunk,
+                    Err(err) => {
+                        let _ = tx
+                            .send(StreamChunk::Error(format!(
+                                "{provider_name} stream error: {err}"
+                            )))
+                            .await;
+                        let _ = tx.send(StreamChunk::Done).await;
+                        return;
+                    }
+                };
+
+                buffer.push_str(&String::from_utf8_lossy(&chunk));
+                while let Some(nl) = buffer.find('\n') {
+                    let raw = buffer[..nl].to_string();
+                    buffer.drain(..=nl);
+                    let line = raw.trim_end_matches('\r').trim();
+
+                    if line.is_empty() || line.starts_with(':') {
+                        continue;
+                    }
+                    if let Some(ev) = line.strip_prefix("event:") {
+                        current_event = ev.trim().to_string();
+                        continue;
+                    }
+                    if !line.starts_with("data:") {
+                        continue;
+                    }
+                    let data = line["data:".len()..].trim();
+                    if data == "[DONE]" {
+                        flush_responses_tool_calls(&tx, &mut tool_calls).await;
+                        let _ = tx.send(StreamChunk::Done).await;
+                        return;
+                    }
+
+                    let Ok(event) = serde_json::from_str::<Value>(data) else {
+                        continue;
+                    };
+                    let event_type = if current_event.is_empty() {
+                        event
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_default()
+                            .to_string()
+                    } else {
+                        current_event.clone()
+                    };
+                    match event_type.as_str() {
+                        "response.output_text.delta" => {
+                            if let Some(delta) = event.get("delta").and_then(|v| v.as_str())
+                                && !delta.is_empty()
+                            {
+                                let _ = tx.send(StreamChunk::TextDelta(delta.to_string())).await;
+                            }
+                        }
+                        "response.output_text.done" => {
+                            if let Some(text) = event.get("text").and_then(|v| v.as_str())
+                                && !text.is_empty()
+                            {
+                                let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
+                            }
+                        }
+                        "response.reasoning_text.delta"
+                        | "response.reasoning_summary_text.delta" => {
+                            if let Some(delta) = event.get("delta").and_then(|v| v.as_str())
+                                && !delta.is_empty()
+                            {
+                                let _ =
+                                    tx.send(StreamChunk::InternalDelta(delta.to_string())).await;
+                            }
+                        }
+                        "response.output_item.added" => {
+                            let item = event.get("item").unwrap_or(&event);
+                            if item.get("type").and_then(|v| v.as_str()) == Some("function_call") {
+                                let item_id = item
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                if item_id.is_empty() {
+                                    continue;
+                                }
+                                let call_id = item
+                                    .get("call_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let name = item
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                tool_calls.entry(item_id).or_insert(ToolCallAccumulator {
+                                    id: call_id,
+                                    name,
+                                    arguments: String::new(),
+                                });
+                            }
+                        }
+                        "response.function_call_arguments.delta" => {
+                            if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
+                                && let Some(acc) = tool_calls.get_mut(item_id)
+                                && let Some(delta) = event.get("delta").and_then(|v| v.as_str())
+                            {
+                                acc.arguments.push_str(delta);
+                            }
+                        }
+                        "response.function_call_arguments.done" => {
+                            if let Some(item_id) = event.get("item_id").and_then(|v| v.as_str())
+                                && let Some(acc) = tool_calls.get_mut(item_id)
+                            {
+                                if let Some(args) = event.get("arguments").and_then(|v| v.as_str())
+                                {
+                                    acc.arguments = args.to_string();
+                                }
+                                if acc.name.is_empty()
+                                    && let Some(name) = event.get("name").and_then(|v| v.as_str())
+                                {
+                                    acc.name = name.to_string();
+                                }
+                            }
+                        }
+                        "response.completed" => {
+                            if let Some(resp) = event.get("response")
+                                && let Some(usage) = resp.get("usage")
+                            {
+                                let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                                let output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
+                                if input_tokens > 0 || output_tokens > 0 {
+                                    let _ = tx
+                                        .send(StreamChunk::Usage {
+                                            input_tokens,
+                                            output_tokens,
+                                        })
+                                        .await;
+                                }
+                            }
+                            flush_responses_tool_calls(&tx, &mut tool_calls).await;
+                            let _ = tx.send(StreamChunk::Done).await;
+                            return;
+                        }
+                        "error" => {
+                            let msg = event
+                                .get("message")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("responses stream error");
+                            let _ = tx.send(StreamChunk::Error(msg.to_string())).await;
+                            let _ = tx.send(StreamChunk::Done).await;
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            flush_responses_tool_calls(&tx, &mut tool_calls).await;
+            let _ = tx.send(StreamChunk::Done).await;
+            return;
+        }
+
+        let event = match response.json::<Value>().await {
+            Ok(v) => v,
+            Err(err) => {
+                let _ = tx
+                    .send(StreamChunk::Error(format!(
+                        "{provider_name} response parse error: {err}"
+                    )))
+                    .await;
+                let _ = tx.send(StreamChunk::Done).await;
+                return;
+            }
+        };
+
+        if let Some(text) = responses_output_text(&event)
+            && !text.is_empty()
+        {
+            let _ = tx.send(StreamChunk::TextDelta(text)).await;
+        }
+
+        if let Some(reasoning) = responses_reasoning_text(&event)
+            && !reasoning.is_empty()
+        {
+            let _ = tx.send(StreamChunk::InternalDelta(reasoning)).await;
+        }
+
+        for call in responses_tool_calls(&event) {
+            let _ = tx.send(StreamChunk::ToolUse(call)).await;
+        }
+
+        let input_tokens = event
+            .pointer("/usage/input_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                event
+                    .pointer("/usage/prompt_tokens")
+                    .and_then(|v| v.as_u64())
+            })
+            .unwrap_or(0);
+        let output_tokens = event
+            .pointer("/usage/output_tokens")
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                event
+                    .pointer("/usage/completion_tokens")
+                    .and_then(|v| v.as_u64())
+            })
+            .unwrap_or(0);
+        if input_tokens > 0 || output_tokens > 0 {
+            let _ = tx
+                .send(StreamChunk::Usage {
+                    input_tokens,
+                    output_tokens,
+                })
+                .await;
+        }
+
+        let _ = tx.send(StreamChunk::Done).await;
+    });
+
+    rx
+}
+
 pub fn map_provider_error(status: reqwest::StatusCode, body_text: String) -> ProviderError {
     match status.as_u16() {
         401 | 403 => ProviderError::AuthError(body_text),
@@ -223,6 +515,130 @@ pub fn map_provider_error(status: reqwest::StatusCode, body_text: String) -> Pro
             retry_after_ms: 1000,
         },
         _ => ProviderError::RequestFailed(body_text),
+    }
+}
+
+fn responses_output_text(event: &Value) -> Option<String> {
+    if let Some(top) = event.get("output_text").and_then(|v| v.as_str())
+        && !top.is_empty()
+    {
+        return Some(top.to_string());
+    }
+
+    let mut out = String::new();
+    let items = event.get("output").and_then(|v| v.as_array())?;
+    for item in items {
+        if item.get("type").and_then(|v| v.as_str()) != Some("message") {
+            continue;
+        }
+        let Some(content) = item.get("content").and_then(|v| v.as_array()) else {
+            continue;
+        };
+        for block in content {
+            let typ = block
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if (typ == "output_text" || typ == "text")
+                && let Some(text) = block.get("text").and_then(|v| v.as_str())
+            {
+                out.push_str(text);
+            }
+        }
+    }
+
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn responses_reasoning_text(event: &Value) -> Option<String> {
+    let mut out = String::new();
+    let items = event.get("output").and_then(|v| v.as_array())?;
+    for item in items {
+        if item.get("type").and_then(|v| v.as_str()) != Some("reasoning") {
+            continue;
+        }
+        if let Some(summary) = item.get("summary").and_then(|v| v.as_array()) {
+            for block in summary {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    out.push_str(text);
+                }
+            }
+        }
+        if let Some(content) = item.get("content").and_then(|v| v.as_array()) {
+            for block in content {
+                if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
+                    out.push_str(text);
+                }
+            }
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn responses_tool_calls(event: &Value) -> Vec<ToolCall> {
+    let mut out = Vec::new();
+    let Some(items) = event.get("output").and_then(|v| v.as_array()) else {
+        return out;
+    };
+
+    for (idx, item) in items.iter().enumerate() {
+        if item.get("type").and_then(|v| v.as_str()) != Some("function_call") {
+            continue;
+        }
+        let Some(name) = item.get("name").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let call_id = item
+            .get("call_id")
+            .and_then(|v| v.as_str())
+            .or_else(|| item.get("id").and_then(|v| v.as_str()))
+            .map(str::to_string)
+            .unwrap_or_else(|| format!("tool-call-{idx}"));
+
+        let input = if let Some(args_str) = item.get("arguments").and_then(|v| v.as_str()) {
+            serde_json::from_str(args_str).unwrap_or_else(|_| json!({ "raw": args_str }))
+        } else if let Some(args_obj) = item.get("arguments") {
+            args_obj.clone()
+        } else {
+            json!({})
+        };
+
+        out.push(ToolCall {
+            id: call_id,
+            name: name.to_string(),
+            input,
+        });
+    }
+
+    out
+}
+
+async fn flush_responses_tool_calls(
+    tx: &tokio::sync::mpsc::Sender<StreamChunk>,
+    tool_calls: &mut BTreeMap<String, ToolCallAccumulator>,
+) {
+    let drained = std::mem::take(tool_calls);
+    for (index, call) in drained {
+        if call.name.is_empty() {
+            continue;
+        }
+        let input = if !call.arguments.is_empty() {
+            serde_json::from_str(&call.arguments)
+                .unwrap_or_else(|_| json!({ "raw": call.arguments }))
+        } else {
+            json!({})
+        };
+        let _ = tx
+            .send(StreamChunk::ToolUse(ToolCall {
+                id: if call.id.is_empty() {
+                    format!("tool-call-{index}")
+                } else {
+                    call.id
+                },
+                name: call.name,
+                input,
+            }))
+            .await;
     }
 }
 
@@ -304,6 +720,103 @@ fn openai_user_content_value(
     }
 }
 
+fn responses_user_content(
+    content: &MessageContent,
+    workspace_root: &Path,
+) -> Result<Vec<Value>, ProviderError> {
+    match content {
+        MessageContent::Text(s) => Ok(vec![json!({
+            "type": "input_text",
+            "text": s,
+        })]),
+        MessageContent::Parts(parts) => {
+            let mut out = Vec::new();
+            for p in parts {
+                match p {
+                    ContentPart::Text { text } => out.push(json!({
+                        "type": "input_text",
+                        "text": text,
+                    })),
+                    ContentPart::Image { media_type, path } => {
+                        let full = workspace_root.join(path);
+                        let bytes = std::fs::read(&full).map_err(|e| {
+                            ProviderError::RequestFailed(format!(
+                                "failed to read image {}: {e}",
+                                full.display()
+                            ))
+                        })?;
+                        let b64 = B64.encode(bytes);
+                        let url = format!("data:{media_type};base64,{b64}");
+                        out.push(json!({
+                            "type": "input_image",
+                            "image_url": url,
+                        }));
+                    }
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn message_to_responses_input_items(
+    message: &Message,
+    workspace_root: &Path,
+) -> Result<Vec<Value>, ProviderError> {
+    let mut items = Vec::new();
+
+    match message.role {
+        Role::User => {
+            items.push(json!({
+                "type": "message",
+                "role": "user",
+                "content": responses_user_content(&message.content, workspace_root)?,
+            }));
+        }
+        Role::Assistant => {
+            if let Some(calls) = &message.tool_calls {
+                if !message.content.is_empty() {
+                    items.push(json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": tool_content_string(&message.content),
+                        }],
+                    }));
+                }
+                for call in calls {
+                    items.push(json!({
+                        "type": "function_call",
+                        "call_id": call.id,
+                        "name": call.name,
+                        "arguments": serde_json::to_string(&call.arguments).unwrap_or_else(|_| "{}".into()),
+                    }));
+                }
+            } else {
+                items.push(json!({
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{
+                        "type": "output_text",
+                        "text": tool_content_string(&message.content),
+                    }],
+                }));
+            }
+        }
+        Role::Tool => {
+            items.push(json!({
+                "type": "function_call_output",
+                "call_id": message.tool_call_id.clone().unwrap_or_default(),
+                "output": tool_content_string(&message.content),
+            }));
+        }
+        Role::System => {}
+    }
+
+    Ok(items)
+}
+
 fn to_openai_messages(
     messages: &[Message],
     workspace_root: &Path,
@@ -370,6 +883,7 @@ fn to_openai_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use dcode_ai_common::message::MessageToolCall;
     use serde_json::json;
 
     #[test]
@@ -402,5 +916,95 @@ mod tests {
             extract_internal_reasoning_delta(&json!({"content":"assistant text only"})),
             None
         );
+    }
+
+    #[test]
+    fn responses_request_body_maps_tools_and_history() {
+        let body = openai_responses_request_body(
+            &[
+                Message::system("sys"),
+                Message::user("hello"),
+                Message::assistant_with_tool_calls(
+                    "",
+                    vec![MessageToolCall {
+                        id: "call_1".into(),
+                        name: "read_file".into(),
+                        arguments: json!({"path":"Cargo.toml"}),
+                    }],
+                ),
+                Message::tool("call_1", "ok"),
+            ],
+            &[ToolDefinition {
+                name: "read_file".into(),
+                description: "Read file".into(),
+                parameters: json!({"type":"object"}),
+            }],
+            "gpt-5-codex",
+            1024,
+            0.1,
+            true,
+            false,
+            std::path::Path::new("."),
+        )
+        .expect("responses body");
+
+        assert_eq!(body["model"], "gpt-5-codex");
+        assert_eq!(body["instructions"], "sys");
+        assert_eq!(body["tools"][0]["type"], "function");
+        assert_eq!(body["tools"][0]["name"], "read_file");
+        let input = body["input"].as_array().expect("input array");
+        assert!(input.iter().any(|v| v["type"] == "function_call"));
+        assert!(input.iter().any(|v| v["type"] == "function_call_output"));
+    }
+
+    #[test]
+    fn responses_parser_extracts_text_tool_and_usage() {
+        let event = json!({
+            "output": [
+                {
+                    "type": "message",
+                    "content": [
+                        {"type":"output_text", "text":"Hello "}
+                    ]
+                },
+                {
+                    "type":"function_call",
+                    "id":"fc_1",
+                    "call_id":"call_1",
+                    "name":"lookup",
+                    "arguments":"{\"path\":\"src\"}"
+                }
+            ],
+            "usage": {
+                "input_tokens": 12,
+                "output_tokens": 8
+            }
+        });
+
+        assert_eq!(responses_output_text(&event), Some("Hello ".into()));
+        let calls = responses_tool_calls(&event);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].id, "call_1");
+        assert_eq!(calls[0].name, "lookup");
+        assert_eq!(calls[0].input, json!({"path":"src"}));
+    }
+
+    #[test]
+    fn responses_body_omits_unsupported_fields_for_codex_chatgpt_backend() {
+        let body = openai_responses_request_body(
+            &[Message::user("hello")],
+            &[],
+            "gpt-5-codex",
+            2048,
+            0.2,
+            true,
+            true,
+            std::path::Path::new("."),
+        )
+        .expect("responses body");
+
+        assert_eq!(body["stream"], json!(true));
+        assert!(body.get("max_output_tokens").is_none());
+        assert!(body.get("temperature").is_none());
     }
 }

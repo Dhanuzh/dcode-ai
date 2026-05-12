@@ -7,13 +7,18 @@ use dcode_ai_common::message::Message;
 use dcode_ai_common::tool::ToolDefinition;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
 
-use super::openai_compat::{map_provider_error, openai_request_body, spawn_openai_stream};
+use super::openai_compat::{
+    map_provider_error, openai_request_body, openai_responses_request_body,
+    spawn_openai_responses_stream, spawn_openai_stream,
+};
 use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk};
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
     config: OpenAiConfig,
     max_tokens: u32,
+    use_responses_api: bool,
+    use_chatgpt_codex_backend: bool,
 }
 
 const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -44,17 +49,35 @@ impl OpenAiProvider {
             }
         };
         let auth_store = AuthStore::load().ok().unwrap_or_default();
+        let has_openai_oauth = auth_store.openai_oauth.is_some();
         let copilot_mode = is_copilot_base_url(&openai.base_url);
+        let codex_mode = matches!(provider, ProviderKind::OpenAi)
+            && openai.model.to_ascii_lowercase().contains("codex");
+        let use_responses_api = codex_mode;
+        let use_chatgpt_codex_backend = use_responses_api && has_openai_oauth;
 
-        let api_key = if let Some(key) = openai.resolve_api_key() {
-            key
-        } else if copilot_mode {
+        let api_key = if copilot_mode {
             let github_token = auth_store.copilot.map(|c| c.github_token).ok_or_else(|| {
                 ProviderError::Configuration(
                     "missing Copilot login; run `dcode-ai login copilot`".to_string(),
                 )
             })?;
             fetch_copilot_access_token_blocking(github_token)?
+        } else if codex_mode {
+            if let Some(oauth) = auth_store.openai_oauth {
+                resolve_openai_oauth_access_token(oauth)?
+            } else if let Some(key) = openai.resolve_api_key() {
+                key
+            } else {
+                return Err(ProviderError::Configuration(format!(
+                    "missing {} API key; set {} or provide `provider.{}.api_key` in config (or run `dcode-ai login openai`)",
+                    Self::provider_label(provider),
+                    openai.api_key_env,
+                    provider.to_config_key()
+                )));
+            }
+        } else if let Some(key) = openai.resolve_api_key() {
+            key
         } else if matches!(provider, ProviderKind::OpenAi | ProviderKind::Antigravity) {
             let oauth = auth_store.openai_oauth.ok_or_else(|| {
                 ProviderError::Configuration(format!(
@@ -117,10 +140,23 @@ impl OpenAiProvider {
             client,
             config: openai,
             max_tokens: config.model.max_tokens,
+            use_responses_api,
+            use_chatgpt_codex_backend,
         })
     }
 
     fn endpoint(&self) -> String {
+        if self.use_responses_api {
+            if self.use_chatgpt_codex_backend {
+                return "https://chatgpt.com/backend-api/codex/responses".to_string();
+            }
+            let base = self.config.base_url.trim_end_matches('/');
+            if base.ends_with("/v1") {
+                return format!("{base}/responses");
+            }
+            return format!("{base}/v1/responses");
+        }
+
         let base = self.config.base_url.trim_end_matches('/');
         if is_copilot_base_url(base) || base.ends_with("/v1") {
             format!("{base}/chat/completions")
@@ -323,16 +359,29 @@ impl Provider for OpenAiProvider {
             model.to_string()
         };
 
-        let body = openai_request_body(
-            messages,
-            tools,
-            &model,
-            self.max_tokens,
-            self.config.temperature,
-            workspace_root,
-        )?;
+        let body = if self.use_responses_api {
+            openai_responses_request_body(
+                messages,
+                tools,
+                &model,
+                self.max_tokens,
+                self.config.temperature,
+                self.use_chatgpt_codex_backend,
+                self.use_chatgpt_codex_backend,
+                workspace_root,
+            )?
+        } else {
+            openai_request_body(
+                messages,
+                tools,
+                &model,
+                self.max_tokens,
+                self.config.temperature,
+                workspace_root,
+            )?
+        };
 
-        let response = self
+        let mut response = self
             .client
             .post(self.endpoint())
             .json(&body)
@@ -340,13 +389,63 @@ impl Provider for OpenAiProvider {
             .await
             .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
 
-        let status = response.status();
-        if !status.is_success() {
+        if !response.status().is_success() {
+            let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
-            return Err(map_provider_error(status, body_text));
+            let model_not_supported = self.use_chatgpt_codex_backend
+                && self.use_responses_api
+                && body_text
+                    .contains("model is not supported when using Codex with a ChatGPT account");
+            if model_not_supported {
+                if let Some(fallback_model) = fallback_codex_model_for_chatgpt(&model) {
+                    let retry_body = openai_responses_request_body(
+                        messages,
+                        tools,
+                        fallback_model,
+                        self.max_tokens,
+                        self.config.temperature,
+                        self.use_chatgpt_codex_backend,
+                        self.use_chatgpt_codex_backend,
+                        workspace_root,
+                    )?;
+                    response = self
+                        .client
+                        .post(self.endpoint())
+                        .json(&retry_body)
+                        .send()
+                        .await
+                        .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+                    if !response.status().is_success() {
+                        let retry_status = response.status();
+                        let retry_body_text = response.text().await.unwrap_or_default();
+                        return Err(map_provider_error(retry_status, retry_body_text));
+                    }
+                } else {
+                    return Err(map_provider_error(status, body_text));
+                }
+            } else {
+                return Err(map_provider_error(status, body_text));
+            }
         }
 
-        Ok(spawn_openai_stream(response, "openai"))
+        if self.use_responses_api {
+            Ok(spawn_openai_responses_stream(
+                response,
+                "openai",
+                self.use_chatgpt_codex_backend,
+            ))
+        } else {
+            Ok(spawn_openai_stream(response, "openai"))
+        }
+    }
+}
+
+fn fallback_codex_model_for_chatgpt(current_model: &str) -> Option<&'static str> {
+    let m = current_model.to_ascii_lowercase();
+    if m == "gpt-5-codex" {
+        None
+    } else {
+        Some("gpt-5-codex")
     }
 }
 
@@ -417,5 +516,22 @@ mod tests {
             }
         ));
         assert!(matches!(chunks.last(), Some(StreamChunk::Done)));
+    }
+
+    #[test]
+    fn codex_mode_uses_responses_endpoint_shape() {
+        let mut config = DcodeAiConfig::default();
+        config.provider.openai.api_key = Some("openai-test-key".into());
+        config.provider.openai.base_url = "https://api.openai.com".into();
+        config.provider.openai.model = "gpt-5-codex".into();
+
+        let provider =
+            OpenAiProvider::from_config(&config, ProviderKind::OpenAi).expect("provider");
+        assert!(
+            provider.endpoint().ends_with("/v1/responses")
+                || provider
+                    .endpoint()
+                    .contains("chatgpt.com/backend-api/codex/responses")
+        );
     }
 }

@@ -15,6 +15,7 @@ use crate::tui::{
 use dcode_ai_common::config::{PermissionMode, ProviderKind};
 use dcode_ai_common::event::{EndReason, QuestionSelection};
 use dcode_ai_common::message::{Message, Role};
+use dcode_ai_common::provider_runtime::has_claude_cli;
 use dcode_ai_core::skills::SkillCatalog;
 use dcode_ai_runtime::memory_store::MemoryStore;
 use reedline::{Completer, Emacs, FileBackedHistory, Reedline, Signal, Suggestion, Vi};
@@ -783,6 +784,50 @@ impl Repl {
                 match self.runtime.config().save_global() {
                     Ok(()) => out.println(&format!(
                         "[provider] Copilot - model {} - saved",
+                        self.runtime.model()
+                    )),
+                    Err(e) => {
+                        out.eprintln(&format!("[provider] applied but global save failed: {e}"))
+                    }
+                }
+            }
+            Err(e) => out.eprintln(&format!("[provider] {e}")),
+        }
+        Ok(())
+    }
+
+    async fn apply_codex_provider_in_session(&mut self, out: ReplOutput<'_>) -> anyhow::Result<()> {
+        let mut cfg = self.runtime.config().clone();
+        cfg.set_default_provider(ProviderKind::OpenAi);
+        if cfg
+            .provider
+            .openai
+            .base_url
+            .to_ascii_lowercase()
+            .contains("githubcopilot.com")
+        {
+            cfg.provider.openai.base_url = "https://api.openai.com".to_string();
+        }
+        // Codex preset: keep OpenAI surface but select a coding-optimized model.
+        if !cfg
+            .provider
+            .openai
+            .model
+            .to_ascii_lowercase()
+            .contains("codex")
+        {
+            cfg.provider.openai.model = "gpt-5-codex".to_string();
+        }
+        match self.runtime.apply_dcode_ai_config(cfg) {
+            Ok(()) => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.model = self.runtime.model().to_string();
+                }
+                match self.runtime.config().save_global() {
+                    Ok(()) => out.println(&format!(
+                        "[provider] OpenAI Codex - model {} - saved",
                         self.runtime.model()
                     )),
                     Err(e) => {
@@ -1674,6 +1719,8 @@ impl Repl {
                     "  anthropic:   {}",
                     if store.anthropic.is_some() {
                         "logged in"
+                    } else if has_claude_cli() {
+                        "local claude cli"
                     } else {
                         "not logged in"
                     }
@@ -1819,6 +1866,8 @@ impl Repl {
                             "usage: /provider <openai|codex|copilot|anthropic|openrouter|antigravity|opencodezen>",
                         );
                     }
+                } else if rest.eq_ignore_ascii_case("codex") {
+                    self.apply_codex_provider_in_session(out).await?;
                 } else if rest.eq_ignore_ascii_case("copilot")
                     || rest.eq_ignore_ascii_case("github")
                 {
@@ -3274,7 +3323,9 @@ fn active_provider_connected(
             }
         }
         ProviderKind::Anthropic => {
-            config.provider.api_key_present_for(ProviderKind::Anthropic) || auth.anthropic.is_some()
+            config.provider.api_key_present_for(ProviderKind::Anthropic)
+                || auth.anthropic.is_some()
+                || has_claude_cli()
         }
         ProviderKind::OpenRouter => config
             .provider
@@ -3318,6 +3369,8 @@ fn build_model_picker_entries(
         let model = config.provider.model_for(p);
         let key_status = if config.provider.api_key_present_for(p) {
             "key ✓"
+        } else if p == ProviderKind::Anthropic && has_claude_cli() {
+            "cli ✓"
         } else if (p == ProviderKind::OpenAi && auth.openai_oauth.is_some())
             || (p == ProviderKind::Anthropic && auth.anthropic.is_some())
             || (p == ProviderKind::Antigravity && auth.antigravity.is_some())

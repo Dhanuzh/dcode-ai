@@ -18,17 +18,26 @@ pub struct AnthropicProvider {
 impl AnthropicProvider {
     pub fn from_config(config: &DcodeAiConfig) -> Result<Self, ProviderError> {
         let anthropic = config.provider.anthropic.clone();
-        let api_key = anthropic.resolve_api_key().or_else(|| {
+        let token = anthropic.resolve_api_key().or_else(|| {
             AuthStore::load()
                 .ok()
                 .and_then(|s| s.anthropic)
                 .map(|a| a.token)
-        }).ok_or_else(|| {
-            ProviderError::Configuration(format!(
-                "missing Anthropic API key; set {} or provide `provider.anthropic.api_key` in config (or open dcode-ai and run /login or /connect)",
-                anthropic.api_key_env
-            ))
-        })?;
+        });
+        let api_key = match token {
+            Some(token) if token.trim_start().starts_with("sk-ant-") => token,
+            Some(_) => {
+                return Err(ProviderError::Configuration(
+                    "Anthropic provider requires an Anthropic API key (sk-ant-*). OAuth/subscription tokens are not valid for https://api.anthropic.com/v1/messages. Set ANTHROPIC_API_KEY or `provider.anthropic.api_key`.".to_string(),
+                ));
+            }
+            None => {
+                return Err(ProviderError::Configuration(format!(
+                    "missing Anthropic API key; set {} or provide `provider.anthropic.api_key` in config",
+                    anthropic.api_key_env
+                )));
+            }
+        };
 
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -149,7 +158,7 @@ mod tests {
                     .headers()
                     .iter()
                     .any(|header| header.field.equiv("x-api-key")
-                        && header.value.as_str() == "anthropic-test-key")
+                        && header.value.as_str() == "sk-ant-api03-test")
             );
             assert!(
                 request
@@ -160,7 +169,7 @@ mod tests {
         });
 
         let mut config = DcodeAiConfig::default();
-        config.provider.anthropic.api_key = Some("anthropic-test-key".into());
+        config.provider.anthropic.api_key = Some("sk-ant-api03-test".into());
         config.provider.anthropic.base_url = base_url;
 
         let provider = AnthropicProvider::from_config(&config).expect("provider");

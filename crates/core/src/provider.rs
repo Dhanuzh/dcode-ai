@@ -1,5 +1,7 @@
 pub mod anthropic;
 pub mod anthropic_compat;
+pub mod anthropic_with_claude_fallback;
+pub mod claude_cli;
 pub mod factory;
 pub mod minimax;
 pub mod openai;
