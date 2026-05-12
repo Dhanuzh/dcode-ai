@@ -4120,9 +4120,13 @@ pub fn run_blocking(
                                 Style::default().fg(theme::muted()),
                             )));
                         }
-                        for abs in list_scroll..list_end {
-                            let idx = filtered[abs];
-                            match idx {
+                        for (abs, idx) in filtered
+                            .iter()
+                            .enumerate()
+                            .take(list_end)
+                            .skip(list_scroll)
+                        {
+                            match *idx {
                                 PaletteRow::Section(name) => {
                                     popup_lines.push(Line::from(Span::styled(
                                         format!("  ─ {} ─", name.to_ascii_uppercase()),

@@ -105,6 +105,7 @@ pub fn openai_request_body(
     }))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn openai_responses_request_body(
     messages: &[Message],
     tools: &[ToolDefinition],
