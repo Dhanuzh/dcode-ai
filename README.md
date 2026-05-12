@@ -1,5 +1,14 @@
 # dcode-ai
 
+```text
+ ___
+/   \
+| x x |
+|  ^  |
+|_____|
+ |   |
+```
+
 **Rust-native coding agent. Single binary. Terminal-first.**
 
 ---
