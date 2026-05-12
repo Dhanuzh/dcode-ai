@@ -1,10 +1,10 @@
 # dcode-ai
 
 ```text
- ___
-/   \
+  ___
+ /   \
 | x x |
-|  ^  |
+|  ^  |    DCODE - AI
 |_____|
  |   |
 ```
@@ -23,21 +23,21 @@ Built for developers who want a fast, local-first AI coding assistant that stays
 
 ## Features
 
-| Feature | Description |
-|---|---|
-| **Streaming reasoning tokens** | See the model think in real time (`✦ thinking`), not just the final reply |
-| **Visible tool execution** | Each tool call renders with name + argument preview + live status (`⚡ bash ls -la  running…` → `✓ bash`) |
-| **Live TUI** | Full interactive terminal UI with command palette, themes, mouse support |
-| **Session persistence** | Every conversation saved. Resume, replay, or attach to any session |
-| **Sub-agents & worktrees** | Spawn child agents with parent/child lineage and isolated git worktrees |
-| **Unix-socket IPC** | Control detached sessions programmatically — send prompts, receive events |
-| **Headless automation** | One-shot prompts, NDJSON streaming, JSON output — CI/pipe friendly |
-| **Multi-provider** | MiniMax, Anthropic, OpenAI, OpenRouter, OpenAI-compatible — switch inline |
-| **Theme picker** | `/theme` opens an interactive dropdown with live preview |
-| **File & image attach** | `@file` mentions with workspace completion, `Ctrl+V` image paste |
-| **Agent profiles** | `@build`, `@plan`, `@review`, `@fix`, `@test` — role-specific agent behavior |
-| **Permission modes** | Default / Plan / AcceptEdits / DontAsk / Bypass — control what the agent can do |
-| **Skill discovery** | Auto-loads skills from `AGENTS.md`, skill directories, and instructions files |
+| Feature                        | Description                                                                                               |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------- |
+| **Streaming reasoning tokens** | See the model think in real time (`✦ thinking`), not just the final reply                                 |
+| **Visible tool execution**     | Each tool call renders with name + argument preview + live status (`⚡ bash ls -la  running…` → `✓ bash`) |
+| **Live TUI**                   | Full interactive terminal UI with command palette, themes, mouse support                                  |
+| **Session persistence**        | Every conversation saved. Resume, replay, or attach to any session                                        |
+| **Sub-agents & worktrees**     | Spawn child agents with parent/child lineage and isolated git worktrees                                   |
+| **Unix-socket IPC**            | Control detached sessions programmatically — send prompts, receive events                                 |
+| **Headless automation**        | One-shot prompts, NDJSON streaming, JSON output — CI/pipe friendly                                        |
+| **Multi-provider**             | MiniMax, Anthropic, OpenAI, OpenRouter, OpenAI-compatible — switch inline                                 |
+| **Theme picker**               | `/theme` opens an interactive dropdown with live preview                                                  |
+| **File & image attach**        | `@file` mentions with workspace completion, `Ctrl+V` image paste                                          |
+| **Agent profiles**             | `@build`, `@plan`, `@review`, `@fix`, `@test` — role-specific agent behavior                              |
+| **Permission modes**           | Default / Plan / AcceptEdits / DontAsk / Bypass — control what the agent can do                           |
+| **Skill discovery**            | Auto-loads skills from `AGENTS.md`, skill directories, and instructions files                             |
 
 ---
 
@@ -84,6 +84,7 @@ dcode-ai
 ```
 
 On first run you'll be guided through:
+
 1. **Provider selection** — choose MiniMax, Anthropic, OpenAI, or OpenRouter
 2. **API key setup** — paste your key or set the appropriate env var
 3. **Ready to go** — start chatting with the agent
@@ -106,39 +107,38 @@ dcode-ai attach <session-id>   # attach to live output
 
 ## Key Maps
 
-| Key | Action |
-|---|---|
-| `Ctrl+P` | Command palette |
-| `F2` | Cycle model |
-| `F12` | Toggle mouse capture (OFF = click-drag text selection) |
-| `Tab` | Cycle agent profile (`@build` / `@plan` / `@review` / `@fix` / `@test`) |
-| `Esc` | Cancel current turn |
-| `Ctrl+V` | Paste image from clipboard |
+| Key      | Action                                                                  |
+| -------- | ----------------------------------------------------------------------- |
+| `Ctrl+P` | Command palette                                                         |
+| `F2`     | Cycle model                                                             |
+| `Tab`    | Cycle agent profile (`@build` / `@plan` / `@review` / `@fix` / `@test`) |
+| `Esc`    | Cancel current turn                                                     |
+| `Ctrl+V` | Paste image from clipboard                                              |
 
 ### Slash commands (type `/` in TUI)
 
-| Command | Description |
-|---|---|
-| `/model` | Switch model |
-| `/provider` | Switch provider |
-| `/theme` | Theme picker (live preview) |
-| `/permission` | Permission mode |
-| `/agent` | Agent profile |
-| `/sessions` | Session picker |
-| `/branch` | Git branch picker |
-| `/compact` | Summarize transcript |
-| `/new` | New session |
+| Command        | Description                       |
+| -------------- | --------------------------------- |
+| `/model`       | Switch model                      |
+| `/provider`    | Switch provider                   |
+| `/theme`       | Theme picker (live preview)       |
+| `/permission`  | Permission mode                   |
+| `/agent`       | Agent profile                     |
+| `/sessions`    | Session picker                    |
+| `/branch`      | Git branch picker                 |
+| `/compact`     | Summarize transcript              |
+| `/new`         | New session                       |
 | `/resume <id>` | Resume session by ID (in-process) |
-| `/editor` | Open `$EDITOR` for composing |
-| `/apikey` | Set/update API key |
-| `/connect` | Provider connect modal |
+| `/editor`      | Open `$EDITOR` for composing      |
+| `/apikey`      | Set/update API key                |
+| `/connect`     | Provider connect modal            |
 
 ### Inline shortcuts
 
-| Syntax | Action |
-|---|---|
+| Syntax          | Action                                 |
+| --------------- | -------------------------------------- |
 | `@path/to/file` | File mention with workspace completion |
-| `!command` | Inline shell execution |
+| `!command`      | Inline shell execution                 |
 
 ---
 
@@ -146,24 +146,23 @@ dcode-ai attach <session-id>   # attach to live output
 
 ### Features
 
-| Feature | How |
-|---|---|
-| Command palette | `Ctrl+P` |
-| Model picker | `F2` cycle, or `/model` |
-| Theme picker | `/theme` — live-preview dropdown |
-| Agent profile | `Tab` cycle, or `@build` / `@plan` / `@review` / `@fix` / `@test` |
-| Permission mode | `/permission` — interactive mode selector |
-| Toggle mouse capture | `F12` — OFF lets you click-drag to select text |
-| Branch picker | status-bar chip or `/branch` |
-| Slash commands | `/` — autocompletes as you type |
-| File mentions | `@path/to/file` — completes from workspace |
-| Inline shell | `!cmd` |
-| Image attach | `Ctrl+V` (paste from clipboard) |
-| Cancel turn | `Esc` |
-| External editor | configured via `/editor` |
-| Session picker | `/sessions` |
-| Doctor | `/doctor` — run diagnostics |
-| Memory | `/memory` — persistent notes across sessions |
+| Feature         | How                                                               |
+| --------------- | ----------------------------------------------------------------- |
+| Command palette | `Ctrl+P`                                                          |
+| Model picker    | `F2` cycle, or `/model`                                           |
+| Theme picker    | `/theme` — live-preview dropdown                                  |
+| Agent profile   | `Tab` cycle, or `@build` / `@plan` / `@review` / `@fix` / `@test` |
+| Permission mode | `/permission` — interactive mode selector                         |
+| Branch picker   | status-bar chip or `/branch`                                      |
+| Slash commands  | `/` — autocompletes as you type                                   |
+| File mentions   | `@path/to/file` — completes from workspace                        |
+| Inline shell    | `!cmd`                                                            |
+| Image attach    | `Ctrl+V` (paste from clipboard)                                   |
+| Cancel turn     | `Esc`                                                             |
+| External editor | configured via `/editor`                                          |
+| Session picker  | `/sessions`                                                       |
+| Doctor          | `/doctor` — run diagnostics                                       |
+| Memory          | `/memory` — persistent notes across sessions                      |
 
 Reasoning tokens stream under a `✦ thinking` chip and commit as a dim italic block before the assistant reply. Tool calls render with their argument preview (file path, shell command, query, etc.) so you see exactly what the agent ran.
 
@@ -173,13 +172,13 @@ Reasoning tokens stream under a `✦ thinking` chip and commit as a dim italic b
 
 Configured in `~/.dcode-ai/config.toml` (global) or `.dcode-ai/config.local.toml` (workspace — workspace wins).
 
-| Provider | Key env | Default model |
-|---|---|---|
-| MiniMax (OpenCode Zen) | `OPENCODE_API_KEY` | `MiniMax-M2.5` |
-| Anthropic | `ANTHROPIC_API_KEY` | `claude-sonnet-4-6` |
-| OpenAI | `OPENAI_API_KEY` | configurable |
-| OpenRouter | `OPENROUTER_API_KEY` | configurable |
-| OpenAI-compatible | — | any `base_url` + model |
+| Provider               | Key env              | Default model          |
+| ---------------------- | -------------------- | ---------------------- |
+| MiniMax (OpenCode Zen) | `OPENCODE_API_KEY`   | `MiniMax-M2.5`         |
+| Anthropic              | `ANTHROPIC_API_KEY`  | `claude-sonnet-4-6`    |
+| OpenAI                 | `OPENAI_API_KEY`     | configurable           |
+| OpenRouter             | `OPENROUTER_API_KEY` | configurable           |
+| OpenAI-compatible      | —                    | any `base_url` + model |
 
 Switch provider inline: `/provider minimax`, `/provider openai`, `/provider anthropic`, `/provider opencodezen`.
 
@@ -188,21 +187,25 @@ Switch model within provider: `/model <name>`.
 ### Per-provider setup
 
 **MiniMax (default):**
+
 ```bash
 export OPENCODE_API_KEY="your-key"
 ```
 
 **Anthropic:**
+
 ```bash
 export ANTHROPIC_API_KEY="your-key"
 ```
 
 **OpenAI:**
+
 ```bash
 export OPENAI_API_KEY="your-key"
 ```
 
 **OpenRouter:**
+
 ```bash
 export OPENROUTER_API_KEY="your-key"
 ```
@@ -275,6 +278,7 @@ skill_directories = [".dcode-ai/skills", ".claude/skills"]
 ### Config resolution
 
 Values are resolved in this order (later wins):
+
 1. Compiled defaults
 2. `~/.dcode-ai/config.toml` (global)
 3. `.dcode-ai/config.local.toml` (workspace)
@@ -300,12 +304,12 @@ dcode-ai uses a tiered permission system to control what the agent can do.
 
 ### Modes
 
-| Mode | Behavior |
-|---|---|
-| `default` | Read/web tools auto-allowed; edits and commands ask for approval |
-| `plan` | Analysis/research only — no writes or shell execution |
-| `accept-edits` | File edits auto-accepted; commands still ask |
-| `dont-ask` | Read-only automatic execution; no approval prompts |
+| Mode                 | Behavior                                                              |
+| -------------------- | --------------------------------------------------------------------- |
+| `default`            | Read/web tools auto-allowed; edits and commands ask for approval      |
+| `plan`               | Analysis/research only — no writes or shell execution                 |
+| `accept-edits`       | File edits auto-accepted; commands still ask                          |
+| `dont-ask`           | Read-only automatic execution; no approval prompts                    |
 | `bypass-permissions` | Fully autonomous — all tools auto-allowed (trusted environments only) |
 
 Switch mode in TUI: `/permission`, or via CLI flag: `--permission-mode bypass-permissions`.
@@ -327,53 +331,60 @@ For headless/automation use `dont-ask` or `bypass-permissions`. If an approval-b
 The agent has access to these built-in tools:
 
 ### Filesystem
-| Tool | Description |
-|---|---|
-| `read_file` | Read file contents |
-| `list_directory` | List directory entries |
-| `write_file` | Create or overwrite a file |
-| `edit_file` | Replace exact string in a file |
-| `apply_patch` | Apply one or more exact replacements |
-| `replace_match` | Replace by exact path/line/column coordinates |
-| `rename_path` | Rename a file or directory |
-| `move_path` | Move a file or directory |
-| `copy_path` | Copy a file |
-| `delete_path` | Delete a file or directory |
+
+| Tool             | Description                                   |
+| ---------------- | --------------------------------------------- |
+| `read_file`      | Read file contents                            |
+| `list_directory` | List directory entries                        |
+| `write_file`     | Create or overwrite a file                    |
+| `edit_file`      | Replace exact string in a file                |
+| `apply_patch`    | Apply one or more exact replacements          |
+| `replace_match`  | Replace by exact path/line/column coordinates |
+| `rename_path`    | Rename a file or directory                    |
+| `move_path`      | Move a file or directory                      |
+| `copy_path`      | Copy a file                                   |
+| `delete_path`    | Delete a file or directory                    |
 
 ### Code search
-| Tool | Description |
-|---|---|
-| `search_code` | Ripgrep-based search with structured JSON results |
-| `query_symbols` | Fast Rust symbol lookup by name |
+
+| Tool            | Description                                       |
+| --------------- | ------------------------------------------------- |
+| `search_code`   | Ripgrep-based search with structured JSON results |
+| `query_symbols` | Fast Rust symbol lookup by name                   |
 
 ### Shell
-| Tool | Description |
-|---|---|
+
+| Tool           | Description                                             |
+| -------------- | ------------------------------------------------------- |
 | `execute_bash` | Run shell commands in workspace (PTY-backed, sandboxed) |
 
 ### Git
-| Tool | Description |
-|---|---|
-| `git_status` | Show working tree status |
-| `git_diff` | Show diff (staged or unstaged) |
+
+| Tool         | Description                    |
+| ------------ | ------------------------------ |
+| `git_status` | Show working tree status       |
+| `git_diff`   | Show diff (staged or unstaged) |
 
 ### Web
-| Tool | Description |
-|---|---|
-| `web_search` | Public web search via DuckDuckGo |
-| `fetch_url` | Fetch and normalize text content of a URL |
+
+| Tool         | Description                               |
+| ------------ | ----------------------------------------- |
+| `web_search` | Public web search via DuckDuckGo          |
+| `fetch_url`  | Fetch and normalize text content of a URL |
 
 ### Validation
-| Tool | Description |
-|---|---|
+
+| Tool             | Description                               |
+| ---------------- | ----------------------------------------- |
 | `run_validation` | Run build/test/lint commands with timeout |
 
 ### Agent utilities
-| Tool | Description |
-|---|---|
-| `spawn_subagent` | Delegate work to a child session |
-| `ask_question` | Ask the user a structured question with options |
-| `invoke_skill` | Load a skill's instructions by name |
+
+| Tool             | Description                                     |
+| ---------------- | ----------------------------------------------- |
+| `spawn_subagent` | Delegate work to a child session                |
+| `ask_question`   | Ask the user a structured question with options |
+| `invoke_skill`   | Load a skill's instructions by name             |
 
 ### MCP tools
 
@@ -496,14 +507,14 @@ DCODE_AI_ORCH_TASK_ID=task-456
 
 ### Exit codes
 
-| Code | Meaning |
-|---|---|
-| `0` | Success |
-| `1` | Internal failure |
-| `10` | Configuration failure |
-| `11` | Runtime/provider/tool failure |
-| `13` | Approval-blocked headless run |
-| `130` | Cancelled |
+| Code  | Meaning                       |
+| ----- | ----------------------------- |
+| `0`   | Success                       |
+| `1`   | Internal failure              |
+| `10`  | Configuration failure         |
+| `11`  | Runtime/provider/tool failure |
+| `13`  | Approval-blocked headless run |
+| `130` | Cancelled                     |
 
 ---
 
@@ -519,23 +530,6 @@ dcode-ai loads instructions from multiple sources, merged in order:
 6. **Orchestration context** — injected via `DCODE_AI_ORCH_*` env vars
 
 ---
-
-## Lifecycle Hooks
-
-Run shell commands at session lifecycle points via config:
-
-```toml
-[[hooks.session_start]]
-command = "notify-send 'dcode-ai started'"
-blocking = false
-
-[[hooks.pre_tool_use]]
-command = "my-audit-script --tool $DCODE_AI_TOOL_NAME"
-matcher = "execute_bash"
-blocking = true
-```
-
-Hook points: `session_start`, `session_end`, `pre_tool_use`, `post_tool_use`, `post_tool_failure`, `approval_requested`, `subagent_start`, `subagent_stop`.
 
 ---
 
@@ -584,7 +578,3 @@ cargo test --workspace
 ## Author
 
 Dhanush
-
-## License
-
-MIT. See [LICENSE](LICENSE).
