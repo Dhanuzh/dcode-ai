@@ -7021,7 +7021,9 @@ pub fn run_blocking(
                             }
                         }
                         (KeyCode::Char('y'), KeyModifiers::NONE)
-                        | (KeyCode::Char('Y'), KeyModifiers::NONE) => {
+                        | (KeyCode::Char('Y'), KeyModifiers::NONE)
+                            if g.active_approval.is_some() =>
+                        {
                             if let Some(req) = g.active_approval.clone() {
                                 let call_id = req.call_id.clone();
                                 g.clear_input();
@@ -7036,7 +7038,9 @@ pub fn run_blocking(
                             }
                         }
                         (KeyCode::Char('n'), KeyModifiers::NONE)
-                        | (KeyCode::Char('N'), KeyModifiers::NONE) => {
+                        | (KeyCode::Char('N'), KeyModifiers::NONE)
+                            if g.active_approval.is_some() =>
+                        {
                             if let Some(req) = g.active_approval.clone() {
                                 let call_id = req.call_id.clone();
                                 g.clear_input();
@@ -7051,7 +7055,9 @@ pub fn run_blocking(
                             }
                         }
                         (KeyCode::Char('a'), KeyModifiers::NONE)
-                        | (KeyCode::Char('A'), KeyModifiers::NONE) => {
+                        | (KeyCode::Char('A'), KeyModifiers::NONE)
+                            if g.active_approval.is_some() =>
+                        {
                             if let Some(req) = g.active_approval.clone() {
                                 let input_json: serde_json::Value =
                                     serde_json::from_str(&req.input).unwrap_or_default();
