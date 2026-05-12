@@ -2611,10 +2611,11 @@ fn render_approval_popup(
     req: &ApprovalRequest,
     selected: usize,
 ) {
-    let popup_w = area.width.saturating_mul(3) / 4;
-    let popup_w = popup_w.clamp(50, area.width.saturating_sub(2).max(50));
-    let popup_h =
-        (area.height.saturating_mul(3) / 4).clamp(14, area.height.saturating_sub(2).max(14));
+    // Keep approval modal compact (Koda/Ironclaw style), not a large sheet.
+    let max_w = area.width.saturating_sub(2);
+    let popup_w = max_w.min(84).max(max_w.min(56));
+    let max_h = area.height.saturating_sub(2);
+    let popup_h = max_h.min(13).max(max_h.min(9));
     let popup_area = centered_rect(area, popup_w, popup_h);
 
     let selected = selected.min(2);
