@@ -63,6 +63,16 @@ latest_release_tag() {
     printf '%s\n' "$body" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
 }
 
+release_exists() {
+    # Args: <tag>
+    # Returns 0 if release exists, 1 otherwise.
+    local tag api body
+    tag="$1"
+    api="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
+    body="$(http_get "$api" 2>/dev/null || true)"
+    [ -n "$body" ] && ! printf '%s\n' "$body" | grep -q '"message":[[:space:]]*"Not Found"'
+}
+
 resolve_version() {
     # Input env:
     #   DCODE_AI_VERSION: "latest" (default) or explicit like "0.2.0" / "v0.2.0"
@@ -85,6 +95,20 @@ resolve_version() {
         else
             version="$requested"
             tag="v${version}"
+        fi
+
+        # If the requested version does not have a published GitHub release yet,
+        # fall back to latest published release instead of 404-ing on download.
+        if ! release_exists "$tag"; then
+            info "Requested release ${tag} not found; falling back to latest published release."
+            tag="$(latest_release_tag)"
+            if [ -z "$tag" ]; then
+                info "Could not resolve latest release from GitHub API; falling back to v${FALLBACK_VERSION}"
+                version="${FALLBACK_VERSION}"
+                tag="v${version}"
+            else
+                version="${tag#v}"
+            fi
         fi
     fi
 
