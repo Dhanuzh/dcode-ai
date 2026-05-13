@@ -2415,9 +2415,22 @@ impl Repl {
         let (answer_tx, mut answer_rx) =
             tokio::sync::mpsc::unbounded_channel::<(String, QuestionSelection)>();
         let qp_dispatch = question.clone();
+        let question_state = tui_state.clone();
         tokio::spawn(async move {
             while let Some((qid, sel)) = answer_rx.recv().await {
-                let _ = dispatch_question_answer(&qp_dispatch, &qid, sel);
+                if !dispatch_question_answer(&qp_dispatch, &qid, sel)
+                    && let Ok(mut g) = question_state.lock()
+                {
+                    if g.active_question.as_ref().map(|q| q.question_id.as_str())
+                        == Some(qid.as_str())
+                    {
+                        g.active_question = None;
+                        g.close_question_modal();
+                    }
+                    g.push_error(
+                        "question was no longer pending; cleared stale question state".into(),
+                    );
+                }
             }
         });
         let answer_for_tui = answer_tx.clone();

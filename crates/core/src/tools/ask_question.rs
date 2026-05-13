@@ -11,7 +11,7 @@ use tokio::sync::oneshot;
 
 use super::ToolExecutor;
 
-const WAIT_SECS: u64 = 3600;
+const WAIT_SECS: u64 = 300;
 
 fn selection_summary(sel: &QuestionSelection, payload: &InteractiveQuestionPayload) -> String {
     match sel {
@@ -208,10 +208,10 @@ impl ToolExecutor for AskQuestionTool {
             };
         }
 
-        let selection =
+        let (selection, timed_out) =
             match tokio::time::timeout(std::time::Duration::from_secs(WAIT_SECS), rx).await {
-                Ok(Ok(sel)) => sel,
-                Ok(Err(_)) | Err(_) => {
+                Ok(Ok(sel)) => (sel, false),
+                Ok(Err(_)) => {
                     let mut m = self.pending.lock().unwrap();
                     m.remove(&question_id);
                     return ToolResult {
@@ -219,15 +219,27 @@ impl ToolExecutor for AskQuestionTool {
                         success: false,
                         output: String::new(),
                         error: Some(
-                            "timed out or channel closed waiting for question answer; use IPC \
-                         AnswerQuestion or an interactive terminal"
+                            "question answer channel closed unexpectedly; use IPC AnswerQuestion \
+                         or an interactive terminal"
                                 .into(),
                         ),
                     };
                 }
+                Err(_) => {
+                    let mut m = self.pending.lock().unwrap();
+                    m.remove(&question_id);
+                    (QuestionSelection::Suggested, true)
+                }
             };
 
-        let summary = selection_summary(&selection, &payload);
+        let summary = if timed_out {
+            format!(
+                "No answer received within {WAIT_SECS}s; auto-selected suggested answer: {}",
+                payload.suggested_answer
+            )
+        } else {
+            selection_summary(&selection, &payload)
+        };
         let _ = self
             .event_tx
             .send(AgentEvent::QuestionResolved {
