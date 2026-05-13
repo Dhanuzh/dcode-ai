@@ -51,6 +51,8 @@ use syntect::highlighting::{FontStyle, Theme, ThemeSet};
 use syntect::parsing::SyntaxSet;
 use tokio::sync::mpsc::UnboundedSender;
 
+const STARTUP_APPROVE_ALL_QUESTION_ID: &str = "startup-approve-all";
+
 /// Message from TUI to the approval dispatch task.
 #[derive(Debug)]
 pub enum ApprovalAnswer {
@@ -5756,7 +5758,12 @@ pub fn run_blocking(
                                                         .map(|q| q.question_id.clone());
                                                     drop(g);
                                                     if let Some(qid) = qid {
-                                                        if let Some(ref tx) = question_answer_tx {
+                                                        if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
+                                                            let _ = cmd_tx
+                                                                .send(TuiCmd::QuestionAnswer(sel));
+                                                        } else if let Some(ref tx) =
+                                                            question_answer_tx
+                                                        {
                                                             let _ = tx.send((qid, sel));
                                                         } else {
                                                             let _ = cmd_tx
@@ -6409,7 +6416,9 @@ pub fn run_blocking(
                                         g.close_question_modal();
                                         g.active_question = None;
                                         drop(g);
-                                        if let Some(ref tx) = question_answer_tx {
+                                        if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
+                                            let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                        } else if let Some(ref tx) = question_answer_tx {
                                             let _ = tx.send((qid, sel));
                                         } else {
                                             let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
@@ -7234,7 +7243,11 @@ pub fn run_blocking(
                                 if t == "/auto-answer" {
                                     let qid = q.question_id.clone();
                                     drop(g);
-                                    if let Some(ref tx) = question_answer_tx {
+                                    if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
+                                        let _ = cmd_tx.send(TuiCmd::QuestionAnswer(
+                                            QuestionSelection::Suggested,
+                                        ));
+                                    } else if let Some(ref tx) = question_answer_tx {
                                         let _ = tx.send((qid, QuestionSelection::Suggested));
                                     } else {
                                         let _ = cmd_tx.send(TuiCmd::QuestionAnswer(
@@ -7251,7 +7264,9 @@ pub fn run_blocking(
                                 if let Some(sel) = parse_tui_question_answer(&line, q) {
                                     let qid = q.question_id.clone();
                                     drop(g);
-                                    if let Some(ref tx) = question_answer_tx {
+                                    if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
+                                        let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
+                                    } else if let Some(ref tx) = question_answer_tx {
                                         let _ = tx.send((qid, sel));
                                     } else {
                                         let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));

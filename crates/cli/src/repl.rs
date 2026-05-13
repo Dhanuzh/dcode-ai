@@ -2421,6 +2421,9 @@ impl Repl {
                 if !dispatch_question_answer(&qp_dispatch, &qid, sel)
                     && let Ok(mut g) = question_state.lock()
                 {
+                    if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
+                        continue;
+                    }
                     if g.active_question.as_ref().map(|q| q.question_id.as_str())
                         == Some(qid.as_str())
                     {
