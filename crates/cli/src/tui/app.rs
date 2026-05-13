@@ -5865,7 +5865,7 @@ pub fn run_blocking(
                 }
                 Event::FocusGained | Event::FocusLost => {}
                 Event::Key(key) => {
-                    if !matches!(key.kind, KeyEventKind::Press) {
+                    if matches!(key.kind, KeyEventKind::Release) {
                         continue;
                     }
 

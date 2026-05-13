@@ -406,10 +406,36 @@ impl Supervisor {
         // Check context before running turn
         self.maybe_compact_context().await;
 
-        let output = self
+        let mut output = self
             .agent
             .run_turn(prompt, self.workspace_root.as_path(), attachments)
-            .await?;
+            .await;
+
+        // If a turn still overflows after proactive compaction, force one compaction
+        // pass and retry once automatically so the session continues without manual
+        // "continue" prompts.
+        if let Err(ref err) = output
+            && is_context_limit_error(err)
+            && self.context_manager.config().enable_auto_summarize
+        {
+            if let Some(tx) = self.agent.event_sender() {
+                let _ = tx
+                    .send(AgentEvent::ContextCompaction {
+                        phase: "retry".to_string(),
+                        message:
+                            "Context limit hit during turn. Compacting and retrying automatically."
+                                .to_string(),
+                    })
+                    .await;
+            }
+            if self.perform_auto_summarize().await.is_ok() {
+                output = self
+                    .agent
+                    .run_turn(prompt, self.workspace_root.as_path(), attachments)
+                    .await;
+            }
+        }
+        let output = output?;
 
         // Check context after turn
         self.check_and_summarize_context().await;
@@ -489,7 +515,7 @@ impl Supervisor {
 
             match self.perform_auto_summarize().await {
                 Ok(()) => {
-                    tracing::info!(
+                    tracing::debug!(
                         "proactive compaction reduced context from {} to {} tokens",
                         stats.estimated_tokens,
                         self.context_manager
@@ -948,6 +974,17 @@ impl Supervisor {
             hooks.run_best_effort(event, None, &payload).await;
         }
     }
+}
+
+fn is_context_limit_error(err: &ProviderError) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("context window")
+        || msg.contains("context length")
+        || msg.contains("prompt is too long")
+        || msg.contains("context exceeds")
+        || msg.contains("max tokens")
+        || msg.contains("token limit")
+        || msg.contains("conversation too long")
 }
 
 fn parse_json_values_on_line(line: &str) -> Vec<Value> {
@@ -2733,5 +2770,17 @@ mod tests {
             fallback,
             "Earlier conversation context was compacted due to token limits."
         );
+    }
+
+    #[test]
+    fn context_limit_error_detector_matches_common_strings() {
+        let e = ProviderError::Other("Prompt is too long for this model".into());
+        assert!(is_context_limit_error(&e));
+
+        let e = ProviderError::RequestFailed("context window exceeded".into());
+        assert!(is_context_limit_error(&e));
+
+        let e = ProviderError::Other("network timeout".into());
+        assert!(!is_context_limit_error(&e));
     }
 }

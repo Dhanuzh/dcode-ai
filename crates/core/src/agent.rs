@@ -81,7 +81,7 @@ impl AgentLoop {
         let old_count = self.messages.len();
         self.messages = new_messages;
         let new_count = self.messages.len();
-        tracing::info!(
+        tracing::debug!(
             "context compacted: {} messages → {} messages",
             old_count,
             new_count
