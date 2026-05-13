@@ -6414,7 +6414,9 @@ pub fn run_blocking(
                                     if let Some(sel) = sel {
                                         let qid = q.question_id.clone();
                                         g.close_question_modal();
-                                        g.active_question = None;
+                                        if qid != STARTUP_APPROVE_ALL_QUESTION_ID {
+                                            g.active_question = None;
+                                        }
                                         drop(g);
                                         if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
                                             let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
