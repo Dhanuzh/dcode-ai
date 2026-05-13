@@ -102,6 +102,14 @@ struct Cli {
     #[arg(long)]
     max_turns: Option<u32>,
 
+    /// Ask once at startup to approve all tools for this session
+    #[arg(long)]
+    startup_approve_all: bool,
+
+    /// Disable startup one-time "approve all" prompt for this run
+    #[arg(long, conflicts_with = "startup_approve_all")]
+    no_startup_approve_all: bool,
+
     /// Internal session identifier for spawned runs
     #[arg(long, hide = true)]
     session_id: Option<String>,
@@ -446,6 +454,12 @@ async fn try_main() -> anyhow::Result<()> {
     }
     if let Some(max_turns) = cli.max_turns {
         config.session.max_turns_per_run = max_turns;
+    }
+    if cli.startup_approve_all {
+        config.permissions.startup_approve_all = true;
+    }
+    if cli.no_startup_approve_all {
+        config.permissions.startup_approve_all = false;
     }
 
     let workspace_root = PathBuf::from(".");

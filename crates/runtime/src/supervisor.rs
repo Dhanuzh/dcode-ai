@@ -1020,6 +1020,15 @@ fn truncate_child_detail(s: &str, max_chars: usize) -> String {
     }
 }
 
+fn summarize_child_error_message(s: &str, max_chars: usize) -> String {
+    let one_line = s
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown child error");
+    truncate_child_detail(one_line, max_chars)
+}
+
 fn tool_input_one_line(input: &serde_json::Value) -> String {
     if let Some(s) = input.as_str() {
         if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
@@ -1631,6 +1640,11 @@ pub fn spawn_subagent_consumer(
                 let result = spawn_child_session(child_cfg, event_tx.clone()).await;
                 match result {
                     Ok(res) => {
+                        let completion_status = if res.status == "error" {
+                            format!("error: {}", summarize_child_error_message(&res.output, 140))
+                        } else {
+                            res.status.clone()
+                        };
                         append_child_to_parent(
                             &parent_store,
                             &parent_session_id,
@@ -1643,7 +1657,7 @@ pub fn spawn_subagent_consumer(
                                 .send(AgentEvent::ChildSessionCompleted {
                                     parent_session_id: parent_session_id.clone(),
                                     child_session_id: res.child_session_id.clone(),
-                                    status: res.status.clone(),
+                                    status: completion_status,
                                 })
                                 .await;
                         }
@@ -1796,6 +1810,8 @@ pub async fn spawn_child_session(
     // Child sessions are non-interactive and already authorized by the parent
     // approval. Elevate to BypassPermissions so sub-agents can write files,
     // run tools, and spawn their own children without being auto-denied.
+    // Pre-authorize execute_bash since the parent's spawn approval already
+    // delegates authority for the child to do its work.
     let mut child_config = cfg.config.clone();
     child_config.permissions.mode = dcode_ai_common::config::PermissionMode::BypassPermissions;
 
@@ -1810,6 +1826,13 @@ pub async fn spawn_child_session(
     })
     .await
     .map_err(|e| e.to_string())?;
+
+    // Pre-authorize execute_bash for the child session so it can run shell
+    // commands without interactive approval. The parent's spawn already
+    // represents user consent for the child to execute its task.
+    sup.agent_mut()
+        .approval
+        .add_session_allow("execute_bash:*".into());
 
     let child_id = sup.session_id.clone();
 

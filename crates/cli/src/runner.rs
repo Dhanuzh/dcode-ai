@@ -164,6 +164,13 @@ impl SessionRuntime {
         self.supervisor.agent_mut().approval.set_mode(mode);
     }
 
+    pub fn add_session_allow_pattern(&mut self, pattern: String) {
+        self.supervisor
+            .agent_mut()
+            .approval
+            .add_session_allow(pattern);
+    }
+
     pub fn request_cancel(&self) {
         self.supervisor.request_cancel();
     }

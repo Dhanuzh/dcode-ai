@@ -13,7 +13,9 @@ use crate::tui::{
     replay_event_log_into_state, run_blocking, spawn_tui_bridge,
 };
 use dcode_ai_common::config::{PermissionMode, ProviderKind};
-use dcode_ai_common::event::{EndReason, QuestionSelection};
+use dcode_ai_common::event::{
+    EndReason, InteractiveQuestionPayload, QuestionOption, QuestionSelection,
+};
 use dcode_ai_common::message::{Message, Role};
 use dcode_ai_common::provider_runtime::has_claude_cli;
 use dcode_ai_core::skills::SkillCatalog;
@@ -24,6 +26,8 @@ use std::io::Write;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use tokio::process::Command;
+
+const STARTUP_APPROVE_ALL_QUESTION_ID: &str = "startup-approve-all";
 
 /// Where slash-command and preset output goes (TTY transcript vs full-screen TUI).
 pub(crate) enum ReplOutput<'a> {
@@ -364,6 +368,14 @@ impl Repl {
             agent_profile,
             current_agent_label,
         }
+    }
+
+    fn should_offer_startup_approve_all_popup(&self) -> bool {
+        self.runtime.config().permissions.startup_approve_all
+            && !matches!(
+                self.runtime.permission_mode(),
+                PermissionMode::Plan | PermissionMode::DontAsk
+            )
     }
 
     /// Run the interactive REPL until the user exits.
@@ -2340,6 +2352,30 @@ impl Repl {
             g.set_current_branch(&branch);
         }
 
+        if self.should_offer_startup_approve_all_popup()
+            && let Ok(mut g) = tui_state.lock()
+            && g.active_question.is_none()
+        {
+            g.active_question = Some(InteractiveQuestionPayload {
+                question_id: STARTUP_APPROVE_ALL_QUESTION_ID.to_string(),
+                call_id: STARTUP_APPROVE_ALL_QUESTION_ID.to_string(),
+                prompt: "Grant one-time approval for ALL tools in this session?".into(),
+                options: vec![
+                    QuestionOption {
+                        id: "approve_all".into(),
+                        label: "Approve all tools (session only)".into(),
+                    },
+                    QuestionOption {
+                        id: "keep_default".into(),
+                        label: "Keep default approval flow".into(),
+                    },
+                ],
+                allow_custom: false,
+                suggested_answer: "approve_all".into(),
+            });
+            g.open_question_modal();
+        }
+
         let rx = self
             .runtime
             .take_event_rx()
@@ -2975,13 +3011,41 @@ impl Repl {
                     } else {
                         None
                     };
-                    if let Some(qid) = qid
-                        && !self.runtime.submit_question_answer(&qid, selection)
-                        && let Ok(mut g) = tui_state.lock()
-                    {
-                        g.push_error(
-                            "failed to submit answer (expired or already answered)".into(),
-                        );
+                    if let Some(qid) = qid {
+                        if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
+                            let approved = match selection {
+                                QuestionSelection::Suggested => true,
+                                QuestionSelection::Option { option_id } => {
+                                    option_id == "approve_all"
+                                }
+                                QuestionSelection::Custom { .. } => false,
+                            };
+                            if approved {
+                                self.runtime.add_session_allow_pattern("*".to_string());
+                            }
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.active_question = None;
+                                g.close_question_modal();
+                                if approved {
+                                    g.blocks.push(DisplayBlock::System(
+                                        "[permissions] startup approval granted for this session."
+                                            .into(),
+                                    ));
+                                } else {
+                                    g.blocks.push(DisplayBlock::System(
+                                        "[permissions] startup approval declined; using default approval flow."
+                                            .into(),
+                                    ));
+                                }
+                                g.touch_transcript();
+                            }
+                        } else if !self.runtime.submit_question_answer(&qid, selection)
+                            && let Ok(mut g) = tui_state.lock()
+                        {
+                            g.push_error(
+                                "failed to submit answer (expired or already answered)".into(),
+                            );
+                        }
                     }
                 }
                 TuiCmd::Submit(line) => {

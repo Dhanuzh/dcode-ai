@@ -920,12 +920,26 @@ impl ModelConfig {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PermissionConfig {
     pub mode: PermissionMode,
     pub allow: Vec<String>,
     pub deny: Vec<String>,
     pub ask: Vec<String>,
+    #[serde(default)]
+    pub startup_approve_all: bool,
+}
+
+impl Default for PermissionConfig {
+    fn default() -> Self {
+        Self {
+            mode: PermissionMode::Default,
+            allow: Vec::new(),
+            deny: Vec::new(),
+            ask: Vec::new(),
+            startup_approve_all: true,
+        }
+    }
 }
 
 impl PermissionConfig {
@@ -941,6 +955,9 @@ impl PermissionConfig {
         }
         if let Some(ask) = partial.ask {
             self.ask = ask;
+        }
+        if let Some(startup_approve_all) = partial.startup_approve_all {
+            self.startup_approve_all = startup_approve_all;
         }
     }
 }
@@ -1361,6 +1378,7 @@ struct PartialPermissionConfig {
     allow: Option<Vec<String>>,
     deny: Option<Vec<String>>,
     ask: Option<Vec<String>>,
+    startup_approve_all: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

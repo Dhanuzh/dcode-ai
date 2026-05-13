@@ -33,6 +33,25 @@ impl SpawnSubagentTool {
     }
 }
 
+fn summarize_subagent_error(output: &str, max_chars: usize) -> String {
+    let one_line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("unknown child error");
+    if one_line.chars().count() <= max_chars {
+        one_line.to_string()
+    } else {
+        format!(
+            "{}…",
+            one_line
+                .chars()
+                .take(max_chars.saturating_sub(1))
+                .collect::<String>()
+        )
+    }
+}
+
 #[async_trait::async_trait]
 impl ToolExecutor for SpawnSubagentTool {
     fn definition(&self) -> ToolDefinition {
@@ -117,9 +136,10 @@ impl ToolExecutor for SpawnSubagentTool {
                     error: if success {
                         None
                     } else {
+                        let detail = summarize_subagent_error(&response.output, 180);
                         Some(format!(
-                            "Sub-agent finished with status: {}",
-                            response.status
+                            "Sub-agent finished with status: {} ({detail})",
+                            response.status,
                         ))
                     },
                 }
