@@ -26,7 +26,7 @@ impl ToolExecutor for ApplyPatchTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "apply_patch".into(),
-            description: "Apply one or more exact string replacements to a file".into(),
+            description: "Apply several exact string replacements to ONE file in a single call (a batch of edit_file edits, applied in order). Prefer this over multiple edit_file calls when changing the same file in more than one place. For a single replacement, use edit_file.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

@@ -11,7 +11,7 @@ use super::openai_compat::{
     map_provider_error, openai_request_body, openai_responses_request_body,
     spawn_openai_responses_stream, spawn_openai_stream,
 };
-use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk};
+use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk, retry};
 
 pub struct OpenAiProvider {
     client: reqwest::Client,
@@ -381,13 +381,25 @@ impl Provider for OpenAiProvider {
             )?
         };
 
-        let mut response = self
-            .client
-            .post(self.endpoint())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+        // Retry the primary request on rate limits; every other status
+        // (success, or the Codex model-not-supported fallback) is handled below.
+        let endpoint = self.endpoint();
+        let mut response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
+            let resp = self
+                .client
+                .post(&endpoint)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+            let status = resp.status();
+            if status.as_u16() == 429 {
+                let body_text = resp.text().await.unwrap_or_default();
+                return Err(map_provider_error(status, body_text));
+            }
+            Ok(resp)
+        })
+        .await?;
 
         if !response.status().is_success() {
             let status = response.status();

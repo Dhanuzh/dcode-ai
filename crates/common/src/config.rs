@@ -1006,6 +1006,10 @@ pub struct HarnessConfig {
     pub project_instructions_path: PathBuf,
     pub local_instructions_path: PathBuf,
     pub skill_directories: Vec<PathBuf>,
+    /// Prepend a ranked repo map (top referenced files) to the system prompt so
+    /// the agent starts oriented. Off by default — it adds tokens every session.
+    #[serde(default)]
+    pub include_repo_map: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -1019,6 +1023,8 @@ pub struct McpConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpServerConfig {
     pub name: String,
+    /// Command for a stdio transport. Empty/omitted when `url` is set.
+    #[serde(default)]
     pub command: String,
     #[serde(default)]
     pub args: Vec<String>,
@@ -1026,6 +1032,15 @@ pub struct McpServerConfig {
     pub env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<PathBuf>,
+    /// Endpoint for a Streamable-HTTP transport. When set, the server is reached
+    /// over HTTP (JSON-RPC POST) instead of spawning `command`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Extra HTTP headers for the Streamable-HTTP transport (e.g. an
+    /// `Authorization` token). Values support `${ENV_VAR}` expansion so secrets
+    /// stay out of the config file.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub headers: BTreeMap<String, String>,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -1163,6 +1178,7 @@ impl Default for HarnessConfig {
             project_instructions_path: PathBuf::from(".dcode-airc"),
             local_instructions_path: PathBuf::from(".dcode-ai/instructions.md"),
             skill_directories: default_skill_directories(),
+            include_repo_map: false,
         }
     }
 }
@@ -1180,6 +1196,9 @@ impl HarnessConfig {
         }
         if let Some(skill_directories) = partial.skill_directories {
             self.skill_directories = skill_directories;
+        }
+        if let Some(include_repo_map) = partial.include_repo_map {
+            self.include_repo_map = include_repo_map;
         }
     }
 }
@@ -1398,6 +1417,7 @@ struct PartialHarnessConfig {
     project_instructions_path: Option<PathBuf>,
     local_instructions_path: Option<PathBuf>,
     skill_directories: Option<Vec<PathBuf>>,
+    include_repo_map: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

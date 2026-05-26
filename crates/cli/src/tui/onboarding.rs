@@ -12,7 +12,7 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::oauth_login::OAuthProvider;
 
-use super::app::{restore_terminal, setup_terminal};
+use super::terminal::{restore_terminal, setup_terminal};
 
 #[derive(Clone, Copy)]
 struct OAuthChoice {

@@ -26,7 +26,7 @@ impl ToolExecutor for EditFileTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "edit_file".into(),
-            description: "Replace a specific string in an existing file".into(),
+            description: "PREFERRED for editing files: replace one exact string in an existing file (set replace_all to change every occurrence). Use apply_patch instead when making several edits to the same file at once; use replace_match only when the target string is ambiguous and you have line/column coordinates from a search.".into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

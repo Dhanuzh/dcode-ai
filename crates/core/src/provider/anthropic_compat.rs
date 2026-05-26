@@ -16,33 +16,85 @@ pub fn anthropic_request_body(
     temperature: f32,
     workspace_root: &Path,
 ) -> Result<Value, ProviderError> {
-    let (system, anthropic_messages) = to_anthropic_messages(messages, workspace_root)?;
+    let (system, mut anthropic_messages) = to_anthropic_messages(messages, workspace_root)?;
+
+    // Prompt caching: the system prompt and tool schemas are the large, static
+    // prefix that repeats verbatim on every turn. Marking them with an
+    // `ephemeral` cache_control breakpoint lets Anthropic serve them from cache
+    // (~0.1x input cost, GA under anthropic-version 2023-06-01), which is the
+    // dominant token saving in a multi-turn agent loop.
+    //
+    // A third breakpoint on the final message caches the *conversation* prefix
+    // incrementally: each turn's breakpoint sits one message later, and Anthropic
+    // reuses the longest previously-cached prefix. (Max 4 breakpoints; we use 3.)
+    if let Some(last) = anthropic_messages.last_mut() {
+        mark_last_block_cacheable(last);
+    }
     let tools = if tools.is_empty() {
         None
     } else {
-        Some(
-            tools
-                .iter()
-                .map(|tool| {
-                    json!({
-                        "name": tool.name,
-                        "description": tool.description,
-                        "input_schema": tool.parameters,
-                    })
+        let mut defs = tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "name": tool.name,
+                    "description": tool.description,
+                    "input_schema": tool.parameters,
                 })
-                .collect::<Vec<_>>(),
-        )
+            })
+            .collect::<Vec<_>>();
+        if let Some(last) = defs.last_mut() {
+            last["cache_control"] = json!({ "type": "ephemeral" });
+        }
+        Some(defs)
     };
 
-    Ok(json!({
+    let mut body = json!({
         "model": model,
         "max_tokens": max_tokens,
-        "system": system,
         "messages": anthropic_messages,
         "tools": tools,
         "stream": true,
         "temperature": temperature,
-    }))
+    });
+
+    // Emit `system` as a cacheable text block when present; omit it entirely
+    // otherwise (sending `"system": null` is wasteful and blocks the cache).
+    if let Some(system) = system {
+        body["system"] = json!([{
+            "type": "text",
+            "text": system,
+            "cache_control": { "type": "ephemeral" },
+        }]);
+    }
+
+    Ok(body)
+}
+
+/// Attach an `ephemeral` cache_control breakpoint to the last content block of
+/// an Anthropic message. String content is promoted to a single text block so
+/// the breakpoint has somewhere to live (Anthropic requires cache_control on a
+/// block, not on the bare `content` string).
+fn mark_last_block_cacheable(message: &mut Value) {
+    let Some(content) = message.get_mut("content") else {
+        return;
+    };
+
+    match content {
+        Value::String(text) => {
+            *content = json!([{
+                "type": "text",
+                "text": text,
+                "cache_control": { "type": "ephemeral" },
+            }]);
+        }
+        Value::Array(blocks) => {
+            if let Some(last) = blocks.last_mut() {
+                last["cache_control"] = json!({ "type": "ephemeral" });
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn spawn_anthropic_stream(
@@ -105,9 +157,22 @@ pub fn spawn_anthropic_stream(
 
                 match event_type.as_str() {
                     "message_start" => {
-                        input_tokens = event["message"]["usage"]["input_tokens"]
-                            .as_u64()
-                            .unwrap_or(0);
+                        // Keep cached-prefix tokens separate from fresh input so
+                        // each can be priced at its own tier downstream. `input_tokens`
+                        // here is the non-cached input only.
+                        let usage = &event["message"]["usage"];
+                        input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                        let cache_read = usage["cache_read_input_tokens"].as_u64().unwrap_or(0);
+                        let cache_creation =
+                            usage["cache_creation_input_tokens"].as_u64().unwrap_or(0);
+                        if cache_read > 0 || cache_creation > 0 {
+                            let _ = tx
+                                .send(StreamChunk::CacheUsage {
+                                    read_tokens: cache_read,
+                                    creation_tokens: cache_creation,
+                                })
+                                .await;
+                        }
                     }
                     "content_block_start" => {
                         let block = &event["content_block"];
@@ -406,5 +471,77 @@ mod tests {
         assert_eq!(content[1]["source"]["type"], "base64");
         assert_eq!(content[1]["source"]["media_type"], "image/png");
         assert!(content[1]["source"]["data"].as_str().unwrap().len() > 8);
+    }
+
+    #[test]
+    fn request_body_marks_cache_breakpoints_on_system_and_last_tool() {
+        let messages = vec![Message::system("be terse"), Message::user("hi")];
+        let tools = vec![
+            ToolDefinition {
+                name: "a".into(),
+                description: "first".into(),
+                parameters: json!({"type": "object"}),
+            },
+            ToolDefinition {
+                name: "b".into(),
+                description: "second".into(),
+                parameters: json!({"type": "object"}),
+            },
+        ];
+
+        let body = anthropic_request_body(
+            &messages,
+            &tools,
+            "claude-sonnet-4-6",
+            256,
+            1.0,
+            std::path::Path::new("."),
+        )
+        .expect("body");
+
+        // System prompt is a cacheable text block.
+        assert_eq!(body["system"][0]["type"], "text");
+        assert_eq!(body["system"][0]["text"], "be terse");
+        assert_eq!(body["system"][0]["cache_control"]["type"], "ephemeral");
+
+        // Only the final tool carries the breakpoint (caches the whole tools block).
+        let tools_out = body["tools"].as_array().expect("tools array");
+        assert!(tools_out[0].get("cache_control").is_none());
+        assert_eq!(tools_out[1]["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn request_body_caches_final_message_block() {
+        let messages = vec![Message::system("sys"), Message::user("latest question")];
+        let body = anthropic_request_body(
+            &messages,
+            &[],
+            "claude-sonnet-4-6",
+            256,
+            1.0,
+            std::path::Path::new("."),
+        )
+        .expect("body");
+
+        // The final user message's text was promoted to a cacheable block.
+        let last = body["messages"].as_array().unwrap().last().unwrap();
+        let block = &last["content"][0];
+        assert_eq!(block["type"], "text");
+        assert_eq!(block["text"], "latest question");
+        assert_eq!(block["cache_control"]["type"], "ephemeral");
+    }
+
+    #[test]
+    fn request_body_omits_system_when_absent() {
+        let body = anthropic_request_body(
+            &[Message::user("hi")],
+            &[],
+            "claude-sonnet-4-6",
+            256,
+            1.0,
+            std::path::Path::new("."),
+        )
+        .expect("body");
+        assert!(body.get("system").is_none());
     }
 }

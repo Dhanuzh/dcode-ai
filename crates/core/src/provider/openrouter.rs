@@ -6,7 +6,7 @@ use dcode_ai_common::tool::ToolDefinition;
 use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderName, HeaderValue};
 
 use super::openai_compat::{map_provider_error, openai_request_body, spawn_openai_stream};
-use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk};
+use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk, retry};
 
 pub struct OpenRouterProvider {
     client: reqwest::Client,
@@ -117,19 +117,24 @@ impl Provider for OpenRouterProvider {
             workspace_root,
         )?;
 
-        let response = self
-            .client
-            .post(self.endpoint())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
-
-        let status = response.status();
-        if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
-            return Err(map_provider_error(status, body_text));
-        }
+        let endpoint = self.endpoint();
+        let response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
+            let resp = self
+                .client
+                .post(&endpoint)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+            let status = resp.status();
+            if status.is_success() {
+                Ok(resp)
+            } else {
+                let body_text = resp.text().await.unwrap_or_default();
+                Err(map_provider_error(status, body_text))
+            }
+        })
+        .await?;
 
         Ok(spawn_openai_stream(response, "openrouter"))
     }

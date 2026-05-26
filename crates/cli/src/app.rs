@@ -13,6 +13,7 @@ pub struct App {
     pub safe_mode: bool,
 }
 
+
 impl App {
     pub fn new(safe_mode: bool) -> Self {
         Self {

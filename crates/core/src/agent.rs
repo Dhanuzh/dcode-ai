@@ -52,8 +52,8 @@ impl AgentLoop {
             tools,
             approval,
             messages: Vec::new(),
+            cost_tracker: CostTracker::for_model(model.clone()),
             model,
-            cost_tracker: CostTracker::default(),
             event_tx,
             max_turns,
             max_tool_calls_per_turn,
@@ -235,11 +235,17 @@ impl AgentLoop {
                         got_usage = true;
                         self.cost_tracker.add(input_tokens, output_tokens);
                         self.emit(AgentEvent::CostUpdated {
-                            input_tokens: self.cost_tracker.input_tokens,
+                            input_tokens: self.cost_tracker.total_input_tokens(),
                             output_tokens: self.cost_tracker.output_tokens,
                             estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
                         })
                         .await;
+                    }
+                    StreamChunk::CacheUsage {
+                        read_tokens,
+                        creation_tokens,
+                    } => {
+                        self.cost_tracker.add_cache(read_tokens, creation_tokens);
                     }
                     StreamChunk::Error(message) => {
                         self.emit(AgentEvent::Error {
@@ -598,7 +604,7 @@ impl AgentLoop {
             let estimated_output = (final_text.len() / 4) as u64;
             self.cost_tracker.add(estimated_input, estimated_output);
             self.emit(AgentEvent::CostUpdated {
-                input_tokens: self.cost_tracker.input_tokens,
+                input_tokens: self.cost_tracker.total_input_tokens(),
                 output_tokens: self.cost_tracker.output_tokens,
                 estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
             })

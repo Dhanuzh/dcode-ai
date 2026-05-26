@@ -83,16 +83,13 @@ impl ContextManager {
     }
 
     /// Calculate estimated token count for a message.
-    /// Uses a rough approximation: tokens ≈ characters / 4
+    ///
+    /// Backed by the `o200k_base` BPE (see [`crate::token_count`]) rather than
+    /// the old `chars / 4` heuristic, so code- and JSON-heavy turns are budgeted
+    /// accurately. Image parts contribute via their summary text only; their
+    /// true vision-token cost comes back in the provider `Usage` event.
     pub fn estimate_tokens(message: &Message) -> usize {
-        // Tool messages tend to be more token-dense
-        let divisor = match message.role {
-            Role::Tool => 3.5,
-            Role::System => 4.0,
-            _ => 4.0,
-        };
-
-        let content_tokens = message.content.approx_chars() as f64 / divisor;
+        let content_tokens = crate::token_count::count_tokens(&message.content.to_summary_text());
 
         // Add overhead for tool calls
         let tool_call_overhead = message
@@ -101,7 +98,7 @@ impl ContextManager {
             .map(|calls| calls.len() * 50) // ~50 tokens per tool call structure
             .unwrap_or(0);
 
-        (content_tokens as usize) + tool_call_overhead + 10 // ~10 tokens base overhead
+        content_tokens + tool_call_overhead + 10 // ~10 tokens base overhead
     }
 
     /// Calculate estimated token count for a slice of messages.

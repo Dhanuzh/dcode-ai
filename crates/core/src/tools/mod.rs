@@ -15,6 +15,7 @@ pub mod mcp;
 pub mod move_path;
 pub mod rename_path;
 pub mod replace_match;
+pub mod repo_map;
 pub mod run_validation;
 pub mod search;
 pub mod spawn_subagent;
@@ -56,6 +57,7 @@ impl ToolRegistry {
         registry.register(Box::new(list_directory::ListDirectoryTool::new(
             workspace_root.clone(),
         )));
+        registry.register(Box::new(repo_map::RepoMapTool::new(workspace_root.clone())));
         registry.register(Box::new(git::GitStatusTool::new(workspace_root.clone())));
         registry.register(Box::new(git::GitDiffTool::new(workspace_root)));
         registry.register(Box::new(web_search::WebSearchTool::new(web_config.clone())));

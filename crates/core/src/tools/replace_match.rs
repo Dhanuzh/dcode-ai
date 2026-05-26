@@ -82,7 +82,7 @@ impl ToolExecutor for ReplaceMatchTool {
         ToolDefinition {
             name: "replace_match".into(),
             description:
-                "Replace a specific search match using exact path, line, and column coordinates"
+                "Disambiguating edit: replace text at exact line/column coordinates (from a prior search). Use ONLY when the same string occurs multiple times and edit_file/apply_patch cannot target the right one. For normal edits, prefer edit_file or apply_patch."
                     .into(),
             parameters: serde_json::json!({
                 "type": "object",

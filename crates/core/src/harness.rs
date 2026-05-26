@@ -91,6 +91,12 @@ pub fn build_system_prompt(
         sections.push(section);
     }
 
+    if config.harness.include_repo_map
+        && let Some(section) = repo_map_section(workspace_root)
+    {
+        sections.push(section);
+    }
+
     if let Some(section) = orchestration_context_section(orchestration) {
         sections.push(section);
     }
@@ -125,6 +131,22 @@ fn permission_mode_section(mode: PermissionMode) -> Option<String> {
         ),
         PermissionMode::Default => None,
     }
+}
+
+/// Top-ranked workspace files (by PageRank over the reference graph), to orient
+/// the agent before it explores. Bounded so it never dominates the prompt.
+fn repo_map_section(workspace_root: &Path) -> Option<String> {
+    const MAX_REPO_MAP_FILES: usize = 25;
+    let ranked = crate::code_map::build_repo_map(workspace_root, MAX_REPO_MAP_FILES);
+    if ranked.is_empty() {
+        return None;
+    }
+    let mut section =
+        String::from("Repo Map (most-referenced files first — start here when orienting):\n");
+    for file in ranked {
+        section.push_str(&format!("- {} ({} refs)\n", file.path, file.score));
+    }
+    Some(section)
 }
 
 fn skills_section(
@@ -191,6 +213,29 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use tempfile::tempdir;
+
+    #[test]
+    fn repo_map_section_is_opt_in() {
+        let temp = tempdir().expect("tempdir");
+        fs::create_dir_all(temp.path().join("src")).unwrap();
+        fs::write(temp.path().join("src/parser.rs"), "pub fn parse() {}").unwrap();
+        fs::write(
+            temp.path().join("src/a.rs"),
+            "use crate::parser; fn x(){parser::parse();}",
+        )
+        .unwrap();
+
+        // Off by default: no repo map in the prompt.
+        let mut config = DcodeAiConfig::default();
+        let prompt_off = build_system_prompt(&config, temp.path(), None);
+        assert!(!prompt_off.contains("Repo Map"));
+
+        // Opt in: the ranked map appears with the hub file.
+        config.harness.include_repo_map = true;
+        let prompt_on = build_system_prompt(&config, temp.path(), None);
+        assert!(prompt_on.contains("Repo Map"));
+        assert!(prompt_on.contains("parser.rs"));
+    }
 
     #[test]
     fn built_in_prompt_includes_repo_specific_directives() {

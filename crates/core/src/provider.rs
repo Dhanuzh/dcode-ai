@@ -7,6 +7,7 @@ pub mod minimax;
 pub mod openai;
 pub mod openai_compat;
 pub mod openrouter;
+pub mod retry;
 #[cfg(test)]
 pub mod test_support;
 pub mod validate;
@@ -40,6 +41,13 @@ pub enum StreamChunk {
     Usage {
         input_tokens: u64,
         output_tokens: u64,
+    },
+    /// Prompt-cache token accounting (Anthropic). `read` tokens were served from
+    /// cache (~0.1x input cost); `creation` tokens were written to cache
+    /// (~1.25x input cost). Providers without caching never emit this.
+    CacheUsage {
+        read_tokens: u64,
+        creation_tokens: u64,
     },
     Error(String),
     Done,

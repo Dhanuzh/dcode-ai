@@ -7,7 +7,7 @@ use dcode_ai_common::tool::ToolDefinition;
 use reqwest::header::{HeaderMap, HeaderValue};
 
 use super::anthropic_compat::{anthropic_request_body, map_provider_error, spawn_anthropic_stream};
-use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk};
+use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk, retry};
 
 pub struct AnthropicProvider {
     client: reqwest::Client,
@@ -106,19 +106,27 @@ impl Provider for AnthropicProvider {
             workspace_root,
         )?;
 
-        let response = self
-            .client
-            .post(self.endpoint())
-            .json(&body)
-            .send()
-            .await
-            .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+        // Retry the initial request on transient rate limits (honoring the
+        // server's retry-after) before streaming begins.
+        let endpoint = self.endpoint();
+        let response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
+            let resp = self
+                .client
+                .post(&endpoint)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
 
-        let status = response.status();
-        if !status.is_success() {
-            let body_text = response.text().await.unwrap_or_default();
-            return Err(map_provider_error(status, body_text));
-        }
+            let status = resp.status();
+            if status.is_success() {
+                Ok(resp)
+            } else {
+                let body_text = resp.text().await.unwrap_or_default();
+                Err(map_provider_error(status, body_text))
+            }
+        })
+        .await?;
 
         Ok(spawn_anthropic_stream(response, "anthropic"))
     }

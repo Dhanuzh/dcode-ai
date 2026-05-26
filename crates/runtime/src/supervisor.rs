@@ -1808,12 +1808,121 @@ fn build_parent_summary(messages: &[dcode_ai_common::message::Message]) -> Strin
 }
 
 fn build_compaction_fallback_summary(messages: &[dcode_ai_common::message::Message]) -> String {
-    let summary = build_parent_summary(messages);
-    if summary.trim().is_empty() {
-        "Earlier conversation context was compacted due to token limits.".to_string()
-    } else {
-        summary
+    // Semantic compaction: a plain conversation digest loses the concrete state
+    // an agent needs to continue (which files it touched, what it ran, what
+    // broke). Pull those artifacts out of *all* messages — including tool
+    // results, which the conversation digest skips — and pin them above the digest.
+    let artifacts = extract_session_artifacts(messages);
+    let convo = build_parent_summary(messages);
+
+    let mut out = String::new();
+    if !artifacts.is_empty() {
+        out.push_str("## Preserved Artifacts\n");
+        out.push_str(&artifacts);
+        out.push('\n');
     }
+    if convo.trim().is_empty() {
+        if out.is_empty() {
+            out.push_str("Earlier conversation context was compacted due to token limits.");
+        }
+    } else {
+        out.push_str("## Recent Conversation\n");
+        out.push_str(&convo);
+    }
+    out
+}
+
+/// Scan every message (tool results included) for the durable state worth
+/// preserving across compaction: files touched, shell commands run, and error
+/// lines. Dependency-free heuristics; capped so the summary stays small.
+fn extract_session_artifacts(messages: &[dcode_ai_common::message::Message]) -> String {
+    use std::collections::BTreeSet;
+
+    let mut files: Vec<String> = Vec::new();
+    let mut seen_files: BTreeSet<String> = BTreeSet::new();
+    let mut commands: Vec<String> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
+
+    let mut push_file = |path: &str| {
+        let p = path
+            .trim()
+            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ';' | ')' | '('));
+        if looks_like_path(p) && seen_files.insert(p.to_string()) && files.len() < 20 {
+            files.push(p.to_string());
+        }
+    };
+
+    for msg in messages {
+        // Shell commands and edited paths from tool calls.
+        if let Some(calls) = &msg.tool_calls {
+            for call in calls {
+                if matches!(call.name.as_str(), "execute_bash" | "bash")
+                    && let Some(cmd) = call.arguments.get("command").and_then(|v| v.as_str())
+                    && commands.len() < 10
+                {
+                    commands.push(cmd.lines().next().unwrap_or(cmd).trim().to_string());
+                }
+                if let Some(path) = call.arguments.get("path").and_then(|v| v.as_str()) {
+                    push_file(path);
+                }
+            }
+        }
+
+        let text = msg.content.to_summary_text();
+        for token in text.split(|c: char| c.is_whitespace()) {
+            if token.contains('/') {
+                push_file(token);
+            }
+        }
+        for line in text.lines() {
+            let lower = line.to_ascii_lowercase();
+            if (lower.contains("error") || lower.contains("failed") || lower.contains("panic"))
+                && errors.len() < 8
+            {
+                let trimmed = line.trim();
+                let clipped: String = trimmed.chars().take(160).collect();
+                if !clipped.is_empty() {
+                    errors.push(clipped);
+                }
+            }
+        }
+    }
+
+    let mut out = String::new();
+    if !files.is_empty() {
+        out.push_str("Files: ");
+        out.push_str(&files.join(", "));
+        out.push('\n');
+    }
+    if !commands.is_empty() {
+        out.push_str("Commands run:\n");
+        for c in &commands {
+            out.push_str(&format!("- {c}\n"));
+        }
+    }
+    if !errors.is_empty() {
+        out.push_str("Errors/failures seen:\n");
+        for e in &errors {
+            out.push_str(&format!("- {e}\n"));
+        }
+    }
+    out
+}
+
+/// Heuristic: does `token` look like a workspace file path worth keeping?
+fn looks_like_path(token: &str) -> bool {
+    if token.len() < 3 || token.len() > 120 {
+        return false;
+    }
+    if token.starts_with("http://") || token.starts_with("https://") {
+        return false;
+    }
+    // Either a path with a separator, or a bare filename with a code-ish extension.
+    let has_sep = token.contains('/');
+    let has_ext = token.rsplit('.').next().is_some_and(|ext| {
+        (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())
+    });
+    has_sep && has_ext
 }
 
 /// Configuration for spawning a child session.
@@ -2715,24 +2824,34 @@ mod tests {
         };
         let cm = ContextManager::new(config, "test-model".to_string());
 
-        // 7000 / 10000 = 70% → not needs_attention
-        let msgs_small = vec![
-            Message::user("a".repeat(28_000).as_str()), // ~7000 tokens
-        ];
+        // Build natural-language text of a known BPE token size. (A run of the
+        // same char can't be used: the tokenizer merges repeated chars, so it
+        // would not produce a predictable token count.)
+        let text_with_tokens = |target: usize| -> String {
+            let unit = "the quick brown fox jumps over the lazy dog. ";
+            let mut s = String::new();
+            while crate::token_count::count_tokens(&s) < target {
+                s.push_str(unit);
+            }
+            s
+        };
+
+        // ~69% of 10_000 → below both the 75% summarize and 80% attention thresholds.
+        let msgs_small = vec![Message::user(text_with_tokens(6_900).as_str())];
         let stats_small = cm.stats(&msgs_small);
         assert!(
             !stats_small.needs_attention,
-            "70% should not need attention"
+            "69% should not need attention (got {}%)",
+            stats_small.usage_percent
         );
         assert!(
             !stats_small.should_summarize,
-            "70% should not auto-summarize"
+            "69% should not auto-summarize (got {}%)",
+            stats_small.usage_percent
         );
 
-        // 8000 / 10000 = 80% → needs_attention but not auto-summarize (75% threshold)
-        let msgs_medium = vec![
-            Message::user("a".repeat(32_000).as_str()), // ~8000 tokens
-        ];
+        // ~81% of 10_000 → needs_attention (>=80%) and auto-summarize (>=75%).
+        let msgs_medium = vec![Message::user(text_with_tokens(8_100).as_str())];
         let stats_medium = cm.stats(&msgs_medium);
         assert!(stats_medium.needs_attention, "80% should need attention");
         assert!(
@@ -2770,6 +2889,52 @@ mod tests {
             fallback,
             "Earlier conversation context was compacted due to token limits."
         );
+    }
+
+    #[test]
+    fn artifacts_capture_files_commands_and_errors() {
+        use dcode_ai_common::message::{Message, MessageToolCall};
+
+        let messages = vec![
+            Message::assistant_with_tool_calls(
+                "edit it",
+                vec![MessageToolCall {
+                    id: "1".into(),
+                    name: "edit_file".into(),
+                    arguments: json!({"path": "src/main.rs", "old_text": "a", "new_text": "b"}),
+                }],
+            ),
+            Message::assistant_with_tool_calls(
+                "run tests",
+                vec![MessageToolCall {
+                    id: "2".into(),
+                    name: "execute_bash".into(),
+                    arguments: json!({"command": "cargo test --workspace"}),
+                }],
+            ),
+            Message::tool("2", "error[E0599]: no method named `foo`"),
+        ];
+
+        let artifacts = extract_session_artifacts(&messages);
+        assert!(artifacts.contains("src/main.rs"), "files: {artifacts}");
+        assert!(
+            artifacts.contains("cargo test --workspace"),
+            "commands: {artifacts}"
+        );
+        assert!(artifacts.contains("error[E0599]"), "errors: {artifacts}");
+
+        // And the full fallback nests these under the artifacts header.
+        let full = build_compaction_fallback_summary(&messages);
+        assert!(full.contains("## Preserved Artifacts"));
+    }
+
+    #[test]
+    fn looks_like_path_filters_noise() {
+        assert!(looks_like_path("src/main.rs"));
+        assert!(looks_like_path("crates/core/src/cost.rs"));
+        assert!(!looks_like_path("https://example.com/x.html"));
+        assert!(!looks_like_path("justtext"));
+        assert!(!looks_like_path("a/b")); // no extension
     }
 
     #[test]
