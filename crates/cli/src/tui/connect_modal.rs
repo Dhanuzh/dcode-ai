@@ -269,12 +269,9 @@ mod tests {
         let found = rows.into_iter().find_map(|row| match row {
             ConnectRow::Provider {
                 title: "MiniMax",
-                action,
+                action: ConnectAction::OAuthLogin(slug),
                 ..
-            } => match action {
-                ConnectAction::OAuthLogin(slug) => Some(slug),
-                _ => None,
-            },
+            } => Some(slug),
             _ => None,
         });
         assert_eq!(found, Some("opencodezen"));
