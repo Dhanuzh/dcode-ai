@@ -297,6 +297,25 @@ pub(crate) fn transcript_lines_and_hits(
                         Style::default().fg(theme::muted()),
                     ));
                 }
+                // Diff scale chip on the header so a collapsed edit still shows
+                // how big the change was without expanding the body.
+                let (adds, dels) = crate::tui::app::diff_change_counts(detail);
+                if adds > 0 || dels > 0 {
+                    header.push(Span::raw("  "));
+                    header.push(Span::styled(
+                        format!("+{adds}"),
+                        Style::default()
+                            .fg(theme::success())
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                    header.push(Span::raw(" "));
+                    header.push(Span::styled(
+                        format!("−{dels}"),
+                        Style::default()
+                            .fg(theme::error())
+                            .add_modifier(Modifier::BOLD),
+                    ));
+                }
                 push_transcript_line(&mut lines, &mut hits, Line::from(header), None);
                 if !collapsed && !detail.trim().is_empty() {
                     push_tool_detail_lines(&mut lines, &mut hits, detail, w.saturating_sub(6), 80);
