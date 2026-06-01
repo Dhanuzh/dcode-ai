@@ -668,6 +668,37 @@ pub(crate) fn transcript_lines_and_hits(
             None,
         );
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+        // Context chips: workspace, branch, model, agent — so a fresh session
+        // shows where you are and what you're driving without running /status.
+        let mut ctx_spans: Vec<Span<'static>> = Vec::new();
+        let push_chip = |spans: &mut Vec<Span<'static>>, label: &str, value: &str| {
+            if value.trim().is_empty() {
+                return;
+            }
+            if !spans.is_empty() {
+                spans.push(Span::styled("  ·  ", Style::default().fg(theme::muted())));
+            }
+            spans.push(Span::styled(
+                format!("{label} "),
+                Style::default().fg(theme::muted()),
+            ));
+            spans.push(Span::styled(
+                value.to_string(),
+                Style::default().fg(theme::text()),
+            ));
+        };
+        push_chip(
+            &mut ctx_spans,
+            "cwd",
+            &truncate_chars(&state.workspace_display, 40),
+        );
+        push_chip(&mut ctx_spans, "branch", &state.current_branch);
+        push_chip(&mut ctx_spans, "model", &truncate_chars(&state.model, 24));
+        push_chip(&mut ctx_spans, "agent", &state.agent_profile);
+        if !ctx_spans.is_empty() {
+            push_transcript_line(&mut lines, &mut hits, Line::from(ctx_spans), None);
+            push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+        }
         push_transcript_line(
             &mut lines,
             &mut hits,
