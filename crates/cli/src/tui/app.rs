@@ -73,6 +73,8 @@ pub enum ApprovalAnswer {
 pub(crate) enum LineClickHit {
     Question(QuestionSelection),
     CopyText(String),
+    /// Toggle full vs preview rendering of thinking blocks.
+    ToggleThinking,
 }
 
 /// Per flattened transcript line: click action (same indices as `transcript_lines`).
@@ -3245,6 +3247,10 @@ pub fn run_blocking(
                                                     g.blocks.push(DisplayBlock::System(feedback));
                                                     g.touch_transcript();
                                                     g.transcript_follow_tail = true;
+                                                }
+                                                LineClickHit::ToggleThinking => {
+                                                    g.thinking_expanded = !g.thinking_expanded;
+                                                    g.touch_transcript();
                                                 }
                                             }
                                             continue;

@@ -157,6 +157,9 @@ pub struct TuiSessionState {
     /// Resolved answers keyed by `question_id`, used to render selected choice
     /// highlight in transcript question blocks.
     pub answered_questions: HashMap<String, QuestionSelection>,
+    /// When true, thinking blocks render in full instead of capping at a
+    /// preview; toggled by clicking a thinking header or its "+N more" line.
+    pub thinking_expanded: bool,
     /// Current git branch name (updated on branch switch).
     pub current_branch: String,
     /// Branch picker popup state.
@@ -491,6 +494,7 @@ impl TuiSessionState {
             approval_option_index: 0,
             active_question: None,
             answered_questions: HashMap::new(),
+            thinking_expanded: false,
             current_branch: String::new(),
             branch_picker_open: false,
             branch_picker_query: String::new(),

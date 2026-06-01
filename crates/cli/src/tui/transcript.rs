@@ -534,23 +534,35 @@ pub(crate) fn transcript_lines_and_hits(
             }
             DisplayBlock::Thinking(content) => {
                 push_section_gap(&mut lines, &mut hits);
+                let wrapped = wrap_text(content, w.saturating_sub(2));
+                let shown = if state.thinking_expanded {
+                    wrapped.len()
+                } else {
+                    wrapped.len().min(10)
+                };
+                let mut header = vec![Span::styled(
+                    " ✦ thinking ",
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(theme::muted())
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if wrapped.len() > 10 {
+                    header.push(Span::styled(
+                        if state.thinking_expanded {
+                            "  ▾ click to collapse"
+                        } else {
+                            "  ▸ click to expand"
+                        },
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
-                    Line::from(vec![
-                        Span::styled(
-                            " ✦ thinking ",
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(theme::muted())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled("", Style::default()),
-                    ]),
-                    None,
+                    Line::from(header),
+                    Some(LineClickHit::ToggleThinking),
                 );
-                let wrapped = wrap_text(content, w.saturating_sub(2));
-                let shown = wrapped.len().min(10);
                 for text_line in wrapped.iter().take(shown) {
                     push_transcript_line(
                         &mut lines,
@@ -572,10 +584,10 @@ pub(crate) fn transcript_lines_and_hits(
                         &mut lines,
                         &mut hits,
                         Line::from(Span::styled(
-                            format!(" … +{} more thinking lines", wrapped.len() - shown),
+                            format!(" … +{} more — click to expand", wrapped.len() - shown),
                             Style::default().fg(theme::muted()),
                         )),
-                        None,
+                        Some(LineClickHit::ToggleThinking),
                     );
                 }
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
@@ -597,20 +609,35 @@ pub(crate) fn transcript_lines_and_hits(
     if let Some(thinking) = &state.streaming_thinking
         && !thinking.is_empty()
     {
+        let wrapped = wrap_text(thinking, w.saturating_sub(2));
+        let shown = if state.thinking_expanded {
+            wrapped.len()
+        } else {
+            wrapped.len().min(10)
+        };
+        let mut header = vec![Span::styled(
+            " ✦ thinking… ",
+            Style::default()
+                .fg(Color::Black)
+                .bg(theme::muted())
+                .add_modifier(Modifier::BOLD),
+        )];
+        if wrapped.len() > 10 {
+            header.push(Span::styled(
+                if state.thinking_expanded {
+                    "  ▾ click to collapse"
+                } else {
+                    "  ▸ click to expand"
+                },
+                Style::default().fg(theme::muted()),
+            ));
+        }
         push_transcript_line(
             &mut lines,
             &mut hits,
-            Line::from(vec![Span::styled(
-                " ✦ thinking… ",
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(theme::muted())
-                    .add_modifier(Modifier::BOLD),
-            )]),
-            None,
+            Line::from(header),
+            Some(LineClickHit::ToggleThinking),
         );
-        let wrapped = wrap_text(thinking, w.saturating_sub(2));
-        let shown = wrapped.len().min(10);
         for text_line in wrapped.iter().take(shown) {
             push_transcript_line(
                 &mut lines,
@@ -632,10 +659,10 @@ pub(crate) fn transcript_lines_and_hits(
                 &mut lines,
                 &mut hits,
                 Line::from(Span::styled(
-                    format!(" … +{} more thinking lines", wrapped.len() - shown),
+                    format!(" … +{} more — click to expand", wrapped.len() - shown),
                     Style::default().fg(theme::muted()),
                 )),
-                None,
+                Some(LineClickHit::ToggleThinking),
             );
         }
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
