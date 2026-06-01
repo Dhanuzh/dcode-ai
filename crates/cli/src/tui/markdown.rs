@@ -230,10 +230,20 @@ fn render_table_lines(
         return;
     }
     const MAX_TABLE_COL_WIDTH: usize = 24;
+    // Size each column to its widest cell (capped), so short columns stay
+    // compact instead of every cell padding to a fixed 24.
+    let mut col_widths = vec![0usize; col_count];
+    for row in table.header_rows.iter().chain(table.body_rows.iter()) {
+        for (cell, w) in row.iter().zip(col_widths.iter_mut()) {
+            *w = (*w).max(cell.chars().count().min(MAX_TABLE_COL_WIDTH));
+        }
+    }
+    const ROW_LABEL: &str = " row   ";
+    const COL_SEP: &str = "  ·  ";
     let render_row = |row: &[String], is_header: bool| -> Line<'static> {
         let mut spans = Vec::new();
         spans.push(Span::styled(
-            if is_header { " table " } else { " row   " },
+            if is_header { " table " } else { ROW_LABEL },
             Style::default()
                 .fg(if is_header {
                     theme::assistant()
@@ -242,11 +252,11 @@ fn render_table_lines(
                 })
                 .add_modifier(Modifier::BOLD),
         ));
-        for i in 0..col_count {
+        for (i, &cw) in col_widths.iter().enumerate() {
             let val = row.get(i).map(String::as_str).unwrap_or("");
             let aligned = align_table_cell(
                 val,
-                MAX_TABLE_COL_WIDTH,
+                cw,
                 table.alignments.get(i).copied().unwrap_or(Alignment::None),
             );
             let style = if is_header {
@@ -258,7 +268,7 @@ fn render_table_lines(
             };
             spans.push(Span::styled(aligned, style));
             if i + 1 != col_count {
-                spans.push(Span::styled("  ·  ", Style::default().fg(theme::muted())));
+                spans.push(Span::styled(COL_SEP, Style::default().fg(theme::muted())));
             }
         }
         Line::from(spans)
@@ -269,8 +279,12 @@ fn render_table_lines(
         hits.push(None);
     }
     if !table.header_rows.is_empty() {
+        // Separator spans the actual rendered table width (label + columns + seps).
+        let rule_width = ROW_LABEL.chars().count()
+            + col_widths.iter().sum::<usize>()
+            + COL_SEP.chars().count() * col_count.saturating_sub(1);
         out.push(Line::from(Span::styled(
-            "────────────────────────────────────────",
+            "─".repeat(rule_width.max(1)),
             Style::default().fg(theme::muted()),
         )));
         hits.push(None);
