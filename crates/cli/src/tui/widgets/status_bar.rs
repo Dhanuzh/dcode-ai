@@ -61,7 +61,7 @@ impl Widget for StatusBar<'_> {
         if self.mcp_servers > 0 {
             spans.push(sep.clone());
             spans.push(Span::styled(
-                format!(" ⚡{} ", self.mcp_servers),
+                format!(" ◇mcp {} ", self.mcp_servers),
                 Style::default().fg(Color::Rgb(110, 210, 170)),
             ));
         }
@@ -69,9 +69,9 @@ impl Widget for StatusBar<'_> {
         if let Some(sandboxed) = self.sandbox_status {
             spans.push(sep.clone());
             let (icon, label, color) = if sandboxed {
-                ("🛡", "sandboxed", Color::Green)
+                ("▣", "sandboxed", Color::Green)
             } else {
-                ("⚠", "unsandboxed", Color::Yellow)
+                ("△", "unsandboxed", Color::Yellow)
             };
             spans.push(Span::styled(
                 format!(" {icon} {label} "),
