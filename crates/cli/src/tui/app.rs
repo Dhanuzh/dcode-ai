@@ -50,7 +50,10 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, Borders, Clear as ClearWidget, Padding, Paragraph, Wrap},
+    widgets::{
+        Block, Borders, Clear as ClearWidget, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
+        ScrollbarState, Wrap,
+    },
 };
 use std::io::stdout;
 use std::sync::{Arc, Mutex};
@@ -1172,6 +1175,28 @@ pub fn run_blocking(
                     .style(Style::default().bg(theme::bg()));
 
                 frame.render_widget(main, tr);
+
+                // Scrollbar gutter on the transcript's right edge — only when the
+                // content overflows the viewport. Skips the top border row so the
+                // track aligns with text rows, not the title.
+                if total > transcript_h && tr.height > 2 {
+                    let mut sb_state =
+                        ScrollbarState::new(max_scroll.max(1)).position(start.min(max_scroll));
+                    let sb_area = Rect::new(
+                        tr.x + tr.width.saturating_sub(1),
+                        tr.y + 1,
+                        1,
+                        tr.height.saturating_sub(1),
+                    );
+                    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .begin_symbol(None)
+                        .end_symbol(None)
+                        .track_symbol(Some("│"))
+                        .thumb_symbol("█")
+                        .track_style(Style::default().fg(theme::border()))
+                        .thumb_style(Style::default().fg(theme::muted()));
+                    frame.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
+                }
 
                 let activity_rows = g
                     .subagents
