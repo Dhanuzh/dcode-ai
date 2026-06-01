@@ -1389,7 +1389,10 @@ pub fn run_blocking(
                     elapsed_secs: elapsed,
                     mcp_servers: g.mcp_server_count,
                     sandbox_status: None,
-                    last_turn: None,
+                    context_tokens: g.context_tokens,
+                    tokens_in: g.input_tokens,
+                    tokens_out: g.output_tokens,
+                    cost_usd: g.cost_usd,
                     permission_bypass: toolbar_permission_is_bypass(&g.permission_mode),
                 };
 

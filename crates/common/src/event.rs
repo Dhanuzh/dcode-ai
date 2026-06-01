@@ -108,6 +108,9 @@ pub enum AgentEvent {
         input_tokens: u64,
         output_tokens: u64,
         estimated_cost_usd: f64,
+        /// Estimated size of the live conversation sent on the most recent
+        /// request (current context-window occupancy), for the ctx gauge.
+        context_tokens: u64,
     },
     Checkpoint {
         phase: String,

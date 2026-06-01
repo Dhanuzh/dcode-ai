@@ -6,13 +6,6 @@ use ratatui::{
     widgets::Widget,
 };
 
-#[derive(Debug, Clone, Default)]
-pub struct TurnStats {
-    pub tokens_in: u64,
-    pub tokens_out: u64,
-    pub elapsed_secs: u64,
-}
-
 pub struct StatusBar<'a> {
     pub model: &'a str,
     pub agent: &'a str,
@@ -20,7 +13,12 @@ pub struct StatusBar<'a> {
     pub elapsed_secs: u64,
     pub mcp_servers: usize,
     pub sandbox_status: Option<bool>,
-    pub last_turn: Option<&'a TurnStats>,
+    /// Estimated current context-window occupancy, for the ctx gauge.
+    pub context_tokens: u64,
+    /// Cumulative session token counts and estimated cost.
+    pub tokens_in: u64,
+    pub tokens_out: u64,
+    pub cost_usd: f64,
     pub permission_bypass: bool,
 }
 
@@ -79,15 +77,18 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
-        if let Some(turn) = self.last_turn {
+        if self.context_tokens > 0 {
             spans.push(sep.clone());
-            // Context-window fullness: last turn's input tokens vs the model's
-            // window, so the user sees how close they are to compaction.
-            spans.extend(context_gauge_spans(turn.tokens_in, self.model));
+            // Context-window fullness vs the model's window, so the user sees
+            // how close they are to compaction.
+            spans.extend(context_gauge_spans(self.context_tokens, self.model));
+        }
+
+        if self.tokens_in > 0 || self.tokens_out > 0 {
             spans.push(Span::styled(
                 format!(
-                    " in:{} out:{} {}s ",
-                    turn.tokens_in, turn.tokens_out, turn.elapsed_secs
+                    " {} in / {} out · ${:.4} ",
+                    self.tokens_in, self.tokens_out, self.cost_usd
                 ),
                 Style::default().fg(Color::Rgb(135, 135, 135)),
             ));

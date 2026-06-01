@@ -234,10 +234,12 @@ impl AgentLoop {
                     } => {
                         got_usage = true;
                         self.cost_tracker.add(input_tokens, output_tokens);
+                        let context_tokens = self.estimated_context_tokens();
                         self.emit(AgentEvent::CostUpdated {
                             input_tokens: self.cost_tracker.total_input_tokens(),
                             output_tokens: self.cost_tracker.output_tokens,
                             estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
+                            context_tokens,
                         })
                         .await;
                     }
@@ -603,10 +605,12 @@ impl AgentLoop {
                 / 4) as u64;
             let estimated_output = (final_text.len() / 4) as u64;
             self.cost_tracker.add(estimated_input, estimated_output);
+            let context_tokens = self.estimated_context_tokens();
             self.emit(AgentEvent::CostUpdated {
                 input_tokens: self.cost_tracker.total_input_tokens(),
                 output_tokens: self.cost_tracker.output_tokens,
                 estimated_cost_usd: self.cost_tracker.estimated_cost_usd(),
+                context_tokens,
             })
             .await;
         }
@@ -619,6 +623,17 @@ impl AgentLoop {
             tracing::warn!("undo finalize failed: {error}");
         }
         Ok(final_text)
+    }
+
+    /// Rough token estimate of the live conversation (current context-window
+    /// occupancy), using ~4 chars/token over all message content.
+    fn estimated_context_tokens(&self) -> u64 {
+        (self
+            .messages
+            .iter()
+            .map(|message| message.content.approx_chars())
+            .sum::<usize>()
+            / 4) as u64
     }
 
     pub fn undo_last_turn(&mut self) -> Result<Option<String>, String> {

@@ -493,6 +493,7 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
             input_tokens,
             output_tokens,
             estimated_cost_usd,
+            ..
         } => {
             stats.update_cost(
                 *input_tokens,

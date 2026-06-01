@@ -133,6 +133,9 @@ pub struct TuiSessionState {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cost_usd: f64,
+    /// Estimated current context-window occupancy (from the latest CostUpdated),
+    /// used to render the status-bar ctx gauge.
+    pub context_tokens: u64,
     pub started: Instant,
     /// Start time per in-flight tool call_id, for duration badges on completion.
     tool_started: HashMap<String, Instant>,
@@ -481,6 +484,7 @@ impl TuiSessionState {
             input_tokens: 0,
             output_tokens: 0,
             cost_usd: 0.0,
+            context_tokens: 0,
             started: Instant::now(),
             tool_started: HashMap::new(),
             busy: false,
@@ -1725,10 +1729,12 @@ impl TuiSessionState {
                 input_tokens,
                 output_tokens,
                 estimated_cost_usd,
+                context_tokens,
             } => {
                 self.input_tokens = *input_tokens;
                 self.output_tokens = *output_tokens;
                 self.cost_usd = *estimated_cost_usd;
+                self.context_tokens = *context_tokens;
             }
             AgentEvent::SessionEnded { .. } => {
                 self.set_process("session ended", "");
