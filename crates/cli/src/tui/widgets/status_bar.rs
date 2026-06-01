@@ -1,3 +1,4 @@
+use crate::tui::theme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -28,7 +29,7 @@ impl Widget for StatusBar<'_> {
             return;
         }
 
-        let sep = Span::styled(" │ ", Style::default().fg(Color::Rgb(70, 70, 70)));
+        let sep = Span::styled(" │ ", Style::default().fg(theme::border()));
         let model_display = truncate_chars(self.model, 20);
         let (busy_icon, busy_color) = busy_badge(self.busy_label);
         let version = env!("CARGO_PKG_VERSION");
@@ -41,35 +42,35 @@ impl Widget for StatusBar<'_> {
             sep.clone(),
             Span::styled(
                 format!(" /{} ", model_display),
-                Style::default().fg(Color::Rgb(170, 170, 170)),
+                Style::default().fg(theme::text()),
             ),
             sep.clone(),
             Span::styled(
                 format!(" {} ", truncate_chars(self.agent, 16)),
-                Style::default().fg(Color::Rgb(185, 150, 230)),
+                Style::default().fg(theme::assistant()),
             ),
         ];
 
         spans.push(sep.clone());
         spans.push(Span::styled(
             format!(" {}s ", self.elapsed_secs),
-            Style::default().fg(Color::Rgb(150, 150, 150)),
+            Style::default().fg(theme::muted()),
         ));
 
         if self.mcp_servers > 0 {
             spans.push(sep.clone());
             spans.push(Span::styled(
                 format!(" ◇mcp {} ", self.mcp_servers),
-                Style::default().fg(Color::Rgb(110, 210, 170)),
+                Style::default().fg(theme::tool()),
             ));
         }
 
         if let Some(sandboxed) = self.sandbox_status {
             spans.push(sep.clone());
             let (icon, label, color) = if sandboxed {
-                ("▣", "sandboxed", Color::Green)
+                ("▣", "sandboxed", theme::success())
             } else {
-                ("△", "unsandboxed", Color::Yellow)
+                ("△", "unsandboxed", theme::warn())
             };
             spans.push(Span::styled(
                 format!(" {icon} {label} "),
@@ -90,7 +91,7 @@ impl Widget for StatusBar<'_> {
                     " {} in / {} out · ${:.4} ",
                     self.tokens_in, self.tokens_out, self.cost_usd
                 ),
-                Style::default().fg(Color::Rgb(135, 135, 135)),
+                Style::default().fg(theme::muted()),
             ));
         }
 
@@ -100,7 +101,7 @@ impl Widget for StatusBar<'_> {
                 " BYPASS ",
                 Style::default()
                     .fg(Color::Black)
-                    .bg(Color::Rgb(255, 120, 140))
+                    .bg(theme::error())
                     .add_modifier(Modifier::BOLD),
             ));
         }
@@ -108,7 +109,7 @@ impl Widget for StatusBar<'_> {
         spans.push(sep.clone());
         spans.push(Span::styled(
             format!(" v{} ", version),
-            Style::default().fg(Color::Rgb(145, 145, 145)),
+            Style::default().fg(theme::muted()),
         ));
 
         Line::from(spans).render(area, buf);
@@ -127,13 +128,13 @@ fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> {
     let filled = ((pct as usize * SEGS) / 100).min(SEGS);
     let bar: String = "▰".repeat(filled) + &"▱".repeat(SEGS - filled);
     let color = if pct >= 90 {
-        Color::Rgb(255, 120, 120)
+        theme::error()
     } else if pct >= 70 {
-        Color::Rgb(230, 190, 120)
+        theme::warn()
     } else {
-        Color::Rgb(135, 180, 135)
+        theme::success()
     };
-    let sep = Span::styled(" │ ", Style::default().fg(Color::Rgb(70, 70, 70)));
+    let sep = Span::styled(" │ ", Style::default().fg(theme::border()));
     vec![
         Span::styled(format!(" ctx {bar} {pct}% "), Style::default().fg(color)),
         sep,
@@ -143,13 +144,13 @@ fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> {
 fn busy_badge(label: &str) -> (&'static str, Color) {
     let lower = label.to_ascii_lowercase();
     if lower.contains("error") {
-        ("✖", Color::Red)
+        ("✖", theme::error())
     } else if lower.contains("idle") {
-        ("•", Color::DarkGray)
+        ("•", theme::muted())
     } else if lower.contains("wait") || lower.contains("tool") {
-        ("◐", Color::Yellow)
+        ("◐", theme::warn())
     } else {
-        ("•", Color::Green)
+        ("•", theme::success())
     }
 }
 
