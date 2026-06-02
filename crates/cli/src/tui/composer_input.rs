@@ -74,7 +74,7 @@ pub(crate) fn composer_chrome_height(
 }
 
 pub(crate) fn composer_input_height(state: &TuiSessionState, area_width: u16) -> u16 {
-    let inner_w = area_width.saturating_sub(4).max(1) as usize;
+    let inner_w = area_width.saturating_sub(6).max(1) as usize; // 3-cell padding each side
     let prompt_w = 2usize; // "› "
     let raw_lines: Vec<&str> = state.input_buffer.split('\n').collect();
     let mut wrapped_input_lines = 0usize;
@@ -96,7 +96,8 @@ pub(crate) fn composer_input_height(state: &TuiSessionState, area_width: u16) ->
         content_lines = content_lines.saturating_add(1);
     }
 
-    content_lines.saturating_add(2).clamp(3, 11)
+    // +3 chrome: top border + top padding + bottom padding.
+    content_lines.saturating_add(3).clamp(4, 12)
 }
 
 pub(crate) fn should_hide_composer_when_scrolling(state: &TuiSessionState) -> bool {

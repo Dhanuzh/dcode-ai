@@ -1547,7 +1547,7 @@ pub fn run_blocking(
                             .borders(Borders::TOP)
                             .border_style(Style::default().fg(border_color))
                             .title(Line::from(title_spans))
-                            .padding(Padding::new(2, 2, 0, 1)),
+                            .padding(Padding::new(3, 3, 1, 1)),
                     )
                     .style(Style::default().bg(theme::surface()))
                     .wrap(Wrap { trim: false });
