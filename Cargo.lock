@@ -809,7 +809,7 @@ checksum = "d7a1e2f27636f116493b8b860f5546edb47c8d8f8ea73e1d2a20be88e28d1fea"
 
 [[package]]
 name = "dcode-ai-autoresearch"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -829,7 +829,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-cli"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -876,7 +876,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-common"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "chrono",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-core"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "async-trait",
  "base64",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-runtime"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "anyhow",
  "async-trait",
