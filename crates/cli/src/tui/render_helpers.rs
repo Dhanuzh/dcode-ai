@@ -175,16 +175,18 @@ pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
 /// A colored permission-mode pill for the composer title bar, so the active
 /// mode (default / plan / accept-edits / dont-ask / bypass) is always visible.
 pub(crate) fn permission_mode_pill(mode: &str) -> Span<'static> {
+    // Default mode is branded "DCODE"; other modes name the active permission
+    // level. Colors follow the active theme.
     let (label, color) = if mode.contains("Bypass") {
-        ("BYPASS", Color::Rgb(255, 120, 140))
+        ("BYPASS", theme::error())
     } else if mode.contains("Plan") {
-        ("PLAN", Color::Rgb(120, 200, 230))
+        ("PLAN", theme::user())
     } else if mode.contains("AcceptEdits") {
-        ("ACCEPT-EDITS", Color::Rgb(135, 200, 135))
+        ("ACCEPT-EDITS", theme::success())
     } else if mode.contains("DontAsk") {
-        ("DONT-ASK", Color::Rgb(230, 190, 120))
+        ("DONT-ASK", theme::warn())
     } else {
-        ("DEFAULT", Color::Rgb(150, 150, 150))
+        ("DCODE", theme::assistant())
     };
     Span::styled(
         format!(" {label} "),
@@ -209,6 +211,6 @@ mod tests {
                 .content
                 .contains("ACCEPT-EDITS")
         );
-        assert!(permission_mode_pill("Default").content.contains("DEFAULT"));
+        assert!(permission_mode_pill("Default").content.contains("DCODE"));
     }
 }
