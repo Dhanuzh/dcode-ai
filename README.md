@@ -144,6 +144,10 @@ dcode-ai attach <session-id>   # attach to live output
 
 ## TUI
 
+<p align="center">
+  <img src="docs/Screenshot%202026-06-02%20144304.png" alt="dcode-ai TUI — streaming assistant output, visible tool execution, and live status bar" width="900">
+</p>
+
 ### Features
 
 | Feature         | How                                                               |
