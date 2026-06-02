@@ -350,6 +350,36 @@ pub(crate) fn push_section_gap(lines: &mut Vec<Line<'static>>, hits: &mut Vec<Li
     }
 }
 
+/// Render a themed vertical scrollbar on the right edge of a popup when its
+/// list overflows the visible rows. `top` is the index of the first visible row.
+fn render_popup_scrollbar(
+    frame: &mut ratatui::Frame<'_>,
+    area: Rect,
+    total: usize,
+    visible: usize,
+    top: usize,
+) {
+    if total <= visible || area.height < 4 {
+        return;
+    }
+    let max = total.saturating_sub(visible).max(1);
+    let mut state = ScrollbarState::new(max).position(top.min(max));
+    let sb_area = Rect::new(
+        area.x + area.width.saturating_sub(1),
+        area.y + 1,
+        1,
+        area.height.saturating_sub(2),
+    );
+    let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+        .begin_symbol(None)
+        .end_symbol(None)
+        .track_symbol(Some("│"))
+        .thumb_symbol("█")
+        .track_style(Style::default().fg(theme::border()))
+        .thumb_style(Style::default().fg(theme::muted()));
+    frame.render_stateful_widget(scrollbar, sb_area, &mut state);
+}
+
 #[derive(Default)]
 struct TranscriptRenderCache {
     width: u16,
@@ -1681,6 +1711,13 @@ pub fn run_blocking(
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
+                    render_popup_scrollbar(
+                        frame,
+                        popup_area,
+                        filtered.len(),
+                        COMMAND_PALETTE_MAX_ROWS,
+                        list_scroll,
+                    );
                 }
 
                 if g.transcript_search_open {
@@ -2411,12 +2448,11 @@ pub fn run_blocking(
                     )));
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(lines))
-                        .block(
-                            popup_block("sessions"),
-                        )
+                        .block(popup_block("sessions"))
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
+                    render_popup_scrollbar(frame, popup_area, n_filtered, viewport_rows, list_start);
                 }
 
                 if g.api_key_modal_open {
@@ -2445,13 +2481,13 @@ pub fn run_blocking(
                             Some(crate::tui::state::OnboardingValidation::Validating) => {
                                 Some(Line::from(Span::styled(
                                     " Validating...",
-                                    Style::default().fg(Color::Yellow),
+                                    Style::default().fg(theme::warn()),
                                 )))
                             }
                             Some(crate::tui::state::OnboardingValidation::Failed(msg)) => {
                                 Some(Line::from(Span::styled(
                                     format!(" {}", msg),
-                                    Style::default().fg(Color::Red),
+                                    Style::default().fg(theme::error()),
                                 )))
                             }
                             _ => None,

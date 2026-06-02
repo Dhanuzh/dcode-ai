@@ -1,7 +1,8 @@
+use crate::tui::theme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Widget,
 };
@@ -49,11 +50,11 @@ impl Widget for ChildActivityOverlay<'_> {
                 break;
             }
 
-            let icon = if row.running { "🤖" } else { "○" };
+            let icon = if row.running { "◉" } else { "○" };
             let icon_color = if row.running {
-                Color::Yellow
+                theme::warn()
             } else {
-                Color::DarkGray
+                theme::muted()
             };
             let id8 = short_id(&row.id, 8);
             let phase = truncate_with_ellipsis(&row.phase.replace('\n', " "), 12);
@@ -64,21 +65,19 @@ impl Widget for ChildActivityOverlay<'_> {
                 Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
                 Span::styled(
                     format!("{id8:<8}"),
-                    Style::default()
-                        .fg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(theme::tool()).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!(" {:<12}", phase),
-                    Style::default().fg(Color::Rgb(160, 160, 160)),
+                    Style::default().fg(theme::muted()),
                 ),
             ];
             if !detail.is_empty() {
                 spans.push(Span::styled(
                     " · ".to_string(),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::border()),
                 ));
-                spans.push(Span::styled(detail, Style::default().fg(Color::Gray)));
+                spans.push(Span::styled(detail, Style::default().fg(theme::text())));
             }
             Line::from(spans).render(Rect::new(area.x, y, area.width, 1), buf);
         }
@@ -92,16 +91,13 @@ impl Widget for ChildActivityOverlay<'_> {
         if overflow > 0 {
             spans.push(Span::styled(
                 format!("+ {overflow} more"),
-                Style::default().fg(Color::DarkGray),
+                Style::default().fg(theme::muted()),
             ));
-            spans.push(Span::styled(
-                "  ·  ",
-                Style::default().fg(Color::Rgb(80, 80, 80)),
-            ));
+            spans.push(Span::styled("  ·  ", Style::default().fg(theme::border())));
         }
         spans.push(Span::styled(
             "Ctrl+G details  ·  Esc cancel turn",
-            Style::default().fg(Color::Rgb(80, 80, 80)),
+            Style::default().fg(theme::border()),
         ));
         Line::from(spans).render(Rect::new(area.x, hint_y, area.width, 1), buf);
     }

@@ -8,7 +8,7 @@
 //! stay stable as the buffer grows during inference.
 
 use ratatui::{
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
 };
 
@@ -118,8 +118,8 @@ pub fn apply_selection_highlight<'a>(
     viewport_width: usize,
 ) -> Vec<Line<'a>> {
     let highlight = Style::default()
-        .bg(Color::Rgb(68, 68, 120))
-        .fg(Color::White)
+        .bg(crate::tui::theme::mention_bg())
+        .fg(crate::tui::theme::text())
         .add_modifier(Modifier::BOLD);
 
     let mut row_idx: u16 = 0;

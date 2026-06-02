@@ -87,6 +87,26 @@ fn render_code_block_lines(
     let line_num_width = line_count.to_string().len();
     let copy_payload = code.to_string();
 
+    // Language label chip on top of the block, with a click-to-copy affordance.
+    if let Some(lang) = language.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+        out.push(Line::from(vec![
+            Span::styled(
+                format!(" {lang} "),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::tool())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                "  copy",
+                Style::default()
+                    .fg(theme::muted())
+                    .add_modifier(Modifier::UNDERLINED),
+            ),
+        ]));
+        hits.push(Some(LineClickHit::CopyText(copy_payload.clone())));
+    }
+
     for (idx, raw) in code.split('\n').enumerate() {
         let highlights = if is_diff {
             Vec::new()
@@ -249,43 +269,8 @@ fn render_table_lines(
             *w = ((*w * cell_budget) / natural_total.max(1)).max(3);
         }
     }
-    let render_row = |row: &[String], is_header: bool| -> Line<'static> {
-        let mut spans = Vec::new();
-        spans.push(Span::styled(
-            if is_header { " table " } else { ROW_LABEL },
-            Style::default()
-                .fg(if is_header {
-                    theme::assistant()
-                } else {
-                    theme::muted()
-                })
-                .add_modifier(Modifier::BOLD),
-        ));
-        for (i, &cw) in col_widths.iter().enumerate() {
-            let val = row.get(i).map(String::as_str).unwrap_or("");
-            let aligned = align_table_cell(
-                val,
-                cw,
-                table.alignments.get(i).copied().unwrap_or(Alignment::None),
-            );
-            let style = if is_header {
-                Style::default()
-                    .fg(theme::assistant())
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme::text())
-            };
-            spans.push(Span::styled(aligned, style));
-            if i + 1 != col_count {
-                spans.push(Span::styled(COL_SEP, Style::default().fg(theme::muted())));
-            }
-        }
-        Line::from(spans)
-    };
-
     for row in &table.header_rows {
-        out.push(render_row(row, true));
-        hits.push(None);
+        push_table_row(out, hits, row, true, &col_widths, &table.alignments);
     }
     if !table.header_rows.is_empty() {
         // Separator spans the actual rendered table width (label + columns + seps).
@@ -299,9 +284,116 @@ fn render_table_lines(
         hits.push(None);
     }
     for row in &table.body_rows {
-        out.push(render_row(row, false));
+        push_table_row(out, hits, row, false, &col_widths, &table.alignments);
+    }
+}
+
+const TABLE_ROW_LABEL: &str = " row   ";
+const TABLE_COL_SEP: &str = "  ·  ";
+
+/// Render one table row, wrapping long cells across multiple lines instead of
+/// truncating. Continuation lines drop the row label and align under each
+/// column.
+fn push_table_row(
+    out: &mut Vec<Line<'static>>,
+    hits: &mut Vec<LineAnswerHit>,
+    row: &[String],
+    is_header: bool,
+    col_widths: &[usize],
+    alignments: &[Alignment],
+) {
+    let col_count = col_widths.len();
+    let wrapped: Vec<Vec<String>> = col_widths
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| wrap_cell(row.get(i).map(String::as_str).unwrap_or(""), w.max(1)))
+        .collect();
+    let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
+    let label_style = Style::default()
+        .fg(if is_header {
+            theme::assistant()
+        } else {
+            theme::muted()
+        })
+        .add_modifier(Modifier::BOLD);
+    let cell_style = if is_header {
+        Style::default()
+            .fg(theme::assistant())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(theme::text())
+    };
+    let label_w = TABLE_ROW_LABEL.chars().count();
+    for line_idx in 0..height {
+        let mut spans = Vec::new();
+        let label = if line_idx == 0 {
+            if is_header {
+                " table ".to_string()
+            } else {
+                TABLE_ROW_LABEL.to_string()
+            }
+        } else {
+            " ".repeat(label_w)
+        };
+        spans.push(Span::styled(label, label_style));
+        for (i, &cw) in col_widths.iter().enumerate() {
+            let cell_line = wrapped[i].get(line_idx).map(String::as_str).unwrap_or("");
+            let aligned = align_table_cell(
+                cell_line,
+                cw,
+                alignments.get(i).copied().unwrap_or(Alignment::None),
+            );
+            spans.push(Span::styled(aligned, cell_style));
+            if i + 1 != col_count {
+                spans.push(Span::styled(
+                    TABLE_COL_SEP,
+                    Style::default().fg(theme::muted()),
+                ));
+            }
+        }
+        out.push(Line::from(spans));
         hits.push(None);
     }
+}
+
+/// Word-wrap a cell to `width`, hard-splitting words longer than the column.
+fn wrap_cell(text: &str, width: usize) -> Vec<String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for word in text.split_whitespace() {
+        let mut word = word;
+        // Hard-split a single word that can't fit the column.
+        while word.chars().count() > width {
+            if !cur.is_empty() {
+                lines.push(std::mem::take(&mut cur));
+            }
+            let head: String = word.chars().take(width).collect();
+            let consumed = head.len();
+            lines.push(head);
+            word = &word[consumed..];
+        }
+        let cur_len = cur.chars().count();
+        if cur.is_empty() {
+            cur.push_str(word);
+        } else if cur_len + 1 + word.chars().count() <= width {
+            cur.push(' ');
+            cur.push_str(word);
+        } else {
+            lines.push(std::mem::take(&mut cur));
+            cur.push_str(word);
+        }
+    }
+    if !cur.is_empty() {
+        lines.push(cur);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    lines
 }
 
 pub(crate) fn render_markdown_lines_with_hits(

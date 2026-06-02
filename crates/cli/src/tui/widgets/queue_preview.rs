@@ -1,7 +1,8 @@
+use crate::tui::theme;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
     widgets::Widget,
 };
@@ -34,7 +35,7 @@ impl Widget for QueuePreview<'_> {
             return;
         }
 
-        let max_text_w = area.width.saturating_sub(8) as usize; // "  📋 N  "
+        let max_text_w = area.width.saturating_sub(8) as usize; // "  ≡ N  "
         let visible = self
             .items
             .iter()
@@ -50,14 +51,14 @@ impl Widget for QueuePreview<'_> {
             let preview = truncate_with_ellipsis(&flat, max_text_w);
             let line = Line::from(vec![
                 Span::styled("  ", Style::default()),
-                Span::styled("📋 ", Style::default().fg(Color::Yellow)),
+                Span::styled("≡ ", Style::default().fg(theme::warn())),
                 Span::styled(
                     format!("{}  ", row + 1),
                     Style::default()
-                        .fg(Color::DarkGray)
+                        .fg(theme::muted())
                         .add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(preview, Style::default().fg(Color::Gray)),
+                Span::styled(preview, Style::default().fg(theme::text())),
             ]);
             line.render(Rect::new(area.x, y, area.width, 1), buf);
         }
@@ -72,11 +73,11 @@ impl Widget for QueuePreview<'_> {
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     format!("+ {overflow} more"),
-                    Style::default().fg(Color::DarkGray),
+                    Style::default().fg(theme::muted()),
                 ),
                 Span::styled(
                     "  ·  ↑ pop  ·  Ctrl+U clear",
-                    Style::default().fg(Color::Rgb(80, 80, 80)),
+                    Style::default().fg(theme::border()),
                 ),
             ]);
             line.render(Rect::new(area.x, hint_y, area.width, 1), buf);
@@ -85,7 +86,7 @@ impl Widget for QueuePreview<'_> {
                 Span::styled("  ", Style::default()),
                 Span::styled(
                     "↑ pop  ·  Ctrl+U clear",
-                    Style::default().fg(Color::Rgb(80, 80, 80)),
+                    Style::default().fg(theme::border()),
                 ),
             ]);
             line.render(Rect::new(area.x, hint_y, area.width, 1), buf);
