@@ -218,6 +218,7 @@ fn render_table_lines(
     out: &mut Vec<Line<'static>>,
     hits: &mut Vec<LineAnswerHit>,
     table: &MdTableState,
+    table_width: usize,
 ) {
     let col_count = table
         .header_rows
@@ -229,17 +230,25 @@ fn render_table_lines(
     if col_count == 0 {
         return;
     }
-    const MAX_TABLE_COL_WIDTH: usize = 24;
-    // Size each column to its widest cell (capped), so short columns stay
-    // compact instead of every cell padding to a fixed 24.
+    const ROW_LABEL: &str = " row   ";
+    const COL_SEP: &str = "  ·  ";
+    // Natural width = widest cell per column. Then fit columns to the
+    // available transcript width: expand to content when there's room,
+    // shrink proportionally (min 3) when the table would overflow.
     let mut col_widths = vec![0usize; col_count];
     for row in table.header_rows.iter().chain(table.body_rows.iter()) {
         for (cell, w) in row.iter().zip(col_widths.iter_mut()) {
-            *w = (*w).max(cell.chars().count().min(MAX_TABLE_COL_WIDTH));
+            *w = (*w).max(cell.chars().count());
         }
     }
-    const ROW_LABEL: &str = " row   ";
-    const COL_SEP: &str = "  ·  ";
+    let chrome = ROW_LABEL.chars().count() + COL_SEP.chars().count() * col_count.saturating_sub(1);
+    let cell_budget = table_width.saturating_sub(chrome).max(col_count * 3);
+    let natural_total: usize = col_widths.iter().sum();
+    if natural_total > cell_budget {
+        for w in col_widths.iter_mut() {
+            *w = ((*w * cell_budget) / natural_total.max(1)).max(3);
+        }
+    }
     let render_row = |row: &[String], is_header: bool| -> Line<'static> {
         let mut spans = Vec::new();
         spans.push(Span::styled(
@@ -298,6 +307,7 @@ fn render_table_lines(
 pub(crate) fn render_markdown_lines_with_hits(
     markdown: &str,
     code_line_numbers: bool,
+    table_width: usize,
 ) -> (Vec<Line<'static>>, Vec<LineAnswerHit>) {
     let mut out: Vec<Line<'static>> = Vec::new();
     let mut hits: Vec<LineAnswerHit> = Vec::new();
@@ -344,7 +354,7 @@ pub(crate) fn render_markdown_lines_with_hits(
                         flush_md_render_line(&mut out, &mut hits, &mut current);
                     }
                     if let Some(done) = table_state.take() {
-                        render_table_lines(&mut out, &mut hits, &done);
+                        render_table_lines(&mut out, &mut hits, &done, table_width);
                     }
                     out.push(Line::default());
                     hits.push(None);
@@ -560,7 +570,7 @@ pub(crate) fn render_markdown_lines_with_hits(
 
 #[cfg(test)]
 pub(crate) fn render_markdown_lines(markdown: &str) -> Vec<Line<'static>> {
-    render_markdown_lines_with_hits(markdown, false).0
+    render_markdown_lines_with_hits(markdown, false, 80).0
 }
 
 fn push_markdown_blank_line_if_needed(out: &mut Vec<Line<'static>>, hits: &mut Vec<LineAnswerHit>) {

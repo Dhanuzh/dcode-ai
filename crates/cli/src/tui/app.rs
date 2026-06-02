@@ -4193,19 +4193,15 @@ pub fn run_blocking(
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::CycleModel(false));
                         }
-                        (KeyCode::Up, KeyModifiers::NONE) => {
-                            if g.active_approval.is_some() {
-                                g.approval_option_index = g.approval_option_index.saturating_sub(1);
-                                g.touch_transcript();
-                                continue;
-                            }
+                        (KeyCode::Up, KeyModifiers::NONE) if g.active_approval.is_some() => {
+                            g.approval_option_index = g.approval_option_index.saturating_sub(1);
+                            g.touch_transcript();
+                            continue;
                         }
-                        (KeyCode::Down, KeyModifiers::NONE) => {
-                            if g.active_approval.is_some() {
-                                g.approval_option_index = (g.approval_option_index + 1).min(2);
-                                g.touch_transcript();
-                                continue;
-                            }
+                        (KeyCode::Down, KeyModifiers::NONE) if g.active_approval.is_some() => {
+                            g.approval_option_index = (g.approval_option_index + 1).min(2);
+                            g.touch_transcript();
+                            continue;
                         }
                         (KeyCode::Char('y'), KeyModifiers::NONE)
                         | (KeyCode::Char('Y'), KeyModifiers::NONE)
@@ -5042,7 +5038,7 @@ mod approval_parse_tests {
 
     #[test]
     fn markdown_event_renderer_supports_code_line_numbers_and_copy_hits() {
-        let (lines, hits) = render_markdown_lines_with_hits("```rs\nlet x = 1;\n```", true);
+        let (lines, hits) = render_markdown_lines_with_hits("```rs\nlet x = 1;\n```", true, 80);
         assert!(lines.iter().any(|line| {
             line.spans
                 .iter()
@@ -5058,8 +5054,11 @@ mod approval_parse_tests {
 
     #[test]
     fn markdown_event_renderer_styles_diff_lanes() {
-        let (lines, _hits) =
-            render_markdown_lines_with_hits("```diff\n+add line\n-del line\n@@ hunk\n```", false);
+        let (lines, _hits) = render_markdown_lines_with_hits(
+            "```diff\n+add line\n-del line\n@@ hunk\n```",
+            false,
+            80,
+        );
         let flat = lines
             .iter()
             .map(|l| {

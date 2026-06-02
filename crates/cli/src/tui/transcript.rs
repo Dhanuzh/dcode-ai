@@ -147,8 +147,11 @@ pub(crate) fn transcript_lines_and_hits(
                     ]),
                     Some(LineClickHit::CopyText(content.clone())),
                 );
-                let (md_lines, md_hits) =
-                    render_markdown_lines_with_hits(content, state.code_line_numbers);
+                let (md_lines, md_hits) = render_markdown_lines_with_hits(
+                    content,
+                    state.code_line_numbers,
+                    w.saturating_sub(2),
+                );
                 for (md_line, md_hit) in md_lines.into_iter().zip(md_hits) {
                     push_transcript_line(
                         &mut lines,
@@ -684,7 +687,8 @@ pub(crate) fn transcript_lines_and_hits(
             Some(LineClickHit::CopyText(stream.clone())),
         );
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-        let (md_lines, md_hits) = render_markdown_lines_with_hits(stream, state.code_line_numbers);
+        let (md_lines, md_hits) =
+            render_markdown_lines_with_hits(stream, state.code_line_numbers, w.saturating_sub(2));
         for (md_line, md_hit) in md_lines.into_iter().zip(md_hits) {
             push_transcript_line(
                 &mut lines,
