@@ -45,6 +45,75 @@ fn extract_reasoning_text(value: &Value) -> Option<String> {
     None
 }
 
+const THINK_OPEN: &str = "<think>";
+const THINK_CLOSE: &str = "</think>";
+
+/// Splits a streamed `content` field into reasoning vs visible-text segments by
+/// tracking `<think>…</think>` tags across chunk boundaries. Some providers
+/// (e.g. DeepSeek via aggregators) inline reasoning as `<think>` tags in the
+/// content instead of a separate `reasoning_content` field; without this the
+/// tags leak into the assistant reply.
+#[derive(Default)]
+struct ThinkSplitter {
+    in_think: bool,
+    carry: String,
+}
+
+impl ThinkSplitter {
+    /// Returns ordered `(is_reasoning, text)` segments for one content delta.
+    fn feed(&mut self, input: &str) -> Vec<(bool, String)> {
+        let mut work = std::mem::take(&mut self.carry);
+        work.push_str(input);
+        let mut out: Vec<(bool, String)> = Vec::new();
+        loop {
+            let marker = if self.in_think {
+                THINK_CLOSE
+            } else {
+                THINK_OPEN
+            };
+            if let Some(pos) = work.find(marker) {
+                let before = work[..pos].to_string();
+                if !before.is_empty() {
+                    out.push((self.in_think, before));
+                }
+                self.in_think = !self.in_think;
+                work = work[pos + marker.len()..].to_string();
+            } else {
+                // Hold back a tail that could be the start of a split marker.
+                let keep = partial_marker_tail_len(&work, marker);
+                let split = work.len() - keep;
+                if split > 0 {
+                    out.push((self.in_think, work[..split].to_string()));
+                }
+                self.carry = work[split..].to_string();
+                break;
+            }
+        }
+        out
+    }
+
+    /// Drain any held-back tail (an incomplete marker that never completed) as
+    /// visible text, for the end of the stream.
+    fn flush(&mut self) -> Option<String> {
+        if self.carry.is_empty() {
+            None
+        } else {
+            Some(std::mem::take(&mut self.carry))
+        }
+    }
+}
+
+/// Largest `k` such that the last `k` bytes of `s` equal the first `k` bytes of
+/// `marker` (a possible split-marker prefix). Markers are ASCII, so the split
+/// always lands on a char boundary.
+fn partial_marker_tail_len(s: &str, marker: &str) -> usize {
+    let max = marker.len().saturating_sub(1).min(s.len());
+    (1..=max)
+        .rev()
+        .find(|&k| s.as_bytes()[s.len() - k..] == marker.as_bytes()[..k])
+        .unwrap_or(0)
+}
+
 fn extract_internal_reasoning_delta(delta: &Value) -> Option<String> {
     for key in [
         "reasoning_content",
@@ -94,7 +163,7 @@ pub fn openai_request_body(
 
     Ok(json!({
         "model": model,
-        "messages": to_openai_messages(messages, workspace_root)?,
+        "messages": to_openai_messages(messages, workspace_root, model_supports_vision(model))?,
         "tools": tools,
         "stream": true,
         "stream_options": {
@@ -171,6 +240,7 @@ pub fn spawn_openai_stream(
     tokio::spawn(async move {
         let mut buffer = String::new();
         let mut tool_calls: BTreeMap<u64, ToolCallAccumulator> = BTreeMap::new();
+        let mut think = ThinkSplitter::default();
 
         while let Some(item) = byte_stream.next().await {
             let chunk = match item {
@@ -202,6 +272,9 @@ pub fn spawn_openai_stream(
 
                 let data = line["data:".len()..].trim();
                 if data == "[DONE]" {
+                    if let Some(tail) = think.flush() {
+                        let _ = tx.send(StreamChunk::TextDelta(tail)).await;
+                    }
                     flush_openai_tool_calls(&tx, &mut tool_calls).await;
                     let _ = tx.send(StreamChunk::Done).await;
                     return;
@@ -238,7 +311,14 @@ pub fn spawn_openai_stream(
                     if let Some(text) = delta["content"].as_str()
                         && !text.is_empty()
                     {
-                        let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
+                        for (is_reasoning, seg) in think.feed(text) {
+                            let chunk = if is_reasoning {
+                                StreamChunk::InternalDelta(seg)
+                            } else {
+                                StreamChunk::TextDelta(seg)
+                            };
+                            let _ = tx.send(chunk).await;
+                        }
                     }
 
                     if let Some(tool_deltas) = delta["tool_calls"].as_array() {
@@ -264,6 +344,9 @@ pub fn spawn_openai_stream(
             }
         }
 
+        if let Some(tail) = think.flush() {
+            let _ = tx.send(StreamChunk::TextDelta(tail)).await;
+        }
         flush_openai_tool_calls(&tx, &mut tool_calls).await;
         let _ = tx.send(StreamChunk::Done).await;
     });
@@ -683,9 +766,18 @@ fn tool_content_string(content: &MessageContent) -> String {
     }
 }
 
+/// Whether a model accepts image content parts. Defaults to true; known
+/// text-only models (the DeepSeek family) are excluded so we don't send
+/// `image_url` blocks they reject with a deserialize error.
+fn model_supports_vision(model: &str) -> bool {
+    let m = model.to_ascii_lowercase();
+    !m.contains("deepseek")
+}
+
 fn openai_user_content_value(
     content: &MessageContent,
     workspace_root: &Path,
+    supports_vision: bool,
 ) -> Result<Value, ProviderError> {
     match content {
         MessageContent::Text(s) => Ok(json!(s)),
@@ -697,6 +789,12 @@ fn openai_user_content_value(
                         blocks.push(json!({
                             "type": "text",
                             "text": text,
+                        }));
+                    }
+                    ContentPart::Image { .. } if !supports_vision => {
+                        blocks.push(json!({
+                            "type": "text",
+                            "text": "[image attached, but the current model does not support image input]",
                         }));
                     }
                     ContentPart::Image { media_type, path } => {
@@ -821,6 +919,7 @@ fn message_to_responses_input_items(
 fn to_openai_messages(
     messages: &[Message],
     workspace_root: &Path,
+    supports_vision: bool,
 ) -> Result<Vec<Value>, ProviderError> {
     let mut out = Vec::new();
 
@@ -831,7 +930,8 @@ fn to_openai_messages(
                 "content": tool_content_string(&message.content),
             })),
             Role::User => {
-                let c = openai_user_content_value(&message.content, workspace_root)?;
+                let c =
+                    openai_user_content_value(&message.content, workspace_root, supports_vision)?;
                 out.push(json!({
                     "role": "user",
                     "content": c,
@@ -843,7 +943,7 @@ fn to_openai_messages(
                     "content": if message.content.is_empty() && message.tool_calls.is_some() {
                         Value::Null
                     } else {
-                        openai_user_content_value(&message.content, workspace_root)?
+                        openai_user_content_value(&message.content, workspace_root, supports_vision)?
                     },
                 });
 
@@ -886,6 +986,54 @@ mod tests {
     use super::*;
     use dcode_ai_common::message::MessageToolCall;
     use serde_json::json;
+
+    fn split_all(chunks: &[&str]) -> (String, String) {
+        let mut s = ThinkSplitter::default();
+        let (mut reasoning, mut text) = (String::new(), String::new());
+        for c in chunks {
+            for (is_reasoning, seg) in s.feed(c) {
+                if is_reasoning {
+                    reasoning.push_str(&seg);
+                } else {
+                    text.push_str(&seg);
+                }
+            }
+        }
+        if let Some(tail) = s.flush() {
+            text.push_str(&tail);
+        }
+        (reasoning, text)
+    }
+
+    #[test]
+    fn think_splitter_routes_inline_tags_to_reasoning() {
+        let (r, t) = split_all(&["<think>planning</think>hello world"]);
+        assert_eq!(r, "planning");
+        assert_eq!(t, "hello world");
+    }
+
+    #[test]
+    fn think_splitter_handles_tags_split_across_chunks() {
+        // Markers arrive split across delta boundaries.
+        let (r, t) = split_all(&["<thi", "nk>deep ", "thought</thi", "nk>visible"]);
+        assert_eq!(r, "deep thought");
+        assert_eq!(t, "visible");
+    }
+
+    #[test]
+    fn think_splitter_passes_plain_text_through() {
+        let (r, t) = split_all(&["just ", "text"]);
+        assert!(r.is_empty());
+        assert_eq!(t, "just text");
+    }
+
+    #[test]
+    fn model_vision_excludes_deepseek() {
+        assert!(model_supports_vision("gpt-4o"));
+        assert!(model_supports_vision("claude-opus-4"));
+        assert!(!model_supports_vision("deepseek-chat"));
+        assert!(!model_supports_vision("DeepSeek-R1"));
+    }
 
     #[test]
     fn reasoning_delta_accepts_multiple_shapes() {

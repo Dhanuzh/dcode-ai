@@ -430,14 +430,50 @@ fn print_connect_hint_if_missing_provider_auth(error: &anyhow::Error) {
     }
 }
 
-async fn try_main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+/// Path for the rolling tracing log used while the TUI owns the terminal.
+fn tracing_log_path() -> std::path::PathBuf {
+    let base = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .map(|h| h.join(".dcode-ai"))
+        .unwrap_or_else(std::env::temp_dir);
+    let _ = std::fs::create_dir_all(&base);
+    base.join("dcode-ai.log")
+}
 
-    let filter = if cli.verbose { "debug" } else { "info" };
+/// Initialize tracing. When the TUI owns the terminal, route logs to a file so
+/// they don't corrupt the UI; otherwise log to stderr as before.
+fn init_tracing(filter: &str, tui_owns_terminal: bool) {
+    if tui_owns_terminal
+        && let Ok(file) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(tracing_log_path())
+    {
+        tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_ansi(false)
+            .with_writer(std::sync::Mutex::new(file))
+            .init();
+        return;
+    }
     tracing_subscriber::fmt()
         .with_env_filter(filter)
         .with_writer(std::io::stderr)
         .init();
+}
+
+async fn try_main() -> anyhow::Result<()> {
+    let cli = Cli::parse();
+
+    let filter = if cli.verbose { "debug" } else { "info" };
+    // The interactive TUI owns the terminal; logging to stderr would paint
+    // tracing lines over the UI. In that case write logs to a file instead.
+    let tui_owns_terminal = matches!(cli.command, None | Some(Command::Resume { .. }))
+        && !cli.no_tui
+        && stdout().is_terminal()
+        && stdin().is_terminal()
+        && matches!(cli.stream, StreamMode::Human);
+    init_tracing(filter, tui_owns_terminal);
 
     tracing::info!("dcode-ai starting");
     let mut config = DcodeAiConfig::load()?;
