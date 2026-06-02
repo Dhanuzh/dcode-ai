@@ -1523,29 +1523,29 @@ pub fn run_blocking(
                 if let Some(hint) = hint {
                     input_lines.push(hint);
                 }
-                // Composer title: DCODE pill + model + branch context, so the
-                // input box shows what you're driving without /status.
+                // Composer title: DCODE pill + git branch. Model is already in
+                // the status bar, so it's not repeated here.
                 let mut title_spans = vec![permission_mode_pill(&g.permission_mode)];
-                if !g.model.is_empty() {
+                if !g.current_branch.is_empty() {
                     title_spans.push(Span::styled(" ", Style::default()));
                     title_spans.push(Span::styled(
-                        format!("/{}", truncate_chars(&g.model, 20)),
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                if !g.current_branch.is_empty() {
-                    title_spans.push(Span::styled(" · ", Style::default().fg(theme::border())));
-                    title_spans.push(Span::styled(
-                        format!("⎇ {}", truncate_chars(&g.current_branch, 18)),
+                        format!("⎇ {}", truncate_chars(&g.current_branch, 24)),
                         Style::default().fg(theme::muted()),
                     ));
                 }
                 title_spans.push(Span::styled(" ", Style::default()));
+                // Tint the composer border red in bypass mode as a danger cue;
+                // otherwise the normal border color.
+                let border_color = if toolbar_permission_is_bypass(&g.permission_mode) {
+                    theme::error()
+                } else {
+                    theme::border()
+                };
                 let input_block = Paragraph::new(Text::from(input_lines))
                     .block(
                         Block::default()
                             .borders(Borders::TOP)
-                            .border_style(Style::default().fg(theme::border()))
+                            .border_style(Style::default().fg(border_color))
                             .title(Line::from(title_spans))
                             .padding(Padding::new(2, 2, 0, 1)),
                     )
