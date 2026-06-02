@@ -31,12 +31,14 @@ impl Widget for StatusBar<'_> {
 
         let sep = Span::styled(" │ ", Style::default().fg(theme::border()));
         let model_display = truncate_chars(self.model, 20);
-        let (busy_icon, busy_color) = busy_badge(self.busy_label);
+        let (_busy_icon, busy_color) = busy_badge(self.busy_label);
         let version = env!("CARGO_PKG_VERSION");
 
         let mut spans = vec![
             Span::styled(
-                format!(" {busy_icon} {} ", self.busy_label.to_ascii_uppercase()),
+                // The indicator text already carries its own state glyph, so no
+                // extra leading dot here.
+                format!(" {} ", self.busy_label.trim().to_ascii_uppercase()),
                 Style::default().fg(busy_color).add_modifier(Modifier::BOLD),
             ),
             sep.clone(),
