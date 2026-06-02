@@ -65,7 +65,9 @@ impl Widget for ChildActivityOverlay<'_> {
                 Span::styled(format!("{icon} "), Style::default().fg(icon_color)),
                 Span::styled(
                     format!("{id8:<8}"),
-                    Style::default().fg(theme::tool()).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(theme::tool())
+                        .add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
                     format!(" {:<12}", phase),
