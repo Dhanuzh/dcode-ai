@@ -25,8 +25,8 @@ use crate::tui::palette::{
 use crate::tui::paste::{expand_paste_tokens, pasted_lines_token};
 use crate::tui::path_parse::{extract_embedded_path_fragments, parse_candidate_image_path};
 use crate::tui::render_helpers::{
-    char_window, permission_mode_pill, progress_bar, subagent_phase_progress, truncate_chars,
-    wrap_preformatted_line, wrap_text,
+    char_window, permission_mode_pill, popup_block, progress_bar, subagent_phase_progress,
+    truncate_chars, wrap_preformatted_line, wrap_text,
 };
 use crate::tui::slash_entries::*;
 use crate::tui::state::{
@@ -1677,16 +1677,7 @@ pub fn run_blocking(
                     )));
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(popup_lines))
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::border()))
-                                .padding(Padding::new(1, 1, 0, 0))
-                                .title(Span::styled(
-                                    " command palette (ctrl+p) ",
-                                    Style::default().fg(theme::muted()),
-                                )),
-                        )
+                        .block(popup_block("command palette (ctrl+p)").padding(Padding::new(1, 1, 0, 0)))
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
@@ -1878,10 +1869,7 @@ pub fn run_blocking(
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(popup_lines))
                         .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::border()))
-                                .title(Span::styled(" git branch ", Style::default().fg(theme::muted()))),
+                            popup_block("git branch"),
                         )
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });
@@ -1926,10 +1914,7 @@ pub fn run_blocking(
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(lines))
                         .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::border()))
-                                .title(Span::styled(" settings ", Style::default().fg(theme::muted()))),
+                            popup_block("settings"),
                         )
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });
@@ -1985,10 +1970,7 @@ pub fn run_blocking(
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(lines))
                         .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::border()))
-                                .title(Span::styled(" permissions ", Style::default().fg(theme::muted()))),
+                            popup_block("permissions"),
                         )
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });
@@ -2009,7 +1991,8 @@ pub fn run_blocking(
                         Line::default(),
                     ];
                     for (i, name) in entries.iter().enumerate() {
-                        let st = if i == g.theme_picker_index {
+                        let selected = i == g.theme_picker_index;
+                        let name_st = if selected {
                             Style::default()
                                 .fg(Color::Black)
                                 .bg(theme::user())
@@ -2017,8 +2000,23 @@ pub fn run_blocking(
                         } else {
                             Style::default().fg(theme::text())
                         };
-                        let marker = if i == g.theme_picker_index { "▸ " } else { "  " };
-                        lines.push(Line::from(Span::styled(format!(" {marker}{name}"), st)));
+                        let marker = if selected { "▸ " } else { "  " };
+                        // Live color swatch so each theme previews its palette.
+                        let pal = theme::resolve(Some(name));
+                        let mut row =
+                            vec![Span::styled(format!(" {marker}{name:<13}"), name_st)];
+                        row.push(Span::raw("  "));
+                        for c in [
+                            pal.user,
+                            pal.assistant,
+                            pal.tool,
+                            pal.success,
+                            pal.warn,
+                            pal.error,
+                        ] {
+                            row.push(Span::styled("█", Style::default().fg(c)));
+                        }
+                        lines.push(Line::from(row));
                     }
                     lines.push(Line::default());
                     lines.push(Line::from(Span::styled(
@@ -2027,16 +2025,7 @@ pub fn run_blocking(
                     )));
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(lines))
-                        .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::border()))
-                                .title(Span::styled(
-                                    " theme ",
-                                    Style::default().fg(theme::muted()),
-                                )),
-                        )
-                        .style(Style::default().bg(theme::surface()))
+                        .block(popup_block("theme"))
                         .wrap(Wrap { trim: false });
                     frame.render_widget(popup, popup_area);
                 }
@@ -2082,10 +2071,7 @@ pub fn run_blocking(
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(lines))
                         .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::border()))
-                                .title(Span::styled(" agent ", Style::default().fg(theme::muted()))),
+                            popup_block("agent"),
                         )
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });
@@ -2259,10 +2245,7 @@ pub fn run_blocking(
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(lines))
                         .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::border()))
-                                .title(Span::styled(" pins ", Style::default().fg(theme::muted()))),
+                            popup_block("pins"),
                         )
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });
@@ -2429,10 +2412,7 @@ pub fn run_blocking(
                     frame.render_widget(ClearWidget, popup_area);
                     let popup = Paragraph::new(Text::from(lines))
                         .block(
-                            Block::default()
-                                .borders(Borders::ALL)
-                                .border_style(Style::default().fg(theme::border()))
-                                .title(Span::styled(" sessions ", Style::default().fg(theme::muted()))),
+                            popup_block("sessions"),
                         )
                         .style(Style::default().bg(theme::surface()))
                         .wrap(Wrap { trim: false });

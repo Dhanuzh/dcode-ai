@@ -5,8 +5,26 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
+use ratatui::widgets::{Block, BorderType, Borders};
 
 use crate::tui::theme;
+
+/// Standard popup/overlay frame: rounded themed border, surface fill, and a
+/// bold muted title. Unifies the look of the command palette, theme picker,
+/// pins, sessions, branch, and similar modals.
+pub(crate) fn popup_block(title: impl Into<String>) -> Block<'static> {
+    Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(theme::border()))
+        .title(Span::styled(
+            format!(" {} ", title.into().trim()),
+            Style::default()
+                .fg(theme::muted())
+                .add_modifier(Modifier::BOLD),
+        ))
+        .style(Style::default().bg(theme::surface()))
+}
 
 /// Map a sub-agent phase string to a 0–100 progress estimate.
 pub(crate) fn subagent_phase_progress(phase: &str, running: bool) -> u8 {
