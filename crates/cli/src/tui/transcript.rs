@@ -13,8 +13,8 @@ use dcode_ai_common::event::QuestionSelection;
 
 use crate::tool_ui;
 use crate::tui::app::{
-    LineAnswerHit, LineClickHit, prefixed_line, push_section_gap, push_tool_detail_lines,
-    push_transcript_line, tool_header_detail_spans,
+    LineAnswerHit, LineClickHit, line_has_text, prefixed_line, push_section_gap,
+    push_tool_detail_lines, push_transcript_line, tool_header_detail_spans,
 };
 use crate::tui::markdown::render_markdown_lines_with_hits;
 use crate::tui::render_helpers::{
@@ -760,7 +760,32 @@ pub(crate) fn transcript_lines_and_hits(
         );
     }
 
-    (lines, hits)
+    collapse_blank_runs(lines, hits)
+}
+
+/// Tighten vertical rhythm: collapse runs of blank lines to a single blank and
+/// trim leading/trailing blanks. Keeps the `lines`/`hits` arrays parallel.
+fn collapse_blank_runs(
+    lines: Vec<Line<'static>>,
+    hits: Vec<LineAnswerHit>,
+) -> (Vec<Line<'static>>, Vec<LineAnswerHit>) {
+    let mut out_lines: Vec<Line<'static>> = Vec::with_capacity(lines.len());
+    let mut out_hits: Vec<LineAnswerHit> = Vec::with_capacity(hits.len());
+    let mut prev_blank = true; // seeded true so leading blanks are trimmed
+    for (line, hit) in lines.into_iter().zip(hits) {
+        let blank = !line_has_text(&line);
+        if blank && prev_blank {
+            continue;
+        }
+        prev_blank = blank;
+        out_lines.push(line);
+        out_hits.push(hit);
+    }
+    while out_lines.last().is_some_and(|l| !line_has_text(l)) {
+        out_lines.pop();
+        out_hits.pop();
+    }
+    (out_lines, out_hits)
 }
 
 /// Format a tool duration as a compact badge: `120ms` under 1s, else `1.2s`.

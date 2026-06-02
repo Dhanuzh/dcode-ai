@@ -340,7 +340,7 @@ pub(crate) fn prefixed_line(prefix: Span<'static>, mut line: Line<'static>) -> L
     Line::from(spans)
 }
 
-fn line_has_text(line: &Line<'_>) -> bool {
+pub(crate) fn line_has_text(line: &Line<'_>) -> bool {
     line.spans.iter().any(|s| !s.content.trim().is_empty())
 }
 
