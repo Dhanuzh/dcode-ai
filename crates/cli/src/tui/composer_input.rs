@@ -220,7 +220,7 @@ fn push_styled_run(
 
 pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
     let prompt = Span::styled("› ", Style::default().fg(theme::user()).bold());
-    let placeholder = "Ask anything... (Shift+Enter for newline, / for commands, /keymaps)";
+    let placeholder = "Ask anything…   /  commands   ·   ⏎ send   ·   ⇧⏎ newline";
     let chars: Vec<char> = buffer.chars().collect();
     let mention_ranges = at_mention_char_ranges(buffer);
     let cursor_char_idx = cursor_char_idx.min(chars.len());

@@ -1523,12 +1523,30 @@ pub fn run_blocking(
                 if let Some(hint) = hint {
                     input_lines.push(hint);
                 }
+                // Composer title: DCODE pill + model + branch context, so the
+                // input box shows what you're driving without /status.
+                let mut title_spans = vec![permission_mode_pill(&g.permission_mode)];
+                if !g.model.is_empty() {
+                    title_spans.push(Span::styled(" ", Style::default()));
+                    title_spans.push(Span::styled(
+                        format!("/{}", truncate_chars(&g.model, 20)),
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
+                if !g.current_branch.is_empty() {
+                    title_spans.push(Span::styled(" · ", Style::default().fg(theme::border())));
+                    title_spans.push(Span::styled(
+                        format!("⎇ {}", truncate_chars(&g.current_branch, 18)),
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
+                title_spans.push(Span::styled(" ", Style::default()));
                 let input_block = Paragraph::new(Text::from(input_lines))
                     .block(
                         Block::default()
                             .borders(Borders::TOP)
                             .border_style(Style::default().fg(theme::border()))
-                            .title(permission_mode_pill(&g.permission_mode))
+                            .title(Line::from(title_spans))
                             .padding(Padding::new(2, 2, 0, 1)),
                     )
                     .style(Style::default().bg(theme::surface()))
