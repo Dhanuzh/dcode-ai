@@ -220,6 +220,10 @@ impl SessionRuntime {
         self.supervisor.compact_summary()
     }
 
+    pub fn compaction_preview(&self) -> String {
+        self.supervisor.compaction_preview()
+    }
+
     pub fn set_session_summary(&mut self, summary: Option<String>) {
         self.supervisor.set_session_summary(summary);
     }

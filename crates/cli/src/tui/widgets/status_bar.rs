@@ -21,6 +21,8 @@ pub struct StatusBar<'a> {
     pub tokens_out: u64,
     pub cost_usd: f64,
     pub permission_bypass: bool,
+    /// Latency of the last completed assistant turn (ms), shown as `↩ 1.2s`.
+    pub last_turn_latency_ms: Option<u64>,
 }
 
 impl Widget for StatusBar<'_> {
@@ -58,6 +60,16 @@ impl Widget for StatusBar<'_> {
             format!(" {}s ", self.elapsed_secs),
             Style::default().fg(theme::muted()),
         ));
+
+        if let Some(latency_ms) = self.last_turn_latency_ms {
+            spans.push(sep.clone());
+            let label = if latency_ms < 1000 {
+                format!(" ↩ {}ms ", latency_ms)
+            } else {
+                format!(" ↩ {:.1}s ", latency_ms as f64 / 1000.0)
+            };
+            spans.push(Span::styled(label, Style::default().fg(theme::muted())));
+        }
 
         if self.mcp_servers > 0 {
             spans.push(sep.clone());

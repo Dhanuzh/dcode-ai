@@ -285,7 +285,7 @@ fn stage_pasted_image_paths(state: &mut TuiSessionState, pasted: &str) -> Result
     }
 
     if staged > 0 {
-        state.blocks.push(DisplayBlock::System(format!(
+        state.push_block(DisplayBlock::System(format!(
             "[image] staged {staged} image(s) — Enter to send"
         )));
         state.touch_transcript();
@@ -1026,8 +1026,8 @@ pub fn run_blocking(
                 .iter()
                 .any(|b| matches!(b, DisplayBlock::System(s) if s == &banner));
             if !already_present {
-                g.blocks.push(DisplayBlock::System(banner));
-                g.blocks.push(DisplayBlock::System(
+                g.push_block(DisplayBlock::System(banner));
+                g.push_block(DisplayBlock::System(
                     "Interactive run — type a message. Ctrl+P commands, /keymaps shortcuts.".into(),
                 ));
                 g.touch_transcript();
@@ -1424,6 +1424,7 @@ pub fn run_blocking(
                     tokens_out: g.output_tokens,
                     cost_usd: g.cost_usd,
                     permission_bypass: toolbar_permission_is_bypass(&g.permission_mode),
+                    last_turn_latency_ms: g.last_turn_latency_ms,
                 };
 
                 crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
@@ -1549,6 +1550,21 @@ pub fn run_blocking(
                         ),
                         Style::default().fg(theme::success()),
                     )));
+                    // Inline thumbnail for each staged image (true-color half-blocks,
+                    // 32 cols × 8 rows). Falls back silently if the file is unreadable.
+                    for att in &g.staged_image_attachments {
+                        let abs = g.workspace_root.join(&att.path);
+                        if let Some(thumb_lines) =
+                            crate::tui::render_helpers::image_thumbnail_lines(&abs, 32, 8)
+                        {
+                            input_lines.push(Line::default());
+                            input_lines.extend(thumb_lines);
+                            input_lines.push(Line::from(Span::styled(
+                                format!("  ↑ {}", att.path),
+                                Style::default().fg(theme::muted()),
+                            )));
+                        }
+                    }
                 }
                 if let Some(hint) = hint {
                     input_lines.push(hint);
@@ -3215,7 +3231,7 @@ pub fn run_blocking(
                                     let n = text.chars().count();
                                     match crate::tui::mouse_select::copy_to_clipboard(&text) {
                                         Ok(msg) => {
-                                            g.blocks.push(DisplayBlock::System(format!(
+                                            g.push_block(DisplayBlock::System(format!(
                                                 " Copied {n} chars {msg}"
                                             )));
                                             g.touch_transcript();
@@ -3281,7 +3297,7 @@ pub fn run_blocking(
                                                             format!(" Clipboard copy failed: {e}")
                                                         }
                                                     };
-                                                    g.blocks.push(DisplayBlock::System(feedback));
+                                                    g.push_block(DisplayBlock::System(feedback));
                                                     g.touch_transcript();
                                                     g.transcript_follow_tail = true;
                                                 }
@@ -3401,7 +3417,7 @@ pub fn run_blocking(
                                 break;
                             }
                             ctrl_c_armed_at = Some(now);
-                            g.blocks.push(DisplayBlock::System(
+                            g.push_block(DisplayBlock::System(
                                 "Press Ctrl+C again within 1.5s to exit.".into(),
                             ));
                             g.touch_transcript();
@@ -3884,7 +3900,7 @@ pub fn run_blocking(
                             } else {
                                 "No pinned note selected".to_string()
                             };
-                            g.blocks.push(DisplayBlock::System(msg));
+                            g.push_block(DisplayBlock::System(msg));
                             g.touch_transcript();
                             g.transcript_follow_tail = true;
                         }
@@ -4033,7 +4049,7 @@ pub fn run_blocking(
                                 } else {
                                     "No tool blocks to toggle yet".to_string()
                                 };
-                                g.blocks.push(DisplayBlock::System(msg));
+                                g.push_block(DisplayBlock::System(msg));
                                 g.touch_transcript();
                             }
                             KeyCode::Char('F') => {
@@ -4043,7 +4059,7 @@ pub fn run_blocking(
                                 } else {
                                     "Expanded all tool blocks"
                                 };
-                                g.blocks.push(DisplayBlock::System(state_msg.into()));
+                                g.push_block(DisplayBlock::System(state_msg.into()));
                                 g.touch_transcript();
                             }
                             _ => {}
@@ -4069,7 +4085,31 @@ pub fn run_blocking(
                             } else {
                                 "Nothing to copy yet".to_string()
                             };
-                            g.blocks.push(DisplayBlock::System(msg));
+                            g.push_block(DisplayBlock::System(msg));
+                            g.touch_transcript();
+                            g.transcript_follow_tail = true;
+                        }
+                        (KeyCode::F(7), _) => {
+                            let detail = g.blocks.iter().rev().find_map(|b| {
+                                if let DisplayBlock::ToolDone { detail, .. } = b {
+                                    if !detail.trim().is_empty() {
+                                        Some(detail.clone())
+                                    } else {
+                                        None
+                                    }
+                                } else {
+                                    None
+                                }
+                            });
+                            let msg = if let Some(text) = detail {
+                                match copy_to_clipboard(&text) {
+                                    Ok(_) => "Copied last tool output".to_string(),
+                                    Err(e) => format!("Clipboard copy failed: {e}"),
+                                }
+                            } else {
+                                "No tool output to copy yet".to_string()
+                            };
+                            g.push_block(DisplayBlock::System(msg));
                             g.touch_transcript();
                             g.transcript_follow_tail = true;
                         }
@@ -4078,6 +4118,7 @@ pub fn run_blocking(
                         }
                         (KeyCode::Char('l'), KeyModifiers::CONTROL) => {
                             g.blocks.clear();
+                            g.block_timestamps.clear();
                             g.streaming_assistant = None;
                             g.streaming_thinking = None;
                             g.touch_transcript();
@@ -4093,7 +4134,7 @@ pub fn run_blocking(
                         }
                         (KeyCode::Char('o'), KeyModifiers::CONTROL) => {
                             if g.pinned_notes.is_empty() {
-                                g.blocks.push(DisplayBlock::System(
+                                g.push_block(DisplayBlock::System(
                                     "No pinned notes yet. Use Ctrl+K to pin the latest response."
                                         .into(),
                                 ));
@@ -4105,7 +4146,7 @@ pub fn run_blocking(
                         }
                         (KeyCode::Char('g'), KeyModifiers::CONTROL) => {
                             if g.subagents.is_empty() {
-                                g.blocks.push(DisplayBlock::System(
+                                g.push_block(DisplayBlock::System(
                                     "No sub-agents to focus right now.".into(),
                                 ));
                                 g.touch_transcript();
@@ -4115,23 +4156,31 @@ pub fn run_blocking(
                             }
                         }
                         (KeyCode::Char('k'), KeyModifiers::CONTROL) => {
-                            let msg = if let Some(note) = latest_pinnable_note(&g) {
-                                let exists = g.pinned_notes.iter().any(|n| n.body == note.body);
-                                if !exists {
-                                    g.pinned_notes.insert(0, note);
-                                    if g.pinned_notes.len() > 20 {
-                                        g.pinned_notes.pop();
-                                    }
-                                    "Pinned latest message".to_string()
-                                } else {
-                                    "Latest message is already pinned".to_string()
-                                }
+                            // When composer has text and no approval is pending,
+                            // Ctrl+K kills to end of line (Emacs-style).
+                            // Otherwise it pins the latest assistant message.
+                            let has_text = !g.input_buffer.trim().is_empty();
+                            if has_text && g.active_approval.is_none() {
+                                g.kill_input_to_end();
                             } else {
-                                "Nothing pinnable yet".to_string()
-                            };
-                            g.blocks.push(DisplayBlock::System(msg));
-                            g.touch_transcript();
-                            g.transcript_follow_tail = true;
+                                let msg = if let Some(note) = latest_pinnable_note(&g) {
+                                    let exists = g.pinned_notes.iter().any(|n| n.body == note.body);
+                                    if !exists {
+                                        g.pinned_notes.insert(0, note);
+                                        if g.pinned_notes.len() > 20 {
+                                            g.pinned_notes.pop();
+                                        }
+                                        "Pinned latest message".to_string()
+                                    } else {
+                                        "Latest message is already pinned".to_string()
+                                    }
+                                } else {
+                                    "Nothing pinnable yet".to_string()
+                                };
+                                g.push_block(DisplayBlock::System(msg));
+                                g.touch_transcript();
+                                g.transcript_follow_tail = true;
+                            }
                         }
                         (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                             g.open_transcript_search();
@@ -4161,7 +4210,7 @@ pub fn run_blocking(
                                 Ok(att) => {
                                     let label = att.path.clone();
                                     g.staged_image_attachments.push(att);
-                                    g.blocks.push(DisplayBlock::System(format!(
+                                    g.push_block(DisplayBlock::System(format!(
                                         "[image] staged {label} — Enter to send"
                                     )));
                                     g.touch_transcript();
@@ -4279,7 +4328,7 @@ pub fn run_blocking(
                                 let pattern = req.allow_pattern();
                                 let call_id = req.call_id.clone();
                                 g.clear_input();
-                                g.blocks.push(DisplayBlock::System(format!(
+                                g.push_block(DisplayBlock::System(format!(
                                     "Always allowing: {pattern}"
                                 )));
                                 g.touch_transcript();
@@ -4303,6 +4352,9 @@ pub fn run_blocking(
                                     });
                                 }
                                 continue;
+                            } else {
+                                // Yank from kill ring when not in an approval prompt.
+                                g.yank_input();
                             }
                         }
                         (KeyCode::Char('n'), KeyModifiers::CONTROL) => {
@@ -4324,7 +4376,7 @@ pub fn run_blocking(
                                 let pattern = req.allow_pattern();
                                 let call_id = req.call_id.clone();
                                 g.clear_input();
-                                g.blocks.push(DisplayBlock::System(format!(
+                                g.push_block(DisplayBlock::System(format!(
                                     "Always allowing: {pattern}"
                                 )));
                                 g.touch_transcript();
@@ -4428,7 +4480,7 @@ pub fn run_blocking(
                                     }
                                     continue;
                                 }
-                                g.blocks.push(DisplayBlock::System(
+                                g.push_block(DisplayBlock::System(
                                     "Could not parse approval — try y, n, yes, no, ok, deny, or Ctrl+Y / Ctrl+N."
                                         .into(),
                                 ));
@@ -4472,7 +4524,7 @@ pub fn run_blocking(
                                     }
                                     continue;
                                 }
-                                g.blocks.push(DisplayBlock::System(
+                                g.push_block(DisplayBlock::System(
                                     "Invalid answer: use Enter/0 for suggested, 1–n for an option, or custom text."
                                         .into(),
                                 ));
@@ -4518,11 +4570,42 @@ pub fn run_blocking(
                             g.insert_input_char('\n');
                         }
                         (KeyCode::Char('a'), KeyModifiers::CONTROL) => {
-                            g.move_input_home();
+                            g.move_input_home_line();
                         }
                         (KeyCode::Char('e'), KeyModifiers::CONTROL) => {
-                            g.move_input_end();
+                            g.move_input_end_line();
                         }
+                        // ── Word movement (Ctrl+←/→  and  Alt+B/F) ──────────
+                        (KeyCode::Left, mods) if mods.contains(KeyModifiers::CONTROL) => {
+                            g.move_input_word_backward();
+                        }
+                        (KeyCode::Right, mods) if mods.contains(KeyModifiers::CONTROL) => {
+                            g.move_input_word_forward();
+                        }
+                        (KeyCode::Char('b'), KeyModifiers::ALT) => {
+                            g.move_input_word_backward();
+                        }
+                        (KeyCode::Char('f'), KeyModifiers::ALT) => {
+                            g.move_input_word_forward();
+                        }
+                        // ── Word deletion (Ctrl+W / Alt+Backspace / Alt+D) ───
+                        (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
+                            g.delete_input_word_backward();
+                        }
+                        (KeyCode::Backspace, KeyModifiers::ALT) => {
+                            g.delete_input_word_backward();
+                        }
+                        (KeyCode::Char('d'), KeyModifiers::ALT) => {
+                            g.delete_input_word_forward();
+                        }
+                        // ── Home / End on current logical line ───────────────
+                        (KeyCode::Home, _) => {
+                            g.move_input_home_line();
+                        }
+                        (KeyCode::End, _) => {
+                            g.move_input_end_line();
+                        }
+                        // ── Char movement ────────────────────────────────────
                         (KeyCode::Left, _) => {
                             g.move_input_left();
                         }
@@ -4617,59 +4700,75 @@ pub fn run_blocking(
                                 {
                                     g.slash_menu_index = g.slash_menu_index.saturating_sub(1);
                                 } else {
-                                    let can_history = !composer_history.is_empty()
-                                        && (g.input_buffer.is_empty()
-                                            || composer_history_index.is_some());
-                                    if can_history {
-                                        if composer_history_index.is_none() {
-                                            composer_history_draft = g.input_buffer.clone();
-                                            composer_history_index =
-                                                Some(composer_history.len().saturating_sub(1));
-                                        } else if let Some(idx) = composer_history_index {
-                                            composer_history_index = Some(idx.saturating_sub(1));
-                                        }
-                                        if let Some(idx) = composer_history_index
-                                            && let Some(entry) = composer_history.get(idx)
-                                        {
-                                            g.set_input_text(entry.clone());
-                                        }
+                                    // Multiline: try moving up one visual line first.
+                                    let composer_w = terminal
+                                        .size()
+                                        .map(|sz| sz.width.saturating_sub(8) as usize)
+                                        .unwrap_or(80);
+                                    let moved_up = g.move_input_up(composer_w);
+                                    if moved_up {
+                                        // Moved within the composer — don't touch history.
                                     } else {
-                                        if let Ok(sz) = terminal.size() {
-                                            let area = Rect::new(0, 0, sz.width, sz.height);
-                                            let (main_area, _) =
-                                                layout_with_sidebar(area, g.sidebar_open);
-                                            let sh = composer_chrome_height(
-                                                &slash_entries,
-                                                &workspace_files,
-                                                &g.input_buffer,
-                                                g.cursor_char_idx,
-                                            );
-                                            let input_h = if should_hide_composer_when_scrolling(&g)
+                                        let can_history = !composer_history.is_empty()
+                                            && (g.input_buffer.is_empty()
+                                                || composer_history_index.is_some());
+                                        if can_history {
+                                            if composer_history_index.is_none() {
+                                                composer_history_draft = g.input_buffer.clone();
+                                                composer_history_index =
+                                                    Some(composer_history.len().saturating_sub(1));
+                                            } else if let Some(idx) = composer_history_index {
+                                                composer_history_index =
+                                                    Some(idx.saturating_sub(1));
+                                            }
+                                            if let Some(idx) = composer_history_index
+                                                && let Some(entry) = composer_history.get(idx)
                                             {
-                                                0
-                                            } else {
-                                                composer_input_height(&g, main_area.width)
-                                            };
-                                            let (tr, _, _, _) = layout_chunks(
-                                                main_area,
-                                                sh,
-                                                input_h,
-                                                g.queue_preview_items.len(),
-                                                g.subagents.len(),
-                                            );
-                                            let (lines, _hits) = transcript_cache
-                                                .get_or_rebuild(&g, tr.width.saturating_sub(2));
-                                            let th = tr.height.saturating_sub(2) as usize;
-                                            let w = tr.width.saturating_sub(2) as usize;
-                                            scroll_buffer.replace_lines(lines.to_vec());
-                                            scroll_buffer.set_from_top(g.scroll_lines, th, w);
-                                            scroll_buffer.scroll_up(scroll_speed as usize, w, th);
-                                            let (from_top, _) =
-                                                scroll_buffer.scroll_position_from_top(th, w);
-                                            g.scroll_lines = from_top as usize;
-                                            g.transcript_follow_tail = scroll_buffer.is_sticky();
+                                                g.set_input_text(entry.clone());
+                                            }
+                                        } else {
+                                            if let Ok(sz) = terminal.size() {
+                                                let area = Rect::new(0, 0, sz.width, sz.height);
+                                                let (main_area, _) =
+                                                    layout_with_sidebar(area, g.sidebar_open);
+                                                let sh = composer_chrome_height(
+                                                    &slash_entries,
+                                                    &workspace_files,
+                                                    &g.input_buffer,
+                                                    g.cursor_char_idx,
+                                                );
+                                                let input_h =
+                                                    if should_hide_composer_when_scrolling(&g) {
+                                                        0
+                                                    } else {
+                                                        composer_input_height(&g, main_area.width)
+                                                    };
+                                                let (tr, _, _, _) = layout_chunks(
+                                                    main_area,
+                                                    sh,
+                                                    input_h,
+                                                    g.queue_preview_items.len(),
+                                                    g.subagents.len(),
+                                                );
+                                                let (lines, _hits) = transcript_cache
+                                                    .get_or_rebuild(&g, tr.width.saturating_sub(2));
+                                                let th = tr.height.saturating_sub(2) as usize;
+                                                let w = tr.width.saturating_sub(2) as usize;
+                                                scroll_buffer.replace_lines(lines.to_vec());
+                                                scroll_buffer.set_from_top(g.scroll_lines, th, w);
+                                                scroll_buffer.scroll_up(
+                                                    scroll_speed as usize,
+                                                    w,
+                                                    th,
+                                                );
+                                                let (from_top, _) =
+                                                    scroll_buffer.scroll_position_from_top(th, w);
+                                                g.scroll_lines = from_top as usize;
+                                                g.transcript_follow_tail =
+                                                    scroll_buffer.is_sticky();
+                                            }
                                         }
-                                    }
+                                    } // end else (moved_up)
                                 }
                             }
                         }
@@ -4693,56 +4792,67 @@ pub fn run_blocking(
                                     let n = slash_filtered.len();
                                     g.slash_menu_index = (g.slash_menu_index + 1) % n;
                                 } else {
-                                    if let Some(idx) = composer_history_index {
-                                        if idx + 1 < composer_history.len() {
-                                            composer_history_index = Some(idx + 1);
-                                            if let Some(entry) =
-                                                composer_history.get(idx.saturating_add(1))
-                                            {
-                                                g.set_input_text(entry.clone());
+                                    // Multiline: try moving down one visual line first.
+                                    let composer_w = terminal
+                                        .size()
+                                        .map(|sz| sz.width.saturating_sub(8) as usize)
+                                        .unwrap_or(80);
+                                    let moved_down = g.move_input_down(composer_w);
+                                    if moved_down {
+                                        // Moved within composer — leave history alone.
+                                    } else {
+                                        if let Some(idx) = composer_history_index {
+                                            if idx + 1 < composer_history.len() {
+                                                composer_history_index = Some(idx + 1);
+                                                if let Some(entry) =
+                                                    composer_history.get(idx.saturating_add(1))
+                                                {
+                                                    g.set_input_text(entry.clone());
+                                                }
+                                            } else {
+                                                composer_history_index = None;
+                                                g.set_input_text(composer_history_draft.clone());
                                             }
                                         } else {
-                                            composer_history_index = None;
-                                            g.set_input_text(composer_history_draft.clone());
+                                            let sz = terminal.size().ok();
+                                            if let Some(sz) = sz {
+                                                let area = Rect::new(0, 0, sz.width, sz.height);
+                                                let (main_area, _) =
+                                                    layout_with_sidebar(area, g.sidebar_open);
+                                                let sh = composer_chrome_height(
+                                                    &slash_entries,
+                                                    &workspace_files,
+                                                    &g.input_buffer,
+                                                    g.cursor_char_idx,
+                                                );
+                                                let input_h =
+                                                    if should_hide_composer_when_scrolling(&g) {
+                                                        0
+                                                    } else {
+                                                        composer_input_height(&g, main_area.width)
+                                                    };
+                                                let (tr, _, _, _) = layout_chunks(
+                                                    main_area,
+                                                    sh,
+                                                    input_h,
+                                                    g.queue_preview_items.len(),
+                                                    g.subagents.len(),
+                                                );
+                                                let (lines, _hits) = transcript_cache
+                                                    .get_or_rebuild(&g, tr.width.saturating_sub(2));
+                                                let th = tr.height.saturating_sub(2) as usize;
+                                                let w = tr.width.saturating_sub(2) as usize;
+                                                scroll_buffer.replace_lines(lines.to_vec());
+                                                scroll_buffer.set_from_top(g.scroll_lines, th, w);
+                                                scroll_buffer.scroll_down(scroll_speed as usize);
+                                                let (from_top, _) =
+                                                    scroll_buffer.scroll_position_from_top(th, w);
+                                                g.scroll_lines = from_top as usize;
+                                                g.transcript_follow_tail =
+                                                    scroll_buffer.is_sticky();
+                                            }
                                         }
-                                    } else {
-                                        let sz = terminal.size().ok();
-                                        if let Some(sz) = sz {
-                                            let area = Rect::new(0, 0, sz.width, sz.height);
-                                            let (main_area, _) =
-                                                layout_with_sidebar(area, g.sidebar_open);
-                                            let sh = composer_chrome_height(
-                                                &slash_entries,
-                                                &workspace_files,
-                                                &g.input_buffer,
-                                                g.cursor_char_idx,
-                                            );
-                                            let input_h = if should_hide_composer_when_scrolling(&g)
-                                            {
-                                                0
-                                            } else {
-                                                composer_input_height(&g, main_area.width)
-                                            };
-                                            let (tr, _, _, _) = layout_chunks(
-                                                main_area,
-                                                sh,
-                                                input_h,
-                                                g.queue_preview_items.len(),
-                                                g.subagents.len(),
-                                            );
-                                            let (lines, _hits) = transcript_cache
-                                                .get_or_rebuild(&g, tr.width.saturating_sub(2));
-                                            let th = tr.height.saturating_sub(2) as usize;
-                                            let w = tr.width.saturating_sub(2) as usize;
-                                            scroll_buffer.replace_lines(lines.to_vec());
-                                            scroll_buffer.set_from_top(g.scroll_lines, th, w);
-                                            scroll_buffer.scroll_down(scroll_speed as usize);
-                                            let (from_top, _) =
-                                                scroll_buffer.scroll_position_from_top(th, w);
-                                            g.scroll_lines = from_top as usize;
-                                            g.transcript_follow_tail = scroll_buffer.is_sticky();
-                                        }
-                                    }
+                                    } // end else (moved_down)
                                 }
                             }
                         }
@@ -5218,7 +5328,7 @@ mod approval_parse_tests {
     #[test]
     fn transcript_renders_tool_done_status_and_detail() {
         let mut state = transcript_test_state();
-        state.blocks.push(super::DisplayBlock::ToolDone {
+        state.push_block(super::DisplayBlock::ToolDone {
             name: "execute_bash".into(),
             call_id: "call-1".into(),
             ok: true,
@@ -5238,7 +5348,7 @@ mod approval_parse_tests {
         // Every flattened line must have a parallel hit entry — the indices are
         // used together by mouse-click handling, so a mismatch is a real bug.
         let mut state = transcript_test_state();
-        state.blocks.push(super::DisplayBlock::User("hi".into()));
+        state.push_block(super::DisplayBlock::User("hi".into()));
         state
             .blocks
             .push(super::DisplayBlock::Assistant("hello there".into()));

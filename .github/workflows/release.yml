@@ -113,12 +113,15 @@ jobs:
           cd target/${{ matrix.target }}/release
           tar czf ../../../${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }} ${{ env.BINARY_NAME }}
           cd ../../..
+          sha256sum ${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }} > ${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }}.sha256
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.BINARY_NAME }}-${{ matrix.target }}
-          path: ${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }}
+          path: |
+            ${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }}
+            ${{ env.BINARY_NAME }}-${{ matrix.target }}.${{ matrix.archive }}.sha256
 
   # Create GitHub Release (only on tags)
   release:

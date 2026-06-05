@@ -389,8 +389,19 @@ mod tests {
         }
     }
 
+    /// Returns true when ripgrep is available; false means the caller should skip.
+    fn rg_available() -> bool {
+        std::process::Command::new("rg")
+            .arg("--version")
+            .output()
+            .is_ok()
+    }
+
     #[tokio::test]
     async fn search_code_returns_structured_literal_matches() {
+        if !rg_available() {
+            return;
+        } // skip when ripgrep not installed
         let dir = tempfile::tempdir().unwrap();
         let src = dir.path().join("src");
         std::fs::create_dir_all(&src).unwrap();
@@ -422,6 +433,9 @@ mod tests {
 
     #[tokio::test]
     async fn search_code_treats_no_matches_as_success() {
+        if !rg_available() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn present() {}\n").unwrap();
 
@@ -442,6 +456,9 @@ mod tests {
 
     #[tokio::test]
     async fn search_code_supports_literal_metacharacters() {
+        if !rg_available() {
+            return;
+        }
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("main.rs"), "fn call() { foo.bar(); }\n").unwrap();
 

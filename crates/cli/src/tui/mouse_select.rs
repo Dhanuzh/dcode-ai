@@ -110,40 +110,116 @@ pub fn extract_selected_text(rows: &[String], gutters: &[u16], selection: &Selec
 
 /// Apply selection highlight to lines being rendered.
 ///
-/// Returns modified lines with inverted styles on selected rows.
+/// Only the selected character range is highlighted:
+/// - middle rows get fully highlighted
+/// - the start row is highlighted from `start.col` to end-of-line
+/// - the end row is highlighted from column 0 to `end.col` (inclusive)
+///
 /// Selection coordinates are in buffer space (absolute visual rows).
 pub fn apply_selection_highlight<'a>(
     lines: Vec<Line<'a>>,
     selection: &Selection,
     viewport_width: usize,
 ) -> Vec<Line<'a>> {
+    let _ = viewport_width;
     let highlight = Style::default()
         .bg(crate::tui::theme::mention_bg())
         .fg(crate::tui::theme::text())
         .add_modifier(Modifier::BOLD);
 
+    let (start, end) = selection.ordered();
     let mut row_idx: u16 = 0;
     let mut result = Vec::with_capacity(lines.len());
 
     for line in lines {
-        let _ = viewport_width;
-        let in_selection = selection.contains_row(row_idx);
-
-        if in_selection {
-            let highlighted_spans: Vec<Span<'a>> = line
-                .spans
-                .into_iter()
-                .map(|s| Span::styled(s.content, highlight))
-                .collect();
-            result.push(Line::from(highlighted_spans));
-        } else {
+        if !selection.contains_row(row_idx) {
             result.push(line);
+            row_idx = row_idx.saturating_add(1);
+            continue;
         }
+
+        // Determine which column range to highlight on this row.
+        let col_start: usize = if row_idx == start.row {
+            start.col as usize
+        } else {
+            0
+        };
+        let col_end: usize = if row_idx == end.row {
+            end.col as usize + 1 // inclusive
+        } else {
+            usize::MAX // whole line
+        };
+
+        // Split each span at the highlight boundaries.
+        let new_spans = highlight_span_range(line.spans, col_start, col_end, highlight);
+        result.push(Line::from(new_spans));
 
         row_idx = row_idx.saturating_add(1);
     }
 
     result
+}
+
+/// Rebuild a span list, applying `highlight` style only to characters in
+/// `[col_start, col_end)` (column indices into the concatenated text).
+fn highlight_span_range<'a>(
+    spans: Vec<Span<'a>>,
+    col_start: usize,
+    col_end: usize,
+    highlight: Style,
+) -> Vec<Span<'a>> {
+    let mut out: Vec<Span<'a>> = Vec::new();
+    let mut pos: usize = 0; // current column (char index)
+
+    for span in spans {
+        let text: Vec<char> = span.content.chars().collect();
+        let span_end = pos + text.len();
+
+        if span_end <= col_start || pos >= col_end {
+            // Entirely outside selection — keep as-is.
+            out.push(span);
+        } else if pos >= col_start && span_end <= col_end {
+            // Entirely inside selection — fully highlight.
+            out.push(Span::styled(span.content, highlight));
+        } else {
+            // Partially overlapping — split into up to three segments.
+            let orig = span.style;
+            let content = span.content;
+
+            // Before the selection
+            let pre_end = col_start.saturating_sub(pos).min(text.len());
+            if pre_end > 0 {
+                out.push(Span::styled(
+                    text[..pre_end].iter().collect::<String>(),
+                    orig,
+                ));
+            }
+
+            // Inside the selection
+            let sel_start = col_start.saturating_sub(pos).min(text.len());
+            let sel_end = col_end.saturating_sub(pos).min(text.len());
+            if sel_start < sel_end {
+                out.push(Span::styled(
+                    text[sel_start..sel_end].iter().collect::<String>(),
+                    highlight,
+                ));
+            }
+
+            // After the selection
+            if sel_end < text.len() {
+                out.push(Span::styled(
+                    text[sel_end..].iter().collect::<String>(),
+                    orig,
+                ));
+            }
+
+            let _ = content; // ownership consumed via `text`
+        }
+
+        pos = span_end;
+    }
+
+    out
 }
 
 /// Copy text to the system clipboard.
@@ -224,6 +300,60 @@ mod tests {
         assert!(text.contains("line 2"));
         assert!(text.contains("line 8"));
         assert_eq!(text.lines().count(), 7);
+    }
+
+    #[test]
+    fn highlight_partial_start_row_only_from_col() {
+        // Selecting from col 6 on row 0 to end of row 1: row 0 should only
+        // highlight "world", not "hello ".
+        let lines = vec![Line::from("hello world"), Line::from("second line")];
+        let sel = Selection {
+            anchor: VisualPos { row: 0, col: 6 },
+            cursor: VisualPos { row: 1, col: 5 },
+            scroll_from_top: 0,
+        };
+        let result = apply_selection_highlight(lines, &sel, 80);
+
+        // Row 0: "hello " unhighlighted, "world" highlighted.
+        let row0_plain: String = result[0]
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier != Modifier::BOLD)
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(row0_plain.contains("hello "), "got: {row0_plain}");
+
+        let row0_hl: String = result[0]
+            .spans
+            .iter()
+            .filter(|s| s.style.add_modifier.contains(Modifier::BOLD))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(row0_hl.contains("world"), "highlighted: {row0_hl}");
+    }
+
+    #[test]
+    fn highlight_partial_end_row_only_up_to_col() {
+        // Selecting row 0 fully, row 1 only up to col 5 ("second").
+        let lines = vec![Line::from("first line"), Line::from("second line")];
+        let sel = Selection {
+            anchor: VisualPos { row: 0, col: 0 },
+            cursor: VisualPos { row: 1, col: 5 },
+            scroll_from_top: 0,
+        };
+        let result = apply_selection_highlight(lines, &sel, 80);
+
+        // Row 1: "second" highlighted, " line" not.
+        let row1_plain: String = result[1]
+            .spans
+            .iter()
+            .filter(|s| !s.style.add_modifier.contains(Modifier::BOLD))
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(
+            row1_plain.contains(" line"),
+            "unhighlighted tail: {row1_plain}"
+        );
     }
 
     #[test]

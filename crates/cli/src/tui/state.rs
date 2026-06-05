@@ -304,6 +304,15 @@ pub struct TuiSessionState {
     /// History panel viewport rect captured each frame, used to translate
     /// raw mouse coordinates → buffer-space rows for selection.
     pub history_rect: Option<(u16, u16, u16, u16)>,
+    /// Wall-clock timestamps (Unix seconds) parallel to `blocks`, recorded when
+    /// each block is first pushed. Used to render `HH:MM` dim labels in the
+    /// transcript header rows.
+    pub block_timestamps: Vec<u64>,
+    /// Wall-clock timestamp of when the most recent assistant turn completed
+    /// (BusyState → Idle transition). Used to compute provider latency.
+    pub last_turn_latency_ms: Option<u64>,
+    /// Wall-clock time (Unix ms) when the current turn started (first non-idle state).
+    pub(crate) turn_started_at: Option<u64>,
 }
 
 #[derive(Debug, Clone)]
@@ -582,6 +591,39 @@ impl TuiSessionState {
             all_tools_collapsed: false,
             mouse_selection: None,
             history_rect: None,
+            block_timestamps: Vec::new(),
+            last_turn_latency_ms: None,
+            turn_started_at: None,
+        }
+    }
+
+    /// Push a `DisplayBlock`, recording the current wall-clock time in
+    /// `block_timestamps` so transcript headers can show `HH:MM` labels.
+    pub fn push_block(&mut self, block: DisplayBlock) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.block_timestamps.push(secs);
+        self.blocks.push(block);
+    }
+
+    /// Remove blocks matching `predicate`, keeping `block_timestamps` in sync.
+    pub fn retain_blocks<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&DisplayBlock) -> bool,
+    {
+        let mut idx = 0;
+        while idx < self.blocks.len() {
+            if predicate(&self.blocks[idx]) {
+                idx += 1;
+            } else {
+                self.blocks.remove(idx);
+                if idx < self.block_timestamps.len() {
+                    self.block_timestamps.remove(idx);
+                }
+            }
         }
     }
 
@@ -1142,11 +1184,13 @@ impl TuiSessionState {
         self.sync_legacy_from_composer();
     }
 
+    #[allow(dead_code)]
     pub fn move_input_home(&mut self) {
         self.composer.move_home();
         self.sync_legacy_from_composer();
     }
 
+    #[allow(dead_code)]
     pub fn move_input_end(&mut self) {
         self.composer.move_end();
         self.sync_legacy_from_composer();
@@ -1160,6 +1204,70 @@ impl TuiSessionState {
     pub fn delete_input(&mut self) {
         self.composer.delete();
         self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_word_backward(&mut self) {
+        self.composer.move_word_backward();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_word_forward(&mut self) {
+        self.composer.move_word_forward();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn delete_input_word_backward(&mut self) {
+        self.composer.delete_word_backward();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn delete_input_word_forward(&mut self) {
+        self.composer.delete_word_forward();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn kill_input_to_end(&mut self) {
+        self.composer.kill_to_end_of_line();
+        self.sync_legacy_from_composer();
+    }
+
+    #[allow(dead_code)]
+    pub fn kill_input_to_start(&mut self) {
+        self.composer.kill_to_start_of_line();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn yank_input(&mut self) {
+        self.composer.yank();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_home_line(&mut self) {
+        self.composer.move_home_line();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_end_line(&mut self) {
+        self.composer.move_end_line();
+        self.sync_legacy_from_composer();
+    }
+
+    /// Move cursor up one visual line. Returns false if already on the first line.
+    pub fn move_input_up(&mut self, visual_width: usize) -> bool {
+        let moved = self.composer.move_up_in_multiline(visual_width);
+        if moved {
+            self.sync_legacy_from_composer();
+        }
+        moved
+    }
+
+    /// Move cursor down one visual line. Returns false if already on the last line.
+    pub fn move_input_down(&mut self, visual_width: usize) -> bool {
+        let moved = self.composer.move_down_in_multiline(visual_width);
+        if moved {
+            self.sync_legacy_from_composer();
+        }
+        moved
     }
 
     /// Toggle the most recent tool block (ToolRunning or ToolDone) by call_id.
@@ -1390,15 +1498,31 @@ impl TuiSessionState {
         self.busy = busy;
     }
 
-    pub fn set_busy_state(&mut self, state: BusyState) {
-        if self.current_busy_state != state {
-            self.current_busy_state = state;
+    pub fn set_busy_state(&mut self, new_state: BusyState) {
+        if self.current_busy_state != new_state {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            // Record when a busy turn begins (first non-idle state after idle).
+            if self.current_busy_state == BusyState::Idle {
+                self.turn_started_at = Some(now_ms);
+            }
+            // When returning to idle, compute elapsed latency.
+            if new_state == BusyState::Idle {
+                self.last_turn_latency_ms = self
+                    .turn_started_at
+                    .take()
+                    .map(|started| now_ms.saturating_sub(started));
+            }
+            self.current_busy_state = new_state;
             self.busy_state_since = Instant::now();
         }
     }
 
     pub fn push_error(&mut self, msg: String) {
-        self.blocks.push(DisplayBlock::ErrorLine(msg));
+        self.push_block(DisplayBlock::ErrorLine(msg));
         self.touch_transcript();
     }
 
@@ -1474,12 +1598,12 @@ impl TuiSessionState {
         if let Some(t) = self.streaming_thinking.take()
             && !t.trim().is_empty()
         {
-            self.blocks.push(DisplayBlock::Thinking(t));
+            self.push_block(DisplayBlock::Thinking(t));
         }
         if let Some(s) = self.streaming_assistant.take()
             && !s.trim().is_empty()
         {
-            self.blocks.push(DisplayBlock::Assistant(s));
+            self.push_block(DisplayBlock::Assistant(s));
         }
     }
 
@@ -1501,7 +1625,7 @@ impl TuiSessionState {
                 if role == "user" {
                     self.streaming_assistant = None;
                     self.streaming_thinking = None;
-                    self.blocks.push(DisplayBlock::User(content.clone()));
+                    self.push_block(DisplayBlock::User(content.clone()));
                     self.set_process("queued prompt", truncate(content, 96));
                     self.set_busy_state(BusyState::Thinking);
                     transcript_dirty = true;
@@ -1510,9 +1634,9 @@ impl TuiSessionState {
                     if let Some(t) = self.streaming_thinking.take()
                         && !t.trim().is_empty()
                     {
-                        self.blocks.push(DisplayBlock::Thinking(t));
+                        self.push_block(DisplayBlock::Thinking(t));
                     }
-                    self.blocks.push(DisplayBlock::Assistant(content.clone()));
+                    self.push_block(DisplayBlock::Assistant(content.clone()));
                     self.set_process("response ready", truncate(content, 96));
                     self.set_busy_state(BusyState::Idle);
                     transcript_dirty = true;
@@ -1540,13 +1664,13 @@ impl TuiSessionState {
             } => {
                 self.flush_stream_before_tool();
                 self.tool_started.insert(call_id.clone(), Instant::now());
-                self.blocks.push(DisplayBlock::ToolRunning {
+                self.push_block(DisplayBlock::ToolRunning {
                     name: tool.clone(),
                     call_id: call_id.clone(),
                     input: tool_ui::format_input_for_display(tool, input),
                 });
                 if let Some(message) = activity::started(tool, input) {
-                    self.blocks.push(DisplayBlock::System(message));
+                    self.push_block(DisplayBlock::System(message));
                 }
                 let ui = tool_ui::metadata(tool);
                 let preview = tool_ui::preview_from_value(tool, input);
@@ -1594,7 +1718,7 @@ impl TuiSessionState {
                         &output.output,
                         Some(self.workspace_root.as_path()),
                     ) {
-                        self.blocks.push(DisplayBlock::System(message));
+                        self.push_block(DisplayBlock::System(message));
                     }
                     self.blocks[idx] = DisplayBlock::ToolDone {
                         name,
@@ -1604,7 +1728,7 @@ impl TuiSessionState {
                         duration_ms,
                     };
                 } else {
-                    self.blocks.push(DisplayBlock::ToolDone {
+                    self.push_block(DisplayBlock::ToolDone {
                         name: "?".into(),
                         call_id: call_id.clone(),
                         ok,
@@ -1632,7 +1756,7 @@ impl TuiSessionState {
             } => {
                 // Idempotency: if we receive duplicate approval events for the same call,
                 // keep only one pending prompt row in transcript state.
-                self.blocks.retain(
+                self.retain_blocks(
                     |b| !matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == *call_id),
                 );
                 let input = self
@@ -1660,7 +1784,7 @@ impl TuiSessionState {
                 ) {
                     self.blocks[idx] = DisplayBlock::ApprovalPending(req);
                 } else {
-                    self.blocks.push(DisplayBlock::ApprovalPending(req));
+                    self.push_block(DisplayBlock::ApprovalPending(req));
                 }
                 self.set_process("waiting approval", truncate(description, 96));
                 transcript_dirty = true;
@@ -1685,10 +1809,10 @@ impl TuiSessionState {
                     .take()
                     .filter(|req| req.call_id != *call_id);
                 self.approval_option_index = 0;
-                self.blocks.retain(
+                self.retain_blocks(
                     |b| !matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == *call_id),
                 );
-                self.blocks.push(DisplayBlock::ApprovalResolved {
+                self.push_block(DisplayBlock::ApprovalResolved {
                     tool,
                     approved: *approved,
                 });
@@ -1704,7 +1828,7 @@ impl TuiSessionState {
             }
             AgentEvent::QuestionRequested { question } => {
                 self.active_question = Some(question.clone());
-                self.blocks.push(DisplayBlock::Question(question.clone()));
+                self.push_block(DisplayBlock::Question(question.clone()));
                 // Bring the prompt into view when follow-tail is on (default).
                 self.transcript_follow_tail = true;
                 self.open_question_modal();
@@ -1719,7 +1843,7 @@ impl TuiSessionState {
                     .insert(question_id.clone(), selection.clone());
                 self.active_question = None;
                 self.close_question_modal();
-                self.blocks.push(DisplayBlock::System(format!(
+                self.push_block(DisplayBlock::System(format!(
                     "Answered question {question_id}: {selection:?}"
                 )));
                 self.set_process("input received", format!("{selection:?}"));
@@ -1740,7 +1864,7 @@ impl TuiSessionState {
                 self.set_process("session ended", "");
             }
             AgentEvent::Error { message } => {
-                self.blocks.push(DisplayBlock::ErrorLine(message.clone()));
+                self.push_block(DisplayBlock::ErrorLine(message.clone()));
                 self.set_process("error", truncate(message, 96));
                 if message.to_ascii_lowercase().contains("run cancelled") {
                     self.set_busy_state(BusyState::Idle);
@@ -1774,7 +1898,7 @@ impl TuiSessionState {
                         skill: None,
                     });
                 }
-                self.blocks.push(DisplayBlock::System(format!(
+                self.push_block(DisplayBlock::System(format!(
                     "Sub-agent {short}… — {}",
                     truncate(task, 80)
                 )));
@@ -1831,7 +1955,7 @@ impl TuiSessionState {
                     row.phase = "done".into();
                     row.detail = status.clone();
                 }
-                self.blocks.push(DisplayBlock::System(format!(
+                self.push_block(DisplayBlock::System(format!(
                     "Sub-agent {short}… done: {status}"
                 )));
                 transcript_dirty = true;

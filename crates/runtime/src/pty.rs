@@ -16,10 +16,8 @@ impl PtyManager {
 
     /// Spawn a command in a new PTY, capture output, and return it.
     pub async fn exec(&self, command: &str, timeout_secs: u64) -> Result<PtyOutput, PtyError> {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-lc")
-            .arg(command)
-            .current_dir(&self.workspace_root)
+        let mut cmd = shell_command(command);
+        cmd.current_dir(&self.workspace_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
@@ -42,6 +40,20 @@ impl PtyManager {
             exit_code: output.status.code().unwrap_or(-1),
         })
     }
+}
+
+#[cfg(windows)]
+fn shell_command(command: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("cmd");
+    cmd.arg("/C").arg(command);
+    cmd
+}
+
+#[cfg(not(windows))]
+fn shell_command(command: &str) -> tokio::process::Command {
+    let mut cmd = tokio::process::Command::new("sh");
+    cmd.arg("-lc").arg(command);
+    cmd
 }
 
 #[derive(Debug)]

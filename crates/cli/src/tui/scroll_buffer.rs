@@ -46,6 +46,11 @@ impl ScrollBuffer {
         self.lines.len()
     }
 
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.lines.is_empty()
+    }
+
     pub fn is_sticky(&self) -> bool {
         self.sticky_bottom
     }

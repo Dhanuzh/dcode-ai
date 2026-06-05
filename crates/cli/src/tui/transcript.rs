@@ -94,23 +94,30 @@ pub(crate) fn transcript_lines_and_hits(
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
     }
 
-    for block in &state.blocks {
+    for (idx, block) in state.blocks.iter().enumerate() {
+        let ts_label = state
+            .block_timestamps
+            .get(idx)
+            .copied()
+            .and_then(fmt_wall_time);
         match block {
             DisplayBlock::User(content) => {
                 push_section_gap(&mut lines, &mut hits);
                 let user_chip = format!(" {:<9} ", "user");
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![Span::styled(
-                        user_chip,
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::user())
-                            .add_modifier(Modifier::BOLD),
-                    )]),
-                    None,
-                );
+                let mut user_header = vec![Span::styled(
+                    user_chip,
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(theme::user())
+                        .add_modifier(Modifier::BOLD),
+                )];
+                if let Some(t) = &ts_label {
+                    user_header.push(Span::styled(
+                        format!("  {t}"),
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
+                push_transcript_line(&mut lines, &mut hits, Line::from(user_header), None);
                 for text_line in wrap_text(content, w) {
                     push_transcript_line(
                         &mut lines,
@@ -127,24 +134,31 @@ pub(crate) fn transcript_lines_and_hits(
             DisplayBlock::Assistant(content) => {
                 push_section_gap(&mut lines, &mut hits);
                 let assistant_chip = format!(" {:<9} ", "assistant");
+                let mut asst_header = vec![
+                    Span::styled(
+                        assistant_chip,
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::assistant())
+                            .bold(),
+                    ),
+                    Span::styled(
+                        " response ",
+                        Style::default()
+                            .fg(theme::assistant())
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                ];
+                if let Some(t) = &ts_label {
+                    asst_header.push(Span::styled(
+                        format!("  {t}"),
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
-                    Line::from(vec![
-                        Span::styled(
-                            assistant_chip,
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(theme::assistant())
-                                .bold(),
-                        ),
-                        Span::styled(
-                            " response ",
-                            Style::default()
-                                .fg(theme::assistant())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
+                    Line::from(asst_header),
                     Some(LineClickHit::CopyText(content.clone())),
                 );
                 let (md_lines, md_hits) = render_markdown_lines_with_hits(
@@ -196,6 +210,12 @@ pub(crate) fn transcript_lines_and_hits(
                 header_spans.push(tool_effect_badge(name));
                 header_spans.push(Span::raw(" "));
                 header_spans.push(tool_status_chip("RUNNING", theme::warn()));
+                if let Some(t) = &ts_label {
+                    header_spans.push(Span::styled(
+                        format!("  {t}"),
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
                 push_transcript_line(&mut lines, &mut hits, Line::from(header_spans), None);
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
@@ -319,7 +339,19 @@ pub(crate) fn transcript_lines_and_hits(
                             .add_modifier(Modifier::BOLD),
                     ));
                 }
-                push_transcript_line(&mut lines, &mut hits, Line::from(header), None);
+                if let Some(t) = &ts_label {
+                    header.push(Span::styled(
+                        format!("  {t}"),
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
+                // Clicking the tool header copies its output to clipboard.
+                let copy_hit = if detail.trim().is_empty() {
+                    None
+                } else {
+                    Some(LineClickHit::CopyText(detail.clone()))
+                };
+                push_transcript_line(&mut lines, &mut hits, Line::from(header), copy_hit);
                 if !collapsed && !detail.trim().is_empty() {
                     push_tool_detail_lines(&mut lines, &mut hits, detail, w.saturating_sub(6), 80);
                 }
@@ -763,6 +795,11 @@ pub(crate) fn transcript_lines_and_hits(
     collapse_blank_runs(lines, hits)
 }
 
+#[allow(dead_code)]
+pub fn transcript_line_count_for_bench(state: &TuiSessionState, width: u16) -> usize {
+    transcript_lines_and_hits(state, width).0.len()
+}
+
 /// Tighten vertical rhythm: collapse runs of blank lines to a single blank and
 /// trim leading/trailing blanks. Keeps the `lines`/`hits` arrays parallel.
 fn collapse_blank_runs(
@@ -786,6 +823,16 @@ fn collapse_blank_runs(
         out_hits.pop();
     }
     (out_lines, out_hits)
+}
+
+/// Format a Unix-seconds timestamp as local `HH:MM`, or `None` if zero.
+fn fmt_wall_time(secs: u64) -> Option<String> {
+    if secs == 0 {
+        return None;
+    }
+    use chrono::{Local, TimeZone};
+    let dt = Local.timestamp_opt(secs as i64, 0).single()?;
+    Some(dt.format("%H:%M").to_string())
 }
 
 /// Format a tool duration as a compact badge: `120ms` under 1s, else `1.2s`.

@@ -230,6 +230,22 @@ fn keymaps_help_lines() -> Vec<String> {
         "  Ctrl+L       Clear screen".into(),
         "  Ctrl+C       Cancel current turn".into(),
         String::new(),
+        "Editing (Emacs-style)".into(),
+        "  Ctrl+←/→     Move word backward / forward".into(),
+        "  Alt+B / Alt+F  Move word backward / forward".into(),
+        "  Ctrl+W        Delete word backward".into(),
+        "  Alt+⌫         Delete word backward".into(),
+        "  Alt+D         Delete word forward".into(),
+        "  Ctrl+K        Kill to end of line (saves to kill ring)".into(),
+        "  Ctrl+Y        Yank (paste) from kill ring".into(),
+        "  Home / End    Start / end of current line".into(),
+        "  ↑ / ↓        Move cursor up/down in multiline; history at edges".into(),
+        String::new(),
+        "Clipboard".into(),
+        "  F6           Copy latest assistant response".into(),
+        "  F7           Copy last tool output".into(),
+        "  Click header Copy tool output / assistant response (TUI)".into(),
+        String::new(),
         "Leader (Ctrl+X)".into(),
         "  Ctrl+X M     Switch model".into(),
         "  Ctrl+X E     Open editor".into(),
@@ -951,6 +967,7 @@ impl Repl {
                     "  /test <task>       Validation turn".into(),
                     "  /clear             Clear the screen".into(),
                     "  /compact           Compact session summary".into(),
+                    "  /compact --preview Preview preserved compaction context".into(),
                     "  /new               Start a new session".into(),
                     "  /export            Export session to markdown".into(),
                     "  /thinking          Toggle thinking/reasoning visibility".into(),
@@ -1369,6 +1386,11 @@ impl Repl {
                 }
             }
             "/compact" => {
+                if rest == "--preview" {
+                    let preview = self.runtime.compaction_preview();
+                    out.println(&format!("compaction preview:\n{}", preview));
+                    return Ok(true);
+                }
                 let summary = self.runtime.compact_summary();
                 self.runtime.set_session_summary(Some(summary.clone()));
                 self.runtime

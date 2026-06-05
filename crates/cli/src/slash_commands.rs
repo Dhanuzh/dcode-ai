@@ -14,6 +14,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/skills",
     "/memory",
     "/compact",
+    "/compact --preview",
     "/models",
     "/mcp",
     "/agents",

@@ -71,7 +71,7 @@ impl ToolRegistry {
     ) -> Self {
         let mut registry = Self::with_default_readonly_tools(workspace_root.clone(), web_config);
         registry.register(Box::new(code_intel_tool::CodeIntelTool::new(
-            crate::code_intel::FastLocalCodeIntel::new(workspace_root.clone()),
+            crate::code_intel::WorkspaceCodeIntel::new(workspace_root.clone()),
         )));
         registry.register(Box::new(write_file::WriteFileTool::new(
             workspace_root.clone(),

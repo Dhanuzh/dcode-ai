@@ -269,23 +269,26 @@ impl AgentLoop {
             if tool_calls.is_empty() {
                 if assistant_text.trim().is_empty() {
                     empty_retries += 1;
-                    if empty_retries <= MAX_EMPTY_RETRIES && got_usage {
+                    let detail = empty_completion_detail(&self.model, got_usage);
+                    if empty_retries <= MAX_EMPTY_RETRIES {
                         self.emit(AgentEvent::Error {
                             message: format!(
-                                "Provider returned empty response (retry {empty_retries}/{MAX_EMPTY_RETRIES})"
+                                "{detail}; retrying empty completion ({empty_retries}/{MAX_EMPTY_RETRIES})"
                             ),
                         })
                         .await;
                         continue;
                     }
+                    let message = format!(
+                        "{detail} after {} attempts",
+                        MAX_EMPTY_RETRIES.saturating_add(1)
+                    );
                     self.emit(AgentEvent::Error {
-                        message: "Provider returned empty response with no tool calls".into(),
+                        message: message.clone(),
                     })
                     .await;
                     self.undo.abort_turn();
-                    return Err(ProviderError::Other(
-                        "Provider returned empty response with no tool calls after retries".into(),
-                    ));
+                    return Err(ProviderError::RequestFailed(message));
                 }
                 self.messages.push(
                     Message::assistant(assistant_text.clone())
@@ -711,6 +714,17 @@ fn format_tool_result(result: &dcode_ai_common::tool::ToolResult) -> String {
     }
 }
 
+fn empty_completion_detail(model: &str, got_usage: bool) -> String {
+    let usage_detail = if got_usage {
+        "usage was reported"
+    } else {
+        "no usage was reported"
+    };
+    format!(
+        "Provider returned empty completion for model `{model}`: no assistant text or tool calls ({usage_detail})"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -721,11 +735,12 @@ mod tests {
     use dcode_ai_common::config::PermissionConfig;
     use dcode_ai_common::message::Message;
     use dcode_ai_common::tool::ToolDefinition;
+    use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex;
 
     struct ChunkProvider {
-        chunks: Mutex<Option<Vec<StreamChunk>>>,
+        chunks: Mutex<VecDeque<Vec<StreamChunk>>>,
     }
 
     #[async_trait]
@@ -742,7 +757,7 @@ mod tests {
                 .chunks
                 .lock()
                 .expect("provider chunks lock")
-                .take()
+                .pop_front()
                 .unwrap_or_default();
             tokio::spawn(async move {
                 for chunk in chunks {
@@ -757,9 +772,9 @@ mod tests {
     async fn provider_stream_error_fails_loudly() {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(16);
         let provider = Box::new(ChunkProvider {
-            chunks: Mutex::new(Some(vec![StreamChunk::Error(
+            chunks: Mutex::new(VecDeque::from([vec![StreamChunk::Error(
                 "openai stream error: connection reset".into(),
-            )])),
+            )]])),
         });
         let mut agent = AgentLoop::new(
             provider,
@@ -798,11 +813,94 @@ mod tests {
         assert!(!saw_token_event);
     }
 
+    async fn run_empty_completion_case(
+        chunks: Vec<StreamChunk>,
+    ) -> (Result<String, ProviderError>, Vec<AgentEvent>) {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(32);
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(VecDeque::from([chunks.clone(), chunks.clone(), chunks])),
+        });
+        let mut agent = AgentLoop::new(
+            provider,
+            ToolRegistry::new(),
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "test-model".into(),
+            event_tx,
+            5,
+            3,
+            1,
+            None,
+        );
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = agent.run_turn("hello", temp.path(), &[]).await;
+        let mut events = Vec::new();
+        while let Ok(event) = event_rx.try_recv() {
+            events.push(event);
+        }
+        (result, events)
+    }
+
+    #[tokio::test]
+    async fn empty_done_only_completion_fails_loudly_after_retries() {
+        let (result, events) = run_empty_completion_case(vec![StreamChunk::Done]).await;
+
+        assert!(
+            matches!(result, Err(ProviderError::RequestFailed(message)) if message.contains("empty completion")
+                && message.contains("test-model")
+                && message.contains("no usage was reported")
+                && message.contains("after 3 attempts"))
+        );
+        let retry_events = events
+            .iter()
+            .filter(|event| {
+                matches!(event, AgentEvent::Error { message } if message.contains("retrying empty completion"))
+            })
+            .count();
+        assert_eq!(retry_events, 2);
+    }
+
+    #[tokio::test]
+    async fn usage_only_completion_fails_loudly_after_retries() {
+        let (result, _events) = run_empty_completion_case(vec![
+            StreamChunk::Usage {
+                input_tokens: 11,
+                output_tokens: 0,
+            },
+            StreamChunk::Done,
+        ])
+        .await;
+
+        assert!(
+            matches!(result, Err(ProviderError::RequestFailed(message)) if message.contains("empty completion")
+                && message.contains("usage was reported"))
+        );
+    }
+
+    #[tokio::test]
+    async fn reasoning_only_completion_is_not_successful_assistant_output() {
+        let (result, events) = run_empty_completion_case(vec![
+            StreamChunk::InternalDelta("thinking only".into()),
+            StreamChunk::Done,
+        ])
+        .await;
+
+        assert!(
+            matches!(result, Err(ProviderError::RequestFailed(message)) if message.contains("empty completion"))
+        );
+        assert!(events.iter().any(
+            |event| matches!(event, AgentEvent::ThinkingDelta { delta } if delta == "thinking only")
+        ));
+        assert!(!events.iter().any(
+            |event| matches!(event, AgentEvent::MessageReceived { role, .. } if role == "assistant")
+        ));
+    }
+
     #[tokio::test]
     async fn compact_messages_replaces_history_and_returns_count() {
         let (event_tx, _rx) = tokio::sync::mpsc::channel(16);
         let provider = Box::new(ChunkProvider {
-            chunks: Mutex::new(None),
+            chunks: Mutex::new(VecDeque::new()),
         });
         let mut agent = AgentLoop::new(
             provider,

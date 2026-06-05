@@ -8,6 +8,7 @@ INSTALL_DIR="${DCODE_AI_INSTALL_DIR:-/usr/local/bin}"
 FALLBACK_VERSION="0.0.12"
 
 info()  { printf '\033[1;34m=>\033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
 error() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 detect_platform() {
@@ -51,6 +52,33 @@ http_download() {
     else
         error "Neither curl nor wget found. Install one and try again."
     fi
+}
+
+verify_checksum() {
+    # Args: <archive-file> <checksum-file>
+    local archive checksum_file expected actual checksum_name
+    archive="$1"
+    checksum_file="$2"
+
+    expected="$(awk '{print $1; exit}' "$checksum_file")"
+    [ -n "$expected" ] || error "Checksum file is empty: $checksum_file"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$archive" | awk '{print $1}')"
+        checksum_name="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+        checksum_name="shasum"
+    else
+        warn "No sha256sum or shasum found; skipping checksum verification."
+        return 0
+    fi
+
+    if [ "$actual" != "$expected" ]; then
+        error "Checksum verification failed for $(basename "$archive")"
+    fi
+
+    info "Verified checksum with ${checksum_name}"
 }
 
 latest_release_tag() {
@@ -125,7 +153,7 @@ cleanup() { [ -n "$tmpdir" ] && rm -rf "$tmpdir"; }
 trap cleanup EXIT
 
 main() {
-    local platform target_url archive
+    local platform target_url checksum_url archive checksum_file
 
     resolve_version
     info "Installing ${BINARY} ${TAG}"
@@ -140,6 +168,13 @@ main() {
 
     archive="${tmpdir}/${BINARY}.tar.gz"
     http_download "$target_url" "$archive"
+    checksum_url="${target_url}.sha256"
+    checksum_file="${archive}.sha256"
+    if http_download "$checksum_url" "$checksum_file" 2>/dev/null; then
+        verify_checksum "$archive" "$checksum_file"
+    else
+        warn "Checksum file not found for ${TAG}; installing without archive verification."
+    fi
 
     tar xzf "$archive" -C "$tmpdir"
 

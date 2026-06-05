@@ -330,3 +330,37 @@ impl std::fmt::Display for ChangeType {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn list_worktrees_discovers_dcode_ai_worktree_dirs() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let worktrees_dir = temp.path().join(".dcode-ai").join("worktrees");
+        std::fs::create_dir_all(worktrees_dir.join("session-b")).expect("session-b");
+        std::fs::create_dir_all(worktrees_dir.join("session-a")).expect("session-a");
+        std::fs::write(worktrees_dir.join("not-a-dir"), "ignored").expect("file");
+
+        let manager = WorktreeManager::new(temp.path());
+        let mut worktrees = manager.list_worktrees();
+        worktrees.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+
+        assert_eq!(worktrees.len(), 2);
+        assert_eq!(worktrees[0].session_id, "session-a");
+        assert_eq!(worktrees[0].branch_name, "dcode-ai/session-a");
+        assert_eq!(worktrees[0].base_branch, "main");
+        assert_eq!(worktrees[1].session_id, "session-b");
+    }
+
+    #[test]
+    fn changed_files_returns_empty_for_non_git_worktree() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let manager = WorktreeManager::new(temp.path());
+
+        let changed = manager.changed_files(temp.path(), "main");
+
+        assert!(changed.is_empty());
+    }
+}

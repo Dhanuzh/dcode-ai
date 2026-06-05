@@ -30,7 +30,7 @@ Built for developers who want a fast, local-first AI coding assistant that stays
 | **Live TUI**                   | Full interactive terminal UI with command palette, themes, mouse support                                  |
 | **Session persistence**        | Every conversation saved. Resume, replay, or attach to any session                                        |
 | **Sub-agents & worktrees**     | Spawn child agents with parent/child lineage and isolated git worktrees                                   |
-| **Unix-socket IPC**            | Control detached sessions programmatically — send prompts, receive events                                 |
+| **Runtime IPC**                | Control detached sessions programmatically — send prompts, receive events                                 |
 | **Headless automation**        | One-shot prompts, NDJSON streaming, JSON output — CI/pipe friendly                                        |
 | **Multi-provider**             | MiniMax, Anthropic, OpenAI, OpenRouter, OpenAI-compatible — switch inline                                 |
 | **Theme picker**               | `/theme` opens an interactive dropdown with live preview                                                  |
@@ -54,6 +54,10 @@ curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | b
 ```bash
 curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | DCODE_AI_VERSION=vX.Y.Z bash
 ```
+
+Release archives include `.sha256` checksum files. The installer verifies them
+with `sha256sum` or `shasum` when available; older releases without checksum
+files install with a warning.
 
 ### User-local install (no sudo)
 
@@ -127,6 +131,7 @@ dcode-ai attach <session-id>   # attach to live output
 | `/sessions`    | Session picker                    |
 | `/branch`      | Git branch picker                 |
 | `/compact`     | Summarize transcript              |
+| `/compact --preview` | Preview preserved compaction context |
 | `/new`         | New session                       |
 | `/resume <id>` | Resume session by ID (in-process) |
 | `/editor`      | Open `$EDITOR` for composing      |
@@ -354,7 +359,7 @@ The agent has access to these built-in tools:
 | Tool            | Description                                       |
 | --------------- | ------------------------------------------------- |
 | `search_code`   | Ripgrep-based search with structured JSON results |
-| `query_symbols` | Fast Rust symbol lookup by name                   |
+| `query_symbols` | LSP-first code intelligence for symbols, definitions, references, and diagnostics; falls back to fast local lookup when `rust-analyzer` is unavailable |
 
 ### Shell
 
@@ -405,8 +410,10 @@ Every conversation is automatically persisted to disk.
 ```
 <workspace>/.dcode-ai/sessions/
 ├── <session-id>.json              # session state
-├── <session-id>.events.jsonl      # append-only event log
-└── <worktrees>/<session-id>/      # optional git worktree
+└── <session-id>.events.jsonl      # append-only event log
+
+<workspace>/.dcode-ai/worktrees/
+└── <session-id>/                  # optional git worktree
 ```
 
 ### Commands
@@ -417,7 +424,14 @@ dcode-ai logs <id>              # replay event log
 dcode-ai resume <id>            # continue a saved session
 dcode-ai attach <id>            # follow live output
 dcode-ai cancel <id>            # stop a running session
+dcode-ai worktrees list         # inspect isolated agent worktrees
+dcode-ai worktrees prune        # prune stale git worktree metadata
+dcode-ai worktrees merge <id>   # merge dcode-ai/<id> into its base branch
 ```
+
+Machine-readable session automation uses JSON/NDJSON. See
+[`docs/ipc-ndjson.md`](docs/ipc-ndjson.md) for event envelope and IPC command
+schemas.
 
 ### Session lifecycle
 
@@ -488,16 +502,16 @@ done
 dcode-ai run --prompt "summarize README.md" --json
 ```
 
-### Unix-socket IPC
+### Runtime IPC
 
-Detached sessions expose a control socket:
+Detached sessions expose a platform IPC endpoint:
 
 ```bash
 dcode-ai spawn --prompt "refactor module X"
 dcode-ai ipc <session-id> send '{"type":"SendMessage","content":"follow up"}'
 ```
 
-Socket location: `$XDG_RUNTIME_DIR/dcode-ai/<session-id>.sock` or `/tmp/dcode-ai/<session-id>.sock`
+Endpoint location: Unix uses `$XDG_RUNTIME_DIR/dcode-ai/<session-id>.sock` or `/tmp/dcode-ai/<session-id>.sock`; Windows uses a loopback TCP endpoint recorded under `%LOCALAPPDATA%\\dcode-ai\\<session-id>.<port>.tcp`.
 
 ### Orchestration metadata
 
@@ -551,6 +565,8 @@ dcode-ai
 ```
 
 Single binary output: `dcode-ai`. No runtime dependencies beyond a working terminal and network access for LLM calls.
+
+Performance baseline commands are documented in [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ---
 

@@ -260,6 +260,11 @@ enum Command {
         #[command(subcommand)]
         command: IndexCmd,
     },
+    /// Inspect and merge dcode-ai git worktrees.
+    Worktrees {
+        #[command(subcommand)]
+        command: WorktreesCmd,
+    },
     /// OAuth login for providers.
     Login {
         #[arg(value_enum)]
@@ -285,6 +290,33 @@ enum IndexCmd {
     /// Print the last generated index (requires `index build` first).
     Show {
         /// Pretty-print full JSON; otherwise print a short summary
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum WorktreesCmd {
+    /// List dcode-ai worktrees under .dcode-ai/worktrees/.
+    List {
+        /// Output structured JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run `git worktree prune` and report remaining dcode-ai worktrees.
+    Prune {
+        /// Output structured JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Merge a dcode-ai worktree branch into its base branch.
+    Merge {
+        /// Session id whose branch is `dcode-ai/<session-id>`.
+        session_id: String,
+        /// Base branch to merge into (defaults to the listed worktree base).
+        #[arg(long)]
+        base: Option<String>,
+        /// Output structured JSON.
         #[arg(long)]
         json: bool,
     },
@@ -395,16 +427,29 @@ impl CliPermissionMode {
     }
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    match try_main().await {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            eprintln!("Error: {error}");
-            print_connect_hint_if_missing_provider_auth(&error);
-            classify_exit_code(&error)
-        }
-    }
+fn main() -> ExitCode {
+    // Run on a thread with an enlarged stack (32 MiB) to avoid stack overflows
+    // in debug builds on Windows where the default stack is only 1 MiB.
+    let result = std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(|| {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .expect("tokio runtime")
+                .block_on(async {
+                    match try_main().await {
+                        Ok(()) => ExitCode::SUCCESS,
+                        Err(error) => {
+                            eprintln!("Error: {error}");
+                            print_connect_hint_if_missing_provider_auth(&error);
+                            classify_exit_code(&error)
+                        }
+                    }
+                })
+        })
+        .expect("spawn main thread");
+    result.join().unwrap_or(ExitCode::FAILURE)
 }
 
 fn print_connect_hint_if_missing_provider_auth(error: &anyhow::Error) {
@@ -682,6 +727,21 @@ async fn try_main() -> anyhow::Result<()> {
             }
             IndexCmd::Show { json } => {
                 cli_index::run_index_show(&workspace_root, json).await?;
+            }
+        },
+        Some(Command::Worktrees { command }) => match command {
+            WorktreesCmd::List { json } => {
+                list_worktrees(&workspace_root, json)?;
+            }
+            WorktreesCmd::Prune { json } => {
+                prune_worktrees(&workspace_root, json)?;
+            }
+            WorktreesCmd::Merge {
+                session_id,
+                base,
+                json,
+            } => {
+                merge_worktree(&workspace_root, &session_id, base.as_deref(), json)?;
             }
         },
         Some(Command::Autoresearch { command }) => match command {
@@ -1135,6 +1195,141 @@ async fn list_sessions(
     Ok(())
 }
 
+fn collect_worktree_entries(workspace_root: &Path) -> anyhow::Result<Vec<WorktreeCommandEntry>> {
+    let manager = dcode_ai_runtime::worktree::WorktreeManager::new(workspace_root);
+    if !manager.is_git_repo() {
+        anyhow::bail!(
+            "not a git repository: {}",
+            workspace_root
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_root.to_path_buf())
+                .display()
+        );
+    }
+
+    let mut entries = manager
+        .list_worktrees()
+        .into_iter()
+        .map(|info| {
+            let changed_files = manager
+                .changed_files(&info.worktree_path, &info.base_branch)
+                .len();
+            let (ahead, behind) = manager.ahead_behind(&info.worktree_path, &info.base_branch);
+            WorktreeCommandEntry {
+                session_id: info.session_id,
+                branch_name: info.branch_name,
+                base_branch: info.base_branch,
+                worktree_path: info.worktree_path,
+                changed_files,
+                ahead,
+                behind,
+            }
+        })
+        .collect::<Vec<_>>();
+    entries.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+    Ok(entries)
+}
+
+fn list_worktrees(workspace_root: &Path, json: bool) -> anyhow::Result<()> {
+    let worktrees = collect_worktree_entries(workspace_root)?;
+    if json {
+        print_json(&WorktreeListOutput { worktrees }, false)?;
+    } else if worktrees.is_empty() {
+        println!("No dcode-ai worktrees found");
+    } else {
+        for worktree in worktrees {
+            print_human_worktree(&worktree);
+        }
+    }
+    Ok(())
+}
+
+fn prune_worktrees(workspace_root: &Path, json: bool) -> anyhow::Result<()> {
+    let manager = dcode_ai_runtime::worktree::WorktreeManager::new(workspace_root);
+    if !manager.is_git_repo() {
+        anyhow::bail!(
+            "not a git repository: {}",
+            workspace_root
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_root.to_path_buf())
+                .display()
+        );
+    }
+    manager.prune_stale();
+    let worktrees = collect_worktree_entries(workspace_root)?;
+    if json {
+        print_json(
+            &WorktreePruneOutput {
+                pruned: true,
+                worktrees,
+            },
+            false,
+        )?;
+    } else {
+        println!("Pruned git worktree metadata");
+        if worktrees.is_empty() {
+            println!("No dcode-ai worktrees found");
+        } else {
+            for worktree in worktrees {
+                print_human_worktree(&worktree);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn merge_worktree(
+    workspace_root: &Path,
+    session_id: &str,
+    base: Option<&str>,
+    json: bool,
+) -> anyhow::Result<()> {
+    let manager = dcode_ai_runtime::worktree::WorktreeManager::new(workspace_root);
+    if !manager.is_git_repo() {
+        anyhow::bail!(
+            "not a git repository: {}",
+            workspace_root
+                .canonicalize()
+                .unwrap_or_else(|_| workspace_root.to_path_buf())
+                .display()
+        );
+    }
+
+    let entries = collect_worktree_entries(workspace_root)?;
+    let listed = entries.iter().find(|entry| entry.session_id == session_id);
+    let base_branch = match base {
+        Some(branch) => branch.to_string(),
+        None => listed
+            .map(|entry| entry.base_branch.clone())
+            .ok_or_else(|| {
+                anyhow::anyhow!("no dcode-ai worktree found for session `{session_id}`")
+            })?,
+    };
+    let branch_name = listed
+        .map(|entry| entry.branch_name.clone())
+        .unwrap_or_else(|| format!("dcode-ai/{session_id}"));
+
+    manager
+        .merge_into_base(session_id, &base_branch)
+        .map_err(anyhow::Error::msg)?;
+
+    let output = WorktreeMergeOutput {
+        session_id: session_id.to_string(),
+        branch_name,
+        base_branch,
+        merged: true,
+    };
+    if json {
+        print_json(&output, false)?;
+    } else {
+        println!(
+            "Merged {} into {} for {}",
+            output.branch_name, output.base_branch, output.session_id
+        );
+    }
+    Ok(())
+}
+
 async fn latest_session_id(
     config: &DcodeAiConfig,
     workspace_root: &Path,
@@ -1250,6 +1445,40 @@ async fn show_logs(
     print_log_file(config, workspace_root, session_id, json).await
 }
 
+async fn load_session_for_ipc_command(
+    store: &dcode_ai_runtime::session_store::SessionStore,
+    session_id: &str,
+    json: bool,
+) -> anyhow::Result<dcode_ai_common::session::SessionState> {
+    match store.load(session_id).await {
+        Ok(session) => Ok(session),
+        Err(err) => {
+            if json {
+                let message = format!("session not found: {session_id}");
+                print_command_error_json("session_not_found", &message, Some(session_id))?;
+            }
+            Err(anyhow::Error::msg(err))
+        }
+    }
+}
+
+async fn load_session_snapshot_for_ipc_command(
+    store: &dcode_ai_runtime::session_store::SessionStore,
+    session_id: &str,
+    json: bool,
+) -> anyhow::Result<SessionSnapshot> {
+    match store.load_snapshot(session_id).await {
+        Ok(snapshot) => Ok(snapshot),
+        Err(err) => {
+            if json {
+                let message = format!("session not found: {session_id}");
+                print_command_error_json("session_not_found", &message, Some(session_id))?;
+            }
+            Err(anyhow::Error::msg(err))
+        }
+    }
+}
+
 async fn attach_session(
     config: &DcodeAiConfig,
     workspace_root: &Path,
@@ -1259,7 +1488,7 @@ async fn attach_session(
     let store = dcode_ai_runtime::session_store::SessionStore::new(
         workspace_root.join(&config.session.history_dir),
     );
-    let session = store.load(session_id).await.map_err(anyhow::Error::msg)?;
+    let session = load_session_for_ipc_command(&store, session_id, json).await?;
 
     if let Some(socket_path) = session.meta.socket_path.clone() {
         let client = dcode_ai_runtime::ipc::IpcClient::new(socket_path);
@@ -1283,10 +1512,7 @@ async fn show_status(
     let store = dcode_ai_runtime::session_store::SessionStore::new(
         workspace_root.join(&config.session.history_dir),
     );
-    let snapshot = store
-        .load_snapshot(session_id)
-        .await
-        .map_err(anyhow::Error::msg)?;
+    let snapshot = load_session_snapshot_for_ipc_command(&store, session_id, json).await?;
     if json {
         print_json(&snapshot, false)?;
     } else {
@@ -1304,7 +1530,7 @@ async fn cancel_session(
     let store = dcode_ai_runtime::session_store::SessionStore::new(
         workspace_root.join(&config.session.history_dir),
     );
-    let mut session = store.load(session_id).await.map_err(anyhow::Error::msg)?;
+    let mut session = load_session_for_ipc_command(&store, session_id, json).await?;
 
     if let Some(socket_path) = session.meta.socket_path.clone() {
         let client = dcode_ai_runtime::ipc::IpcClient::new(socket_path);
@@ -1378,6 +1604,19 @@ fn print_human_session(session: &SessionSnapshot) {
     if let Some(summary) = &session.session_summary {
         println!("  summary: {}", summary.replace('\n', " "));
     }
+}
+
+fn print_human_worktree(worktree: &WorktreeCommandEntry) {
+    println!(
+        "{}  branch={}  base={}  ahead={}  behind={}  changed={}  path={}",
+        worktree.session_id,
+        worktree.branch_name,
+        worktree.base_branch,
+        worktree.ahead,
+        worktree.behind,
+        worktree.changed_files,
+        worktree.worktree_path.display()
+    );
 }
 
 fn print_event_envelope(envelope: &EventEnvelope, json: bool) -> anyhow::Result<()> {
@@ -1656,7 +1895,15 @@ fn show_doctor(config: &DcodeAiConfig, workspace_root: &Path, json: bool) -> any
     let skills = SkillCatalog::discover(workspace_root, &config.harness.skill_directories)
         .map(|skills| skills.len())
         .unwrap_or(0);
+    let binary_path = std::env::current_exe().ok();
+    let runtime_socket_dir = runtime_socket_dir();
     let output = DoctorOutput {
+        binary_name: env!("CARGO_PKG_NAME").to_string(),
+        binary_version: env!("CARGO_PKG_VERSION").to_string(),
+        binary_path,
+        platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+        runtime_socket_dir,
+        checksum_tool: detect_checksum_tool().map(str::to_string),
         provider: config.provider.default.display_name().to_string(),
         default_model: config.model.default_model.clone(),
         providers: ProviderKind::ALL
@@ -1686,6 +1933,19 @@ fn show_doctor(config: &DcodeAiConfig, workspace_root: &Path, json: bool) -> any
     if json {
         print_json(&output, false)?;
     } else {
+        println!("Binary: {} {}", output.binary_name, output.binary_version);
+        if let Some(path) = &output.binary_path {
+            println!("Binary path: {}", path.display());
+        }
+        println!("Platform: {}", output.platform);
+        println!(
+            "Runtime socket dir: {}",
+            output.runtime_socket_dir.display()
+        );
+        println!(
+            "Checksum tool: {}",
+            output.checksum_tool.as_deref().unwrap_or("missing")
+        );
         println!("Provider: {}", output.provider);
         println!("Default model: {}", output.default_model);
         println!("Provider readiness:");
@@ -1709,6 +1969,25 @@ fn show_doctor(config: &DcodeAiConfig, workspace_root: &Path, json: bool) -> any
         println!("Memory path: {}", output.memory_path.display());
     }
     Ok(())
+}
+
+fn runtime_socket_dir() -> PathBuf {
+    dcode_ai_runtime::ipc::runtime_ipc_dir()
+}
+
+fn detect_checksum_tool() -> Option<&'static str> {
+    if command_exists("sha256sum") {
+        Some("sha256sum")
+    } else if command_exists("shasum") {
+        Some("shasum")
+    } else {
+        None
+    }
+}
+
+fn command_exists(command: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(command).is_file()))
 }
 
 async fn autoresearch_once(program: PathBuf, workspace: PathBuf) -> anyhow::Result<()> {
@@ -1851,6 +2130,49 @@ struct CancelCommandOutput {
 }
 
 #[derive(serde::Serialize)]
+struct CommandErrorOutput<'a> {
+    error: CommandErrorBody<'a>,
+}
+
+#[derive(serde::Serialize)]
+struct CommandErrorBody<'a> {
+    code: &'a str,
+    message: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    session_id: Option<&'a str>,
+}
+
+#[derive(serde::Serialize)]
+struct WorktreeListOutput {
+    worktrees: Vec<WorktreeCommandEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct WorktreePruneOutput {
+    pruned: bool,
+    worktrees: Vec<WorktreeCommandEntry>,
+}
+
+#[derive(serde::Serialize)]
+struct WorktreeMergeOutput {
+    session_id: String,
+    branch_name: String,
+    base_branch: String,
+    merged: bool,
+}
+
+#[derive(serde::Serialize)]
+struct WorktreeCommandEntry {
+    session_id: String,
+    branch_name: String,
+    base_branch: String,
+    worktree_path: PathBuf,
+    changed_files: usize,
+    ahead: usize,
+    behind: usize,
+}
+
+#[derive(serde::Serialize)]
 struct SkillOutput {
     name: String,
     command: String,
@@ -1874,6 +2196,12 @@ struct ModelCatalogOutput {
 
 #[derive(serde::Serialize)]
 struct DoctorOutput {
+    binary_name: String,
+    binary_version: String,
+    binary_path: Option<PathBuf>,
+    platform: String,
+    runtime_socket_dir: PathBuf,
+    checksum_tool: Option<String>,
     provider: String,
     default_model: String,
     providers: Vec<ProviderDoctorStatus>,
@@ -1908,6 +2236,23 @@ fn print_json<T: serde::Serialize>(value: &T, pretty: bool) -> anyhow::Result<()
     };
     println!("{rendered}");
     Ok(())
+}
+
+fn print_command_error_json(
+    code: &str,
+    message: &str,
+    session_id: Option<&str>,
+) -> anyhow::Result<()> {
+    print_json(
+        &CommandErrorOutput {
+            error: CommandErrorBody {
+                code,
+                message,
+                session_id,
+            },
+        },
+        false,
+    )
 }
 
 fn generate_shell_completion(shell: ClapShell) {
@@ -2136,6 +2481,36 @@ mod tests {
                 assert_eq!(model.as_deref(), Some("claude-3-7-sonnet-latest"));
             }
             _ => panic!("expected run subcommand"),
+        }
+    }
+
+    #[test]
+    fn parses_worktrees_merge_base_override() {
+        let cli = Cli::try_parse_from([
+            "dcode-ai",
+            "worktrees",
+            "merge",
+            "session-123",
+            "--base",
+            "main",
+            "--json",
+        ])
+        .expect("should parse worktrees merge");
+
+        match cli.command {
+            Some(Command::Worktrees {
+                command:
+                    WorktreesCmd::Merge {
+                        session_id,
+                        base,
+                        json,
+                    },
+            }) => {
+                assert_eq!(session_id, "session-123");
+                assert_eq!(base.as_deref(), Some("main"));
+                assert!(json);
+            }
+            _ => panic!("expected worktrees merge subcommand"),
         }
     }
 }

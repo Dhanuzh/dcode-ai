@@ -53,4 +53,9 @@ tempfile = "3"
 assert_cmd = "2"
 insta = "1"
 predicates = "3"
+criterion = "0.5"
 cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy", "run-cargo-test"] }
+
+[[bench]]
+name = "tui_perf"
+harness = false

@@ -789,6 +789,10 @@ impl Supervisor {
         build_parent_summary(&self.agent.messages)
     }
 
+    pub fn compaction_preview(&self) -> String {
+        build_compaction_preview_summary(&self.context_manager, &self.agent.messages)
+    }
+
     pub fn set_session_summary(&mut self, summary: Option<String>) {
         self.session_summary = summary.filter(|summary| !summary.trim().is_empty());
     }
@@ -1830,6 +1834,29 @@ fn build_compaction_fallback_summary(messages: &[dcode_ai_common::message::Messa
         out.push_str(&convo);
     }
     out
+}
+
+fn build_compaction_preview_summary(
+    context_manager: &ContextManager,
+    messages: &[dcode_ai_common::message::Message],
+) -> String {
+    if !messages.iter().any(|message| {
+        matches!(
+            message.role,
+            dcode_ai_common::message::Role::User
+                | dcode_ai_common::message::Role::Assistant
+                | dcode_ai_common::message::Role::Tool
+        )
+    }) {
+        return build_compaction_fallback_summary(&[]);
+    }
+
+    let messages_to_summarize = context_manager.get_messages_to_summarize(messages);
+    if messages_to_summarize.is_empty() {
+        build_compaction_fallback_summary(messages)
+    } else {
+        build_compaction_fallback_summary(&messages_to_summarize)
+    }
 }
 
 /// Scan every message (tool results included) for the durable state worth
@@ -2926,6 +2953,51 @@ mod tests {
         // And the full fallback nests these under the artifacts header.
         let full = build_compaction_fallback_summary(&messages);
         assert!(full.contains("## Preserved Artifacts"));
+    }
+
+    #[test]
+    fn compaction_preview_uses_preserved_artifact_summary_without_mutating() {
+        use dcode_ai_common::message::{Message, MessageToolCall, Role};
+
+        let context_manager = ContextManager::with_default_config("MiniMax-M2.5".into());
+        let messages = vec![
+            Message::user("edit src/main.rs"),
+            Message {
+                role: Role::Assistant,
+                content: dcode_ai_common::message::MessageContent::Text("running tests".into()),
+                tool_call_id: None,
+                tool_calls: Some(vec![MessageToolCall {
+                    id: "call-1".into(),
+                    name: "execute_bash".into(),
+                    arguments: json!({"command": "cargo test -p dcode-ai-runtime"}),
+                }]),
+                reasoning_content: None,
+            },
+            Message::tool("call-1", "error[E0425]: cannot find value"),
+        ];
+        let before_count = messages.len();
+
+        let preview = build_compaction_preview_summary(&context_manager, &messages);
+
+        assert_eq!(messages.len(), before_count);
+        assert!(preview.contains("## Preserved Artifacts"), "{preview}");
+        assert!(preview.contains("src/main.rs"), "{preview}");
+        assert!(
+            preview.contains("cargo test -p dcode-ai-runtime"),
+            "{preview}"
+        );
+        assert!(preview.contains("error[E0425]"), "{preview}");
+    }
+
+    #[test]
+    fn compaction_preview_empty_session_uses_default_message() {
+        let context_manager = ContextManager::with_default_config("MiniMax-M2.5".into());
+        let messages = vec![Message::system("system prompt")];
+
+        assert_eq!(
+            build_compaction_preview_summary(&context_manager, &messages),
+            "Earlier conversation context was compacted due to token limits."
+        );
     }
 
     #[test]

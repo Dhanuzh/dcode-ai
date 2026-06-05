@@ -39,8 +39,9 @@ The machinery around the agent.
 - `context_manager.rs` — token budgeting + compaction (sliding window + summary),
   now backed by a real BPE tokenizer (`token_count.rs`).
 - `session_store.rs` / `last_session.rs` — persistence and resume.
-- `process.rs` / `pty.rs` / `tmux.rs` — command execution surfaces (**Unix-only**).
-- `ipc.rs` — Unix-socket control plane for detached sessions.
+- `process.rs` / `pty.rs` / `tmux.rs` — command execution surfaces.
+- `ipc.rs` — platform IPC control plane for detached sessions: Unix sockets on
+  Unix, loopback TCP on Windows.
 
 ### `cli`
 - `tui/app.rs` (~8k LOC) — the interactive terminal UI. **The biggest file in the

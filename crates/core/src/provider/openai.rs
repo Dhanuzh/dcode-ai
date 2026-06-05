@@ -19,6 +19,7 @@ pub struct OpenAiProvider {
     max_tokens: u32,
     use_responses_api: bool,
     use_chatgpt_codex_backend: bool,
+    stream_provider_name: &'static str,
 }
 
 const OPENAI_OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -142,6 +143,11 @@ impl OpenAiProvider {
             max_tokens: config.model.max_tokens,
             use_responses_api,
             use_chatgpt_codex_backend,
+            stream_provider_name: match provider {
+                ProviderKind::OpenCodeZen => "minimax",
+                ProviderKind::Antigravity => "antigravity",
+                _ => "openai",
+            },
         })
     }
 
@@ -443,11 +449,11 @@ impl Provider for OpenAiProvider {
         if self.use_responses_api {
             Ok(spawn_openai_responses_stream(
                 response,
-                "openai",
+                self.stream_provider_name,
                 self.use_chatgpt_codex_backend,
             ))
         } else {
-            Ok(spawn_openai_stream(response, "openai"))
+            Ok(spawn_openai_stream(response, self.stream_provider_name))
         }
     }
 }

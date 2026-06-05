@@ -212,6 +212,46 @@ pub(crate) fn permission_mode_pill(mode: &str) -> Span<'static> {
     )
 }
 
+/// Render an image file as a block of Unicode half-block lines (`▄`) using
+/// true-color ANSI, scaled to `cols×rows` terminal cells (each cell covers
+/// 1×2 pixels via upper/lower half-blocks).  Returns `None` if the file
+/// cannot be read or the crate feature is not available.
+///
+/// The returned `Vec<Line>` is ready to be pushed into a transcript or
+/// composer overlay.  Each entry is one terminal row.
+pub(crate) fn image_thumbnail_lines(
+    path: &std::path::Path,
+    cols: u16,
+    rows: u16,
+) -> Option<Vec<ratatui::text::Line<'static>>> {
+    use image::imageops::FilterType;
+    use ratatui::style::Style;
+    use ratatui::text::{Line, Span};
+
+    let cols = cols.max(4) as u32;
+    let rows = rows.max(2) as u32;
+
+    let img = image::open(path).ok()?.into_rgba8();
+    // Scale to (cols × rows*2) pixels — each terminal cell = 1 col × 2 px.
+    let scaled = image::imageops::resize(&img, cols, rows * 2, FilterType::Lanczos3);
+
+    let mut lines = Vec::with_capacity(rows as usize);
+    for row in 0..rows {
+        let top_y = row * 2;
+        let bot_y = top_y + 1;
+        let mut spans: Vec<Span<'static>> = Vec::with_capacity(cols as usize);
+        for x in 0..cols {
+            let top = scaled.get_pixel(x, top_y);
+            let bot = scaled.get_pixel(x, bot_y);
+            let fg = Color::Rgb(bot[0], bot[1], bot[2]);
+            let bg = Color::Rgb(top[0], top[1], top[2]);
+            spans.push(Span::styled("▄", Style::default().fg(fg).bg(bg)));
+        }
+        lines.push(Line::from(spans));
+    }
+    Some(lines)
+}
+
 #[cfg(test)]
 mod tests {
     use super::permission_mode_pill;

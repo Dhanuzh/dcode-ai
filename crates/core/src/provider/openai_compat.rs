@@ -120,8 +120,12 @@ fn extract_internal_reasoning_delta(delta: &Value) -> Option<String> {
         "reasoning",
         "thinking",
         "thinking_content",
+        "thinkingContent",
         "reasoning_text",
+        "reasoningText",
         "reasoning_delta",
+        "reasoningDelta",
+        "reasoningContent",
     ] {
         let Some(value) = delta.get(key) else {
             continue;
@@ -334,6 +338,15 @@ pub fn spawn_openai_stream(
                             if let Some(arguments) = tool_delta["function"]["arguments"].as_str() {
                                 entry.arguments.push_str(arguments);
                             }
+                        }
+                    }
+                    if let Some(function_call) = delta.get("function_call") {
+                        let entry = tool_calls.entry(0).or_default();
+                        if let Some(name) = function_call["name"].as_str() {
+                            entry.name.push_str(name);
+                        }
+                        if let Some(arguments) = function_call["arguments"].as_str() {
+                            entry.arguments.push_str(arguments);
                         }
                     }
 
@@ -743,19 +756,23 @@ async fn flush_openai_tool_calls(
             continue;
         }
 
-        if let Ok(input) = serde_json::from_str(&call.arguments) {
-            let _ = tx
-                .send(StreamChunk::ToolUse(ToolCall {
-                    id: if call.id.is_empty() {
-                        format!("tool-call-{index}")
-                    } else {
-                        call.id
-                    },
-                    name: call.name,
-                    input,
-                }))
-                .await;
-        }
+        let input = if call.arguments.trim().is_empty() {
+            json!({})
+        } else {
+            serde_json::from_str(&call.arguments)
+                .unwrap_or_else(|_| json!({ "raw": call.arguments }))
+        };
+        let _ = tx
+            .send(StreamChunk::ToolUse(ToolCall {
+                id: if call.id.is_empty() {
+                    format!("tool-call-{index}")
+                } else {
+                    call.id
+                },
+                name: call.name,
+                input,
+            }))
+            .await;
     }
 }
 
@@ -984,6 +1001,7 @@ fn to_openai_messages(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::provider::test_support::{collect_chunks, spawn_sse_server};
     use dcode_ai_common::message::MessageToolCall;
     use serde_json::json;
 
@@ -1062,9 +1080,59 @@ mod tests {
             Some("r5".into())
         );
         assert_eq!(
+            extract_internal_reasoning_delta(&json!({"reasoningContent":"r6"})),
+            Some("r6".into())
+        );
+        assert_eq!(
             extract_internal_reasoning_delta(&json!({"content":"assistant text only"})),
             None
         );
+    }
+
+    #[tokio::test]
+    async fn chat_stream_parses_legacy_function_call_delta() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"function_call\":{\"name\":\"lookup\",\"arguments\":\"{\\\"path\\\":\\\"src\\\"}\"}},\"index\":0,\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let base_url = spawn_sse_server(body, 200, |_| {});
+        let response = reqwest::Client::new()
+            .get(base_url)
+            .send()
+            .await
+            .expect("mock response");
+
+        let chunks = collect_chunks(spawn_openai_stream(response, "minimax")).await;
+
+        assert!(
+            matches!(&chunks[0], StreamChunk::ToolUse(call) if call.name == "lookup" && call.input == json!({"path":"src"}))
+        );
+        assert!(matches!(chunks.last(), Some(StreamChunk::Done)));
+    }
+
+    #[tokio::test]
+    async fn chat_stream_preserves_malformed_tool_arguments_as_raw() {
+        let body = concat!(
+            "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{bad-json\"}}]},\"index\":0,\"finish_reason\":null}]}\n\n",
+            "data: [DONE]\n\n"
+        )
+        .to_string();
+        let base_url = spawn_sse_server(body, 200, |_| {});
+        let response = reqwest::Client::new()
+            .get(base_url)
+            .send()
+            .await
+            .expect("mock response");
+
+        let chunks = collect_chunks(spawn_openai_stream(response, "minimax")).await;
+
+        assert!(
+            matches!(&chunks[0], StreamChunk::ToolUse(call) if call.id == "call_1"
+                && call.name == "lookup"
+                && call.input == json!({"raw":"{bad-json"}))
+        );
+        assert!(matches!(chunks.last(), Some(StreamChunk::Done)));
     }
 
     #[test]
