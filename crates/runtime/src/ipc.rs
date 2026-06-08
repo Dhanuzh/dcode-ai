@@ -175,7 +175,7 @@ async fn start_transport_accept_loop(
 
     let listener = UnixListener::bind(socket_path)
         .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
-    let socket_path = socket_path.clone();
+    let socket_path = socket_path.to_path_buf();
 
     tokio::spawn(async move {
         loop {
