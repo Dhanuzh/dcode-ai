@@ -32,6 +32,13 @@ impl DcodeAiConfig {
     }
 
     /// Load config for an explicit workspace root.
+    ///
+    /// Layer order (later layers win):
+    ///   1. Built-in defaults
+    ///   2. Global user config  (`~/.dcode-ai/config.toml`)
+    ///   3. Project config      (`.dcode.toml` in workspace root — commit to git)
+    ///   4. Local override      (`.dcode-ai/config.local.toml` — gitignored, personal)
+    ///   5. Environment variables
     pub fn load_for_workspace(workspace_root: &Path) -> Result<Self, ConfigError> {
         let mut config = Self::default();
 
@@ -39,6 +46,14 @@ impl DcodeAiConfig {
             && path.exists()
         {
             let partial = load_partial(&path)?;
+            config.merge(partial);
+        }
+
+        // Project-level config: `.dcode.toml` at workspace root.
+        // Intended to be committed to git so teammates share the same defaults.
+        let project_path = workspace_root.join(".dcode.toml");
+        if project_path.exists() {
+            let partial = load_partial(&project_path)?;
             config.merge(partial);
         }
 

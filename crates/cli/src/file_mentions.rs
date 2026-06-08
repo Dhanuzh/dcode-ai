@@ -215,6 +215,80 @@ pub fn expand_at_file_mentions_default(text: &str, workspace: &Path) -> anyhow::
     expand_at_file_mentions(text, workspace, DEFAULT_MAX_FILE_BYTES)
 }
 
+/// Quick symbol search: grep for `fn|struct|enum|trait|type|const|impl` lines
+/// matching `query` in the workspace and return `symbol_name  (file:line)` entries.
+/// Uses ripgrep when available; falls back to an empty list on failure.
+pub fn search_workspace_symbols(workspace: &Path, query: &str) -> Vec<String> {
+    if query.len() < 2 || query.contains('/') {
+        return Vec::new();
+    }
+    // Build a ripgrep pattern that matches Rust/TS/JS symbol declarations.
+    let pattern = format!(
+        r"(fn|struct|enum|trait|type|const|class|interface|def|func)\s+{q}",
+        q = regex_escape_simple(query)
+    );
+    let output = std::process::Command::new("rg")
+        .args([
+            "--no-heading",
+            "--line-number",
+            "--max-count=40",
+            "--glob=!target",
+            "--glob=!node_modules",
+            "--glob=!.dcode-ai",
+            &pattern,
+        ])
+        .current_dir(workspace)
+        .output();
+    let Ok(out) = output else {
+        return Vec::new();
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut results: Vec<String> = Vec::new();
+    for line in stdout.lines().take(40) {
+        // Format: path:line:content
+        let parts: Vec<&str> = line.splitn(3, ':').collect();
+        if parts.len() < 3 {
+            continue;
+        }
+        let file = parts[0];
+        let lineno = parts[1];
+        let content = parts[2].trim();
+        // Extract just the symbol name from content using simple heuristic.
+        let sym = extract_symbol_name(content).unwrap_or(query);
+        let entry = format!("@sym:{sym}  ({file}:{lineno})");
+        results.push(entry);
+    }
+    results
+}
+
+fn regex_escape_simple(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if "()[]{}.*+?^$|\\".contains(c) {
+                vec!['\\', c]
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
+fn extract_symbol_name(line: &str) -> Option<&str> {
+    // Skip keyword + whitespace, take the identifier.
+    let after_kw = line
+        .find(|c: char| c.is_alphabetic())
+        .and_then(|i| line[i..].find(char::is_whitespace).map(|j| &line[i + j..]))?;
+    let trimmed = after_kw.trim_start();
+    let end = trimmed
+        .find(|c: char| !c.is_alphanumeric() && c != '_')
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        None
+    } else {
+        Some(&trimmed[..end])
+    }
+}
+
 /// Active `@`-token immediately before `cursor_byte` (UTF-8 byte index in `line`).
 pub fn at_token_before_cursor(line: &str, cursor_byte: usize) -> Option<(usize, String)> {
     let before = line.get(..cursor_byte.min(line.len()))?;

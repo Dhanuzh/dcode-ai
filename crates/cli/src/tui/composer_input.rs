@@ -42,6 +42,15 @@ pub(crate) fn at_completion_matches(
     buffer: &str,
     cursor_char_idx: usize,
 ) -> Vec<String> {
+    at_completion_matches_with_workspace(workspace_files, buffer, cursor_char_idx, None)
+}
+
+pub(crate) fn at_completion_matches_with_workspace(
+    workspace_files: &[String],
+    buffer: &str,
+    cursor_char_idx: usize,
+    workspace_root: Option<&std::path::Path>,
+) -> Vec<String> {
     if !at_completion_active(buffer, cursor_char_idx) {
         return Vec::new();
     }
@@ -49,7 +58,25 @@ pub(crate) fn at_completion_matches(
     let Some((_, prefix)) = file_mentions::at_token_before_cursor(buffer, b) else {
         return Vec::new();
     };
-    file_mentions::filter_paths_prefix(workspace_files, &prefix)
+
+    let mut file_matches = file_mentions::filter_paths_prefix(workspace_files, &prefix);
+
+    // If the token has no `/` and looks like an identifier (possible symbol name),
+    // also run a ripgrep-backed symbol search and append the results.
+    if !prefix.contains('/')
+        && prefix.len() >= 2
+        && let Some(root) = workspace_root
+    {
+        let sym_results = file_mentions::search_workspace_symbols(root, &prefix);
+        // Deduplicate: only add symbols not already covered by file matches.
+        for s in sym_results {
+            if !file_matches.contains(&s) {
+                file_matches.push(s);
+            }
+        }
+    }
+
+    file_matches
 }
 
 pub(crate) fn composer_chrome_height(

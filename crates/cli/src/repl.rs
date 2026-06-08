@@ -1190,8 +1190,14 @@ impl Repl {
                 .await?
             }
             "/clear" => {
+                let keep_context = rest == "--keep-context";
                 out.clear_screen();
-                out.println("[screen cleared]");
+                if keep_context {
+                    // In TUI mode we only wipe display blocks; conversation messages are preserved.
+                    out.println("[screen cleared — context preserved]");
+                } else {
+                    out.println("[screen cleared]");
+                }
             }
             "/undo" => {
                 match self.runtime.undo_last_turn() {
@@ -2147,6 +2153,78 @@ impl Repl {
                     out.eprintln(&format!("failed to clean empty sessions: {error}"));
                 }
             },
+            "/init" => {
+                let workspace = self.runtime.workspace_root();
+                let dcode_toml = workspace.join(".dcode.toml");
+                let instructions_dir = workspace.join(".dcode-ai");
+                let instructions_path = instructions_dir.join("instructions.md");
+
+                // Write .dcode.toml only if it doesn't exist yet.
+                if dcode_toml.exists() {
+                    out.println("[init] .dcode.toml already exists — skipped");
+                } else {
+                    let toml_content = r#"# dcode-ai project configuration — commit this file to share with teammates.
+# All fields are optional; unset fields fall back to the user's global config.
+
+# [model]
+# default_model = "claude-opus-4-5"   # override the default model for this project
+
+# [permissions]
+# mode = "AcceptEdits"                 # Default | AcceptEdits | Plan | DontAsk | Bypass
+
+# [session]
+# agent_profile = "@build"             # default agent profile
+
+# [memory]
+# file_path = ".dcode-ai/memory.json"  # project memory store path
+"#;
+                    match std::fs::write(&dcode_toml, toml_content) {
+                        Ok(_) => out.println("[init] Created .dcode.toml"),
+                        Err(e) => out.eprintln(&format!("[init] Failed to write .dcode.toml: {e}")),
+                    }
+                }
+
+                // Write instructions.md scaffold.
+                if instructions_path.exists() {
+                    out.println("[init] .dcode-ai/instructions.md already exists — skipped");
+                } else {
+                    let instructions_content =
+                        "# Project Instructions for dcode-ai\n\n\
+                         Add context here that dcode-ai should always know about this project.\n\n\
+                         ## Project Overview\n\n\
+                         <!-- Describe what this project does -->\n\n\
+                         ## Key Conventions\n\n\
+                         - <!-- e.g. \"Always run `cargo test` before committing\" -->\n\n\
+                         ## Architecture Notes\n\n\
+                         <!-- Important design decisions, patterns, or constraints -->\n"
+                        .to_string();
+                    if let Err(e) = std::fs::create_dir_all(&instructions_dir) {
+                        out.eprintln(&format!("[init] Failed to create .dcode-ai/: {e}"));
+                    } else {
+                        match std::fs::write(&instructions_path, instructions_content) {
+                            Ok(_) => out.println("[init] Created .dcode-ai/instructions.md"),
+                            Err(e) => out.eprintln(&format!("[init] Failed to write instructions.md: {e}")),
+                        }
+                    }
+                }
+
+                // Remind about .gitignore.
+                let gitignore = workspace.join(".gitignore");
+                let gitignore_hint = if gitignore.exists() {
+                    let content = std::fs::read_to_string(&gitignore).unwrap_or_default();
+                    if content.contains(".dcode-ai/") || content.contains(".dcode-ai") {
+                        None
+                    } else {
+                        Some(true)
+                    }
+                } else {
+                    Some(true)
+                };
+                if gitignore_hint.is_some() {
+                    out.println("[init] Tip: add `.dcode-ai/` to your .gitignore (sessions + local config)");
+                    out.println("[init] Tip: commit `.dcode.toml` to share project config with teammates");
+                }
+            }
             "/new" => {
                 let summary = self.runtime.compact_summary();
                 self.runtime.set_session_summary(Some(summary.clone()));

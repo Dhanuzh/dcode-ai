@@ -385,6 +385,7 @@ struct TranscriptRenderCache {
     width: u16,
     revision: u64,
     code_line_numbers: bool,
+    zoom_offset: i32,
     lines: Vec<Line<'static>>,
     hits: Vec<LineAnswerHit>,
 }
@@ -452,15 +453,22 @@ impl TranscriptRenderCache {
         state: &TuiSessionState,
         width: u16,
     ) -> (&'a [Line<'static>], &'a [LineAnswerHit]) {
-        let normalized_width = width.max(20);
+        // Apply user zoom offset: positive offset = narrower column (zoom in).
+        let zoomed_width = {
+            let w = width as i32 - state.transcript_zoom_offset;
+            w.max(20) as u16
+        };
+        let normalized_width = zoomed_width;
         if self.width != normalized_width
             || self.revision != state.transcript_rev
             || self.code_line_numbers != state.code_line_numbers
+            || self.zoom_offset != state.transcript_zoom_offset
         {
             let (lines, hits) = transcript_lines_and_hits(state, normalized_width);
             self.width = normalized_width;
             self.revision = state.transcript_rev;
             self.code_line_numbers = state.code_line_numbers;
+            self.zoom_offset = state.transcript_zoom_offset;
             self.lines = lines;
             self.hits = hits;
         }
@@ -882,6 +890,77 @@ fn parse_unified_hunk_header(line: &str) -> Option<(usize, usize)> {
     Some((old_start, new_start))
 }
 
+/// Build a compact colorized diff preview for file-write/edit tool approvals.
+/// Returns up to ~6 colored `Line`s showing +/- changes, or empty if not applicable.
+fn approval_diff_preview(tool: &str, input_json: &str, max_cols: usize) -> Vec<Line<'static>> {
+    // Only show diff for file-writing tools.
+    let lower = tool.to_ascii_lowercase();
+    if !lower.contains("write")
+        && !lower.contains("edit")
+        && !lower.contains("patch")
+        && !lower.contains("replace")
+    {
+        return Vec::new();
+    }
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(input_json) else {
+        return Vec::new();
+    };
+
+    // Try to get old and new content.
+    let path = val
+        .get("path")
+        .or_else(|| val.get("file"))
+        .or_else(|| val.get("filename"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
+    let new_content = val
+        .get("content")
+        .or_else(|| val.get("new_content"))
+        .or_else(|| val.get("text"))
+        .and_then(|v| v.as_str());
+
+    let old_content: Option<String> = if !path.is_empty() {
+        std::fs::read_to_string(path).ok()
+    } else {
+        None
+    };
+
+    let (old_str, new_str) = match (old_content.as_deref(), new_content) {
+        (Some(old), Some(new)) => (old, new),
+        _ => return Vec::new(),
+    };
+
+    // Use `similar` to compute a unified diff, show first 6 changed lines.
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old_str, new_str);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let max_lines = 6_usize;
+    for change in diff.iter_all_changes().take(60) {
+        if out.len() >= max_lines {
+            out.push(Line::from(Span::styled(
+                "  …",
+                Style::default().fg(theme::muted()),
+            )));
+            break;
+        }
+        let (sigil, color) = match change.tag() {
+            ChangeTag::Insert => ("+", theme::success()),
+            ChangeTag::Delete => ("-", theme::error()),
+            ChangeTag::Equal => continue,
+        };
+        let text = format!(
+            "{sigil} {}",
+            truncate_chars(
+                change.value().trim_end_matches('\n'),
+                max_cols.saturating_sub(2)
+            )
+        );
+        out.push(Line::from(Span::styled(text, Style::default().fg(color))));
+    }
+    out
+}
+
 /// Render the approval request as a centered popup overlay. The popup body
 /// reuses the same content layout as `render_approval_block` (icon + label,
 /// description, full input, action hint) but lives above the transcript so
@@ -892,11 +971,21 @@ fn render_approval_popup(
     req: &ApprovalRequest,
     selected: usize,
 ) {
-    // Keep approval modal compact (Koda/Ironclaw style), not a large sheet.
+    // Keep approval modal compact but allow extra rows when diff preview is shown.
     let max_w = area.width.saturating_sub(2);
     let popup_w = max_w.min(84).max(max_w.min(56));
     let max_h = area.height.saturating_sub(2);
-    let popup_h = max_h.min(13).max(max_h.min(9));
+    let has_diff = !approval_diff_preview(
+        req.tool.as_str(),
+        req.input.as_str(),
+        (popup_w as usize).saturating_sub(4),
+    )
+    .is_empty();
+    let popup_h = if has_diff {
+        max_h.min(20).max(max_h.min(13))
+    } else {
+        max_h.min(13).max(max_h.min(9))
+    };
     let popup_area = centered_rect(area, popup_w, popup_h);
 
     let selected = selected.min(2);
@@ -945,7 +1034,17 @@ fn render_approval_popup(
     lines.push(option_row(2, "Deny (n)"));
     lines.push(Line::default());
 
-    if !preview.is_empty() {
+    // Show a mini diff preview for file edit/write tools.
+    let diff_preview = approval_diff_preview(&req.tool, &req.input, inner_w);
+    if !diff_preview.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "diff preview:",
+            Style::default().fg(theme::muted()),
+        )));
+        for dl in diff_preview {
+            lines.push(dl);
+        }
+    } else if !preview.is_empty() {
         lines.push(Line::from(Span::styled(
             truncate_chars(
                 &format!("input: {preview}"),
@@ -1425,6 +1524,7 @@ pub fn run_blocking(
                     cost_usd: g.cost_usd,
                     permission_bypass: toolbar_permission_is_bypass(&g.permission_mode),
                     last_turn_latency_ms: g.last_turn_latency_ms,
+                    turn_output_tokens: g.turn_output_tokens,
                 };
 
                 crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
@@ -4268,6 +4368,9 @@ pub fn run_blocking(
                                 }
                             }
                         }
+                        (KeyCode::F(1), _) => {
+                            g.open_info_modal("Keybindings", keybindings_cheatsheet());
+                        }
                         (KeyCode::F(2), KeyModifiers::NONE) => {
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::CycleModel(true));
@@ -4275,6 +4378,20 @@ pub fn run_blocking(
                         (KeyCode::F(2), KeyModifiers::SHIFT) => {
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::CycleModel(false));
+                        }
+                        // Transcript zoom: + narrows (zooms in), - widens (zooms out), = resets.
+                        (KeyCode::Char('+'), KeyModifiers::NONE)
+                        | (KeyCode::Char('+'), KeyModifiers::SHIFT) => {
+                            g.transcript_zoom_offset = (g.transcript_zoom_offset + 4).min(40);
+                            g.touch_transcript();
+                        }
+                        (KeyCode::Char('-'), KeyModifiers::NONE) => {
+                            g.transcript_zoom_offset = (g.transcript_zoom_offset - 4).max(-20);
+                            g.touch_transcript();
+                        }
+                        (KeyCode::Char('='), KeyModifiers::NONE) => {
+                            g.transcript_zoom_offset = 0;
+                            g.touch_transcript();
                         }
                         (KeyCode::Up, KeyModifiers::NONE) if g.active_approval.is_some() => {
                             g.approval_option_index = g.approval_option_index.saturating_sub(1);
@@ -4906,6 +5023,86 @@ pub fn run_blocking(
     restore_terminal(mouse_capture);
     let _ = execute!(stdout(), MoveToColumn(0));
     Ok(())
+}
+
+/// Full keybindings reference shown by F1.
+fn keybindings_cheatsheet() -> Vec<String> {
+    vec![
+        "─── Navigation ───────────────────────────────────────".into(),
+        "  ↑ / ↓              Scroll transcript one line".into(),
+        "  PgUp / PgDn        Scroll transcript one page".into(),
+        "  Home / End         Jump to top / bottom of transcript".into(),
+        "  Ctrl+F             Open transcript search".into(),
+        "  n / N              Next / previous search match".into(),
+        "  Ctrl+G             Go to bottom (follow tail)".into(),
+        "".into(),
+        "─── Composer ─────────────────────────────────────────".into(),
+        "  Enter              Send message".into(),
+        "  Shift+Enter        Insert newline".into(),
+        "  Alt+Enter          Queue follow-up (when busy)".into(),
+        "  ↑ / ↓              History prev/next (or move line when multiline)".into(),
+        "  Ctrl+R             History search".into(),
+        "  Ctrl+A / Home      Move to line start".into(),
+        "  Ctrl+E / End       Move to line end".into(),
+        "  Alt+B / Ctrl+←     Word backward".into(),
+        "  Alt+F / Ctrl+→     Word forward".into(),
+        "  Ctrl+W / Alt+BS    Delete word backward".into(),
+        "  Alt+D              Delete word forward".into(),
+        "  Ctrl+K             Kill to end of line".into(),
+        "  Ctrl+Y             Yank (paste kill ring)".into(),
+        "  Ctrl+U             Kill to start of line".into(),
+        "".into(),
+        "─── Tools ────────────────────────────────────────────".into(),
+        "  Ctrl+X T           Toggle latest tool block collapsed/expanded".into(),
+        "  Ctrl+X F           Toggle ALL tool blocks collapsed/expanded".into(),
+        "  Ctrl+X X           Ctrl+X leader (prefix for shortcuts below)".into(),
+        "".into(),
+        "─── Session ──────────────────────────────────────────".into(),
+        "  Ctrl+L             Clear transcript".into(),
+        "  Ctrl+K             Pin latest response (when composer empty)".into(),
+        "  Ctrl+P             Open command palette".into(),
+        "  Ctrl+C             Cancel current turn / exit (double-tap)".into(),
+        "  Esc                Cancel / close modal".into(),
+        "".into(),
+        "─── Clipboard ────────────────────────────────────────".into(),
+        "  F6                 Copy latest assistant response".into(),
+        "  F7                 Copy latest tool output".into(),
+        "  Click header       Copy that block's text".into(),
+        "  Mouse drag         Select + copy range".into(),
+        "".into(),
+        "─── Models / Agents ──────────────────────────────────".into(),
+        "  F2                 Cycle model forward".into(),
+        "  Shift+F2           Cycle model backward".into(),
+        "  F3                 Cycle agent profile".into(),
+        "".into(),
+        "─── Approvals ────────────────────────────────────────".into(),
+        "  y / Ctrl+Y         Approve tool call".into(),
+        "  n / Ctrl+N         Deny tool call".into(),
+        "  Ctrl+U             Always allow (add to allowlist)".into(),
+        "  ↑ / ↓              Move approval selection".into(),
+        "".into(),
+        "─── Modals & Overlays ────────────────────────────────".into(),
+        "  F1                 This keybindings cheatsheet".into(),
+        "  Ctrl+P             Command palette".into(),
+        "  /theme             Theme picker".into(),
+        "  /models            Model picker".into(),
+        "  /connect           Provider connect modal".into(),
+        "  /sessions          Session picker".into(),
+        "  q / Esc            Close any modal".into(),
+        "".into(),
+        "─── Slash Commands (type / to see all) ───────────────".into(),
+        "  /help              Full help text".into(),
+        "  /status            Session + context info".into(),
+        "  /undo              Undo last agent turn (git-stash backed)".into(),
+        "  /redo              Redo last undone turn".into(),
+        "  /diff              Show recent git file changes".into(),
+        "  /compact           Summarise and compact context".into(),
+        "  /export            Export session to Markdown".into(),
+        "  /clear             Clear transcript (keep context)".into(),
+        "  /cost              Show token cost summary".into(),
+        "  /thinking          Toggle extended thinking".into(),
+        "  /plan              Switch to plan mode".into(),
+    ]
 }
 
 #[cfg(test)]

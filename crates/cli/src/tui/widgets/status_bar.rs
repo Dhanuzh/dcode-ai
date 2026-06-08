@@ -23,6 +23,9 @@ pub struct StatusBar<'a> {
     pub permission_bypass: bool,
     /// Latency of the last completed assistant turn (ms), shown as `↩ 1.2s`.
     pub last_turn_latency_ms: Option<u64>,
+    /// Output tokens streamed in the current turn (live counter while busy).
+    /// When non-zero and the agent is busy, shown as `~Nt` in the status bar.
+    pub turn_output_tokens: u64,
 }
 
 impl Widget for StatusBar<'_> {
@@ -61,7 +64,14 @@ impl Widget for StatusBar<'_> {
             Style::default().fg(theme::muted()),
         ));
 
-        if let Some(latency_ms) = self.last_turn_latency_ms {
+        // Live per-turn token counter while streaming; latency badge when idle.
+        if self.turn_output_tokens > 0 && !self.busy_label.eq_ignore_ascii_case("idle") {
+            spans.push(sep.clone());
+            spans.push(Span::styled(
+                format!(" ~{}t ", self.turn_output_tokens),
+                Style::default().fg(theme::assistant()),
+            ));
+        } else if let Some(latency_ms) = self.last_turn_latency_ms {
             spans.push(sep.clone());
             let label = if latency_ms < 1000 {
                 format!(" ↩ {}ms ", latency_ms)

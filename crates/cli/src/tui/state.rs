@@ -136,6 +136,10 @@ pub struct TuiSessionState {
     /// Estimated current context-window occupancy (from the latest CostUpdated),
     /// used to render the status-bar ctx gauge.
     pub context_tokens: u64,
+    /// Output tokens streamed so far **in the current turn** (reset each time a
+    /// new busy turn begins). Shown live in the status bar while the agent is
+    /// streaming, so the user can see tokens accumulating in real-time.
+    pub turn_output_tokens: u64,
     pub started: Instant,
     /// Start time per in-flight tool call_id, for duration badges on completion.
     tool_started: HashMap<String, Instant>,
@@ -313,6 +317,10 @@ pub struct TuiSessionState {
     pub last_turn_latency_ms: Option<u64>,
     /// Wall-clock time (Unix ms) when the current turn started (first non-idle state).
     pub(crate) turn_started_at: Option<u64>,
+    /// User-adjustable transcript column width offset (from default terminal width).
+    /// Positive = narrower (zoom in / larger text density), negative = wider margin.
+    /// Clamped to [-20, +40] at render time so layout never breaks.
+    pub transcript_zoom_offset: i32,
 }
 
 #[derive(Debug, Clone)]
@@ -494,6 +502,7 @@ impl TuiSessionState {
             output_tokens: 0,
             cost_usd: 0.0,
             context_tokens: 0,
+            turn_output_tokens: 0,
             started: Instant::now(),
             tool_started: HashMap::new(),
             busy: false,
@@ -594,6 +603,7 @@ impl TuiSessionState {
             block_timestamps: Vec::new(),
             last_turn_latency_ms: None,
             turn_started_at: None,
+            transcript_zoom_offset: 0,
         }
     }
 
@@ -1508,13 +1518,19 @@ impl TuiSessionState {
             // Record when a busy turn begins (first non-idle state after idle).
             if self.current_busy_state == BusyState::Idle {
                 self.turn_started_at = Some(now_ms);
+                // Reset the per-turn streaming counter for the new turn.
+                self.turn_output_tokens = 0;
             }
-            // When returning to idle, compute elapsed latency.
+            // When returning to idle, compute elapsed latency and fire OS notification.
             if new_state == BusyState::Idle {
                 self.last_turn_latency_ms = self
                     .turn_started_at
                     .take()
                     .map(|started| now_ms.saturating_sub(started));
+                // Fire a desktop notification if the turn took more than 5 seconds.
+                if self.last_turn_latency_ms.unwrap_or(0) >= 5_000 {
+                    fire_desktop_notification("dcode-ai", "Task complete ✓");
+                }
             }
             self.current_busy_state = new_state;
             self.busy_state_since = Instant::now();
@@ -1653,6 +1669,11 @@ impl TuiSessionState {
                 self.streaming_assistant
                     .get_or_insert_with(String::new)
                     .push_str(delta);
+                // Count output tokens this turn using a rough 4-chars-per-token estimate
+                // (updated precisely when CostUpdated arrives; this is just the live counter).
+                self.turn_output_tokens = self
+                    .turn_output_tokens
+                    .saturating_add((delta.len() as u64).saturating_add(3) / 4);
                 self.set_process("writing response", truncate(delta, 96));
                 self.set_busy_state(BusyState::Streaming);
                 transcript_dirty = true;
@@ -1988,6 +2009,22 @@ fn truncate(s: &str, max: usize) -> String {
             t.chars().take(max.saturating_sub(1)).collect::<String>()
         )
     }
+}
+
+/// Fire an OS desktop notification with `title` and `body`.
+/// Only active when the `desktop-notify` Cargo feature is enabled; otherwise a
+/// no-op so the binary works everywhere without native notification libraries.
+fn fire_desktop_notification(title: &str, body: &str) {
+    #[cfg(feature = "desktop-notify")]
+    {
+        let _ = notify_rust::Notification::new()
+            .summary(title)
+            .body(body)
+            .timeout(notify_rust::Timeout::Milliseconds(4000))
+            .show();
+    }
+    // Feature not enabled — silently skip.
+    let _ = (title, body);
 }
 
 #[cfg(test)]

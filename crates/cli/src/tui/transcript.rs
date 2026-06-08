@@ -320,6 +320,19 @@ pub(crate) fn transcript_lines_and_hits(
                         Style::default().fg(theme::muted()),
                     ));
                 }
+                // Exit-code chip: parse "exit N" from tool output for shell/exec tools.
+                if let Some(code) = parse_exit_code(detail) {
+                    header.push(Span::raw(" "));
+                    let (label, color) = if code == 0 {
+                        ("[exit 0]".to_string(), theme::success())
+                    } else {
+                        (format!("[exit {code}]"), theme::error())
+                    };
+                    header.push(Span::styled(
+                        label,
+                        Style::default().fg(color).add_modifier(Modifier::BOLD),
+                    ));
+                }
                 // Diff scale chip on the header so a collapsed edit still shows
                 // how big the change was without expanding the body.
                 let (adds, dels) = crate::tui::app::diff_change_counts(detail);
@@ -842,6 +855,34 @@ fn format_duration_badge(ms: u64) -> String {
     } else {
         format!("{:.1}s", ms as f64 / 1000.0)
     }
+}
+
+/// Parse an exit code from shell/exec tool output.
+/// Looks for patterns like "exit code: 1", "Exit code 0", or "exited with 2".
+fn parse_exit_code(detail: &str) -> Option<i32> {
+    for line in detail.lines().take(8) {
+        let lower = line.to_ascii_lowercase();
+        // Match "exit code: N", "exit code N", "exited with N", "exit status: N"
+        for prefix in &[
+            "exit code:",
+            "exit code ",
+            "exited with ",
+            "exit status:",
+            "exit status ",
+        ] {
+            if let Some(rest) = lower.find(prefix).map(|i| &lower[i + prefix.len()..]) {
+                let num_str: String = rest
+                    .trim_start()
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '-')
+                    .collect();
+                if let Ok(n) = num_str.parse::<i32>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
