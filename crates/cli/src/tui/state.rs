@@ -121,6 +121,9 @@ pub struct TuiSessionState {
     pub workspace_display: String,
     /// Images to send on the next user message (TUI only).
     pub staged_image_attachments: Vec<ImageAttachment>,
+    /// Extra context blocks (from `/web` or `/run`) to prepend to the next
+    /// outgoing user message and then clear.
+    pub pending_context: Vec<String>,
     /// Live view of spawned sub-agents (updated from child activity events).
     pub subagents: Vec<SubagentRow>,
     pub model: String,
@@ -492,6 +495,7 @@ impl TuiSessionState {
             workspace_root,
             workspace_display: String::new(),
             staged_image_attachments: Vec::new(),
+            pending_context: Vec::new(),
             subagents: Vec::new(),
             model,
             agent_profile,

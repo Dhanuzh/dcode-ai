@@ -5,7 +5,7 @@ REPO="Dhanuzh/dcode-ai"
 BINARY="dcode-ai"
 INSTALL_DIR="${DCODE_AI_INSTALL_DIR:-/usr/local/bin}"
 # Fallback when API lookup fails and no explicit version is provided.
-FALLBACK_VERSION="0.0.19"
+FALLBACK_VERSION="0.0.21"
 
 info()  { printf '\033[1;34m=>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }

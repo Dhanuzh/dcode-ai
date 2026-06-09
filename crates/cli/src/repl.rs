@@ -2320,6 +2320,200 @@ impl Repl {
                     Err(e) => out.eprintln(&format!("[thinking] {e}")),
                 }
             }
+            // ── /retry ────────────────────────────────────────────────────────
+            "/retry" => {
+                let last_user = self
+                    .runtime
+                    .messages()
+                    .iter()
+                    .rev()
+                    .find(|m| m.role == dcode_ai_common::message::Role::User)
+                    .map(|m| m.content.event_preview());
+                match last_user {
+                    Some(text) if !text.trim().is_empty() => {
+                        out.println("[retry] Re-sending last message…");
+                        match self.runtime.run_turn(text.trim()).await {
+                            Ok(response) => {
+                                if matches!(out, ReplOutput::Stdio) {
+                                    out.println(&response);
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[retry] {e}")),
+                        }
+                    }
+                    _ => out.eprintln("[retry] No previous user message to retry"),
+                }
+            }
+
+            // ── /run <shell cmd> ──────────────────────────────────────────────
+            "/run" => {
+                if rest.trim().is_empty() {
+                    out.eprintln("[run] usage: /run <shell command>");
+                    return Ok(true);
+                }
+                let shell_cmd = rest.trim().to_string();
+                out.println(&format!("[run] $ {shell_cmd}"));
+                let result = Command::new(if cfg!(windows) { "cmd" } else { "sh" })
+                    .args(if cfg!(windows) {
+                        vec!["/C", &shell_cmd]
+                    } else {
+                        vec!["-c", &shell_cmd]
+                    })
+                    .current_dir(self.runtime.workspace_root())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .await;
+                match result {
+                    Ok(cmd_out) => {
+                        let stdout = String::from_utf8_lossy(&cmd_out.stdout).to_string();
+                        let stderr = String::from_utf8_lossy(&cmd_out.stderr).to_string();
+                        let combined = if stderr.is_empty() {
+                            stdout
+                        } else if stdout.is_empty() {
+                            stderr
+                        } else {
+                            format!("{stdout}{stderr}")
+                        };
+                        const MAX_SHOW: usize = 8_000;
+                        let truncated = if combined.len() > MAX_SHOW {
+                            format!("{}…\n[output truncated]", &combined[..MAX_SHOW])
+                        } else {
+                            combined.clone()
+                        };
+                        if truncated.is_empty() {
+                            out.println("[run] (no output)");
+                        } else {
+                            out.print(&truncated);
+                        }
+                        let exit_label = if cmd_out.status.success() {
+                            "[exit 0]".to_string()
+                        } else {
+                            format!("[exit {}]", cmd_out.status.code().unwrap_or(-1))
+                        };
+                        out.println(&format!("[run] {exit_label} — output staged (send a message to use it)"));
+                        // Stage the output so the user's next message carries it.
+                        if let ReplOutput::Tui(st) = &out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.pending_context.push(format!(
+                                "Output of `{shell_cmd}` ({exit_label}):\n```\n{truncated}\n```"
+                            ));
+                        }
+                    }
+                    Err(e) => out.eprintln(&format!("[run] error: {e}")),
+                }
+            }
+
+            // ── /web <url> ────────────────────────────────────────────────────
+            "/web" => {
+                let url = rest.trim();
+                if url.is_empty() {
+                    out.eprintln("[web] usage: /web <url>");
+                    return Ok(true);
+                }
+                out.println(&format!("[web] Fetching {url}…"));
+                match fetch_url_as_text(url).await {
+                    Ok(text) => {
+                        let preview: String = text.lines().take(3).collect::<Vec<_>>().join(" ");
+                        let preview = truncate_str_bytes(&preview, 80);
+                        out.println(&format!("[web] {}: {preview}…", text.lines().count()));
+                        out.println("[web] Staged — send a message to use this context");
+                        let block = format!(
+                            "Content fetched from <{url}>:\n```text\n{text}\n```"
+                        );
+                        if let ReplOutput::Tui(st) = &out {
+                            if let Ok(mut g) = st.lock() {
+                                g.pending_context.push(block);
+                            }
+                        } else {
+                            // In stdio mode: just run a turn announcing the fetch.
+                            let prompt = format!("Web page context from <{url}>:\n\n```\n{text}\n```\n\nAcknowledge briefly.");
+                            let _ = self.runtime.run_turn(&prompt).await;
+                        }
+                    }
+                    Err(e) => out.eprintln(&format!("[web] fetch failed: {e}")),
+                }
+            }
+
+            // ── /commit ───────────────────────────────────────────────────────
+            "/commit" => {
+                // Check for staged changes.
+                let diff_out = Command::new("git")
+                    .args(["diff", "--staged"])
+                    .current_dir(self.runtime.workspace_root())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .output()
+                    .await;
+                let diff = match diff_out {
+                    Ok(o) => String::from_utf8_lossy(&o.stdout).to_string(),
+                    Err(e) => {
+                        out.eprintln(&format!("[commit] git error: {e}"));
+                        return Ok(true);
+                    }
+                };
+                if diff.trim().is_empty() {
+                    out.eprintln("[commit] No staged changes — run `git add` first");
+                    return Ok(true);
+                }
+                out.println("[commit] Generating commit message…");
+                let prompt = format!(
+                    "Write a git commit message for the following staged diff.\n\
+                     Use Conventional Commits format (feat/fix/chore/docs/…).\n\
+                     Output ONLY the commit message text — no code fences, no extra commentary.\n\
+                     Keep the subject line ≤72 chars.\n\
+                     \n\
+                     ```diff\n{diff}\n```"
+                );
+                let msg = match self.runtime.run_turn(&prompt).await {
+                    Ok(m) => m,
+                    Err(e) => {
+                        out.eprintln(&format!("[commit] model error: {e}"));
+                        return Ok(true);
+                    }
+                };
+                // Strip fences if model wrapped the message anyway.
+                let msg = msg
+                    .trim()
+                    .trim_start_matches("```")
+                    .trim_end_matches("```")
+                    .trim()
+                    .to_string();
+                if msg.is_empty() {
+                    out.eprintln("[commit] Model returned an empty message — aborting");
+                    return Ok(true);
+                }
+                let commit_out = Command::new("git")
+                    .args(["commit", "-m", &msg])
+                    .current_dir(self.runtime.workspace_root())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .output()
+                    .await;
+                match commit_out {
+                    Ok(o) if o.status.success() => {
+                        let first_line = msg.lines().next().unwrap_or(&msg);
+                        out.println(&format!("[commit] ✓ {first_line}"));
+                    }
+                    Ok(o) => {
+                        let stderr = String::from_utf8_lossy(&o.stderr);
+                        out.eprintln(&format!("[commit] git commit failed: {stderr}"));
+                    }
+                    Err(e) => out.eprintln(&format!("[commit] error: {e}")),
+                }
+            }
+
+            // ── /map ──────────────────────────────────────────────────────────
+            "/map" => {
+                let workspace = self.runtime.workspace_root().to_path_buf();
+                let files = discover_workspace_files(&workspace);
+                let tree = build_file_tree(&files);
+                let n = files.len();
+                out.println(&format!("[map] {n} files"));
+                out.println(&tree);
+            }
+
             _ => {
                 if command.starts_with('/')
                     && self
@@ -3298,6 +3492,19 @@ impl Repl {
                                 continue;
                             }
                         };
+                    // Prepend any pending context blocks (from /web or /run).
+                    let expanded = if let Ok(mut g) = tui_state.lock()
+                        && !g.pending_context.is_empty()
+                    {
+                        let ctx = g
+                            .pending_context
+                            .drain(..)
+                            .collect::<Vec<_>>()
+                            .join("\n\n---\n\n");
+                        format!("{ctx}\n\n---\n\n{expanded}")
+                    } else {
+                        expanded
+                    };
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_busy(true);
                     }
@@ -3661,6 +3868,163 @@ fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
         }
         _ => None,
     }
+}
+
+// ── /web helper: fetch URL and return plain text ──────────────────────────────
+
+/// Fetch a URL and return its content as plain text (HTML tags stripped).
+/// Truncates to ~16 KiB to keep context sizes manageable.
+async fn fetch_url_as_text(url: &str) -> anyhow::Result<String> {
+    use reqwest::header;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .user_agent("dcode-ai/1.0 (URL context fetcher)")
+        .build()?;
+    let resp = client.get(url).send().await?;
+    let content_type = resp
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let body = resp.text().await?;
+    const MAX_BYTES: usize = 16_384;
+    let text = if content_type.contains("html") {
+        strip_html_tags(&body)
+    } else {
+        body
+    };
+    if text.len() > MAX_BYTES {
+        Ok(format!(
+            "{}\n[…content truncated at 16 KiB]",
+            &text[..MAX_BYTES]
+        ))
+    } else {
+        Ok(text)
+    }
+}
+
+/// Very light HTML→text: remove tags, decode common entities, collapse whitespace.
+fn strip_html_tags(html: &str) -> String {
+    // Remove <script> and <style> blocks first.
+    let mut s = html.to_string();
+    for tag in &["script", "style", "head"] {
+        loop {
+            let open = format!("<{tag}");
+            let close = format!("</{tag}>");
+            if let Some(start) = s.to_ascii_lowercase().find(&open) {
+                if let Some(end) = s[start..].to_ascii_lowercase().find(&close) {
+                    s.drain(start..start + end + close.len());
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+    }
+    // Strip remaining tags.
+    let mut out = String::with_capacity(s.len());
+    let mut in_tag = false;
+    for c in s.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            _ if !in_tag => out.push(c),
+            _ => {}
+        }
+    }
+    // Decode common HTML entities.
+    let out = out
+        .replace("&amp;", "&")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&nbsp;", " ");
+    // Collapse runs of blank lines and trim.
+    let lines: Vec<&str> = out.lines().collect();
+    let mut result = String::new();
+    let mut prev_blank = false;
+    for line in lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            if !prev_blank {
+                result.push('\n');
+            }
+            prev_blank = true;
+        } else {
+            result.push_str(trimmed);
+            result.push('\n');
+            prev_blank = false;
+        }
+    }
+    result.trim().to_string()
+}
+
+/// Truncate to at most `max_bytes` UTF-8 bytes (on a char boundary).
+fn truncate_str_bytes(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+// ── /map helper: build an indented file tree ──────────────────────────────────
+
+/// Build a compact indented tree from a flat list of `/`-separated relative paths.
+/// Limits output to 200 entries to avoid flooding the transcript.
+fn build_file_tree(paths: &[String]) -> String {
+    use std::collections::BTreeMap;
+
+    // Represent the tree as nested BTreeMaps for sorted output.
+    #[derive(Default)]
+    struct Dir {
+        children: BTreeMap<String, Dir>,
+        files: Vec<String>,
+    }
+
+    let mut root = Dir::default();
+
+    for path in paths.iter().take(2000) {
+        let parts: Vec<&str> = path.split('/').collect();
+        let mut cur = &mut root;
+        if let Some((file, dirs)) = parts.split_last() {
+            for dir in dirs {
+                cur = cur.children.entry(dir.to_string()).or_default();
+            }
+            cur.files.push(file.to_string());
+        }
+    }
+
+    fn render(dir: &Dir, prefix: &str, out: &mut Vec<String>, count: &mut usize) {
+        for file in &dir.files {
+            if *count >= 200 {
+                return;
+            }
+            out.push(format!("{prefix}{file}"));
+            *count += 1;
+        }
+        let mut children: Vec<(&String, &Dir)> = dir.children.iter().collect();
+        children.sort_by_key(|(k, _)| k.as_str());
+        for (name, child) in children {
+            if *count >= 200 {
+                out.push(format!("{prefix}… (truncated)"));
+                return;
+            }
+            out.push(format!("{prefix}{name}/"));
+            render(child, &format!("{prefix}  "), out, count);
+        }
+    }
+
+    let mut lines = Vec::new();
+    let mut count = 0usize;
+    render(&root, "", &mut lines, &mut count);
+    lines.join("\n")
 }
 
 #[cfg(test)]

@@ -1638,6 +1638,21 @@ pub fn run_blocking(
                         "Busy: Enter queue · Alt+Enter follow-up · Esc cancel",
                         Style::default().fg(theme::tool()),
                     )))
+                } else if !g.pending_context.is_empty() {
+                    // Pending /web or /run context is waiting — remind the user.
+                    Some(Line::from(Span::styled(
+                        format!(
+                            "{} context block(s) staged — type your question and Enter to send",
+                            g.pending_context.len()
+                        ),
+                        Style::default().fg(theme::success()),
+                    )))
+                } else if !g.input_buffer.is_empty() && !g.input_buffer.contains('\n') {
+                    // Subtle multiline hint once the user starts typing.
+                    Some(Line::from(Span::styled(
+                        "Shift+Enter = newline · @file = attach file · /run /web /commit /map",
+                        Style::default().fg(theme::muted()),
+                    )))
                 } else {
                     None
                 };
@@ -5095,6 +5110,11 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "  /status            Session + context info".into(),
         "  /undo              Undo last agent turn (git-stash backed)".into(),
         "  /redo              Redo last undone turn".into(),
+        "  /retry             Re-send the last user message".into(),
+        "  /run <cmd>         Run shell command; output staged as context".into(),
+        "  /web <url>         Fetch URL; content staged as context".into(),
+        "  /commit            AI-generated commit message for staged changes".into(),
+        "  /map               Show workspace file tree".into(),
         "  /diff              Show recent git file changes".into(),
         "  /compact           Summarise and compact context".into(),
         "  /export            Export session to Markdown".into(),

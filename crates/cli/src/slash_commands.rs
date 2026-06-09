@@ -52,4 +52,9 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/cost",
     "/stats",
     "/auto-answer",
+    "/retry",
+    "/run",
+    "/web",
+    "/commit",
+    "/map",
 ];
