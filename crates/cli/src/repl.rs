@@ -2686,6 +2686,13 @@ impl Repl {
                         call_id,
                         dcode_ai_core::approval::ApprovalVerdict::AllowPattern(pattern),
                     ),
+                    ApprovalAnswer::ModifiedApproval {
+                        call_id,
+                        modified_input,
+                    } => (
+                        call_id,
+                        dcode_ai_core::approval::ApprovalVerdict::ApprovedModified(modified_input),
+                    ),
                 };
                 if !dispatch_tool_approval(&approval_dispatch, &call_id, verdict)
                     && let Ok(mut g) = approval_state.lock()

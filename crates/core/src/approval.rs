@@ -9,13 +9,18 @@ pub enum ApprovalVerdict {
     Denied,
     /// User chose "always allow" — pattern should be added to session allow list.
     AllowPattern(String),
+    /// User approved with modified tool input (e.g. partial hunk selection).
+    /// The tool call will execute with this input instead of the original.
+    ApprovedModified(serde_json::Value),
 }
 
 impl ApprovalVerdict {
     pub fn is_approved(&self) -> bool {
         matches!(
             self,
-            ApprovalVerdict::Approved | ApprovalVerdict::AllowPattern(_)
+            ApprovalVerdict::Approved
+                | ApprovalVerdict::AllowPattern(_)
+                | ApprovalVerdict::ApprovedModified(_)
         )
     }
 }

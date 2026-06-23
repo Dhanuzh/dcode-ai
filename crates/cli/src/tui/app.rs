@@ -65,8 +65,19 @@ const STARTUP_APPROVE_ALL_QUESTION_ID: &str = "startup-approve-all";
 /// Message from TUI to the approval dispatch task.
 #[derive(Debug)]
 pub enum ApprovalAnswer {
-    Verdict { call_id: String, approved: bool },
-    AllowPattern { call_id: String, pattern: String },
+    Verdict {
+        call_id: String,
+        approved: bool,
+    },
+    AllowPattern {
+        call_id: String,
+        pattern: String,
+    },
+    /// Approve with modified tool input (partial hunk selection).
+    ModifiedApproval {
+        call_id: String,
+        modified_input: serde_json::Value,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -891,6 +902,139 @@ fn parse_unified_hunk_header(line: &str) -> Option<(usize, usize)> {
     Some((old_start, new_start))
 }
 
+/// One hunk of a diff for interactive staging.
+#[derive(Debug, Clone)]
+pub(crate) struct DiffHunk {
+    /// Human-readable label, e.g. "@@ -10,3 +10,5 @@"
+    pub header: String,
+    /// Lines in this hunk (with +/-/space prefix).
+    pub lines: Vec<(char, String)>,
+}
+
+/// Parse a unified diff between `old` and `new` into discrete hunks.
+pub(crate) fn parse_diff_hunks(old: &str, new: &str) -> Vec<DiffHunk> {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new);
+    let mut hunks = Vec::new();
+    for group in diff.grouped_ops(3) {
+        let mut lines: Vec<(char, String)> = Vec::new();
+        let mut old_start = usize::MAX;
+        let mut new_start = usize::MAX;
+        for op in &group {
+            for change in diff.iter_changes(op) {
+                if old_start == usize::MAX {
+                    old_start = change.old_index().unwrap_or(0);
+                    new_start = change.new_index().unwrap_or(0);
+                }
+                let (sigil, text) = match change.tag() {
+                    ChangeTag::Insert => ('+', change.value().to_string()),
+                    ChangeTag::Delete => ('-', change.value().to_string()),
+                    ChangeTag::Equal => (' ', change.value().to_string()),
+                };
+                lines.push((sigil, text.trim_end_matches('\n').to_string()));
+            }
+        }
+        if lines.iter().any(|(s, _)| *s != ' ') {
+            let header = format!(
+                "@@ -{},{} +{},{} @@",
+                old_start + 1,
+                lines.iter().filter(|(s, _)| *s != '+').count(),
+                new_start + 1,
+                lines.iter().filter(|(s, _)| *s != '-').count(),
+            );
+            hunks.push(DiffHunk { header, lines });
+        }
+    }
+    hunks
+}
+
+/// Reconstruct file content by applying only selected hunks to the old text.
+pub(crate) fn apply_selected_hunks(old: &str, new: &str, selected: &[bool]) -> String {
+    use similar::{ChangeTag, TextDiff};
+    let diff = TextDiff::from_lines(old, new);
+    let groups: Vec<Vec<similar::DiffOp>> = diff.grouped_ops(3);
+    let old_lines: Vec<&str> = old.lines().collect();
+
+    let mut result = String::new();
+    let mut old_cursor = 0usize;
+
+    for (group_idx, group) in groups.iter().enumerate() {
+        let accept = selected.get(group_idx).copied().unwrap_or(false);
+        let group_old_start = group
+            .first()
+            .map(|op| match op {
+                similar::DiffOp::Equal { old_index, .. }
+                | similar::DiffOp::Delete { old_index, .. }
+                | similar::DiffOp::Replace { old_index, .. }
+                | similar::DiffOp::Insert { old_index, .. } => *old_index,
+            })
+            .unwrap_or(old_cursor);
+
+        // Copy unchanged lines between the previous hunk and this one.
+        for i in old_cursor..group_old_start {
+            if let Some(line) = old_lines.get(i) {
+                result.push_str(line);
+                result.push('\n');
+            }
+        }
+
+        if accept {
+            // Apply this hunk: use new lines where there are changes.
+            for op in group {
+                for change in diff.iter_changes(op) {
+                    match change.tag() {
+                        ChangeTag::Insert | ChangeTag::Equal => {
+                            result.push_str(change.value());
+                        }
+                        ChangeTag::Delete => {}
+                    }
+                }
+            }
+        } else {
+            // Reject this hunk: keep old lines.
+            for op in group {
+                for change in diff.iter_changes(op) {
+                    match change.tag() {
+                        ChangeTag::Delete | ChangeTag::Equal => {
+                            result.push_str(change.value());
+                        }
+                        ChangeTag::Insert => {}
+                    }
+                }
+            }
+        }
+
+        // Track where we left off in old text.
+        old_cursor = group
+            .last()
+            .map(|op| match op {
+                similar::DiffOp::Equal { old_index, len, .. } => *old_index + *len,
+                similar::DiffOp::Delete {
+                    old_index, old_len, ..
+                }
+                | similar::DiffOp::Replace {
+                    old_index, old_len, ..
+                } => *old_index + *old_len,
+                similar::DiffOp::Insert { old_index, .. } => *old_index,
+            })
+            .unwrap_or(old_cursor);
+    }
+
+    // Copy remaining old lines after the last hunk.
+    for i in old_cursor..old_lines.len() {
+        if let Some(line) = old_lines.get(i) {
+            result.push_str(line);
+            result.push('\n');
+        }
+    }
+
+    // Match original trailing newline behavior.
+    if !old.ends_with('\n') && !new.ends_with('\n') {
+        result.truncate(result.trim_end_matches('\n').len());
+    }
+    result
+}
+
 /// Build a compact colorized diff preview for file-write/edit tool approvals.
 /// Returns up to ~6 colored `Line`s showing +/- changes, or empty if not applicable.
 fn approval_diff_preview(tool: &str, input_json: &str, max_cols: usize) -> Vec<Line<'static>> {
@@ -971,6 +1115,9 @@ fn render_approval_popup(
     area: Rect,
     req: &ApprovalRequest,
     selected: usize,
+    hunk_mode: bool,
+    hunk_selection: &[bool],
+    hunk_cursor: usize,
 ) {
     // Keep approval modal compact but allow extra rows when diff preview is shown.
     let max_w = area.width.saturating_sub(2);
@@ -982,7 +1129,9 @@ fn render_approval_popup(
         (popup_w as usize).saturating_sub(4),
     )
     .is_empty();
-    let popup_h = if has_diff {
+    let popup_h = if hunk_mode {
+        max_h.min(30).max(max_h.min(18))
+    } else if has_diff {
         max_h.min(20).max(max_h.min(13))
     } else {
         max_h.min(13).max(max_h.min(9))
@@ -1035,34 +1184,93 @@ fn render_approval_popup(
     lines.push(option_row(2, "Deny (n)"));
     lines.push(Line::default());
 
-    // Show a mini diff preview for file edit/write tools.
-    let diff_preview = approval_diff_preview(&req.tool, &req.input, inner_w);
-    if !diff_preview.is_empty() {
-        lines.push(Line::from(Span::styled(
-            "diff preview:",
-            Style::default().fg(theme::muted()),
-        )));
-        for dl in diff_preview {
-            lines.push(dl);
+    // Show hunk-selection mode or mini diff preview.
+    if hunk_mode && !hunk_selection.is_empty() {
+        let hunks = extract_approval_hunks(&req.tool, &req.input);
+        for (i, hunk) in hunks.iter().enumerate() {
+            let accepted = hunk_selection.get(i).copied().unwrap_or(true);
+            let is_focused = i == hunk_cursor;
+            let marker = if accepted { "[✓]" } else { "[✗]" };
+            let hdr_style = if is_focused {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::user())
+                    .add_modifier(Modifier::BOLD)
+            } else if accepted {
+                Style::default().fg(theme::success())
+            } else {
+                Style::default().fg(theme::error())
+            };
+            lines.push(Line::from(vec![
+                Span::styled(format!("{marker} "), hdr_style),
+                Span::styled(
+                    truncate_chars(&hunk.header, inner_w.saturating_sub(6)),
+                    hdr_style,
+                ),
+            ]));
+            // Show up to 4 lines of each hunk as context.
+            let max_hunk_lines = if is_focused { 6 } else { 2 };
+            for (sigil, text) in hunk.lines.iter().take(max_hunk_lines) {
+                let color = match sigil {
+                    '+' => theme::success(),
+                    '-' => theme::error(),
+                    _ => theme::muted(),
+                };
+                let dimmed = if !accepted && *sigil != ' ' {
+                    Style::default().fg(color).add_modifier(Modifier::DIM)
+                } else {
+                    Style::default().fg(color)
+                };
+                lines.push(Line::from(Span::styled(
+                    format!(
+                        "  {sigil}{}",
+                        truncate_chars(text, inner_w.saturating_sub(4))
+                    ),
+                    dimmed,
+                )));
+            }
+            if hunk.lines.len() > max_hunk_lines {
+                lines.push(Line::from(Span::styled(
+                    format!("  … {} more lines", hunk.lines.len() - max_hunk_lines),
+                    Style::default().fg(theme::muted()),
+                )));
+            }
         }
-    } else if !preview.is_empty() {
+        let accepted = hunk_selection.iter().filter(|&&s| s).count();
+        let total = hunk_selection.len();
         lines.push(Line::from(Span::styled(
-            truncate_chars(
-                &format!("input: {preview}"),
-                inner_w.saturating_sub(2).max(24),
-            ),
+            format!("{accepted}/{total} hunks selected — ↑↓ navigate · space toggle · y/n accept/reject · Enter apply"),
             Style::default().fg(theme::muted()),
         )));
     } else {
+        let diff_preview = approval_diff_preview(&req.tool, &req.input, inner_w);
+        if !diff_preview.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "diff preview (h = per-hunk staging):",
+                Style::default().fg(theme::muted()),
+            )));
+            for dl in diff_preview {
+                lines.push(dl);
+            }
+        } else if !preview.is_empty() {
+            lines.push(Line::from(Span::styled(
+                truncate_chars(
+                    &format!("input: {preview}"),
+                    inner_w.saturating_sub(2).max(24),
+                ),
+                Style::default().fg(theme::muted()),
+            )));
+        } else {
+            lines.push(Line::from(Span::styled(
+                truncate_chars(&req.description, inner_w.saturating_sub(2).max(24)),
+                Style::default().fg(theme::muted()),
+            )));
+        }
         lines.push(Line::from(Span::styled(
-            truncate_chars(&req.description, inner_w.saturating_sub(2).max(24)),
+            "↑↓ select  Enter confirm  Esc cancel  h hunks",
             Style::default().fg(theme::muted()),
         )));
     }
-    lines.push(Line::from(Span::styled(
-        "↑↓ select  Enter confirm  Esc cancel",
-        Style::default().fg(theme::muted()),
-    )));
 
     frame.render_widget(ClearWidget, popup_area);
     let popup = Paragraph::new(Text::from(lines))
@@ -3194,7 +3402,15 @@ pub fn run_blocking(
                     && !g.connect_modal_open
                     && !g.onboarding_mode
                 {
-                    render_approval_popup(frame, area, &req, g.approval_option_index);
+                    render_approval_popup(
+                        frame,
+                        area,
+                        &req,
+                        g.approval_option_index,
+                        g.approval_hunk_mode,
+                        &g.approval_hunk_selection,
+                        g.approval_hunk_cursor,
+                    );
                 }
             })?;
         }
@@ -4546,6 +4762,71 @@ pub fn run_blocking(
                                 continue;
                             }
                         }
+                        // Toggle hunk-selection mode for file-writing approvals.
+                        (KeyCode::Char('h'), KeyModifiers::NONE)
+                            if g.active_approval.is_some() && !g.approval_hunk_mode =>
+                        {
+                            if let Some(req) = g.active_approval.as_ref() {
+                                let hunks = extract_approval_hunks(&req.tool, &req.input);
+                                if !hunks.is_empty() {
+                                    g.approval_hunk_selection = vec![true; hunks.len()];
+                                    g.approval_hunk_cursor = 0;
+                                    g.approval_hunk_mode = true;
+                                    g.touch_transcript();
+                                }
+                            }
+                            continue;
+                        }
+                        // Hunk mode navigation.
+                        (KeyCode::Up, KeyModifiers::NONE) if g.approval_hunk_mode => {
+                            g.approval_hunk_cursor = g.approval_hunk_cursor.saturating_sub(1);
+                            g.touch_transcript();
+                            continue;
+                        }
+                        (KeyCode::Down, KeyModifiers::NONE) if g.approval_hunk_mode => {
+                            let max = g.approval_hunk_selection.len().saturating_sub(1);
+                            g.approval_hunk_cursor = (g.approval_hunk_cursor + 1).min(max);
+                            g.touch_transcript();
+                            continue;
+                        }
+                        // Toggle current hunk.
+                        (KeyCode::Char(' '), KeyModifiers::NONE) if g.approval_hunk_mode => {
+                            let idx = g.approval_hunk_cursor;
+                            if let Some(val) = g.approval_hunk_selection.get_mut(idx) {
+                                *val = !*val;
+                            }
+                            g.touch_transcript();
+                            continue;
+                        }
+                        // Accept current hunk.
+                        (KeyCode::Char('y'), KeyModifiers::NONE) if g.approval_hunk_mode => {
+                            let idx = g.approval_hunk_cursor;
+                            if let Some(val) = g.approval_hunk_selection.get_mut(idx) {
+                                *val = true;
+                            }
+                            let max = g.approval_hunk_selection.len().saturating_sub(1);
+                            g.approval_hunk_cursor = (g.approval_hunk_cursor + 1).min(max);
+                            g.touch_transcript();
+                            continue;
+                        }
+                        // Reject current hunk.
+                        (KeyCode::Char('n'), KeyModifiers::NONE) if g.approval_hunk_mode => {
+                            let idx = g.approval_hunk_cursor;
+                            if let Some(val) = g.approval_hunk_selection.get_mut(idx) {
+                                *val = false;
+                            }
+                            let max = g.approval_hunk_selection.len().saturating_sub(1);
+                            g.approval_hunk_cursor = (g.approval_hunk_cursor + 1).min(max);
+                            g.touch_transcript();
+                            continue;
+                        }
+                        // Exit hunk mode without applying.
+                        (KeyCode::Esc, _) if g.approval_hunk_mode => {
+                            g.approval_hunk_mode = false;
+                            g.approval_hunk_selection.clear();
+                            g.touch_transcript();
+                            continue;
+                        }
                         (KeyCode::Char('y'), KeyModifiers::CONTROL) => {
                             if let Some(req) = g.active_approval.clone() {
                                 let call_id = req.call_id.clone();
@@ -4622,6 +4903,41 @@ pub fn run_blocking(
                                 let t = line.trim();
                                 if t.is_empty() {
                                     let call_id = req.call_id.clone();
+
+                                    // If in hunk mode, apply partial selection.
+                                    if g.approval_hunk_mode && !g.approval_hunk_selection.is_empty()
+                                    {
+                                        let modified_input = build_hunk_modified_input(
+                                            &req.tool,
+                                            &req.input,
+                                            &g.approval_hunk_selection,
+                                        );
+                                        let all_selected =
+                                            g.approval_hunk_selection.iter().all(|&s| s);
+                                        g.approval_hunk_mode = false;
+                                        g.approval_hunk_selection.clear();
+                                        drop(g);
+                                        if let Some(ref tx) = approval_answer_tx {
+                                            if all_selected {
+                                                let _ = tx.send(ApprovalAnswer::Verdict {
+                                                    call_id,
+                                                    approved: true,
+                                                });
+                                            } else if let Some(modified) = modified_input {
+                                                let _ = tx.send(ApprovalAnswer::ModifiedApproval {
+                                                    call_id,
+                                                    modified_input: modified,
+                                                });
+                                            } else {
+                                                let _ = tx.send(ApprovalAnswer::Verdict {
+                                                    call_id,
+                                                    approved: true,
+                                                });
+                                            }
+                                        }
+                                        continue;
+                                    }
+
                                     let selection = g.approval_option_index.min(2);
                                     drop(g);
                                     if let Some(ref tx) = approval_answer_tx {
@@ -5112,6 +5428,73 @@ pub fn run_blocking(
     restore_terminal(mouse_capture);
     let _ = execute!(stdout(), MoveToColumn(0));
     Ok(())
+}
+
+/// Extract old/new content from approval request and compute diff hunks.
+fn extract_approval_hunks(tool: &str, input_json: &str) -> Vec<DiffHunk> {
+    let lower = tool.to_ascii_lowercase();
+    if !lower.contains("write") && !lower.contains("edit") && !lower.contains("patch") {
+        return Vec::new();
+    }
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(input_json) else {
+        return Vec::new();
+    };
+    let path = val
+        .get("path")
+        .or_else(|| val.get("file"))
+        .or_else(|| val.get("filename"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new_content = val
+        .get("content")
+        .or_else(|| val.get("new_content"))
+        .or_else(|| val.get("text"))
+        .and_then(|v| v.as_str());
+    let old_content = if !path.is_empty() {
+        std::fs::read_to_string(path).ok()
+    } else {
+        None
+    };
+    match (old_content.as_deref(), new_content) {
+        (Some(old), Some(new)) => parse_diff_hunks(old, new),
+        _ => Vec::new(),
+    }
+}
+
+/// Build modified tool input with only selected hunks applied.
+fn build_hunk_modified_input(
+    tool: &str,
+    input_json: &str,
+    selection: &[bool],
+) -> Option<serde_json::Value> {
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(input_json) else {
+        return None;
+    };
+    let path = val
+        .get("path")
+        .or_else(|| val.get("file"))
+        .or_else(|| val.get("filename"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let new_content = val
+        .get("content")
+        .or_else(|| val.get("new_content"))
+        .or_else(|| val.get("text"))
+        .and_then(|v| v.as_str())?;
+    let old_content = std::fs::read_to_string(path).ok()?;
+    let patched = apply_selected_hunks(&old_content, new_content, selection);
+    let lower = tool.to_ascii_lowercase();
+    if lower.contains("write") {
+        let mut modified = val.clone();
+        if modified.get("content").is_some() {
+            modified["content"] = serde_json::Value::String(patched);
+        } else if modified.get("text").is_some() {
+            modified["text"] = serde_json::Value::String(patched);
+        }
+        Some(modified)
+    } else {
+        None
+    }
 }
 
 /// Subsequence fuzzy match: checks if all chars of `needle` appear in order

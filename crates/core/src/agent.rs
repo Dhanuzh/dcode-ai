@@ -400,28 +400,39 @@ impl AgentLoop {
                         }
 
                         if approved {
+                            // If the user partially approved (hunk selection), use
+                            // the modified input instead of the original.
+                            let effective_call =
+                                if let ApprovalVerdict::ApprovedModified(modified_input) = &verdict
+                                {
+                                    let mut patched = call.clone();
+                                    patched.input = modified_input.clone();
+                                    patched
+                                } else {
+                                    call.clone()
+                                };
                             if let Some(hooks) = &self.hooks
                                 && let Err(reason) = hooks
                                     .run(
                                         HookEventKind::PreToolUse,
-                                        Some(&call.name),
+                                        Some(&effective_call.name),
                                         &json!({
-                                            "call_id": call.id.clone(),
-                                            "tool": call.name.clone(),
-                                            "input": call.input.clone(),
+                                            "call_id": effective_call.id.clone(),
+                                            "tool": effective_call.name.clone(),
+                                            "input": effective_call.input.clone(),
                                         }),
                                     )
                                     .await
                             {
                                 tickets.push(Ticket::Resolved(ToolResult {
-                                    call_id: call.id.clone(),
+                                    call_id: effective_call.id.clone(),
                                     success: false,
                                     output: String::new(),
                                     error: Some(reason),
                                 }));
                                 continue;
                             }
-                            tickets.push(Ticket::Execute(call.clone()));
+                            tickets.push(Ticket::Execute(effective_call));
                         } else {
                             if self.approval.should_fail_on_ask() {
                                 let message = format!(

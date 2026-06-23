@@ -164,6 +164,14 @@ pub struct TuiSessionState {
     pub active_approval: Option<ApprovalRequest>,
     /// Selected action in approval popup: 0=approve, 1=always approve, 2=deny.
     pub approval_option_index: usize,
+    /// Per-hunk accept/reject selection for the active approval (git add -p style).
+    /// `true` = hunk accepted, `false` = rejected. Empty when not in hunk mode.
+    pub approval_hunk_selection: Vec<bool>,
+    /// Currently focused hunk index (for ↑/↓ navigation in hunk mode).
+    pub approval_hunk_cursor: usize,
+    /// When true, the approval popup is in hunk-selection mode instead of
+    /// the simple approve/deny radio.
+    pub approval_hunk_mode: bool,
     /// When set, the composer answers this question (see status hint).
     pub active_question: Option<InteractiveQuestionPayload>,
     /// Resolved answers keyed by `question_id`, used to render selected choice
@@ -522,6 +530,9 @@ impl TuiSessionState {
             command_palette_query: String::new(),
             active_approval: None,
             approval_option_index: 0,
+            approval_hunk_selection: Vec::new(),
+            approval_hunk_cursor: 0,
+            approval_hunk_mode: false,
             active_question: None,
             answered_questions: HashMap::new(),
             thinking_expanded: false,
