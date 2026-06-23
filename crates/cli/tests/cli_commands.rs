@@ -4,6 +4,8 @@ use dcode_ai_common::message::Message;
 use dcode_ai_common::session::{SessionMeta, SessionState, SessionStatus};
 use serde_json::Value;
 use std::fs;
+use std::io::{Read, Write};
+use std::net::TcpListener;
 use std::path::Path;
 use std::process::Command as StdCommand;
 use tempfile::tempdir;
@@ -63,6 +65,27 @@ fn write_event_log(workspace: &Path, id: &str, lines: &str) {
     let sessions_dir = workspace.join(".dcode-ai").join("sessions");
     fs::create_dir_all(&sessions_dir).expect("create sessions dir");
     fs::write(sessions_dir.join(format!("{id}.events.jsonl")), lines).expect("write event log");
+}
+
+fn spawn_model_catalog_server(body: &'static str) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind model catalog server");
+    let address = listener.local_addr().expect("model catalog address");
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().expect("accept model catalog request");
+        let mut request = [0_u8; 4096];
+        let _ = stream
+            .read(&mut request)
+            .expect("read model catalog request");
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(response.as_bytes())
+            .expect("write model catalog response");
+    });
+    format!("http://{address}")
 }
 
 fn init_git_repo(workspace: &Path) -> bool {
@@ -492,11 +515,14 @@ fn spawn_json_reports_machine_paths() {
 }
 
 #[test]
-fn models_json_lists_all_provider_models() {
+fn models_json_includes_live_active_provider_catalog() {
     let temp = tempdir().expect("tempdir");
+    let base_url =
+        spawn_model_catalog_server(r#"{"data":[{"id":"provider-new"},{"id":"provider-latest"}]}"#);
     write_local_config_contents(
         temp.path(),
-        r#"
+        &format!(
+            r#"
 [provider]
 default = "openai"
 
@@ -505,6 +531,7 @@ api_key = "minimax-key"
 
 [provider.openai]
 api_key = "openai-key"
+base_url = "{base_url}"
 model = "gpt-4o"
 
 [provider.anthropic]
@@ -514,7 +541,8 @@ model = "claude-3-7-sonnet-latest"
 [provider.openrouter]
 api_key = "openrouter-key"
 model = "openai/gpt-4o-mini"
-"#,
+"#
+        ),
     );
 
     let output = Command::cargo_bin("dcode-ai")
@@ -532,6 +560,11 @@ model = "openai/gpt-4o-mini"
     let payload: Value = serde_json::from_slice(&output).expect("json");
     assert_eq!(payload["default_provider"], "OpenAI");
     assert_eq!(payload["default_model"], "gpt-4o");
+    assert_eq!(payload["source"], "provider_api");
+    assert_eq!(
+        payload["active_provider_models"],
+        serde_json::json!(["provider-latest", "provider-new"])
+    );
     let provider_models = payload["provider_models"]
         .as_array()
         .expect("provider_models array");

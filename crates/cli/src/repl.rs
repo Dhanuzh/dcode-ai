@@ -126,17 +126,6 @@ fn parse_logout_target(value: &str) -> Option<LogoutTarget> {
     }
 }
 
-fn prefers_openai_default_model(model: &str) -> bool {
-    let m = model.trim().to_ascii_lowercase();
-    m.is_empty()
-        || m.starts_with("minimax")
-        || m.starts_with("claude")
-        || m.starts_with("gemini")
-        || m.contains("big-pickle")
-        || m.contains("kimi")
-        || m.contains("glm")
-}
-
 fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -612,51 +601,15 @@ impl Repl {
     ) -> anyhow::Result<()> {
         let mut cfg = self.runtime.config().clone();
         cfg.set_default_provider(p);
-        match p {
-            ProviderKind::OpenAi => {
-                if cfg
-                    .provider
-                    .openai
-                    .base_url
-                    .to_ascii_lowercase()
-                    .contains("githubcopilot.com")
-                {
-                    cfg.provider.openai.base_url = "https://api.openai.com".to_string();
-                }
-                if prefers_openai_default_model(cfg.provider.openai.model.as_str()) {
-                    cfg.provider.openai.model = "gpt-4o-mini".to_string();
-                }
-            }
-            ProviderKind::Antigravity
-                if cfg.provider.openai.model.trim().is_empty()
-                    || cfg
-                        .provider
-                        .openai
-                        .model
-                        .to_ascii_lowercase()
-                        .starts_with("gpt-")
-                    || cfg
-                        .provider
-                        .openai
-                        .model
-                        .to_ascii_lowercase()
-                        .starts_with("o1")
-                    || cfg
-                        .provider
-                        .openai
-                        .model
-                        .to_ascii_lowercase()
-                        .starts_with("o3")
-                    || cfg
-                        .provider
-                        .openai
-                        .model
-                        .to_ascii_lowercase()
-                        .starts_with("o4") =>
-            {
-                cfg.provider.openai.model = "MiniMax-M2.5".to_string();
-            }
-            _ => {}
+        if p == ProviderKind::OpenAi
+            && cfg
+                .provider
+                .openai
+                .base_url
+                .to_ascii_lowercase()
+                .contains("githubcopilot.com")
+        {
+            cfg.provider.openai.base_url = "https://api.openai.com".to_string();
         }
         match self.runtime.apply_dcode_ai_config(cfg) {
             Ok(()) => {
@@ -699,17 +652,11 @@ impl Repl {
                 {
                     cfg.provider.openai.base_url = "https://api.openai.com".to_string();
                 }
-                if prefers_openai_default_model(cfg.provider.openai.model.as_str()) {
-                    cfg.provider.openai.model = "gpt-4o-mini".to_string();
-                }
                 ProviderKind::OpenAi
             }
             OAuthProvider::Copilot => {
                 cfg.set_default_provider(ProviderKind::OpenAi);
                 cfg.provider.openai.base_url = "https://api.githubcopilot.com".to_string();
-                if cfg.provider.openai.model.trim().is_empty() {
-                    cfg.provider.openai.model = "gpt-4o".to_string();
-                }
                 ProviderKind::OpenAi
             }
             OAuthProvider::Anthropic => {
@@ -718,16 +665,6 @@ impl Repl {
             }
             OAuthProvider::Antigravity => {
                 cfg.set_default_provider(ProviderKind::Antigravity);
-                if cfg.provider.openai.model.trim().is_empty()
-                    || cfg
-                        .provider
-                        .openai
-                        .model
-                        .to_ascii_lowercase()
-                        .starts_with("gpt-")
-                {
-                    cfg.provider.openai.model = "MiniMax-M2.5".to_string();
-                }
                 ProviderKind::Antigravity
             }
             OAuthProvider::Opencodezen => {
@@ -774,34 +711,6 @@ impl Repl {
         let mut cfg = self.runtime.config().clone();
         cfg.set_default_provider(ProviderKind::OpenAi);
         cfg.provider.openai.base_url = "https://api.githubcopilot.com".to_string();
-        if cfg.provider.openai.model.trim().is_empty()
-            || cfg
-                .provider
-                .openai
-                .model
-                .to_ascii_lowercase()
-                .starts_with("gpt-")
-            || cfg
-                .provider
-                .openai
-                .model
-                .to_ascii_lowercase()
-                .starts_with("o1")
-            || cfg
-                .provider
-                .openai
-                .model
-                .to_ascii_lowercase()
-                .starts_with("o3")
-            || cfg
-                .provider
-                .openai
-                .model
-                .to_ascii_lowercase()
-                .starts_with("o4")
-        {
-            cfg.provider.openai.model = "gpt-4o".to_string();
-        }
         match self.runtime.apply_dcode_ai_config(cfg) {
             Ok(()) => {
                 if let ReplOutput::Tui(st) = &out
@@ -835,16 +744,6 @@ impl Repl {
             .contains("githubcopilot.com")
         {
             cfg.provider.openai.base_url = "https://api.openai.com".to_string();
-        }
-        // Codex preset: keep OpenAI surface but select a coding-optimized model.
-        if !cfg
-            .provider
-            .openai
-            .model
-            .to_ascii_lowercase()
-            .contains("codex")
-        {
-            cfg.provider.openai.model = "gpt-5-codex".to_string();
         }
         match self.runtime.apply_dcode_ai_config(cfg) {
             Ok(()) => {
@@ -1407,14 +1306,20 @@ impl Repl {
                 out.println(&format!("saved session summary:\n{}", summary));
             }
             "/models" => {
-                let provider_models =
+                let catalog =
                     dcode_ai_runtime::model_limits_api::fetch_provider_model_ids(self.runtime.config())
                         .await;
+                let (provider_models, catalog_error) = match catalog {
+                    Ok(models) => (models, None),
+                    Err(error) => (Vec::new(), Some(error.to_string())),
+                };
                 let auth = dcode_ai_common::auth::AuthStore::load().unwrap_or_default();
                 let connected = active_provider_connected(self.runtime.config(), &auth);
                 if let ReplOutput::Tui(st) = &out {
                     let entries = build_model_picker_entries(self.runtime.config(), &provider_models);
                     if let Ok(mut g) = st.lock() {
+                        // An unavailable live catalog is non-fatal in the picker.
+                        // Keep it empty; never substitute a built-in model list.
                         g.open_model_picker(entries);
                     }
                 } else {
@@ -1437,8 +1342,8 @@ impl Repl {
                     if !connected {
                         out.println("no provider connected for current selection; run /connect or /login");
                     }
-                    if provider_models.is_empty() {
-                        out.println("no models available for current provider");
+                    if let Some(error) = catalog_error {
+                        out.eprintln(&format!("[models] {error}"));
                     } else {
                         out.println(&format!(
                             "active provider models ({}) :",
@@ -2991,14 +2896,15 @@ impl Repl {
                 TuiCmd::ApplyModelProvider(p) => {
                     self.apply_provider_in_session(p, ReplOutput::Tui(&tui_state))
                         .await?;
-                    let provider_models =
-                        dcode_ai_runtime::model_limits_api::fetch_provider_model_ids(
-                            self.runtime.config(),
-                        )
-                        .await;
+                    let catalog = dcode_ai_runtime::model_limits_api::fetch_provider_model_ids(
+                        self.runtime.config(),
+                    )
+                    .await;
+                    let provider_models = catalog.unwrap_or_default();
                     let entries =
                         build_model_picker_entries(self.runtime.config(), &provider_models);
                     if let Ok(mut g) = tui_state.lock() {
+                        // An unavailable live catalog is non-fatal in the picker.
                         g.open_model_picker(entries);
                     }
                 }

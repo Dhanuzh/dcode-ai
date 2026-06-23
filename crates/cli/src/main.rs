@@ -710,7 +710,7 @@ async fn try_main() -> anyhow::Result<()> {
             }
         },
         Some(Command::Models { json }) => {
-            show_models(&config, json)?;
+            show_models(&config, json).await?;
         }
         Some(Command::Doctor { json }) => {
             show_doctor(&config, &workspace_root, json)?;
@@ -1845,10 +1845,16 @@ async fn add_memory_note(
     Ok(())
 }
 
-fn show_models(config: &DcodeAiConfig, json: bool) -> anyhow::Result<()> {
+async fn show_models(config: &DcodeAiConfig, json: bool) -> anyhow::Result<()> {
+    let active_provider_models =
+        dcode_ai_runtime::model_limits_api::fetch_provider_model_ids(config)
+            .await
+            .map_err(anyhow::Error::msg)?;
     let output = ModelCatalogOutput {
         default_provider: config.provider.default.display_name().to_string(),
         default_model: config.model.default_model.clone(),
+        source: "provider_api",
+        active_provider_models,
         provider_models: ProviderKind::ALL
             .into_iter()
             .map(|provider| ProviderModelOutput {
@@ -1883,6 +1889,10 @@ fn show_models(config: &DcodeAiConfig, json: bool) -> anyhow::Result<()> {
                 provider.model,
                 provider.base_url
             );
+        }
+        println!("Live active-provider models:");
+        for model in &output.active_provider_models {
+            println!("  {model}");
         }
         for (alias, target) in output.aliases {
             println!("  {alias} -> {target}");
@@ -2188,6 +2198,8 @@ struct SkillOutput {
 struct ModelCatalogOutput {
     default_provider: String,
     default_model: String,
+    source: &'static str,
+    active_provider_models: Vec<String>,
     provider_models: Vec<ProviderModelOutput>,
     aliases: std::collections::BTreeMap<String, String>,
     thinking_enabled: bool,
@@ -2358,9 +2370,6 @@ fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
             LoggedProvider::Copilot if store.copilot.is_some() => {
                 config.set_default_provider(ProviderKind::OpenAi);
                 config.provider.openai.base_url = "https://api.githubcopilot.com".to_string();
-                if config.provider.openai.model.trim().is_empty() {
-                    config.provider.openai.model = "gpt-4o".to_string();
-                }
                 return;
             }
             _ => {}

@@ -52,6 +52,10 @@ thinking_budget = 4096
 aliases         = { fast = "claude-haiku-4-5-20251001" }   # /model fast
 ```
 
+Aliases and configured defaults are user-owned configuration. Available model
+IDs are not bundled into dcode-ai; use `/models` or `dcode-ai models --json` to
+read the active provider's live catalog.
+
 ## `[permissions]` — what the agent may do
 
 ```toml

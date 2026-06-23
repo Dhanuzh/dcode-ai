@@ -101,9 +101,6 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
                             if matches!(choice.oauth, OAuthProvider::Copilot) {
                                 config.provider.openai.base_url =
                                     "https://api.githubcopilot.com".to_string();
-                                if config.provider.openai.model.trim().is_empty() {
-                                    config.provider.openai.model = "gpt-4o".to_string();
-                                }
                             }
                             config.ui.onboarding_completed = true;
                             if let Err(e) = config.save_global() {

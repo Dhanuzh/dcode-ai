@@ -124,6 +124,7 @@ dcode-ai attach <session-id>   # attach to live output
 | Command        | Description                       |
 | -------------- | --------------------------------- |
 | `/model`       | Switch model                      |
+| `/models`      | Fetch models from the active provider |
 | `/provider`    | Switch provider                   |
 | `/theme`       | Theme picker (live preview)       |
 | `/permission`  | Permission mode                   |
@@ -192,6 +193,10 @@ Configured in `~/.dcode-ai/config.toml` (global) or `.dcode-ai/config.local.toml
 Switch provider inline: `/provider minimax`, `/provider openai`, `/provider anthropic`, `/provider opencodezen`.
 
 Switch model within provider: `/model <name>`.
+
+`/models` and `dcode-ai models` fetch the active provider's live model catalog.
+The CLI does not fall back to a built-in model list; authentication, HTTP, empty
+catalog, and response-format failures are reported explicitly.
 
 ### Per-provider setup
 
