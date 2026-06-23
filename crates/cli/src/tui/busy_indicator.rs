@@ -63,6 +63,10 @@ pub fn render_indicator(state: BusyState, state_since: Instant) -> String {
     match state {
         BusyState::Idle => format!(" ○ {label} "),
         BusyState::Error => format!(" ✕ {label} "),
+        BusyState::Thinking => {
+            let secs = elapsed_ms / 1000;
+            format!(" {frame} {label} {secs}s ")
+        }
         _ => {
             let dots = trailing_dots(elapsed_ms);
             format!(" {frame} {label}{dots} ")

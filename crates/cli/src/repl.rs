@@ -2426,6 +2426,81 @@ impl Repl {
                 out.println(&tree);
             }
 
+            // ── /cd <path> ─────────────────────────────────────────────────
+            "/cd" => {
+                let target = rest.trim();
+                if target.is_empty() {
+                    out.println(&format!(
+                        "[cd] current: {}",
+                        self.runtime.workspace_root().display()
+                    ));
+                    return Ok(true);
+                }
+                let new_root = if std::path::Path::new(target).is_absolute() {
+                    std::path::PathBuf::from(target)
+                } else {
+                    self.runtime.workspace_root().join(target)
+                };
+                match new_root.canonicalize() {
+                    Ok(canonical) if canonical.is_dir() => {
+                        std::env::set_current_dir(&canonical)
+                            .map_err(|e| anyhow::anyhow!("chdir: {e}"))?;
+                        out.println(&format!("[cd] moved to {}", canonical.display()));
+                        if let ReplOutput::Tui(st) = &out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.workspace_root = canonical.clone();
+                            g.workspace_display = canonical.display().to_string();
+                            g.touch_transcript();
+                        }
+                    }
+                    Ok(_) => out.eprintln(&format!("[cd] not a directory: {target}")),
+                    Err(e) => out.eprintln(&format!("[cd] {target}: {e}")),
+                }
+            }
+
+            // ── /effort <level> ───────────────────────────────────────────────
+            "/effort" => {
+                let level = rest.trim().to_ascii_lowercase();
+                let (thinking, budget, max_tok) = match level.as_str() {
+                    "low" | "l" => (false, 0, 4096),
+                    "medium" | "m" | "med" => (false, 0, 8192),
+                    "high" | "h" => (true, 8192, 16384),
+                    "xhigh" | "x" | "max" => (true, 32768, 32768),
+                    "" => {
+                        let cfg = self.runtime.config();
+                        let current = if !cfg.model.enable_thinking {
+                            if cfg.model.max_tokens <= 4096 {
+                                "low"
+                            } else {
+                                "medium"
+                            }
+                        } else if cfg.model.thinking_budget >= 32768 {
+                            "xhigh"
+                        } else {
+                            "high"
+                        };
+                        out.println(&format!("[effort] current: {current} (thinking={}, budget={}, max_tokens={})",
+                            cfg.model.enable_thinking, cfg.model.thinking_budget, cfg.model.max_tokens));
+                        return Ok(true);
+                    }
+                    _ => {
+                        out.eprintln("[effort] usage: /effort low|medium|high|xhigh");
+                        return Ok(true);
+                    }
+                };
+                let mut cfg = self.runtime.config().clone();
+                cfg.model.enable_thinking = thinking;
+                cfg.model.thinking_budget = budget;
+                cfg.model.max_tokens = max_tok;
+                match self.runtime.apply_dcode_ai_config(cfg) {
+                    Ok(()) => out.println(&format!(
+                        "[effort] set to {level} (thinking={thinking}, budget={budget}, max_tokens={max_tok})"
+                    )),
+                    Err(e) => out.eprintln(&format!("[effort] {e}")),
+                }
+            }
+
             // ── /history <query> ──────────────────────────────────────────
             "/history" => {
                 let query = rest.trim();
@@ -3408,7 +3483,26 @@ impl Repl {
                     }
                     if line.starts_with('!') {
                         let shell_cmd = line.trim_start_matches('!').trim();
-                        self.run_bash_tui(shell_cmd, &tui_state).await;
+                        let output = self.run_bash_tui_capture(shell_cmd, &tui_state).await;
+                        // Auto-send the shell output to the AI for analysis.
+                        if let Some(output) = output
+                            && !output.trim().is_empty()
+                        {
+                            let prompt = format!(
+                                "I ran `{shell_cmd}` and got this output. Analyze it and suggest what to do next:\n\n```\n{output}\n```"
+                            );
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.set_busy(true);
+                            }
+                            if let Err(e) = self.runtime.run_turn(&prompt).await
+                                && let Ok(mut g) = tui_state.lock()
+                            {
+                                g.push_error(e.to_string());
+                            }
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.set_busy(false);
+                            }
+                        }
                         continue;
                     }
                     if line.starts_with('/') {
@@ -3479,7 +3573,12 @@ impl Repl {
         Ok(())
     }
 
-    async fn run_bash_tui(&self, cmd: &str, st: &Arc<Mutex<TuiSessionState>>) {
+    /// Run a shell command from `!` prefix, display output, and return captured text.
+    async fn run_bash_tui_capture(
+        &self,
+        cmd: &str,
+        st: &Arc<Mutex<TuiSessionState>>,
+    ) -> Option<String> {
         fn log(st: &Arc<Mutex<TuiSessionState>>, s: &str) {
             if let Ok(mut g) = st.lock() {
                 g.blocks.push(DisplayBlock::System(s.to_string()));
@@ -3488,41 +3587,57 @@ impl Repl {
         }
         if cmd.is_empty() {
             log(st, "! usage: !<command>");
-            return;
+            return None;
         }
-        log(st, &format!("[bash] {cmd}"));
-        let output = Command::new("sh")
-            .arg("-c")
+        log(st, &format!("[bash] $ {cmd}"));
+        let shell = if cfg!(windows) { "cmd" } else { "sh" };
+        let flag = if cfg!(windows) { "/C" } else { "-c" };
+        let output = Command::new(shell)
+            .arg(flag)
             .arg(cmd)
+            .current_dir(self.runtime.workspace_root())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
             .await;
         match output {
             Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
                 if !stdout.is_empty()
                     && let Ok(mut g) = st.lock()
                 {
-                    for line in stdout.lines() {
+                    for line in stdout.lines().take(50) {
                         g.blocks.push(DisplayBlock::System(line.to_string()));
+                    }
+                    if stdout.lines().count() > 50 {
+                        g.blocks.push(DisplayBlock::System(format!(
+                            "… {} more lines",
+                            stdout.lines().count() - 50
+                        )));
                     }
                     g.touch_transcript();
                 }
                 if !stderr.is_empty() {
-                    log(st, &format!("[stderr] {stderr}"));
+                    log(st, &format!("[stderr] {}", stderr.trim()));
                 }
-                log(
-                    st,
-                    &if out.status.success() {
-                        "[bash] exit 0".into()
-                    } else {
-                        format!("[bash] exit {}", out.status.code().unwrap_or(-1))
-                    },
-                );
+                let exit_label = if out.status.success() {
+                    "[bash] exit 0".to_string()
+                } else {
+                    format!("[bash] exit {}", out.status.code().unwrap_or(-1))
+                };
+                log(st, &exit_label);
+                let combined = if stderr.is_empty() {
+                    stdout
+                } else {
+                    format!("{stdout}\n{stderr}")
+                };
+                Some(combined)
             }
-            Err(e) => log(st, &format!("[bash] {e}")),
+            Err(e) => {
+                log(st, &format!("[bash] {e}"));
+                None
+            }
         }
     }
 }
