@@ -879,6 +879,31 @@ pub struct ModelConfig {
     pub recent_models: Vec<String>,
 }
 
+/// Convenient shorthands that map to full model IDs.
+/// User-defined aliases in config override these.
+pub const BUILTIN_MODEL_ALIASES: &[(&str, &str)] = &[
+    // Anthropic
+    ("opus", "claude-opus-4-8-20250520"),
+    ("sonnet", "claude-sonnet-4-6-20250514"),
+    ("haiku", "claude-haiku-4-5-20251001"),
+    ("fable", "claude-fable-5"),
+    // OpenAI
+    ("4.1", "gpt-4.1"),
+    ("4.1-mini", "gpt-4.1-mini"),
+    ("4.1-nano", "gpt-4.1-nano"),
+    ("4o", "gpt-4o"),
+    ("4o-mini", "gpt-4o-mini"),
+    ("o3", "o3"),
+    ("o3-mini", "o3-mini"),
+    ("o4-mini", "o4-mini"),
+    // DeepSeek
+    ("deepseek", "deepseek-chat"),
+    ("r1", "deepseek-reasoner"),
+    // Gemini (via OpenRouter)
+    ("gemini", "google/gemini-2.5-pro"),
+    ("flash", "google/gemini-2.5-flash"),
+];
+
 impl Default for ModelConfig {
     fn default() -> Self {
         Self {
@@ -921,10 +946,31 @@ impl ModelConfig {
         }
 
         let lowered = trimmed.to_ascii_lowercase();
+        // User aliases take priority, then built-in shortcuts.
         self.aliases
             .get(&lowered)
             .cloned()
+            .or_else(|| {
+                BUILTIN_MODEL_ALIASES
+                    .iter()
+                    .find(|(k, _)| *k == lowered)
+                    .map(|(_, v)| v.to_string())
+            })
             .unwrap_or_else(|| trimmed.to_string())
+    }
+
+    /// Return all aliases (built-in + user overrides) for display in `/models`.
+    pub fn all_aliases(&self) -> Vec<(&str, &str)> {
+        let mut out: Vec<(&str, &str)> = BUILTIN_MODEL_ALIASES.to_vec();
+        for (k, v) in &self.aliases {
+            if let Some(entry) = out.iter_mut().find(|(alias, _)| *alias == k.as_str()) {
+                entry.1 = v.as_str();
+            } else {
+                // Can't push user aliases as &str easily; skip — user aliases
+                // are already displayed separately.
+            }
+        }
+        out
     }
 
     /// Push a model name to the front of the recent list, deduplicating and capping at 8.
