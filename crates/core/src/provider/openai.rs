@@ -52,10 +52,13 @@ impl OpenAiProvider {
         let auth_store = AuthStore::load().ok().unwrap_or_default();
         let has_openai_oauth = auth_store.openai_oauth.is_some();
         let copilot_mode = is_copilot_base_url(&openai.base_url);
-        let codex_mode = matches!(provider, ProviderKind::OpenAi)
-            && openai.model.to_ascii_lowercase().contains("codex");
-        let use_responses_api = codex_mode;
-        let use_chatgpt_codex_backend = use_responses_api && has_openai_oauth;
+        let use_chatgpt_codex_backend = matches!(provider, ProviderKind::OpenAi)
+            && has_openai_oauth
+            && openai.resolve_api_key().is_none()
+            && !copilot_mode;
+        let use_responses_api = use_chatgpt_codex_backend
+            || (matches!(provider, ProviderKind::OpenAi)
+                && openai.model.to_ascii_lowercase().contains("codex"));
 
         let api_key = if copilot_mode {
             let github_token = auth_store.copilot.map(|c| c.github_token).ok_or_else(|| {
@@ -64,7 +67,7 @@ impl OpenAiProvider {
                 )
             })?;
             fetch_copilot_access_token_blocking(github_token)?
-        } else if codex_mode {
+        } else if use_chatgpt_codex_backend {
             if let Some(oauth) = auth_store.openai_oauth {
                 resolve_openai_oauth_access_token(oauth)?
             } else if let Some(key) = openai.resolve_api_key() {
@@ -337,8 +340,11 @@ impl Provider for OpenAiProvider {
             || model_lower.contains("big-pickle")
             || model_lower.contains("kimi")
             || model_lower.contains("glm");
+        let is_openai_reasoning = model_lower.starts_with("o1")
+            || model_lower.starts_with("o3")
+            || model_lower.starts_with("o4");
         let supports_thinking_stream = is_minimax_surface
-            || model_lower.starts_with('o')
+            || is_openai_reasoning
             || model_lower.contains("deepseek-r1")
             || model_lower.contains("qwq")
             || model_lower.contains("reasoning");
@@ -347,7 +353,9 @@ impl Provider for OpenAiProvider {
             supports_native_images: is_minimax_surface
                 || model_lower.contains("vision")
                 || model_lower.contains("qwen-vl")
-                || model_lower.contains("gpt-4o"),
+                || model_lower.contains("gpt-4o")
+                || model_lower.contains("gpt-4.1")
+                || is_openai_reasoning,
             supports_video: model_lower.starts_with("gpt-4.1"),
         }
     }
@@ -387,10 +395,10 @@ impl Provider for OpenAiProvider {
             )?
         };
 
-        // Retry the primary request on rate limits; every other status
-        // (success, or the Codex model-not-supported fallback) is handled below.
+        // Retry the primary request on rate limits; every other status is
+        // returned to the caller so the selected live-catalog model is visible.
         let endpoint = self.endpoint();
-        let mut response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
+        let response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
             let resp = self
                 .client
                 .post(&endpoint)
@@ -410,40 +418,7 @@ impl Provider for OpenAiProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body_text = response.text().await.unwrap_or_default();
-            let model_not_supported = self.use_chatgpt_codex_backend
-                && self.use_responses_api
-                && body_text
-                    .contains("model is not supported when using Codex with a ChatGPT account");
-            if model_not_supported {
-                if let Some(fallback_model) = fallback_codex_model_for_chatgpt(&model) {
-                    let retry_body = openai_responses_request_body(
-                        messages,
-                        tools,
-                        fallback_model,
-                        self.max_tokens,
-                        self.config.temperature,
-                        self.use_chatgpt_codex_backend,
-                        self.use_chatgpt_codex_backend,
-                        workspace_root,
-                    )?;
-                    response = self
-                        .client
-                        .post(self.endpoint())
-                        .json(&retry_body)
-                        .send()
-                        .await
-                        .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
-                    if !response.status().is_success() {
-                        let retry_status = response.status();
-                        let retry_body_text = response.text().await.unwrap_or_default();
-                        return Err(map_provider_error(retry_status, retry_body_text));
-                    }
-                } else {
-                    return Err(map_provider_error(status, body_text));
-                }
-            } else {
-                return Err(map_provider_error(status, body_text));
-            }
+            return Err(map_provider_error(status, body_text));
         }
 
         if self.use_responses_api {
@@ -455,15 +430,6 @@ impl Provider for OpenAiProvider {
         } else {
             Ok(spawn_openai_stream(response, self.stream_provider_name))
         }
-    }
-}
-
-fn fallback_codex_model_for_chatgpt(current_model: &str) -> Option<&'static str> {
-    let m = current_model.to_ascii_lowercase();
-    if m == "gpt-5-codex" {
-        None
-    } else {
-        Some("gpt-5-codex")
     }
 }
 

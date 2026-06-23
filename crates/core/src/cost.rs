@@ -16,7 +16,7 @@ struct ModelPricing {
 /// Pricing table. Order is irrelevant; the longest matching `pattern` wins so
 /// that e.g. `claude-3-5-haiku` beats a hypothetical `claude` catch-all.
 const PRICING: &[ModelPricing] = &[
-    // Anthropic
+    // ── Anthropic ────────────────────────────────────────────────────
     ModelPricing {
         pattern: "claude-opus-4",
         input_per_mtok: 15.0,
@@ -29,8 +29,13 @@ const PRICING: &[ModelPricing] = &[
     },
     ModelPricing {
         pattern: "claude-haiku-4",
-        input_per_mtok: 1.0,
-        output_per_mtok: 5.0,
+        input_per_mtok: 0.8,
+        output_per_mtok: 4.0,
+    },
+    ModelPricing {
+        pattern: "claude-fable-5",
+        input_per_mtok: 3.0,
+        output_per_mtok: 15.0,
     },
     ModelPricing {
         pattern: "claude-3-7-sonnet",
@@ -62,15 +67,62 @@ const PRICING: &[ModelPricing] = &[
         input_per_mtok: 0.25,
         output_per_mtok: 1.25,
     },
-    // OpenAI
+    // ── OpenAI GPT-4.1 ──────────────────────────────────────────────
+    ModelPricing {
+        pattern: "gpt-4.1-nano",
+        input_per_mtok: 0.10,
+        output_per_mtok: 0.40,
+    },
+    ModelPricing {
+        pattern: "gpt-4.1-mini",
+        input_per_mtok: 0.40,
+        output_per_mtok: 1.60,
+    },
+    ModelPricing {
+        pattern: "gpt-4.1",
+        input_per_mtok: 2.0,
+        output_per_mtok: 8.0,
+    },
+    // ── OpenAI o-series reasoning ────────────────────────────────────
+    ModelPricing {
+        pattern: "o4-mini",
+        input_per_mtok: 1.10,
+        output_per_mtok: 4.40,
+    },
+    ModelPricing {
+        pattern: "o3-pro",
+        input_per_mtok: 20.0,
+        output_per_mtok: 80.0,
+    },
+    ModelPricing {
+        pattern: "o3-mini",
+        input_per_mtok: 1.10,
+        output_per_mtok: 4.40,
+    },
+    ModelPricing {
+        pattern: "o3",
+        input_per_mtok: 10.0,
+        output_per_mtok: 40.0,
+    },
+    ModelPricing {
+        pattern: "o1-mini",
+        input_per_mtok: 3.0,
+        output_per_mtok: 12.0,
+    },
+    ModelPricing {
+        pattern: "o1",
+        input_per_mtok: 15.0,
+        output_per_mtok: 60.0,
+    },
+    // ── OpenAI GPT-4o ───────────────────────────────────────────────
     ModelPricing {
         pattern: "gpt-4o-mini",
         input_per_mtok: 0.15,
-        output_per_mtok: 0.6,
+        output_per_mtok: 0.60,
     },
     ModelPricing {
         pattern: "gpt-4o",
-        input_per_mtok: 2.5,
+        input_per_mtok: 2.50,
         output_per_mtok: 10.0,
     },
     ModelPricing {
@@ -85,8 +137,56 @@ const PRICING: &[ModelPricing] = &[
     },
     ModelPricing {
         pattern: "gpt-3.5-turbo",
-        input_per_mtok: 0.5,
-        output_per_mtok: 1.5,
+        input_per_mtok: 0.50,
+        output_per_mtok: 1.50,
+    },
+    // ── Google Gemini ───────────────────────────────────────────────
+    ModelPricing {
+        pattern: "gemini-2.5-pro",
+        input_per_mtok: 1.25,
+        output_per_mtok: 10.0,
+    },
+    ModelPricing {
+        pattern: "gemini-2.5-flash",
+        input_per_mtok: 0.15,
+        output_per_mtok: 0.60,
+    },
+    ModelPricing {
+        pattern: "gemini-2.0-flash",
+        input_per_mtok: 0.10,
+        output_per_mtok: 0.40,
+    },
+    ModelPricing {
+        pattern: "gemini-1.5-pro",
+        input_per_mtok: 1.25,
+        output_per_mtok: 5.0,
+    },
+    ModelPricing {
+        pattern: "gemini-1.5-flash",
+        input_per_mtok: 0.075,
+        output_per_mtok: 0.30,
+    },
+    // ── DeepSeek ────────────────────────────────────────────────────
+    ModelPricing {
+        pattern: "deepseek-r1",
+        input_per_mtok: 0.55,
+        output_per_mtok: 2.19,
+    },
+    ModelPricing {
+        pattern: "deepseek-v3",
+        input_per_mtok: 0.27,
+        output_per_mtok: 1.10,
+    },
+    // ── Mistral ─────────────────────────────────────────────────────
+    ModelPricing {
+        pattern: "mistral-large",
+        input_per_mtok: 2.0,
+        output_per_mtok: 6.0,
+    },
+    ModelPricing {
+        pattern: "codestral",
+        input_per_mtok: 0.30,
+        output_per_mtok: 0.90,
     },
 ];
 

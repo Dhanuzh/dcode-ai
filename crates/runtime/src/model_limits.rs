@@ -22,159 +22,261 @@ pub struct ModelContextLimits {
 }
 
 /// Known model context windows.
-/// Order matters - more specific patterns should come first.
+/// Order matters — more specific patterns must come before generics.
+/// Live API lookups override these when available.
 pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
-    // Claude 3.7 family
+    // ── Anthropic Claude 4.x ──────────────────────────────────────────
+    ModelContextLimits {
+        pattern: "claude-opus-4",
+        context_window: 200_000,
+        max_output_tokens: 32_000,
+    },
+    ModelContextLimits {
+        pattern: "claude-sonnet-4",
+        context_window: 200_000,
+        max_output_tokens: 16_000,
+    },
+    ModelContextLimits {
+        pattern: "claude-haiku-4",
+        context_window: 200_000,
+        max_output_tokens: 8192,
+    },
+    ModelContextLimits {
+        pattern: "claude-fable-5",
+        context_window: 200_000,
+        max_output_tokens: 16_000,
+    },
+    // ── Anthropic Claude 3.x ──────────────────────────────────────────
     ModelContextLimits {
         pattern: "claude-3-7",
         context_window: 200_000,
         max_output_tokens: 8192,
     },
-    // Claude 3.5 family
     ModelContextLimits {
         pattern: "claude-3-5",
         context_window: 200_000,
         max_output_tokens: 8192,
     },
-    // Claude 3 Opus
     ModelContextLimits {
         pattern: "claude-3-opus",
         context_window: 200_000,
         max_output_tokens: 4096,
     },
-    // Claude 3 Sonnet
     ModelContextLimits {
         pattern: "claude-3-sonnet",
         context_window: 200_000,
         max_output_tokens: 4096,
     },
-    // Claude 3 Haiku
     ModelContextLimits {
         pattern: "claude-3-haiku",
         context_window: 200_000,
         max_output_tokens: 4096,
     },
-    // GPT-4o family
+    // ── OpenAI GPT-4.1 ───────────────────────────────────────────────
+    ModelContextLimits {
+        pattern: "gpt-4.1-nano",
+        context_window: 1_047_576,
+        max_output_tokens: 32_768,
+    },
+    ModelContextLimits {
+        pattern: "gpt-4.1-mini",
+        context_window: 1_047_576,
+        max_output_tokens: 32_768,
+    },
+    ModelContextLimits {
+        pattern: "gpt-4.1",
+        context_window: 1_047_576,
+        max_output_tokens: 32_768,
+    },
+    // ── OpenAI o-series (reasoning) ──────────────────────────────────
+    ModelContextLimits {
+        pattern: "o4-mini",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    ModelContextLimits {
+        pattern: "o3-pro",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    ModelContextLimits {
+        pattern: "o3-mini",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    ModelContextLimits {
+        pattern: "o3",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    ModelContextLimits {
+        pattern: "o1-pro",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    ModelContextLimits {
+        pattern: "o1-mini",
+        context_window: 128_000,
+        max_output_tokens: 65_536,
+    },
+    ModelContextLimits {
+        pattern: "o1",
+        context_window: 200_000,
+        max_output_tokens: 100_000,
+    },
+    // ── OpenAI GPT-4o ────────────────────────────────────────────────
+    ModelContextLimits {
+        pattern: "gpt-4o-mini",
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+    },
     ModelContextLimits {
         pattern: "gpt-4o",
         context_window: 128_000,
-        max_output_tokens: 16384,
+        max_output_tokens: 16_384,
     },
-    // GPT-4.5 / GPT-4 Turbo
     ModelContextLimits {
         pattern: "gpt-4-turbo",
         context_window: 128_000,
         max_output_tokens: 4096,
     },
-    // GPT-4
     ModelContextLimits {
         pattern: "gpt-4",
         context_window: 128_000,
         max_output_tokens: 4096,
     },
-    // GPT-3.5 Turbo
     ModelContextLimits {
         pattern: "gpt-3.5-turbo",
         context_window: 16_385,
         max_output_tokens: 4096,
     },
-    // MiniMax M2.7 — OpenRouter `minimax/minimax-m2.7`: context_length 204_800 (must be before `minimax-m2`)
-    ModelContextLimits {
-        pattern: "minimax-m2.7",
-        context_window: 204_800,
-        max_output_tokens: 131_072,
-    },
-    // OpenRouter slug (config may store full id)
+    // ── MiniMax ──────────────────────────────────────────────────────
     ModelContextLimits {
         pattern: "minimax/minimax-m2.7",
         context_window: 204_800,
         max_output_tokens: 131_072,
     },
-    // MiniMax M2.5 (reasoning model)
+    ModelContextLimits {
+        pattern: "minimax-m2.7",
+        context_window: 204_800,
+        max_output_tokens: 131_072,
+    },
     ModelContextLimits {
         pattern: "minimax-m2.5",
         context_window: 100_000,
         max_output_tokens: 8192,
     },
-    // MiniMax M2 (not M2.5 / M2.7)
     ModelContextLimits {
         pattern: "minimax-m2",
         context_window: 32_000,
         max_output_tokens: 8192,
     },
-    // MiniMax M1
     ModelContextLimits {
         pattern: "minimax-m1",
         context_window: 32_000,
         max_output_tokens: 8192,
     },
-    // Gemini 1.5 Pro
+    // ── Google Gemini ────────────────────────────────────────────────
     ModelContextLimits {
-        pattern: "gemini-1.5-pro",
-        context_window: 2_000_000,
-        max_output_tokens: 8192,
-    },
-    // Gemini 1.5 Flash
-    ModelContextLimits {
-        pattern: "gemini-1.5-flash",
+        pattern: "gemini-2.5-pro",
         context_window: 1_000_000,
-        max_output_tokens: 8192,
+        max_output_tokens: 65_536,
     },
-    // Gemini 1.5
     ModelContextLimits {
-        pattern: "gemini-1.5",
+        pattern: "gemini-2.5-flash",
         context_window: 1_000_000,
-        max_output_tokens: 8192,
+        max_output_tokens: 65_536,
     },
-    // Gemini 2.0 Flash
     ModelContextLimits {
         pattern: "gemini-2.0-flash",
         context_window: 1_000_000,
         max_output_tokens: 8192,
     },
-    // DeepSeek V3
     ModelContextLimits {
-        pattern: "deepseek-v3",
-        context_window: 64_000,
+        pattern: "gemini-1.5-pro",
+        context_window: 2_000_000,
         max_output_tokens: 8192,
     },
-    // DeepSeek R1
+    ModelContextLimits {
+        pattern: "gemini-1.5-flash",
+        context_window: 1_000_000,
+        max_output_tokens: 8192,
+    },
+    ModelContextLimits {
+        pattern: "gemini-1.5",
+        context_window: 1_000_000,
+        max_output_tokens: 8192,
+    },
+    // ── DeepSeek ─────────────────────────────────────────────────────
     ModelContextLimits {
         pattern: "deepseek-r1",
-        context_window: 64_000,
-        max_output_tokens: 8192,
+        context_window: 128_000,
+        max_output_tokens: 16_384,
     },
-    // Qwen 2.5
     ModelContextLimits {
-        pattern: "qwen-2.5",
+        pattern: "deepseek-v3",
+        context_window: 128_000,
+        max_output_tokens: 16_384,
+    },
+    ModelContextLimits {
+        pattern: "deepseek",
         context_window: 128_000,
         max_output_tokens: 8192,
     },
-    // Llama 3.1 405B
+    // ── Meta Llama ───────────────────────────────────────────────────
+    ModelContextLimits {
+        pattern: "llama-4",
+        context_window: 10_000_000,
+        max_output_tokens: 16_384,
+    },
+    ModelContextLimits {
+        pattern: "llama-3.3",
+        context_window: 128_000,
+        max_output_tokens: 8192,
+    },
     ModelContextLimits {
         pattern: "llama-3.1-405b",
         context_window: 128_000,
         max_output_tokens: 4096,
     },
-    // Llama 3.1 70B
-    ModelContextLimits {
-        pattern: "llama-3.1-70b",
-        context_window: 128_000,
-        max_output_tokens: 4096,
-    },
-    // Llama 3.1 family
     ModelContextLimits {
         pattern: "llama-3.1",
         context_window: 128_000,
         max_output_tokens: 4096,
     },
-    // Llama 3 family
     ModelContextLimits {
         pattern: "llama-3",
         context_window: 8_192,
         max_output_tokens: 2048,
     },
-    // Default for unknown models
+    // ── Alibaba Qwen ─────────────────────────────────────────────────
+    ModelContextLimits {
+        pattern: "qwen-3",
+        context_window: 128_000,
+        max_output_tokens: 8192,
+    },
+    ModelContextLimits {
+        pattern: "qwen-2.5",
+        context_window: 128_000,
+        max_output_tokens: 8192,
+    },
+    // ── Mistral ──────────────────────────────────────────────────────
+    ModelContextLimits {
+        pattern: "mistral-large",
+        context_window: 128_000,
+        max_output_tokens: 8192,
+    },
+    ModelContextLimits {
+        pattern: "codestral",
+        context_window: 256_000,
+        max_output_tokens: 8192,
+    },
+    ModelContextLimits {
+        pattern: "mistral",
+        context_window: 128_000,
+        max_output_tokens: 8192,
+    },
+    // ── Catch-all ────────────────────────────────────────────────────
     ModelContextLimits {
         pattern: "*",
         context_window: 32_000,
@@ -231,21 +333,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_detect_claude() {
+    fn claude_4_family() {
+        assert_eq!(detect_context_window("claude-opus-4-8"), 200_000);
+        assert_eq!(detect_max_output_tokens("claude-opus-4-8"), 32_000);
+        assert_eq!(detect_context_window("claude-sonnet-4-6"), 200_000);
+        assert_eq!(detect_context_window("claude-haiku-4-5"), 200_000);
+        assert_eq!(detect_context_window("claude-fable-5"), 200_000);
+    }
+
+    #[test]
+    fn claude_3_family() {
         assert_eq!(detect_context_window("claude-3-7-sonnet-latest"), 200_000);
         assert_eq!(detect_context_window("claude-3-5-sonnet-20241022"), 200_000);
         assert_eq!(detect_context_window("claude-3-opus-20240229"), 200_000);
     }
 
     #[test]
-    fn test_detect_gpt() {
+    fn openai_gpt41() {
+        assert_eq!(detect_context_window("gpt-4.1"), 1_047_576);
+        assert_eq!(detect_context_window("gpt-4.1-mini"), 1_047_576);
+        assert_eq!(detect_context_window("gpt-4.1-nano"), 1_047_576);
+    }
+
+    #[test]
+    fn openai_o_series() {
+        assert_eq!(detect_context_window("o3"), 200_000);
+        assert_eq!(detect_context_window("o3-mini"), 200_000);
+        assert_eq!(detect_context_window("o4-mini"), 200_000);
+        assert_eq!(detect_max_output_tokens("o3"), 100_000);
+    }
+
+    #[test]
+    fn openai_gpt4o() {
         assert_eq!(detect_context_window("gpt-4o-2024-08-06"), 128_000);
         assert_eq!(detect_context_window("gpt-4o-mini"), 128_000);
         assert_eq!(detect_context_window("gpt-4-turbo-2024-04-09"), 128_000);
     }
 
     #[test]
-    fn test_detect_minimax() {
+    fn minimax() {
         assert_eq!(detect_context_window("MiniMax-M2.7"), 204_800);
         assert_eq!(detect_context_window("minimax/minimax-m2.7"), 204_800);
         assert_eq!(detect_context_window("MiniMax-M2.5"), 100_000);
@@ -253,20 +379,41 @@ mod tests {
     }
 
     #[test]
-    fn test_detect_gemini() {
+    fn gemini() {
+        assert_eq!(detect_context_window("gemini-2.5-pro"), 1_000_000);
+        assert_eq!(detect_context_window("gemini-2.5-flash"), 1_000_000);
+        assert_eq!(detect_context_window("gemini-2.0-flash"), 1_000_000);
         assert_eq!(detect_context_window("gemini-1.5-pro-latest"), 2_000_000);
-        assert_eq!(detect_context_window("gemini-1.5-flash"), 1_000_000);
     }
 
     #[test]
-    fn test_fallback() {
+    fn deepseek() {
+        assert_eq!(detect_context_window("deepseek-r1"), 128_000);
+        assert_eq!(detect_context_window("deepseek-v3"), 128_000);
+    }
+
+    #[test]
+    fn llama() {
+        assert_eq!(detect_context_window("llama-4-scout"), 10_000_000);
+        assert_eq!(detect_context_window("llama-3.3-70b"), 128_000);
+        assert_eq!(detect_context_window("llama-3.1-405b"), 128_000);
+    }
+
+    #[test]
+    fn mistral() {
+        assert_eq!(detect_context_window("mistral-large-latest"), 128_000);
+        assert_eq!(detect_context_window("codestral-latest"), 256_000);
+    }
+
+    #[test]
+    fn fallback() {
         assert_eq!(detect_context_window("unknown-model-xyz"), 32_000);
     }
 
     #[test]
-    fn test_model_limits_struct() {
-        let limits = ModelLimits::for_model("claude-3-7-sonnet");
+    fn model_limits_struct() {
+        let limits = ModelLimits::for_model("claude-sonnet-4-6");
         assert_eq!(limits.context_window, 200_000);
-        assert_eq!(limits.max_output_tokens, 8192);
+        assert_eq!(limits.max_output_tokens, 16_000);
     }
 }

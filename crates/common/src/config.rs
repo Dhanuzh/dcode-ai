@@ -734,7 +734,7 @@ impl Default for OpenAiConfig {
             api_key_env: "OPENAI_API_KEY".into(),
             api_key: None,
             base_url: "https://api.openai.com".into(),
-            model: "gpt-4o-mini".into(),
+            model: "gpt-4.1-mini".into(),
             temperature: 0.7,
         }
     }
@@ -779,7 +779,7 @@ impl Default for AnthropicConfig {
             api_key_env: "ANTHROPIC_API_KEY".into(),
             api_key: None,
             base_url: "https://api.anthropic.com".into(),
-            model: "claude-3-7-sonnet-latest".into(),
+            model: "claude-sonnet-4-6-20250514".into(),
             temperature: 1.0,
         }
     }
@@ -828,7 +828,7 @@ impl Default for OpenRouterConfig {
             api_key_env: "OPENROUTER_API_KEY".into(),
             api_key: None,
             base_url: "https://openrouter.ai/api".into(),
-            model: "openai/gpt-4o-mini".into(),
+            model: "openai/gpt-4.1-mini".into(),
             temperature: 0.7,
             site_url: None,
             app_name: None,
@@ -886,7 +886,7 @@ impl Default for ModelConfig {
             max_tokens: 8192,
             enable_thinking: false,
             thinking_budget: 5120,
-            aliases: default_model_aliases(),
+            aliases: BTreeMap::new(),
             recent_models: Vec::new(),
         }
     }
@@ -1491,24 +1491,6 @@ fn default_max_memory_notes() -> usize {
     128
 }
 
-fn default_model_aliases() -> BTreeMap<String, String> {
-    BTreeMap::from([
-        ("default".into(), "MiniMax-M2.5".into()),
-        ("coding".into(), "claude-3-7-sonnet-latest".into()),
-        ("reasoning".into(), "claude-3-7-sonnet-latest".into()),
-        ("smart".into(), "MiniMax-M2.5".into()),
-        ("minimax".into(), "MiniMax-M2.5".into()),
-        ("m2.5".into(), "MiniMax-M2.5".into()),
-        ("openai".into(), "gpt-4o-mini".into()),
-        ("codex".into(), "gpt-5-codex".into()),
-        ("gpt4o".into(), "gpt-4o".into()),
-        ("gpt4omini".into(), "gpt-4o-mini".into()),
-        ("claude".into(), "claude-3-7-sonnet-latest".into()),
-        ("claude-sonnet".into(), "claude-3-7-sonnet-latest".into()),
-        ("openrouter".into(), "openai/gpt-4o-mini".into()),
-    ])
-}
-
 fn resolve_api_key_value(inline: &Option<String>, env_name: &str) -> Option<String> {
     inline
         .as_deref()
@@ -1545,11 +1527,15 @@ mod tests {
         let mut config = DcodeAiConfig::default();
         config.provider.default = ProviderKind::OpenAi;
         config.sync_default_model_from_provider();
+        config
+            .model
+            .aliases
+            .insert("fast".into(), "provider-model".into());
 
-        config.apply_model_override("gpt4o");
+        config.apply_model_override("fast");
 
-        assert_eq!(config.provider.openai.model, "gpt-4o");
-        assert_eq!(config.model.default_model, "gpt-4o");
+        assert_eq!(config.provider.openai.model, "provider-model");
+        assert_eq!(config.model.default_model, "provider-model");
     }
 
     #[test]
