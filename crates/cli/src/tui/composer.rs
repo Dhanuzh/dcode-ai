@@ -16,6 +16,8 @@ pub struct TextArea {
     cursor_char_idx: usize,
     /// Yanked text from the last Ctrl+K / Ctrl+U kill (for future Ctrl+Y yank).
     pub kill_ring: Option<String>,
+    /// Simple undo stack: snapshots of (text, cursor) pushed before each mutation.
+    undo_stack: Vec<(String, usize)>,
 }
 
 impl TextArea {
@@ -25,6 +27,31 @@ impl TextArea {
 
     pub fn cursor_char_idx(&self) -> usize {
         self.cursor_char_idx
+    }
+
+    fn save_undo(&mut self) {
+        // Deduplicate: don't push if identical to the top.
+        if self
+            .undo_stack
+            .last()
+            .is_none_or(|(t, c)| t != &self.text || *c != self.cursor_char_idx)
+        {
+            self.undo_stack
+                .push((self.text.clone(), self.cursor_char_idx));
+            if self.undo_stack.len() > 100 {
+                self.undo_stack.remove(0);
+            }
+        }
+    }
+
+    pub fn undo(&mut self) -> bool {
+        if let Some((text, cursor)) = self.undo_stack.pop() {
+            self.text = text;
+            self.cursor_char_idx = cursor;
+            true
+        } else {
+            false
+        }
     }
 
     pub fn set_text(&mut self, text: impl Into<String>) {
@@ -50,6 +77,7 @@ impl TextArea {
     }
 
     pub fn insert_char(&mut self, ch: char) {
+        self.save_undo();
         let idx = cursor_byte_index(&self.text, self.cursor_char_idx);
         self.text.insert(idx, ch);
         self.cursor_char_idx += 1;
@@ -59,6 +87,7 @@ impl TextArea {
         if s.is_empty() {
             return;
         }
+        self.save_undo();
         let idx = cursor_byte_index(&self.text, self.cursor_char_idx);
         self.text.insert_str(idx, s);
         self.cursor_char_idx += s.chars().count();
@@ -147,6 +176,7 @@ impl TextArea {
 
     /// Delete the word before the cursor (Ctrl+W / Alt+Backspace).
     pub fn delete_word_backward(&mut self) {
+        self.save_undo();
         let prev = self.cursor_char_idx;
         self.move_word_backward();
         let next = self.cursor_char_idx;
@@ -159,6 +189,7 @@ impl TextArea {
 
     /// Delete the word after the cursor (Alt+D).
     pub fn delete_word_forward(&mut self) {
+        self.save_undo();
         let prev = self.cursor_char_idx;
         self.move_word_forward();
         let next = self.cursor_char_idx;
@@ -175,6 +206,7 @@ impl TextArea {
     /// Kill from cursor to end of logical line (Ctrl+K).
     /// Saves killed text to kill_ring.
     pub fn kill_to_end_of_line(&mut self) {
+        self.save_undo();
         let chars: Vec<char> = self.text.chars().collect();
         let start = self.cursor_char_idx;
         // Find the next newline or end of text.
@@ -201,6 +233,7 @@ impl TextArea {
     /// Saves killed text to kill_ring.
     #[allow(dead_code)]
     pub fn kill_to_start_of_line(&mut self) {
+        self.save_undo();
         let chars: Vec<char> = self.text.chars().collect();
         let end = self.cursor_char_idx;
         // Find the previous newline (or beginning of text).

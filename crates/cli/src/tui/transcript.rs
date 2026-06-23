@@ -734,16 +734,18 @@ pub(crate) fn transcript_lines_and_hits(
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
         let (md_lines, md_hits) =
             render_markdown_lines_with_hits(stream, state.code_line_numbers, w.saturating_sub(2));
-        for (md_line, md_hit) in md_lines.into_iter().zip(md_hits) {
-            push_transcript_line(
-                &mut lines,
-                &mut hits,
-                prefixed_line(
-                    Span::styled("▏ ", Style::default().fg(theme::assistant())),
-                    md_line,
-                ),
-                md_hit,
+        let md_count = md_lines.len();
+        for (i, (md_line, md_hit)) in md_lines.into_iter().zip(md_hits).enumerate() {
+            let mut line = prefixed_line(
+                Span::styled("▏ ", Style::default().fg(theme::assistant())),
+                md_line,
             );
+            // Blinking cursor at the end of the last streaming line.
+            if i == md_count - 1 {
+                line.spans
+                    .push(Span::styled("▌", Style::default().fg(theme::assistant())));
+            }
+            push_transcript_line(&mut lines, &mut hits, line, md_hit);
         }
     }
 

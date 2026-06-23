@@ -1771,6 +1771,7 @@ pub fn run_blocking(
                     last_turn_latency_ms: g.last_turn_latency_ms,
                     turn_output_tokens: g.turn_output_tokens,
                     context_compacted: g.context_compacted,
+                    notification_count: g.notification_count,
                 };
 
                 crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
@@ -3704,6 +3705,7 @@ pub fn run_blocking(
                                                     g.push_block(DisplayBlock::System(feedback));
                                                     g.touch_transcript();
                                                     g.transcript_follow_tail = true;
+                                                    g.notification_count = 0;
                                                 }
                                                 LineClickHit::ToggleThinking => {
                                                     g.thinking_expanded = !g.thinking_expanded;
@@ -3833,6 +3835,7 @@ pub fn run_blocking(
                             ));
                             g.touch_transcript();
                             g.transcript_follow_tail = true;
+                            g.notification_count = 0;
                         }
                         continue;
                     } else {
@@ -4314,6 +4317,7 @@ pub fn run_blocking(
                             g.push_block(DisplayBlock::System(msg));
                             g.touch_transcript();
                             g.transcript_follow_tail = true;
+                            g.notification_count = 0;
                         }
                         continue;
                     }
@@ -4499,6 +4503,7 @@ pub fn run_blocking(
                             g.push_block(DisplayBlock::System(msg));
                             g.touch_transcript();
                             g.transcript_follow_tail = true;
+                            g.notification_count = 0;
                         }
                         (KeyCode::F(7), _) => {
                             let detail = g.blocks.iter().rev().find_map(|b| {
@@ -4523,6 +4528,7 @@ pub fn run_blocking(
                             g.push_block(DisplayBlock::System(msg));
                             g.touch_transcript();
                             g.transcript_follow_tail = true;
+                            g.notification_count = 0;
                         }
                         (KeyCode::Char('c'), KeyModifiers::CONTROL) => {
                             // Handled earlier in Event::Key with double-press semantics.
@@ -4535,6 +4541,7 @@ pub fn run_blocking(
                             g.touch_transcript();
                             g.scroll_lines = 0;
                             g.transcript_follow_tail = true;
+                            g.notification_count = 0;
                             composer_history_index = None;
                             composer_history_draft.clear();
                         }
@@ -4551,6 +4558,7 @@ pub fn run_blocking(
                                 ));
                                 g.touch_transcript();
                                 g.transcript_follow_tail = true;
+                                g.notification_count = 0;
                             } else {
                                 g.open_pins_modal();
                             }
@@ -4562,6 +4570,7 @@ pub fn run_blocking(
                                 ));
                                 g.touch_transcript();
                                 g.transcript_follow_tail = true;
+                                g.notification_count = 0;
                             } else {
                                 g.open_subagent_modal();
                             }
@@ -4591,6 +4600,7 @@ pub fn run_blocking(
                                 g.push_block(DisplayBlock::System(msg));
                                 g.touch_transcript();
                                 g.transcript_follow_tail = true;
+                                g.notification_count = 0;
                             }
                         }
                         (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
@@ -5120,6 +5130,9 @@ pub fn run_blocking(
                         // ── Word deletion (Ctrl+W / Alt+Backspace / Alt+D) ───
                         (KeyCode::Char('w'), KeyModifiers::CONTROL) => {
                             g.delete_input_word_backward();
+                        }
+                        (KeyCode::Char('z'), KeyModifiers::CONTROL) => {
+                            g.undo_input();
                         }
                         (KeyCode::Backspace, KeyModifiers::ALT) => {
                             g.delete_input_word_backward();

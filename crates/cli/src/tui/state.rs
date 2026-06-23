@@ -336,6 +336,9 @@ pub struct TuiSessionState {
     pub transcript_zoom_offset: i32,
     /// True after the context manager has compacted at least once this session.
     pub context_compacted: bool,
+    /// Notification counter for events that arrived while the user was typing
+    /// or scrolled away. Cleared when transcript scrolls to bottom.
+    pub notification_count: u16,
 }
 
 #[derive(Debug, Clone)]
@@ -624,6 +627,7 @@ impl TuiSessionState {
             turn_started_at: None,
             transcript_zoom_offset: 0,
             context_compacted: false,
+            notification_count: 0,
         }
     }
 
@@ -1270,6 +1274,12 @@ impl TuiSessionState {
     pub fn yank_input(&mut self) {
         self.composer.yank();
         self.sync_legacy_from_composer();
+    }
+
+    pub fn undo_input(&mut self) -> bool {
+        let ok = self.composer.undo();
+        self.sync_legacy_from_composer();
+        ok
     }
 
     pub fn move_input_home_line(&mut self) {
@@ -2048,6 +2058,9 @@ impl TuiSessionState {
         }
         if transcript_dirty {
             self.touch_transcript();
+            if !self.transcript_follow_tail {
+                self.notification_count = self.notification_count.saturating_add(1);
+            }
         }
     }
 }

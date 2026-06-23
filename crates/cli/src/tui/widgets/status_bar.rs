@@ -28,6 +28,8 @@ pub struct StatusBar<'a> {
     pub turn_output_tokens: u64,
     /// True after context has been compacted at least once this session.
     pub context_compacted: bool,
+    /// Pending notification count (events while scrolled away).
+    pub notification_count: u16,
 }
 
 impl Widget for StatusBar<'_> {
@@ -51,7 +53,7 @@ impl Widget for StatusBar<'_> {
             sep.clone(),
             Span::styled(
                 format!(" /{} ", model_display),
-                Style::default().fg(theme::text()),
+                Style::default().fg(provider_model_color(self.model)),
             ),
             sep.clone(),
             Span::styled(
@@ -131,6 +133,17 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
+        if self.notification_count > 0 {
+            spans.push(sep.clone());
+            spans.push(Span::styled(
+                format!(" ↓{} new ", self.notification_count),
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(theme::warn())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+
         if self.permission_bypass {
             spans.push(sep.clone());
             spans.push(Span::styled(
@@ -175,6 +188,31 @@ fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> {
         Span::styled(format!(" ctx {bar} {pct}% "), Style::default().fg(color)),
         sep,
     ]
+}
+
+fn provider_model_color(model: &str) -> Color {
+    let m = model.to_ascii_lowercase();
+    if m.contains("claude") || m.contains("fable") {
+        Color::Rgb(204, 139, 72) // Anthropic amber
+    } else if m.starts_with("gpt")
+        || m.starts_with("o1")
+        || m.starts_with("o3")
+        || m.starts_with("o4")
+    {
+        Color::Rgb(116, 184, 134) // OpenAI green
+    } else if m.contains("gemini") {
+        Color::Rgb(102, 153, 255) // Google blue
+    } else if m.contains("deepseek") {
+        Color::Rgb(85, 170, 255) // DeepSeek light blue
+    } else if m.contains("minimax") {
+        Color::Rgb(255, 153, 51) // MiniMax orange
+    } else if m.contains("mistral") || m.contains("codestral") {
+        Color::Rgb(255, 119, 51) // Mistral orange-red
+    } else if m.contains("llama") || m.contains("meta") {
+        Color::Rgb(51, 153, 255) // Meta blue
+    } else {
+        theme::text()
+    }
 }
 
 fn busy_badge(label: &str) -> (&'static str, Color) {
