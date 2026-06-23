@@ -448,22 +448,23 @@ fn latest_pinnable_note(state: &TuiSessionState) -> Option<PinnedNote> {
 }
 
 impl TranscriptRenderCache {
-    fn get_or_rebuild<'a>(
-        &'a mut self,
+    /// Returns `(lines, hits, was_rebuilt)`. When `was_rebuilt` is false the
+    /// caller can skip expensive work like copying lines into the scroll buffer.
+    fn get_or_rebuild(
+        &mut self,
         state: &TuiSessionState,
         width: u16,
-    ) -> (&'a [Line<'static>], &'a [LineAnswerHit]) {
-        // Apply user zoom offset: positive offset = narrower column (zoom in).
+    ) -> (&[Line<'static>], &[LineAnswerHit], bool) {
         let zoomed_width = {
             let w = width as i32 - state.transcript_zoom_offset;
             w.max(20) as u16
         };
         let normalized_width = zoomed_width;
-        if self.width != normalized_width
+        let stale = self.width != normalized_width
             || self.revision != state.transcript_rev
             || self.code_line_numbers != state.code_line_numbers
-            || self.zoom_offset != state.transcript_zoom_offset
-        {
+            || self.zoom_offset != state.transcript_zoom_offset;
+        if stale {
             let (lines, hits) = transcript_lines_and_hits(state, normalized_width);
             self.width = normalized_width;
             self.revision = state.transcript_rev;
@@ -472,7 +473,7 @@ impl TranscriptRenderCache {
             self.lines = lines;
             self.hits = hits;
         }
-        (&self.lines, &self.hits)
+        (&self.lines, &self.hits, stale)
     }
 }
 
@@ -1107,7 +1108,18 @@ pub fn run_blocking(
         g.workspace_root.clone()
     };
     let slash_entries = load_slash_entries(&workspace_root, &skill_dirs);
-    let workspace_files = file_mentions::discover_workspace_files(&workspace_root);
+    // Discover workspace files in a background thread so the TUI is responsive
+    // immediately on large repos. Completion uses an empty list until ready.
+    let workspace_files_rx = {
+        let root = workspace_root.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let files = file_mentions::discover_workspace_files(&root);
+            let _ = tx.send(files);
+        });
+        rx
+    };
+    let mut workspace_files: Vec<String> = Vec::new();
     let mut transcript_cache = TranscriptRenderCache::default();
     let mut scroll_buffer = crate::tui::scroll_buffer::ScrollBuffer::default();
     let mut composer_history: Vec<String> = Vec::new();
@@ -1135,6 +1147,12 @@ pub fn run_blocking(
     }
 
     loop {
+        // Pick up async workspace file discovery when it completes.
+        if workspace_files.is_empty()
+            && let Ok(files) = workspace_files_rx.try_recv()
+        {
+            workspace_files = files;
+        }
         {
             let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
             if g.should_exit {
@@ -1171,8 +1189,10 @@ pub fn run_blocking(
 
                 let transcript_h = tr.height.saturating_sub(2) as usize;
                 let inner_w = tr.width.saturating_sub(2);
-                let (lines, _hits) = transcript_cache.get_or_rebuild(&g, inner_w);
-                scroll_buffer.replace_lines(lines.to_vec());
+                let (lines, _hits, cache_rebuilt) = transcript_cache.get_or_rebuild(&g, inner_w);
+                if cache_rebuilt {
+                    scroll_buffer.replace_lines(lines.to_vec());
+                }
                 if g.transcript_follow_tail {
                     scroll_buffer.scroll_to_bottom();
                 } else {
@@ -1525,6 +1545,7 @@ pub fn run_blocking(
                     permission_bypass: toolbar_permission_is_bypass(&g.permission_mode),
                     last_turn_latency_ms: g.last_turn_latency_ms,
                     turn_output_tokens: g.turn_output_tokens,
+                    context_compacted: g.context_compacted,
                 };
 
                 crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
@@ -1853,7 +1874,7 @@ pub fn run_blocking(
 
                 if g.transcript_search_open {
                     let inner_w = tr.width.saturating_sub(2);
-                    let (lines, _) = transcript_cache.get_or_rebuild(&g, inner_w);
+                    let (lines, _, _) = transcript_cache.get_or_rebuild(&g, inner_w);
                     let matches = transcript_search_matches(lines, &g.transcript_search_query);
                     let status = if g.transcript_search_query.trim().is_empty() {
                         "type to search transcript".to_string()
@@ -3224,9 +3245,11 @@ pub fn run_blocking(
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown
                     ) {
                         let inner_w = tr.width.saturating_sub(2);
-                        let (lines, _hits) = transcript_cache.get_or_rebuild(&g, inner_w);
+                        let (lines, _hits, rebuilt) = transcript_cache.get_or_rebuild(&g, inner_w);
                         let th = tr.height.saturating_sub(2) as usize;
-                        scroll_buffer.replace_lines(lines.to_vec());
+                        if rebuilt {
+                            scroll_buffer.replace_lines(lines.to_vec());
+                        }
                         scroll_buffer.set_from_top(g.scroll_lines, th, inner_w as usize);
                         let step = mouse_scroll_step(m.modifiers, th, scroll_speed as usize);
                         // Scrolling clears any active mouse text selection.
@@ -3282,9 +3305,11 @@ pub fn run_blocking(
                         MouseEventKind::Drag(MouseButton::Left) => {
                             if g.mouse_selection.is_some() && inner_h > 0 {
                                 let inner_w_eff = inner_w.max(1);
-                                let (lines, _hits) =
+                                let (lines, _hits, rebuilt) =
                                     transcript_cache.get_or_rebuild(&g, inner_w_eff as u16);
-                                scroll_buffer.replace_lines(lines.to_vec());
+                                if rebuilt {
+                                    scroll_buffer.replace_lines(lines.to_vec());
+                                }
                                 scroll_buffer.set_from_top(g.scroll_lines, inner_h, inner_w_eff);
                                 if m.row < inner_top {
                                     scroll_buffer.scroll_up(1, inner_w_eff, inner_h);
@@ -3330,7 +3355,7 @@ pub fn run_blocking(
                                 && !is_click_jitter(&sel)
                             {
                                 let inner_w_eff = inner_w.max(1);
-                                let (lines, _hits) =
+                                let (lines, _hits, _) =
                                     transcript_cache.get_or_rebuild(&g, inner_w_eff as u16);
                                 let gutter_widths = vec![0u16; lines.len()];
                                 let (rows, gutters) =
@@ -3367,7 +3392,7 @@ pub fn run_blocking(
                     // Transcript click targets (left-click on question options / code blocks).
                     if rect_contains(tr, m.column, m.row) {
                         let inner_w = tr.width.saturating_sub(2);
-                        let (_lines, hits) = transcript_cache.get_or_rebuild(&g, inner_w);
+                        let (_lines, hits, _) = transcript_cache.get_or_rebuild(&g, inner_w);
                         let th = tr.height.saturating_sub(2) as usize;
                         match m.kind {
                             k if mouse_left_activated(k) => {
@@ -4061,7 +4086,7 @@ pub fn run_blocking(
                             }
                             (KeyCode::Up, _) => {
                                 let inner_w = sz.map(|s| s.width.saturating_sub(2)).unwrap_or(80);
-                                let (lines, _) = transcript_cache.get_or_rebuild(&g, inner_w);
+                                let (lines, _, _) = transcript_cache.get_or_rebuild(&g, inner_w);
                                 let matches =
                                     transcript_search_matches(lines, &g.transcript_search_query);
                                 if !matches.is_empty() {
@@ -4075,7 +4100,7 @@ pub fn run_blocking(
                             }
                             (KeyCode::Down, _) | (KeyCode::Enter, _) => {
                                 let inner_w = sz.map(|s| s.width.saturating_sub(2)).unwrap_or(80);
-                                let (lines, _) = transcript_cache.get_or_rebuild(&g, inner_w);
+                                let (lines, _, _) = transcript_cache.get_or_rebuild(&g, inner_w);
                                 let matches =
                                     transcript_search_matches(lines, &g.transcript_search_query);
                                 if !matches.is_empty() {
@@ -4766,7 +4791,7 @@ pub fn run_blocking(
                                     g.queue_preview_items.len(),
                                     g.subagents.len(),
                                 );
-                                let (lines, _hits) =
+                                let (lines, _hits, _) =
                                     transcript_cache.get_or_rebuild(&g, tr.width.saturating_sub(2));
                                 let th = tr.height.saturating_sub(2) as usize;
                                 let w = tr.width.saturating_sub(2) as usize;
@@ -4801,7 +4826,7 @@ pub fn run_blocking(
                                     g.queue_preview_items.len(),
                                     g.subagents.len(),
                                 );
-                                let (lines, _hits) =
+                                let (lines, _hits, _) =
                                     transcript_cache.get_or_rebuild(&g, tr.width.saturating_sub(2));
                                 let th = tr.height.saturating_sub(2) as usize;
                                 let w = tr.width.saturating_sub(2) as usize;
@@ -4882,7 +4907,7 @@ pub fn run_blocking(
                                                     g.queue_preview_items.len(),
                                                     g.subagents.len(),
                                                 );
-                                                let (lines, _hits) = transcript_cache
+                                                let (lines, _hits, _) = transcript_cache
                                                     .get_or_rebuild(&g, tr.width.saturating_sub(2));
                                                 let th = tr.height.saturating_sub(2) as usize;
                                                 let w = tr.width.saturating_sub(2) as usize;
@@ -4970,7 +4995,7 @@ pub fn run_blocking(
                                                     g.queue_preview_items.len(),
                                                     g.subagents.len(),
                                                 );
-                                                let (lines, _hits) = transcript_cache
+                                                let (lines, _hits, _) = transcript_cache
                                                     .get_or_rebuild(&g, tr.width.saturating_sub(2));
                                                 let th = tr.height.saturating_sub(2) as usize;
                                                 let w = tr.width.saturating_sub(2) as usize;

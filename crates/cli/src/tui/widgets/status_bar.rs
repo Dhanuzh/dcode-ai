@@ -26,6 +26,8 @@ pub struct StatusBar<'a> {
     /// Output tokens streamed in the current turn (live counter while busy).
     /// When non-zero and the agent is busy, shown as `~Nt` in the status bar.
     pub turn_output_tokens: u64,
+    /// True after context has been compacted at least once this session.
+    pub context_compacted: bool,
 }
 
 impl Widget for StatusBar<'_> {
@@ -116,6 +118,16 @@ impl Widget for StatusBar<'_> {
                     self.tokens_in, self.tokens_out, self.cost_usd
                 ),
                 Style::default().fg(theme::muted()),
+            ));
+        }
+
+        if self.context_compacted {
+            spans.push(sep.clone());
+            spans.push(Span::styled(
+                " compacted ",
+                Style::default()
+                    .fg(theme::warn())
+                    .add_modifier(Modifier::BOLD),
             ));
         }
 

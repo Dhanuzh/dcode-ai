@@ -324,6 +324,8 @@ pub struct TuiSessionState {
     /// Positive = narrower (zoom in / larger text density), negative = wider margin.
     /// Clamped to [-20, +40] at render time so layout never breaks.
     pub transcript_zoom_offset: i32,
+    /// True after the context manager has compacted at least once this session.
+    pub context_compacted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -608,6 +610,7 @@ impl TuiSessionState {
             last_turn_latency_ms: None,
             turn_started_at: None,
             transcript_zoom_offset: 0,
+            context_compacted: false,
         }
     }
 
@@ -1888,8 +1891,20 @@ impl TuiSessionState {
             AgentEvent::SessionEnded { .. } => {
                 self.set_process("session ended", "");
             }
+            AgentEvent::ContextWarning { message } => {
+                self.push_block(DisplayBlock::System(format!("⚠ {message}")));
+                transcript_dirty = true;
+            }
+            AgentEvent::ContextCompaction { phase, message } => {
+                if phase == "completed" {
+                    self.context_compacted = true;
+                }
+                self.push_block(DisplayBlock::System(format!("⟳ {message}")));
+                transcript_dirty = true;
+            }
             AgentEvent::Error { message } => {
-                self.push_block(DisplayBlock::ErrorLine(message.clone()));
+                let classified = classify_error(message);
+                self.push_block(DisplayBlock::ErrorLine(classified));
                 self.set_process("error", truncate(message, 96));
                 if message.to_ascii_lowercase().contains("run cancelled") {
                     self.set_busy_state(BusyState::Idle);
@@ -2029,6 +2044,26 @@ fn fire_desktop_notification(title: &str, body: &str) {
     }
     // Feature not enabled — silently skip.
     let _ = (title, body);
+}
+
+fn classify_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key")
+    {
+        format!("{raw}\n  → Check your API key with /login or /provider")
+    } else if lower.contains("429") || lower.contains("rate limit") || lower.contains("too many") {
+        format!("{raw}\n  → Rate limited — wait a moment and /retry")
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        format!("{raw}\n  → Connection timed out — check your network and /retry")
+    } else if lower.contains("dns") || lower.contains("resolve") || lower.contains("connect") {
+        format!("{raw}\n  → Network error — check internet connection")
+    } else if lower.contains("500") || lower.contains("502") || lower.contains("503") {
+        format!("{raw}\n  → Server error — the provider may be down, try again shortly")
+    } else if lower.contains("context") && lower.contains("length") {
+        format!("{raw}\n  → Context too long — use /compact to reduce")
+    } else {
+        raw.to_string()
+    }
 }
 
 #[cfg(test)]
