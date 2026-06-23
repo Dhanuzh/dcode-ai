@@ -1,5 +1,8 @@
 //! Diff hunk parsing and selective application for interactive staging.
 //!
+//! This module is the canonical home for diff logic. The same functions
+//! still exist in `app.rs` for now; new code should import from here.
+//!
 //! Used by the approval popup to let users cherry-pick which hunks to
 //! accept (git add -p style) and by the transcript to display diffs.
 

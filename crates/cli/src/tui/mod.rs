@@ -9,6 +9,7 @@ pub mod clipboard;
 pub mod composer;
 pub mod composer_input;
 pub mod connect_modal;
+#[allow(dead_code)]
 pub mod diff_hunk;
 pub mod git;
 pub mod layout;
