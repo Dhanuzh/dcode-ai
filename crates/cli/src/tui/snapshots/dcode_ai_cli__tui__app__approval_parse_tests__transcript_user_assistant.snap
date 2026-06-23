@@ -1,0 +1,10 @@
+---
+source: crates/cli/src/tui/app.rs
+expression: lines_to_text(&lines)
+---
+ user      
+▏ Hello world
+
+ assistant  response 
+▏ Hi! How can I help you today?
+▏

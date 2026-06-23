@@ -1,0 +1,13 @@
+---
+source: crates/cli/src/tui/app.rs
+expression: lines_to_text(&lines)
+---
+Here’s some code:
+
+ rust   copy
+fn main() {
+    println!("hello");
+}
+
+
+That’s it.

@@ -1,0 +1,5 @@
+---
+source: crates/cli/src/tui/app.rs
+expression: text
+---
+ ctx ▰▰▱▱▱ 50%  │

@@ -167,7 +167,7 @@ impl Widget for StatusBar<'_> {
 
 /// A 5-segment context-window gauge (`ctx ▰▰▰▱▱ 62%`), colored by fullness:
 /// green < 70%, amber < 90%, red ≥ 90%. Empty if the model window is unknown.
-fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> {
+pub fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> {
     let window = dcode_ai_runtime::model_limits::detect_context_window(model) as u64;
     if window == 0 {
         return Vec::new();

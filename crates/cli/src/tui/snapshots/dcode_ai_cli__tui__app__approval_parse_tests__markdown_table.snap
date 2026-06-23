@@ -1,0 +1,6 @@
+---
+source: crates/cli/src/tui/app.rs
+expression: lines_to_text(&lines)
+---
+ row   foo  ·  42
+ row   bar  ·  99

@@ -6155,4 +6155,115 @@ mod approval_parse_tests {
             .count();
         assert_eq!(cancel_msgs, 1);
     }
+
+    // ── Snapshot tests (insta) ─────────────────────────────────────────
+
+    fn lines_to_text(lines: &[ratatui::text::Line<'_>]) -> String {
+        lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|s| s.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn snapshot_transcript_user_and_assistant() {
+        let mut st = TuiSessionState::new(
+            "test-snap".into(),
+            "test-model".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        st.blocks
+            .push(super::DisplayBlock::User("Hello world".into()));
+        st.blocks.push(super::DisplayBlock::Assistant(
+            "Hi! How can I help you today?".into(),
+        ));
+        st.touch_transcript();
+        let (lines, _hits) = transcript_lines_and_hits(&st, 60);
+        insta::assert_snapshot!("transcript_user_assistant", lines_to_text(&lines));
+    }
+
+    #[test]
+    fn snapshot_transcript_tool_done() {
+        let mut st = TuiSessionState::new(
+            "test-snap".into(),
+            "test-model".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        st.blocks.push(super::DisplayBlock::ToolDone {
+            name: "execute_bash".into(),
+            call_id: "call-1".into(),
+            ok: true,
+            detail: "hello world\nexit code: 0".into(),
+            duration_ms: Some(150),
+        });
+        st.touch_transcript();
+        let (lines, _hits) = transcript_lines_and_hits(&st, 60);
+        insta::assert_snapshot!("transcript_tool_done", lines_to_text(&lines));
+    }
+
+    #[test]
+    fn snapshot_markdown_code_block() {
+        let md = "Here's some code:\n\n```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n\nThat's it.";
+        let lines = render_markdown_lines(md);
+        insta::assert_snapshot!("markdown_code_block", lines_to_text(&lines));
+    }
+
+    #[test]
+    fn snapshot_markdown_table() {
+        let md = "| Name | Value |\n|------|-------|\n| foo  | 42    |\n| bar  | 99    |";
+        let lines = render_markdown_lines(md);
+        insta::assert_snapshot!("markdown_table", lines_to_text(&lines));
+    }
+
+    #[test]
+    fn snapshot_composer_with_mention() {
+        let line = composer_line("check @src/main.rs for errors", 30);
+        let text = line
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect::<String>();
+        insta::assert_snapshot!("composer_mention", text);
+    }
+
+    #[test]
+    fn snapshot_context_gauge() {
+        use crate::tui::widgets::status_bar::context_gauge_spans;
+        let spans = context_gauge_spans(64_000, "gpt-4o");
+        let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+        insta::assert_snapshot!("context_gauge_50pct", text);
+    }
+
+    #[test]
+    fn snapshot_diff_hunks() {
+        let old = "line1\nline2\nline3\nline4\nline5\n";
+        let new = "line1\nmodified2\nline3\nnew_line\nline4\nline5\n";
+        let hunks = super::parse_diff_hunks(old, new);
+        let text: String = hunks
+            .iter()
+            .map(|h| {
+                let lines: String = h
+                    .lines
+                    .iter()
+                    .map(|(s, t)| format!("{s}{t}"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                format!("{}\n{}", h.header, lines)
+            })
+            .collect::<Vec<_>>()
+            .join("\n---\n");
+        insta::assert_snapshot!("diff_hunks", text);
+    }
 }
