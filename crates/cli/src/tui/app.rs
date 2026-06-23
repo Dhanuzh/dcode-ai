@@ -1101,6 +1101,21 @@ pub fn run_blocking(
     let mouse_capture = true;
     let mut terminal = setup_terminal(mouse_capture)?;
 
+    // Set terminal window title for tab identification.
+    {
+        let title = if let Ok(g) = state.lock() {
+            let ws = g
+                .workspace_root
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("workspace");
+            format!("dcode-ai: {ws}")
+        } else {
+            "dcode-ai".to_string()
+        };
+        let _ = crossterm::execute!(std::io::stdout(), crossterm::terminal::SetTitle(&title));
+    }
+
     // Load slash entries once: hardcoded commands + discovered skills
     let skill_dirs = vec![PathBuf::from(".dcode-ai/skills")];
     let workspace_root = {
@@ -2545,8 +2560,8 @@ pub fn run_blocking(
                     const SESSION_PICKER_MAX_ROWS: usize = 16;
                     let n_filtered = filtered_indices.len();
                     let viewport_rows = n_filtered.min(SESSION_PICKER_MAX_ROWS);
-                    let rows = (viewport_rows as u16).saturating_add(8).max(10);
-                    let popup_area = centered_rect(area, 56, rows);
+                    let rows = (viewport_rows as u16).saturating_add(13).max(14);
+                    let popup_area = centered_rect(area, 60, rows);
                     let pick = g.session_picker_index.min(n_filtered.saturating_sub(1));
 
                     if pick < g.session_picker_scroll {
@@ -2605,6 +2620,22 @@ pub fn run_blocking(
                                 format!("  ▼ {} more", remaining_below),
                                 Style::default().fg(theme::muted()),
                             )));
+                        }
+                    }
+                    // Show preview of selected session's last messages.
+                    if let Some(&filt_idx) = filtered_indices.get(pick) {
+                        let preview = &g.session_picker_entries[filt_idx].preview;
+                        if !preview.is_empty() {
+                            lines.push(Line::from(Span::styled(
+                                " ─── preview ───",
+                                Style::default().fg(theme::border()),
+                            )));
+                            for pline in preview.lines().take(3) {
+                                lines.push(Line::from(Span::styled(
+                                    format!(" {pline}"),
+                                    Style::default().fg(theme::muted()),
+                                )));
+                            }
                         }
                     }
                     lines.push(Line::default());
@@ -2791,6 +2822,7 @@ pub fn run_blocking(
                                 || filter.is_empty()
                                 || e.label.to_ascii_lowercase().contains(&filter)
                                 || e.detail.to_ascii_lowercase().contains(&filter)
+                                || fuzzy_subsequence_match(&filter, &e.label.to_ascii_lowercase())
                         })
                         .map(|(i, _)| i)
                         .collect();
@@ -5080,6 +5112,23 @@ pub fn run_blocking(
     restore_terminal(mouse_capture);
     let _ = execute!(stdout(), MoveToColumn(0));
     Ok(())
+}
+
+/// Subsequence fuzzy match: checks if all chars of `needle` appear in order
+/// within `haystack`. E.g. "son" matches "claude-sonnet-4-6", "csn" matches
+/// "claude-sonnet".
+fn fuzzy_subsequence_match(needle: &str, haystack: &str) -> bool {
+    let mut hay = haystack.chars();
+    for nc in needle.chars() {
+        loop {
+            match hay.next() {
+                Some(hc) if hc == nc => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
 }
 
 /// Full keybindings reference shown by F1.

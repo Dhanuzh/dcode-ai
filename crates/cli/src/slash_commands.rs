@@ -57,4 +57,5 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/web",
     "/commit",
     "/map",
+    "/history",
 ];

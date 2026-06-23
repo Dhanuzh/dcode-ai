@@ -1996,6 +1996,10 @@ impl Repl {
                                 .workspace_root()
                                 .join(&self.runtime.config().session.history_dir),
                         );
+                        let sessions_dir = self
+                            .runtime
+                            .workspace_root()
+                            .join(&self.runtime.config().session.history_dir);
                         let mut entries: Vec<SessionPickerEntry> = Vec::new();
                         for id in &ids {
                             let (label, search_text) = match store.load_snapshot(id).await {
@@ -2008,10 +2012,13 @@ impl Repl {
                                 }
                                 Err(_) => (id.clone(), id.clone()),
                             };
+                            let preview =
+                                session_event_preview(&sessions_dir, id, 3).unwrap_or_default();
                             entries.push(SessionPickerEntry {
                                 id: id.clone(),
                                 label,
                                 search_text,
+                                preview,
                             });
                         }
                         if let Ok(mut g) = st.lock() {
@@ -2417,6 +2424,28 @@ impl Repl {
                 let n = files.len();
                 out.println(&format!("[map] {n} files"));
                 out.println(&tree);
+            }
+
+            // ── /history <query> ──────────────────────────────────────────
+            "/history" => {
+                let query = rest.trim();
+                if query.is_empty() {
+                    out.eprintln("[history] usage: /history <search term>");
+                    return Ok(true);
+                }
+                let sessions_dir = self
+                    .runtime
+                    .workspace_root()
+                    .join(&self.runtime.config().session.history_dir);
+                let results = search_session_history(&sessions_dir, query, 20);
+                if results.is_empty() {
+                    out.println(&format!("[history] No matches for \"{query}\""));
+                } else {
+                    out.println(&format!("[history] {} match(es) for \"{query}\":", results.len()));
+                    for r in &results {
+                        out.println(r);
+                    }
+                }
             }
 
             _ => {
@@ -3931,6 +3960,100 @@ fn build_file_tree(paths: &[String]) -> String {
     let mut count = 0usize;
     render(&root, "", &mut lines, &mut count);
     lines.join("\n")
+}
+
+// ── Session event preview ─────────────────────────────────────────────────────
+
+/// Extract the last `n` user/assistant messages from a session's event log
+/// for preview display.
+fn session_event_preview(
+    sessions_dir: &std::path::Path,
+    session_id: &str,
+    max_lines: usize,
+) -> Option<String> {
+    let log_path = sessions_dir.join(format!("{session_id}.events.jsonl"));
+    let raw = std::fs::read_to_string(&log_path).ok()?;
+    let mut previews: Vec<String> = Vec::new();
+    for line in raw.lines().rev() {
+        if previews.len() >= max_lines {
+            break;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+        if kind != "MessageReceived" {
+            continue;
+        }
+        let role = val.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+        let content = val
+            .get("content")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .chars()
+            .take(80)
+            .collect::<String>();
+        if content.trim().is_empty() {
+            continue;
+        }
+        previews.push(format!("{role}: {content}"));
+    }
+    previews.reverse();
+    if previews.is_empty() {
+        None
+    } else {
+        Some(previews.join("\n"))
+    }
+}
+
+/// Search across all session event logs for a keyword.
+fn search_session_history(
+    sessions_dir: &std::path::Path,
+    query: &str,
+    max_results: usize,
+) -> Vec<String> {
+    let query_lower = query.to_ascii_lowercase();
+    let mut results = Vec::new();
+    let Ok(entries) = std::fs::read_dir(sessions_dir) else {
+        return results;
+    };
+    let mut paths: Vec<_> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".events.jsonl"))
+        .collect();
+    paths.sort_by_key(|e| std::cmp::Reverse(e.metadata().ok().and_then(|m| m.modified().ok())));
+    for entry in paths {
+        if results.len() >= max_results {
+            break;
+        }
+        let session_id = entry
+            .file_name()
+            .to_string_lossy()
+            .trim_end_matches(".events.jsonl")
+            .to_string();
+        let Ok(raw) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        for line in raw.lines() {
+            if results.len() >= max_results {
+                break;
+            }
+            let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            let kind = val.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+            if kind != "MessageReceived" {
+                continue;
+            }
+            let content = val.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            if content.to_ascii_lowercase().contains(&query_lower) {
+                let role = val.get("role").and_then(|v| v.as_str()).unwrap_or("?");
+                let preview: String = content.chars().take(100).collect();
+                results.push(format!("[{session_id}] {role}: {preview}"));
+            }
+        }
+    }
+    results
 }
 
 #[cfg(test)]

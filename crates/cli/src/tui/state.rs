@@ -88,6 +88,8 @@ pub struct SessionPickerEntry {
     pub id: String,
     pub label: String,
     pub search_text: String,
+    /// Last few messages as a preview (populated from event log).
+    pub preview: String,
 }
 
 /// Status of an API key validation during onboarding.
@@ -2392,11 +2394,13 @@ mod tests {
                 id: "sess-1".into(),
                 label: "fix auth".into(),
                 search_text: "fix auth".into(),
+                preview: String::new(),
             },
             SessionPickerEntry {
                 id: "sess-2".into(),
                 label: "add tests".into(),
                 search_text: "add tests".into(),
+                preview: String::new(),
             },
         ];
         st.session_picker_search = "tests".into();

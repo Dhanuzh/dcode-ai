@@ -94,6 +94,11 @@ struct Cli {
     #[arg(long)]
     no_tui: bool,
 
+    /// Pipe mode: read prompt from stdin, print only the assistant response to stdout, then exit.
+    /// Useful for scripting: echo "explain this" | dcode-ai --pipe
+    #[arg(long)]
+    pipe: bool,
+
     /// Permission handling mode (default: from config, fallback to `default`)
     #[arg(long, value_enum)]
     permission_mode: Option<CliPermissionMode>,
@@ -760,6 +765,37 @@ async fn try_main() -> anyhow::Result<()> {
             oauth_login::show_auth_status()?;
         }
         None => {
+            // --pipe mode: read prompt from stdin, print response, exit.
+            if cli.pipe {
+                let prompt = if let Some(p) = cli.prompt.as_deref() {
+                    p.to_string()
+                } else {
+                    use std::io::Read;
+                    let mut buf = String::new();
+                    stdin()
+                        .read_to_string(&mut buf)
+                        .map_err(|e| anyhow::anyhow!("stdin: {e}"))?;
+                    buf
+                };
+                if prompt.trim().is_empty() {
+                    eprintln!("error: --pipe requires a prompt (via --prompt or stdin)");
+                    std::process::exit(1);
+                }
+                run_one_shot(
+                    config,
+                    &workspace_root,
+                    prompt.trim(),
+                    OneShotOptions {
+                        stream: StreamMode::Off,
+                        json: cli.json,
+                        safe: cli.safe,
+                        session_id: cli.session_id,
+                        orchestration_context: orchestration_context.clone(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
             if let Some(prompt) = cli.prompt.as_deref() {
                 if let Some(mode) = cli.permission_mode {
                     config.permissions.mode = mode.into();
