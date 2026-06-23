@@ -333,6 +333,21 @@ pub(crate) fn transcript_lines_and_hits(
                         Style::default().fg(color).add_modifier(Modifier::BOLD),
                     ));
                 }
+                // Extract file path from the first line (e.g. "Wrote src/main.rs")
+                // and show it on the header for file-writing tools.
+                let first_line = detail.lines().next().unwrap_or("");
+                let file_path = first_line
+                    .strip_prefix("Wrote ")
+                    .or_else(|| first_line.strip_prefix("Edited "))
+                    .or_else(|| first_line.strip_prefix("Patched "))
+                    .or_else(|| first_line.strip_prefix("Created "))
+                    .or_else(|| first_line.strip_prefix("Deleted "));
+                if let Some(fp) = file_path {
+                    header.push(Span::styled(
+                        format!(" {}", truncate_chars(fp.trim(), 30)),
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
                 // Diff scale chip on the header so a collapsed edit still shows
                 // how big the change was without expanding the body.
                 let (adds, dels) = crate::tui::app::diff_change_counts(detail);

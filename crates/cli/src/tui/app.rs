@@ -1040,7 +1040,6 @@ pub(crate) fn apply_selected_hunks(old: &str, new: &str, selected: &[bool]) -> S
 /// Build a compact colorized diff preview for file-write/edit tool approvals.
 /// Returns up to ~6 colored `Line`s showing +/- changes, or empty if not applicable.
 fn approval_diff_preview(tool: &str, input_json: &str, max_cols: usize) -> Vec<Line<'static>> {
-    // Only show diff for file-writing tools.
     let lower = tool.to_ascii_lowercase();
     if !lower.contains("write")
         && !lower.contains("edit")
@@ -1053,38 +1052,90 @@ fn approval_diff_preview(tool: &str, input_json: &str, max_cols: usize) -> Vec<L
         return Vec::new();
     };
 
-    // Try to get old and new content.
     let path = val
         .get("path")
         .or_else(|| val.get("file"))
+        .or_else(|| val.get("file_path"))
         .or_else(|| val.get("filename"))
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-    let new_content = val
-        .get("content")
-        .or_else(|| val.get("new_content"))
-        .or_else(|| val.get("text"))
-        .and_then(|v| v.as_str());
-
-    let old_content: Option<String> = if !path.is_empty() {
-        std::fs::read_to_string(path).ok()
+    // For edit_file / replace_match: compute diff from old_string → new_string.
+    let (old_str_owned, new_str_owned);
+    let (old_str, new_str) = if lower.contains("edit") || lower.contains("replace") {
+        let old_s = val
+            .get("old_string")
+            .or_else(|| val.get("old_text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let new_s = val
+            .get("new_string")
+            .or_else(|| val.get("new_text"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if old_s.is_empty() && new_s.is_empty() {
+            return Vec::new();
+        }
+        (old_s, new_s)
     } else {
-        None
+        // write_file: diff between current file and proposed content.
+        let new_content = val
+            .get("content")
+            .or_else(|| val.get("new_content"))
+            .or_else(|| val.get("text"))
+            .and_then(|v| v.as_str());
+        let old_content = if !path.is_empty() {
+            std::fs::read_to_string(path).ok()
+        } else {
+            None
+        };
+        match (old_content, new_content) {
+            (Some(old), Some(new)) => {
+                old_str_owned = old;
+                new_str_owned = new.to_string();
+                (old_str_owned.as_str(), new_str_owned.as_str())
+            }
+            _ => return Vec::new(),
+        }
     };
 
-    let (old_str, new_str) = match (old_content.as_deref(), new_content) {
-        (Some(old), Some(new)) => (old, new),
-        _ => return Vec::new(),
-    };
-
-    // Use `similar` to compute a unified diff, show first 6 changed lines.
     use similar::{ChangeTag, TextDiff};
     let diff = TextDiff::from_lines(old_str, new_str);
     let mut out: Vec<Line<'static>> = Vec::new();
-    let max_lines = 6_usize;
-    for change in diff.iter_all_changes().take(60) {
-        if out.len() >= max_lines {
+
+    // File path header.
+    if !path.is_empty() {
+        let (adds, dels) = {
+            let mut a = 0usize;
+            let mut d = 0usize;
+            for change in diff.iter_all_changes() {
+                match change.tag() {
+                    ChangeTag::Insert => a += 1,
+                    ChangeTag::Delete => d += 1,
+                    ChangeTag::Equal => {}
+                }
+            }
+            (a, d)
+        };
+        out.push(Line::from(vec![
+            Span::styled(
+                truncate_chars(path, max_cols.saturating_sub(16)),
+                Style::default()
+                    .fg(theme::text())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" | ", Style::default().fg(theme::muted())),
+            Span::styled(format!("+{adds}"), Style::default().fg(theme::success())),
+            Span::styled(" ", Style::default()),
+            Span::styled(format!("-{dels}"), Style::default().fg(theme::error())),
+        ]));
+    }
+
+    // Show up to 12 changed lines with 1 line of context around each change.
+    let max_lines = 12_usize;
+    let mut prev_was_context = false;
+    for change in diff.iter_all_changes().take(80) {
+        if out.len() > max_lines {
             out.push(Line::from(Span::styled(
                 "  …",
                 Style::default().fg(theme::muted()),
@@ -1094,8 +1145,25 @@ fn approval_diff_preview(tool: &str, input_json: &str, max_cols: usize) -> Vec<L
         let (sigil, color) = match change.tag() {
             ChangeTag::Insert => ("+", theme::success()),
             ChangeTag::Delete => ("-", theme::error()),
-            ChangeTag::Equal => continue,
+            ChangeTag::Equal => {
+                if !prev_was_context && out.len() > 1 {
+                    prev_was_context = true;
+                    let text = format!(
+                        "  {}",
+                        truncate_chars(
+                            change.value().trim_end_matches('\n'),
+                            max_cols.saturating_sub(4)
+                        )
+                    );
+                    out.push(Line::from(Span::styled(
+                        text,
+                        Style::default().fg(theme::muted()),
+                    )));
+                }
+                continue;
+            }
         };
+        prev_was_context = false;
         let text = format!(
             "{sigil} {}",
             truncate_chars(
