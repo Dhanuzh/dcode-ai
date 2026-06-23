@@ -2289,7 +2289,11 @@ impl Repl {
                         };
                         const MAX_SHOW: usize = 8_000;
                         let truncated = if combined.len() > MAX_SHOW {
-                            format!("{}…\n[output truncated]", &combined[..MAX_SHOW])
+                            let mut end = MAX_SHOW;
+                            while end > 0 && !combined.is_char_boundary(end) {
+                                end -= 1;
+                            }
+                            format!("{}…\n[output truncated]", &combined[..end])
                         } else {
                             combined.clone()
                         };
@@ -3952,10 +3956,11 @@ async fn fetch_url_as_text(url: &str) -> anyhow::Result<String> {
         body
     };
     if text.len() > MAX_BYTES {
-        Ok(format!(
-            "{}\n[…content truncated at 16 KiB]",
-            &text[..MAX_BYTES]
-        ))
+        let mut end = MAX_BYTES;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Ok(format!("{}\n[…content truncated at 16 KiB]", &text[..end]))
     } else {
         Ok(text)
     }
