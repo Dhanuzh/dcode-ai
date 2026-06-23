@@ -51,8 +51,8 @@ use ratatui::{
     style::{Color, Modifier, Style},
     text::{Line, Span, Text},
     widgets::{
-        Block, Borders, Clear as ClearWidget, Padding, Paragraph, Scrollbar, ScrollbarOrientation,
-        ScrollbarState, Wrap,
+        Block, BorderType, Borders, Clear as ClearWidget, Padding, Paragraph, Scrollbar,
+        ScrollbarOrientation, ScrollbarState, Wrap,
     },
 };
 use std::io::stdout;
@@ -167,13 +167,19 @@ const COMMAND_PALETTE_WIDTH: u16 = 56;
 const COMMAND_PALETTE_MAX_ROWS: usize = 10;
 
 pub fn session_start_banner() -> String {
+    let version = env!("CARGO_PKG_VERSION");
     [
         "   ___",
         "  /   \\",
         " | x x |",
-        " |  ^  |   dcode-ai",
+        &format!(" |  ^  |   dcode-ai v{version}"),
         " |_____|",
         "  |   |",
+        "",
+        "  Quick start:",
+        "    Type a message and press Enter to chat",
+        "    @file to attach · /cmd for commands · Ctrl+P palette",
+        "    !cmd  to run shell · F1 for all keybindings",
     ]
     .join("\n")
 }
@@ -361,6 +367,20 @@ pub(crate) fn push_section_gap(lines: &mut Vec<Line<'static>>, hits: &mut Vec<Li
     if lines.last().is_some_and(line_has_text) {
         push_transcript_line(lines, hits, Line::default(), None);
     }
+}
+
+pub(crate) fn push_tool_separator(
+    lines: &mut Vec<Line<'static>>,
+    hits: &mut Vec<LineAnswerHit>,
+    width: usize,
+) {
+    let bar = "─".repeat(width.min(60));
+    push_transcript_line(
+        lines,
+        hits,
+        Line::from(Span::styled(bar, Style::default().fg(theme::border()))),
+        None,
+    );
 }
 
 /// Render a themed vertical scrollbar on the right edge of a popup when its
@@ -1347,6 +1367,7 @@ fn render_approval_popup(
         .block(
             Block::default()
                 .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(theme::warn()))
                 .title(Span::styled(
                     " Tool Approval ",

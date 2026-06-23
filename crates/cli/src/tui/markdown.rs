@@ -107,6 +107,7 @@ fn render_code_block_lines(
         hits.push(Some(LineClickHit::CopyText(copy_payload.clone())));
     }
 
+    let code_bg = theme::surface();
     for (idx, raw) in code.split('\n').enumerate() {
         let highlights = if is_diff {
             Vec::new()
@@ -117,7 +118,7 @@ fn render_code_block_lines(
         if code_line_numbers {
             spans.push(Span::styled(
                 format!("{:>width$} │ ", idx + 1, width = line_num_width),
-                Style::default().fg(theme::muted()),
+                Style::default().fg(theme::muted()).bg(code_bg),
             ));
         }
         if is_diff {

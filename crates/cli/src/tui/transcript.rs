@@ -14,7 +14,7 @@ use dcode_ai_common::event::QuestionSelection;
 use crate::tool_ui;
 use crate::tui::app::{
     LineAnswerHit, LineClickHit, line_has_text, prefixed_line, push_section_gap,
-    push_tool_detail_lines, push_transcript_line, tool_header_detail_spans,
+    push_tool_detail_lines, push_tool_separator, push_transcript_line, tool_header_detail_spans,
 };
 use crate::tui::markdown::render_markdown_lines_with_hits;
 use crate::tui::render_helpers::{
@@ -287,7 +287,17 @@ pub(crate) fn transcript_lines_and_hits(
                 detail,
                 duration_ms,
             } => {
-                push_section_gap(&mut lines, &mut hits);
+                // Add a thin separator between consecutive tool blocks.
+                let prev_is_tool = idx > 0
+                    && matches!(
+                        state.blocks.get(idx - 1),
+                        Some(DisplayBlock::ToolDone { .. } | DisplayBlock::ToolRunning { .. })
+                    );
+                if prev_is_tool {
+                    push_tool_separator(&mut lines, &mut hits, w);
+                } else {
+                    push_section_gap(&mut lines, &mut hits);
+                }
                 let ui = tool_ui::metadata(name);
                 let collapsed = state.is_tool_block_collapsed(call_id);
                 let fold_indicator = if collapsed { "▸" } else { "▾" };
@@ -601,7 +611,7 @@ pub(crate) fn transcript_lines_and_hits(
                 let shown = if state.thinking_expanded {
                     wrapped.len()
                 } else {
-                    wrapped.len().min(10)
+                    wrapped.len().min(3)
                 };
                 let mut header = vec![Span::styled(
                     " ✦ thinking ",
@@ -610,7 +620,7 @@ pub(crate) fn transcript_lines_and_hits(
                         .bg(theme::muted())
                         .add_modifier(Modifier::BOLD),
                 )];
-                if wrapped.len() > 10 {
+                if wrapped.len() > 3 {
                     header.push(Span::styled(
                         if state.thinking_expanded {
                             "  ▾ click to collapse"
@@ -901,7 +911,17 @@ fn fmt_wall_time(secs: u64) -> Option<String> {
     }
     use chrono::{Local, TimeZone};
     let dt = Local.timestamp_opt(secs as i64, 0).single()?;
-    Some(dt.format("%H:%M").to_string())
+    let now = Local::now();
+    let age = now.signed_duration_since(dt);
+    if age.num_seconds() < 60 {
+        Some("just now".to_string())
+    } else if age.num_minutes() < 60 {
+        Some(format!("{}m ago", age.num_minutes()))
+    } else if age.num_hours() < 12 {
+        Some(format!("{}h ago", age.num_hours()))
+    } else {
+        Some(dt.format("%H:%M").to_string())
+    }
 }
 
 /// Format a tool duration as a compact badge: `120ms` under 1s, else `1.2s`.
