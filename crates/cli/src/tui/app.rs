@@ -86,6 +86,8 @@ pub(crate) enum LineClickHit {
     CopyText(String),
     /// Toggle full vs preview rendering of thinking blocks.
     ToggleThinking,
+    /// Open a URL in the browser or a file path in the editor.
+    OpenLink(String),
 }
 
 /// Per flattened transcript line: click action (same indices as `transcript_lines`).
@@ -3707,6 +3709,13 @@ pub fn run_blocking(
                                                     g.thinking_expanded = !g.thinking_expanded;
                                                     g.touch_transcript();
                                                 }
+                                                LineClickHit::OpenLink(target) => {
+                                                    let _ = open_link_in_system(&target);
+                                                    g.push_block(DisplayBlock::System(format!(
+                                                        "Opened: {target}"
+                                                    )));
+                                                    g.touch_transcript();
+                                                }
                                             }
                                             continue;
                                         }
@@ -5495,6 +5504,25 @@ fn build_hunk_modified_input(
     } else {
         None
     }
+}
+
+/// Open a URL in the default browser or a file path in the system editor.
+fn open_link_in_system(target: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("cmd")
+            .args(["/C", "start", "", target])
+            .spawn()?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open").arg(target).spawn()?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open").arg(target).spawn()?;
+    }
+    Ok(())
 }
 
 /// Subsequence fuzzy match: checks if all chars of `needle` appear in order

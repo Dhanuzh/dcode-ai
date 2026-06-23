@@ -1,18 +1,33 @@
 use crate::pty::PtyManager;
+use dcode_ai_common::event::AgentEvent;
 use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 use dcode_ai_core::tools::ToolExecutor;
 use std::sync::Arc;
 
 /// Runtime-backed bash tool that executes shell commands via PTY.
-/// Lives in the runtime crate so the supervisor can register it
-/// without depending on the CLI crate.
+/// When an event sender is provided, stdout/stderr lines are streamed
+/// to the TUI as `ToolOutputDelta` events for live feedback.
 pub struct RuntimeBashTool {
     pty: Arc<PtyManager>,
+    event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 }
 
 impl RuntimeBashTool {
     pub fn new(pty: Arc<PtyManager>) -> Self {
-        Self { pty }
+        Self {
+            pty,
+            event_tx: None,
+        }
+    }
+
+    pub fn with_event_tx(
+        pty: Arc<PtyManager>,
+        event_tx: tokio::sync::mpsc::Sender<AgentEvent>,
+    ) -> Self {
+        Self {
+            pty,
+            event_tx: Some(event_tx),
+        }
     }
 }
 
@@ -43,7 +58,29 @@ impl ToolExecutor for RuntimeBashTool {
         let command = call.input["command"].as_str().unwrap_or("");
         let timeout_secs = call.input["timeout_secs"].as_u64().unwrap_or(30);
 
-        match self.pty.exec(command, timeout_secs).await {
+        // Set up a line-streaming channel if we have an event sender.
+        let line_tx = if let Some(event_tx) = &self.event_tx {
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+            let etx = event_tx.clone();
+            let cid = call.id.clone();
+            tokio::spawn(async move {
+                while let Some(line) = rx.recv().await {
+                    let _ = etx.try_send(AgentEvent::ToolOutputDelta {
+                        call_id: cid.clone(),
+                        delta: line,
+                    });
+                }
+            });
+            Some(tx)
+        } else {
+            None
+        };
+
+        match self
+            .pty
+            .exec_streaming(command, timeout_secs, line_tx)
+            .await
+        {
             Ok(out) => ToolResult {
                 call_id: call.id.clone(),
                 success: out.exit_code == 0,

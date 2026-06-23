@@ -152,7 +152,8 @@ impl Supervisor {
         }
 
         let pty = Arc::new(PtyManager::new(&workspace_root));
-        tools.register(Box::new(crate::bash_tool::RuntimeBashTool::new(pty)));
+        // RuntimeBashTool is registered after event_tx is created (below)
+        // so it can stream ToolOutputDelta events.
 
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
         if !cfg.safe_mode {
@@ -181,6 +182,10 @@ impl Supervisor {
         };
 
         let (event_tx, event_rx) = mpsc::channel(256);
+        tools.register(Box::new(crate::bash_tool::RuntimeBashTool::with_event_tx(
+            pty,
+            event_tx.clone(),
+        )));
         let question_pending = Arc::new(Mutex::new(HashMap::new()));
         tools.register(Box::new(AskQuestionTool::new(
             event_tx.clone(),

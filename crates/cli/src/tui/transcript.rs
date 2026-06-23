@@ -805,7 +805,46 @@ pub(crate) fn transcript_lines_and_hits(
         );
     }
 
-    collapse_blank_runs(lines, hits)
+    let (lines, mut hits) = collapse_blank_runs(lines, hits);
+
+    // Post-process: upgrade None hits to OpenLink when the line contains a URL.
+    for (i, hit) in hits.iter_mut().enumerate() {
+        if hit.is_some() {
+            continue;
+        }
+        if let Some(line) = lines.get(i) {
+            let text = line_plain_text(line);
+            if let Some(url) = extract_first_url(&text) {
+                *hit = Some(LineClickHit::OpenLink(url));
+            }
+        }
+    }
+
+    (lines, hits)
+}
+
+fn line_plain_text(line: &Line<'_>) -> String {
+    line.spans.iter().map(|s| s.content.as_ref()).collect()
+}
+
+fn extract_first_url(text: &str) -> Option<String> {
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| {
+            c == '('
+                || c == ')'
+                || c == '['
+                || c == ']'
+                || c == '<'
+                || c == '>'
+                || c == '"'
+                || c == '\''
+                || c == ','
+        });
+        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
 }
 
 #[allow(dead_code)]
