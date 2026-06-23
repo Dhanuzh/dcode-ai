@@ -234,6 +234,8 @@ pub fn openai_responses_request_body(
     Ok(body)
 }
 
+const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 pub fn spawn_openai_stream(
     response: reqwest::Response,
     provider_name: &'static str,
@@ -246,7 +248,20 @@ pub fn spawn_openai_stream(
         let mut tool_calls: BTreeMap<u64, ToolCallAccumulator> = BTreeMap::new();
         let mut think = ThinkSplitter::default();
 
-        while let Some(item) = byte_stream.next().await {
+        loop {
+            let item = match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, byte_stream.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    let _ = tx
+                        .send(StreamChunk::Error(format!(
+                            "{provider_name} stream timed out (no data for {}s)",
+                            STREAM_CHUNK_TIMEOUT.as_secs()
+                        )))
+                        .await;
+                    break;
+                }
+            };
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(err) => {
@@ -381,7 +396,22 @@ pub fn spawn_openai_responses_stream(
             let mut current_event = String::new();
             let mut tool_calls: BTreeMap<String, ToolCallAccumulator> = BTreeMap::new();
 
-            while let Some(item) = byte_stream.next().await {
+            loop {
+                let item =
+                    match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, byte_stream.next()).await {
+                        Ok(Some(item)) => item,
+                        Ok(None) => break,
+                        Err(_elapsed) => {
+                            let _ = tx
+                                .send(StreamChunk::Error(format!(
+                                    "{provider_name} stream timed out (no data for {}s)",
+                                    STREAM_CHUNK_TIMEOUT.as_secs()
+                                )))
+                                .await;
+                            let _ = tx.send(StreamChunk::Done).await;
+                            return;
+                        }
+                    };
                 let chunk = match item {
                     Ok(chunk) => chunk,
                     Err(err) => {

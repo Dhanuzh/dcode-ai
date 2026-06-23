@@ -97,6 +97,11 @@ fn mark_last_block_cacheable(message: &mut Value) {
     }
 }
 
+/// Per-chunk timeout: if no bytes arrive within this window the stream is
+/// considered dead. Protects against server hangs and network drops that
+/// would otherwise block until the OS TCP keepalive fires (~2-5 min).
+const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+
 pub fn spawn_anthropic_stream(
     response: reqwest::Response,
     provider_name: &'static str,
@@ -112,7 +117,20 @@ pub fn spawn_anthropic_stream(
         let mut tool_input = String::new();
         let mut input_tokens: u64 = 0;
 
-        while let Some(item) = byte_stream.next().await {
+        loop {
+            let item = match tokio::time::timeout(STREAM_CHUNK_TIMEOUT, byte_stream.next()).await {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_elapsed) => {
+                    let _ = tx
+                        .send(StreamChunk::Error(format!(
+                            "{provider_name} stream timed out (no data for {}s)",
+                            STREAM_CHUNK_TIMEOUT.as_secs()
+                        )))
+                        .await;
+                    break;
+                }
+            };
             let chunk = match item {
                 Ok(chunk) => chunk,
                 Err(err) => {

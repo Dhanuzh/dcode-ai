@@ -135,6 +135,7 @@ impl OpenAiProvider {
 
         let client = reqwest::Client::builder()
             .default_headers(headers)
+            .connect_timeout(std::time::Duration::from_secs(15))
             .build()
             .map_err(|err| {
                 ProviderError::Configuration(format!("failed to build HTTP client: {err}"))
