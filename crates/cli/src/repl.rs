@@ -1359,32 +1359,104 @@ impl Repl {
                 }
             }
             "/mcp" => {
-                let lines: Vec<String> = if self.runtime.config().mcp.servers.is_empty() {
-                    vec!["No MCP servers configured.".into()]
-                } else {
-                    self.runtime
-                        .config()
-                        .mcp
-                        .servers
-                        .iter()
-                        .filter(|server| server.enabled)
-                        .map(|server| {
-                            format!(
-                                "{} command={} {}",
-                                server.name,
-                                server.command,
-                                server.args.join(" ")
-                            )
-                        })
-                        .collect()
-                };
-                if let ReplOutput::Tui(st) = &out {
-                    if let Ok(mut g) = st.lock() {
-                        g.open_info_modal("mcp", lines);
+                let subcommand = rest.trim();
+                let servers = &self.runtime.config().mcp.servers;
+                if subcommand == "test" || subcommand.starts_with("test ") {
+                    // /mcp test [name] — verify a server connection.
+                    let name = subcommand.strip_prefix("test").unwrap_or("").trim();
+                    let target = if name.is_empty() {
+                        servers.first()
+                    } else {
+                        servers.iter().find(|s| s.name == name)
+                    };
+                    match target {
+                        Some(server) => {
+                            out.println(&format!("[mcp] Testing {}…", server.name));
+                            let ws = self.runtime.workspace_root().to_path_buf();
+                            let srv = server.clone();
+                            match tokio::task::spawn_blocking(move || {
+                                dcode_ai_core::tools::mcp::load_mcp_tools(&ws, &[srv])
+                            })
+                            .await
+                            {
+                                Ok(Ok(tools)) => {
+                                    out.println(&format!(
+                                        "[mcp] ✓ {} connected — {} tool(s) discovered",
+                                        server.name,
+                                        tools.len()
+                                    ));
+                                    for t in &tools {
+                                        out.println(&format!("  • {}", t.definition().name));
+                                    }
+                                }
+                                Ok(Err(e)) => {
+                                    out.eprintln(&format!("[mcp] ✗ {} failed: {e}", server.name))
+                                }
+                                Err(e) => out.eprintln(&format!("[mcp] ✗ internal: {e}")),
+                            }
+                        }
+                        None => {
+                            if name.is_empty() {
+                                out.eprintln("[mcp] No servers configured");
+                            } else {
+                                out.eprintln(&format!("[mcp] Server '{name}' not found"));
+                            }
+                        }
                     }
                 } else {
-                    for l in &lines {
-                        out.println(l);
+                    // /mcp — show server status overview.
+                    let mut lines: Vec<String> = vec![format!(
+                        "MCP Servers ({} configured)",
+                        servers.len()
+                    )];
+                    lines.push(String::new());
+                    if servers.is_empty() {
+                        lines.push("No servers configured.".into());
+                        lines.push(String::new());
+                        lines.push("Add to .dcode-ai/config.local.toml:".into());
+                        lines.push("  [[mcp.servers]]".into());
+                        lines.push("  name = \"my-server\"".into());
+                        lines.push("  command = \"npx\"".into());
+                        lines.push("  args = [\"-y\", \"@modelcontextprotocol/server-filesystem\"]".into());
+                    } else {
+                        for server in servers {
+                            let status = if server.enabled { "●" } else { "○" };
+                            let transport = if server.url.is_some() {
+                                "http"
+                            } else {
+                                "stdio"
+                            };
+                            lines.push(format!(
+                                "{status} {:<20} [{transport}] {}",
+                                server.name,
+                                if server.enabled {
+                                    "enabled"
+                                } else {
+                                    "disabled"
+                                }
+                            ));
+                            if !server.command.is_empty() {
+                                lines.push(format!(
+                                    "  cmd: {} {}",
+                                    server.command,
+                                    server.args.join(" ")
+                                ));
+                            }
+                            if let Some(url) = &server.url {
+                                lines.push(format!("  url: {url}"));
+                            }
+                        }
+                        lines.push(String::new());
+                        lines.push("Use /mcp test [name] to verify connection".into());
+                    }
+                    if let ReplOutput::Tui(st) = &out {
+                        if let Ok(mut g) = st.lock() {
+                            g.open_info_modal("MCP Servers", lines);
+                        }
+                    } else {
+                        for l in &lines {
+                            out.println(l);
+                        }
                     }
                 }
             }

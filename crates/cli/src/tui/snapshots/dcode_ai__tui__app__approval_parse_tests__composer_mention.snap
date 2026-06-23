@@ -1,0 +1,6 @@
+---
+source: crates/cli/src/tui/app.rs
+assertion_line: 6306
+expression: text
+---
+› check @src/main.rs for errors
