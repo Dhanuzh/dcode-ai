@@ -123,7 +123,7 @@ pub(crate) fn transcript_lines_and_hits(
                         &mut lines,
                         &mut hits,
                         prefixed_line(
-                            Span::styled("▏ ", Style::default().fg(theme::user())),
+                            Span::styled("▏  ", Style::default().fg(theme::user())),
                             Line::from(Span::styled(text_line, Style::default().fg(theme::text()))),
                         ),
                         None,
@@ -171,7 +171,7 @@ pub(crate) fn transcript_lines_and_hits(
                         &mut lines,
                         &mut hits,
                         prefixed_line(
-                            Span::styled("▏ ", Style::default().fg(theme::assistant())),
+                            Span::styled("▏  ", Style::default().fg(theme::assistant())),
                             md_line,
                         ),
                         md_hit,
