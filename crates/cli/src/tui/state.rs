@@ -1739,7 +1739,13 @@ impl TuiSessionState {
                     input.push_str(delta);
                     const MAX_PREVIEW: usize = 4_000;
                     if input.len() > MAX_PREVIEW {
-                        let truncated = input[input.len() - MAX_PREVIEW..].to_string();
+                        // Find a valid char boundary to avoid panicking on
+                        // multi-byte UTF-8 (e.g. em-dash '—' is 3 bytes).
+                        let mut start = input.len() - MAX_PREVIEW;
+                        while start < input.len() && !input.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        let truncated = input[start..].to_string();
                         *input = format!("…{truncated}");
                     }
                 }

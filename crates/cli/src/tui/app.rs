@@ -4690,20 +4690,18 @@ pub fn run_blocking(
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::CycleModel(false));
                         }
-                        // Transcript zoom: only when the composer is empty so
-                        // typing `-`, `+`, `=` into a message works normally.
-                        (KeyCode::Char('+'), KeyModifiers::NONE)
-                        | (KeyCode::Char('+'), KeyModifiers::SHIFT)
-                            if g.input_buffer.is_empty() =>
-                        {
+                        // Transcript zoom: Ctrl+Plus / Ctrl+Minus / Ctrl+0
+                        // to avoid stealing -, +, = from the composer.
+                        (KeyCode::Char('+'), KeyModifiers::CONTROL)
+                        | (KeyCode::Char('='), KeyModifiers::CONTROL) => {
                             g.transcript_zoom_offset = (g.transcript_zoom_offset + 4).min(40);
                             g.touch_transcript();
                         }
-                        (KeyCode::Char('-'), KeyModifiers::NONE) if g.input_buffer.is_empty() => {
+                        (KeyCode::Char('-'), KeyModifiers::CONTROL) => {
                             g.transcript_zoom_offset = (g.transcript_zoom_offset - 4).max(-20);
                             g.touch_transcript();
                         }
-                        (KeyCode::Char('='), KeyModifiers::NONE) if g.input_buffer.is_empty() => {
+                        (KeyCode::Char('0'), KeyModifiers::CONTROL) => {
                             g.transcript_zoom_offset = 0;
                             g.touch_transcript();
                         }
