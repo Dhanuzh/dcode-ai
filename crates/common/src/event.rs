@@ -95,6 +95,12 @@ pub enum AgentEvent {
         call_id: String,
         output: ToolResult,
     },
+    /// Incremental output from a long-running tool (bash, etc.).
+    /// The TUI appends this to the ToolRunning block for live feedback.
+    ToolOutputDelta {
+        call_id: String,
+        delta: String,
+    },
     ApprovalRequested {
         call_id: String,
         tool: String,

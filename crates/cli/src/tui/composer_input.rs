@@ -229,6 +229,45 @@ pub(crate) fn delete_completed_at_mention(
     Some((remove_char_range(buffer, start_char, end_char), start_char))
 }
 
+/// Detect `inline code` (single backtick) and ``` fenced blocks ``` ranges
+/// by character index. Used to tint code spans in the composer.
+fn code_fence_char_ranges(buffer: &str) -> Vec<(usize, usize)> {
+    let chars: Vec<char> = buffer.chars().collect();
+    let mut ranges = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '`' {
+            // Count consecutive backticks.
+            let fence_start = i;
+            let tick_count = chars[i..].iter().take_while(|&&c| c == '`').count();
+            i += tick_count;
+            // Find matching closing fence.
+            let mut j = i;
+            while j < chars.len() {
+                if chars[j] == '`' {
+                    let close_count = chars[j..].iter().take_while(|&&c| c == '`').count();
+                    if close_count >= tick_count {
+                        ranges.push((fence_start, j + close_count));
+                        j += close_count;
+                        i = j;
+                        break;
+                    }
+                    j += close_count;
+                } else {
+                    j += 1;
+                }
+            }
+            if j >= chars.len() && ranges.last().map(|r| r.1) != Some(j) {
+                ranges.push((fence_start, chars.len()));
+                i = chars.len();
+            }
+        } else {
+            i += 1;
+        }
+    }
+    ranges
+}
+
 fn push_styled_run(
     spans: &mut Vec<Span<'static>>,
     text: &mut String,
@@ -251,6 +290,7 @@ pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'stati
     let placeholder = "Ask anything…   /  commands   ·   ⏎ send   ·   ⇧⏎ newline";
     let chars: Vec<char> = buffer.chars().collect();
     let mention_ranges = at_mention_char_ranges(buffer);
+    let code_fence_ranges = code_fence_char_ranges(buffer);
     let cursor_char_idx = cursor_char_idx.min(chars.len());
     let mut spans = vec![prompt];
     let mut run = String::new();
@@ -293,11 +333,16 @@ pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'stati
         let in_mention = mention_ranges
             .iter()
             .any(|(start, end)| *start <= idx && idx < *end);
+        let in_code = code_fence_ranges
+            .iter()
+            .any(|(start, end)| *start <= idx && idx < *end);
         let style = if in_mention {
             Style::default()
                 .fg(theme::text())
                 .bg(theme::mention_bg())
                 .add_modifier(Modifier::BOLD)
+        } else if in_code {
+            Style::default().fg(theme::tool())
         } else {
             Style::default().fg(theme::text())
         };

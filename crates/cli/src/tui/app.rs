@@ -33,7 +33,7 @@ use crate::tui::state::{
     ApprovalRequest, BranchPickerKey, CommandPaletteKey, ConnectModalKey, DisplayBlock,
     HistorySearchKey, InfoModalKey, ModelPickerAction, ModelPickerKey, PinnedNote, PinsModalKey,
     ProviderPickerKey, ProviderPickerOutcome, QuestionModalKey, QuestionModalOutcome,
-    SessionPickerKey, TuiSessionState,
+    SessionPickerKey, SubagentRow, TuiSessionState,
 };
 use crate::tui::terminal::{restore_terminal, setup_terminal};
 use crate::tui::transcript::transcript_lines_and_hits;
@@ -1705,8 +1705,7 @@ pub fn run_blocking(
                 if let Some(hint) = hint {
                     input_lines.push(hint);
                 }
-                // Composer title: DCODE pill + git branch. Model is already in
-                // the status bar, so it's not repeated here.
+                // Composer title: DCODE pill + git branch + sub-agent breadcrumb.
                 let mut title_spans = vec![permission_mode_pill(&g.permission_mode)];
                 if !g.current_branch.is_empty() {
                     title_spans.push(Span::styled(" ", Style::default()));
@@ -1714,6 +1713,21 @@ pub fn run_blocking(
                         format!("⎇ {}", truncate_chars(&g.current_branch, 24)),
                         Style::default().fg(theme::muted()),
                     ));
+                }
+                // Breadcrumb: show active sub-agent count and latest task.
+                let active_agents: Vec<&SubagentRow> =
+                    g.subagents.iter().filter(|r| r.running).collect();
+                if !active_agents.is_empty() {
+                    title_spans.push(Span::styled(
+                        format!(" › {} agent(s)", active_agents.len()),
+                        Style::default().fg(theme::tool()),
+                    ));
+                    if let Some(latest) = active_agents.last() {
+                        title_spans.push(Span::styled(
+                            format!(": {}", truncate_chars(&latest.task, 30)),
+                            Style::default().fg(theme::tool()),
+                        ));
+                    }
                 }
                 title_spans.push(Span::styled(" ", Style::default()));
                 // Tint the composer border red in bypass mode as a danger cue;
@@ -4419,17 +4433,20 @@ pub fn run_blocking(
                             drop(g);
                             let _ = cmd_tx.send(TuiCmd::CycleModel(false));
                         }
-                        // Transcript zoom: + narrows (zooms in), - widens (zooms out), = resets.
+                        // Transcript zoom: only when the composer is empty so
+                        // typing `-`, `+`, `=` into a message works normally.
                         (KeyCode::Char('+'), KeyModifiers::NONE)
-                        | (KeyCode::Char('+'), KeyModifiers::SHIFT) => {
+                        | (KeyCode::Char('+'), KeyModifiers::SHIFT)
+                            if g.input_buffer.is_empty() =>
+                        {
                             g.transcript_zoom_offset = (g.transcript_zoom_offset + 4).min(40);
                             g.touch_transcript();
                         }
-                        (KeyCode::Char('-'), KeyModifiers::NONE) => {
+                        (KeyCode::Char('-'), KeyModifiers::NONE) if g.input_buffer.is_empty() => {
                             g.transcript_zoom_offset = (g.transcript_zoom_offset - 4).max(-20);
                             g.touch_transcript();
                         }
-                        (KeyCode::Char('='), KeyModifiers::NONE) => {
+                        (KeyCode::Char('='), KeyModifiers::NONE) if g.input_buffer.is_empty() => {
                             g.transcript_zoom_offset = 0;
                             g.touch_transcript();
                         }

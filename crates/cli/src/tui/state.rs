@@ -1713,6 +1713,25 @@ impl TuiSessionState {
                 self.set_busy_state(BusyState::ToolRunning);
                 transcript_dirty = true;
             }
+            AgentEvent::ToolOutputDelta { call_id, delta } => {
+                // Append incremental output to the running tool block.
+                if let Some(DisplayBlock::ToolRunning { input, .. }) =
+                    self.blocks.iter_mut().rev().find(|b| {
+                        matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id)
+                    })
+                {
+                    if !input.ends_with('\n') && !input.is_empty() {
+                        input.push('\n');
+                    }
+                    input.push_str(delta);
+                    const MAX_PREVIEW: usize = 4_000;
+                    if input.len() > MAX_PREVIEW {
+                        let truncated = input[input.len() - MAX_PREVIEW..].to_string();
+                        *input = format!("…{truncated}");
+                    }
+                }
+                transcript_dirty = true;
+            }
             AgentEvent::ToolCallCompleted { call_id, output } => {
                 let ok = output.success;
                 let duration_ms = self
