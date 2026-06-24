@@ -339,6 +339,10 @@ pub struct TuiSessionState {
     /// Notification counter for events that arrived while the user was typing
     /// or scrolled away. Cleared when transcript scrolls to bottom.
     pub notification_count: u16,
+    /// When true, the next `MessageReceived { role: "user" }` event will NOT
+    /// create a User display block. Used by `!` auto-response to hide the
+    /// synthetic prompt from the transcript.
+    pub suppress_next_user_block: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -628,6 +632,7 @@ impl TuiSessionState {
             transcript_zoom_offset: 0,
             context_compacted: false,
             notification_count: 0,
+            suppress_next_user_block: false,
         }
     }
 
@@ -1671,7 +1676,13 @@ impl TuiSessionState {
                 if role == "user" {
                     self.streaming_assistant = None;
                     self.streaming_thinking = None;
-                    self.push_block(DisplayBlock::User(content.clone()));
+                    // Skip the user block if this is an auto-generated prompt
+                    // (e.g. from ! shell auto-response).
+                    if self.suppress_next_user_block {
+                        self.suppress_next_user_block = false;
+                    } else {
+                        self.push_block(DisplayBlock::User(content.clone()));
+                    }
                     self.set_process("queued prompt", truncate(content, 96));
                     self.set_busy_state(BusyState::Thinking);
                     transcript_dirty = true;

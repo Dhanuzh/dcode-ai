@@ -3567,12 +3567,13 @@ pub fn run_blocking(
                                     &rows, &gutters, &sel,
                                 );
                                 if !text.is_empty() {
-                                    let n = text.chars().count();
                                     match crate::tui::mouse_select::copy_to_clipboard(&text) {
-                                        Ok(msg) => {
-                                            g.push_block(DisplayBlock::System(format!(
-                                                " Copied {n} chars {msg}"
-                                            )));
+                                        Ok(_msg) => {
+                                            // Brief confirmation, not a verbose
+                                            // "Copied N chars (native)" block.
+                                            g.push_block(DisplayBlock::System(
+                                                "✓ Copied to clipboard".into(),
+                                            ));
                                             g.touch_transcript();
                                         }
                                         Err(e) => {

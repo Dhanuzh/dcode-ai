@@ -3576,15 +3576,21 @@ impl Repl {
                             continue;
                         }
                         let output = self.run_bash_tui_capture(shell_cmd, &tui_state).await;
-                        // Auto-send the shell output to the AI for analysis.
+                        // Auto-send the shell output to the AI — but DON'T
+                        // show the synthetic prompt in the transcript (it looks
+                        // like the user typed it). Just show the AI's response.
                         if let Some(output) = output
                             && !output.trim().is_empty()
                         {
                             let prompt = format!(
-                                "I ran `{shell_cmd}` and got this output. Analyze it and suggest what to do next:\n\n```\n{output}\n```"
+                                "I ran `{shell_cmd}` and got this output. Analyze it briefly and suggest what to do next if the output indicates a problem:\n\n```\n{output}\n```"
                             );
                             if let Ok(mut g) = tui_state.lock() {
                                 g.set_busy(true);
+                                // Suppress the auto-generated user message in the
+                                // transcript by setting a flag the event handler
+                                // can check to skip the UserBlock push.
+                                g.suppress_next_user_block = true;
                             }
                             if let Err(e) = self.runtime.run_turn(&prompt).await
                                 && let Ok(mut g) = tui_state.lock()
@@ -3713,12 +3719,11 @@ impl Repl {
                 if !stderr.is_empty() {
                     log(st, &format!("[stderr] {}", stderr.trim()));
                 }
-                let exit_label = if out.status.success() {
-                    "[bash] exit 0".to_string()
-                } else {
-                    format!("[bash] exit {}", out.status.code().unwrap_or(-1))
-                };
-                log(st, &exit_label);
+                if out.status.success() {
+                    log(st, "[bash] ✓ exit 0");
+                } else if let Ok(mut g) = st.lock() {
+                    g.push_error(format!("[bash] ✗ exit {}", out.status.code().unwrap_or(-1)));
+                }
                 let combined = if stderr.is_empty() {
                     stdout
                 } else {
