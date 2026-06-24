@@ -1517,7 +1517,7 @@ pub fn run_blocking(
                         let toast_w = (msg.len() as u16 + 4).min(tr.width.saturating_sub(4));
                         let toast_h = 1;
                         let toast_x = tr.x + tr.width.saturating_sub(toast_w + 2);
-                        let toast_y = tr.y + tr.height.saturating_sub(toast_h + 2);
+                        let toast_y = tr.y + 1;
                         let toast_area = Rect::new(toast_x, toast_y, toast_w, toast_h + 2);
                         let (fg, bg) = match toast.kind {
                             crate::tui::state::ToastKind::Success => {
