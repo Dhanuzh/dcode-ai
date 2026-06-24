@@ -32,6 +32,8 @@ pub struct StatusBar<'a> {
     pub notification_count: u16,
     /// Effort level label (e.g. "HIGH", "LOW").
     pub effort_label: &'a str,
+    /// True when context compaction is actively running.
+    pub compaction_in_progress: bool,
 }
 
 impl Widget for StatusBar<'_> {
@@ -116,15 +118,24 @@ impl Widget for StatusBar<'_> {
             ));
         }
 
-        if self.context_tokens > 0 {
-            spans.push(sep.clone());
-            // Context-window fullness vs the model's window, so the user sees
-            // how close they are to compaction.
-            spans.extend(context_gauge_spans(self.context_tokens, self.model));
-        }
+        // (context gauge, tokens, badges, version moved to line 2 below)
 
+        // ── Line 2: tokens, cost, context gauge, badges ──────────
+        let mut line2 = Vec::new();
+        if self.compaction_in_progress {
+            line2.push(Span::styled(
+                " ⟳ compacting context… ",
+                Style::default()
+                    .fg(theme::warn())
+                    .add_modifier(Modifier::BOLD),
+            ));
+            line2.push(sep.clone());
+        }
+        if self.context_tokens > 0 {
+            line2.extend(context_gauge_spans(self.context_tokens, self.model));
+        }
         if self.tokens_in > 0 || self.tokens_out > 0 {
-            spans.push(Span::styled(
+            line2.push(Span::styled(
                 format!(
                     " {} in / {} out · ${:.4} ",
                     self.tokens_in, self.tokens_out, self.cost_usd
@@ -132,20 +143,18 @@ impl Widget for StatusBar<'_> {
                 Style::default().fg(theme::muted()),
             ));
         }
-
         if self.context_compacted {
-            spans.push(sep.clone());
-            spans.push(Span::styled(
+            line2.push(sep.clone());
+            line2.push(Span::styled(
                 " compacted ",
                 Style::default()
                     .fg(theme::warn())
                     .add_modifier(Modifier::BOLD),
             ));
         }
-
         if self.notification_count > 0 {
-            spans.push(sep.clone());
-            spans.push(Span::styled(
+            line2.push(sep.clone());
+            line2.push(Span::styled(
                 format!(" ↓{} new ", self.notification_count),
                 Style::default()
                     .fg(Color::Black)
@@ -153,10 +162,9 @@ impl Widget for StatusBar<'_> {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-
         if self.permission_bypass {
-            spans.push(sep.clone());
-            spans.push(Span::styled(
+            line2.push(sep.clone());
+            line2.push(Span::styled(
                 " BYPASS ",
                 Style::default()
                     .fg(Color::Black)
@@ -164,14 +172,23 @@ impl Widget for StatusBar<'_> {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-
-        spans.push(sep.clone());
-        spans.push(Span::styled(
+        line2.push(sep);
+        line2.push(Span::styled(
             format!(" v{} ", version),
             Style::default().fg(theme::muted()),
         ));
 
-        Line::from(spans).render(area, buf);
+        // Render two lines into the 2-row area.
+        if area.height >= 2 {
+            let row1 = Rect::new(area.x, area.y, area.width, 1);
+            let row2 = Rect::new(area.x, area.y + 1, area.width, 1);
+            Line::from(spans).render(row1, buf);
+            Line::from(line2).render(row2, buf);
+        } else {
+            // Fallback: squeeze everything into one line.
+            spans.extend(line2);
+            Line::from(spans).render(area, buf);
+        }
     }
 }
 

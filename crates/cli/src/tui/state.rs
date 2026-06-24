@@ -356,6 +356,8 @@ pub struct TuiSessionState {
     pub transcript_zoom_offset: i32,
     /// True after the context manager has compacted at least once this session.
     pub context_compacted: bool,
+    /// True while context compaction is actively running.
+    pub compaction_in_progress: bool,
     /// Notification counter for events that arrived while the user was typing
     /// or scrolled away. Cleared when transcript scrolls to bottom.
     pub notification_count: u16,
@@ -660,6 +662,7 @@ impl TuiSessionState {
             turn_started_at: None,
             transcript_zoom_offset: 0,
             context_compacted: false,
+            compaction_in_progress: false,
             notification_count: 0,
             suppress_next_user_block: false,
             toast: None,
@@ -2003,6 +2006,9 @@ impl TuiSessionState {
             AgentEvent::ContextCompaction { phase, message } => {
                 if phase == "completed" {
                     self.context_compacted = true;
+                    self.compaction_in_progress = false;
+                } else {
+                    self.compaction_in_progress = true;
                 }
                 self.push_block(DisplayBlock::System(format!("⟳ {message}")));
                 transcript_dirty = true;

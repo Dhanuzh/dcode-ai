@@ -32,7 +32,7 @@ pub fn layout(
             Constraint::Length(queue_h),
             Constraint::Length(slash_h),
             Constraint::Length(input_h),
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Length(2),
         ])
         .split(area);
@@ -50,7 +50,7 @@ pub fn layout(
             Constraint::Length(activity_h),
             Constraint::Length(queue_h),
             Constraint::Length(input_h),
-            Constraint::Length(1),
+            Constraint::Length(2),
             Constraint::Length(2),
         ])
         .split(area);

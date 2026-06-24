@@ -1757,6 +1757,7 @@ pub fn run_blocking(
                     } else {
                         ""
                     },
+                    compaction_in_progress: g.compaction_in_progress,
                 };
 
                 crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
