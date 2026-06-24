@@ -30,7 +30,10 @@ impl PtyManager {
         line_tx: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<PtyOutput, PtyError> {
         let mut cmd = shell_command(command);
-        cmd.current_dir(&self.workspace_root)
+        // Use process cwd if it differs from the stored root (e.g. after /cd).
+        let effective_root =
+            std::env::current_dir().unwrap_or_else(|_| self.workspace_root.clone());
+        cmd.current_dir(&effective_root)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
 
