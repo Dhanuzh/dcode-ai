@@ -3559,6 +3559,22 @@ impl Repl {
                     }
                     if line.starts_with('!') {
                         let shell_cmd = line.trim_start_matches('!').trim();
+                        // Intercept `!cd <path>` — cd is a shell built-in that
+                        // can't work in a child process. Redirect to /cd.
+                        if shell_cmd == "cd" || shell_cmd.starts_with("cd ") {
+                            let path = shell_cmd.strip_prefix("cd").unwrap_or("").trim();
+                            let cd_cmd = format!("/cd {path}");
+                            if !self
+                                .handle_command(&cd_cmd, ReplOutput::Tui(&tui_state))
+                                .await?
+                            {
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.should_exit = true;
+                                }
+                                break;
+                            }
+                            continue;
+                        }
                         let output = self.run_bash_tui_capture(shell_cmd, &tui_state).await;
                         // Auto-send the shell output to the AI for analysis.
                         if let Some(output) = output
