@@ -1,4 +1,4 @@
-﻿//! Full-screen session TUI: transcript, streaming assistant, composer.
+//! Full-screen session TUI: transcript, streaming assistant, composer.
 
 #![allow(clippy::collapsible_match, clippy::explicit_into_iter_loop)]
 
@@ -1506,6 +1506,44 @@ pub fn run_blocking(
                         .track_style(Style::default().fg(theme::border()))
                         .thumb_style(Style::default().fg(theme::muted()));
                     frame.render_stateful_widget(scrollbar, sb_area, &mut sb_state);
+                }
+
+                // Toast notification overlay — bottom-right of transcript.
+                if let Some(toast) = &g.toast {
+                    if toast.is_expired() {
+                        g.toast = None;
+                    } else {
+                        let msg = &toast.message;
+                        let toast_w = (msg.len() as u16 + 4).min(tr.width.saturating_sub(4));
+                        let toast_h = 1;
+                        let toast_x = tr.x + tr.width.saturating_sub(toast_w + 2);
+                        let toast_y = tr.y + tr.height.saturating_sub(toast_h + 2);
+                        let toast_area = Rect::new(toast_x, toast_y, toast_w, toast_h + 2);
+                        let (fg, bg) = match toast.kind {
+                            crate::tui::state::ToastKind::Success => {
+                                (Color::Black, theme::success())
+                            }
+                            crate::tui::state::ToastKind::Error => {
+                                (Color::Black, theme::error())
+                            }
+                            crate::tui::state::ToastKind::Info => {
+                                (Color::Black, theme::assistant())
+                            }
+                        };
+                        frame.render_widget(ClearWidget, toast_area);
+                        let toast_widget = Paragraph::new(Line::from(Span::styled(
+                            format!(" {msg} "),
+                            Style::default().fg(fg).bg(bg).add_modifier(Modifier::BOLD),
+                        )))
+                        .block(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_type(BorderType::Rounded)
+                                .border_style(Style::default().fg(bg))
+                                .style(Style::default().bg(theme::surface())),
+                        );
+                        frame.render_widget(toast_widget, toast_area);
+                    }
                 }
 
                 let activity_rows = g
@@ -3569,12 +3607,10 @@ pub fn run_blocking(
                                 if !text.is_empty() {
                                     match crate::tui::mouse_select::copy_to_clipboard(&text) {
                                         Ok(_msg) => {
-                                            // Brief confirmation, not a verbose
-                                            // "Copied N chars (native)" block.
-                                            g.push_block(DisplayBlock::System(
-                                                "✓ Copied to clipboard".into(),
-                                            ));
-                                            g.touch_transcript();
+                                            g.show_toast(
+                                                "✓ Copied to clipboard",
+                                                crate::tui::state::ToastKind::Success,
+                                            );
                                         }
                                         Err(e) => {
                                             g.push_error(format!("Clipboard copy failed: {e}"));
@@ -3630,17 +3666,16 @@ pub fn run_blocking(
                                                     }
                                                 }
                                                 LineClickHit::CopyText(text) => {
-                                                    let feedback = match copy_to_clipboard(&text) {
-                                                        Ok(_) => " Copied code block to clipboard"
-                                                            .to_string(),
-                                                        Err(e) => {
-                                                            format!(" Clipboard copy failed: {e}")
-                                                        }
-                                                    };
-                                                    g.push_block(DisplayBlock::System(feedback));
-                                                    g.touch_transcript();
-                                                    g.transcript_follow_tail = true;
-                                                    g.notification_count = 0;
+                                                    match copy_to_clipboard(&text) {
+                                                        Ok(_) => g.show_toast(
+                                                            "✓ Copied to clipboard",
+                                                            crate::tui::state::ToastKind::Success,
+                                                        ),
+                                                        Err(e) => g.show_toast(
+                                                            format!("✗ Copy failed: {e}"),
+                                                            crate::tui::state::ToastKind::Error,
+                                                        ),
+                                                    }
                                                 }
                                                 LineClickHit::ToggleThinking => {
                                                     g.thinking_expanded = !g.thinking_expanded;
@@ -3648,10 +3683,13 @@ pub fn run_blocking(
                                                 }
                                                 LineClickHit::OpenLink(target) => {
                                                     let _ = open_link_in_system(&target);
-                                                    g.push_block(DisplayBlock::System(format!(
-                                                        "Opened: {target}"
-                                                    )));
-                                                    g.touch_transcript();
+                                                    g.show_toast(
+                                                        format!(
+                                                            "↗ Opened: {}",
+                                                            &target[..target.len().min(40)]
+                                                        ),
+                                                        crate::tui::state::ToastKind::Info,
+                                                    );
                                                 }
                                             }
                                             continue;

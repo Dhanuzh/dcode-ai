@@ -83,7 +83,27 @@ pub struct PinnedNote {
     pub body: String,
 }
 
+/// A brief floating notification that auto-dismisses after a timeout.
 #[derive(Debug, Clone)]
+pub struct Toast {
+    pub message: String,
+    pub kind: ToastKind,
+    pub expires_at: Instant,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToastKind {
+    Info,
+    Success,
+    Error,
+}
+
+impl Toast {
+    pub fn is_expired(&self) -> bool {
+        Instant::now() >= self.expires_at
+    }
+}
+
 pub struct SessionPickerEntry {
     pub id: String,
     pub label: String,
@@ -343,6 +363,9 @@ pub struct TuiSessionState {
     /// create a User display block. Used by `!` auto-response to hide the
     /// synthetic prompt from the transcript.
     pub suppress_next_user_block: bool,
+    /// Toast notification: a brief floating message that auto-dismisses.
+    /// Rendered as an overlay in the bottom-right of the transcript area.
+    pub toast: Option<Toast>,
 }
 
 #[derive(Debug, Clone)]
@@ -633,6 +656,7 @@ impl TuiSessionState {
             context_compacted: false,
             notification_count: 0,
             suppress_next_user_block: false,
+            toast: None,
         }
     }
 
@@ -1279,6 +1303,14 @@ impl TuiSessionState {
     pub fn yank_input(&mut self) {
         self.composer.yank();
         self.sync_legacy_from_composer();
+    }
+
+    pub fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        self.toast = Some(Toast {
+            message: message.into(),
+            kind,
+            expires_at: Instant::now() + std::time::Duration::from_secs(3),
+        });
     }
 
     pub fn undo_input(&mut self) -> bool {
