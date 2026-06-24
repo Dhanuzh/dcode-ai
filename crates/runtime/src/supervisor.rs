@@ -141,13 +141,24 @@ impl Supervisor {
             ToolRegistry::with_default_full_tools(workspace_root.clone(), config.web.clone())
         };
         if !config.mcp.servers.is_empty() && (!cfg.safe_mode || config.mcp.expose_in_safe_mode) {
-            match load_mcp_tools(&workspace_root, &config.mcp.servers) {
-                Ok(mcp_tools) => {
+            let mcp_servers = config.mcp.servers.clone();
+            let mcp_root = workspace_root.clone();
+            // Load MCP tools with a timeout to prevent startup hangs.
+            let mcp_result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                tokio::task::spawn_blocking(move || load_mcp_tools(&mcp_root, &mcp_servers)),
+            )
+            .await;
+            match mcp_result {
+                Ok(Ok(Ok(mcp_tools))) => {
+                    tracing::info!("loaded {} MCP tool(s)", mcp_tools.len());
                     for tool in mcp_tools {
                         tools.register(tool);
                     }
                 }
-                Err(error) => tracing::warn!("failed to load MCP tools: {}", error),
+                Ok(Ok(Err(error))) => tracing::warn!("MCP tool load failed: {}", error),
+                Ok(Err(error)) => tracing::warn!("MCP tool load panicked: {}", error),
+                Err(_) => tracing::warn!("MCP tool load timed out after 15s — skipping"),
             }
         }
 
