@@ -384,7 +384,7 @@ impl StdioMcpClient {
             .args(&server.args)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::null());
 
         let working_directory = server
             .cwd
