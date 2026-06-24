@@ -366,6 +366,12 @@ pub struct TuiSessionState {
     /// Toast notification: a brief floating message that auto-dismisses.
     /// Rendered as an overlay in the bottom-right of the transcript area.
     pub toast: Option<Toast>,
+    /// Block indices of collapsed assistant responses (click header to fold).
+    pub collapsed_assistant_blocks: std::collections::HashSet<usize>,
+    /// Whether extended thinking is currently enabled (for effort badge).
+    pub thinking_enabled: bool,
+    /// Current thinking budget (for effort level detection).
+    pub thinking_budget: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -657,6 +663,9 @@ impl TuiSessionState {
             notification_count: 0,
             suppress_next_user_block: false,
             toast: None,
+            collapsed_assistant_blocks: std::collections::HashSet::new(),
+            thinking_enabled: false,
+            thinking_budget: 0,
         }
     }
 
@@ -1309,7 +1318,12 @@ impl TuiSessionState {
         self.toast = Some(Toast {
             message: message.into(),
             kind,
-            expires_at: Instant::now() + std::time::Duration::from_secs(3),
+            expires_at: Instant::now()
+                + match kind {
+                    ToastKind::Success => std::time::Duration::from_secs(2),
+                    ToastKind::Info => std::time::Duration::from_secs(3),
+                    ToastKind::Error => std::time::Duration::from_secs(5),
+                },
         });
     }
 

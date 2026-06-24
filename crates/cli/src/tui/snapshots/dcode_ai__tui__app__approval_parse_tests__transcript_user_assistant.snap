@@ -1,11 +1,10 @@
 ---
 source: crates/cli/src/tui/app.rs
-assertion_line: 6059
 expression: lines_to_text(&lines)
 ---
  user      
 ▏  Hello world
 
- assistant  response 
+▾  assistant  response 
 ▏  Hi! How can I help you today?
 ▏

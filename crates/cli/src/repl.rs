@@ -2718,6 +2718,8 @@ impl Repl {
                 .iter()
                 .filter(|s| s.enabled)
                 .count();
+            g.thinking_enabled = self.runtime.config().model.enable_thinking;
+            g.thinking_budget = self.runtime.config().model.thinking_budget;
         }
 
         let log_path = self.runtime.event_log_path();

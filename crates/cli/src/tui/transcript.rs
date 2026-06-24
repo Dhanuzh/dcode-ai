@@ -133,8 +133,11 @@ pub(crate) fn transcript_lines_and_hits(
             }
             DisplayBlock::Assistant(content) => {
                 push_section_gap(&mut lines, &mut hits);
+                let collapsed = state.collapsed_assistant_blocks.contains(&idx);
+                let fold_icon = if collapsed { "▸" } else { "▾" };
                 let assistant_chip = format!(" {:<9} ", "assistant");
                 let mut asst_header = vec![
+                    Span::styled(format!("{fold_icon} "), Style::default().fg(theme::muted())),
                     Span::styled(
                         assistant_chip,
                         Style::default()
@@ -155,27 +158,36 @@ pub(crate) fn transcript_lines_and_hits(
                         Style::default().fg(theme::muted()),
                     ));
                 }
+                if collapsed {
+                    let preview: String = content.chars().take(60).collect();
+                    asst_header.push(Span::styled(
+                        format!("  {preview}…"),
+                        Style::default().fg(theme::muted()),
+                    ));
+                }
                 push_transcript_line(
                     &mut lines,
                     &mut hits,
                     Line::from(asst_header),
-                    Some(LineClickHit::CopyText(content.clone())),
+                    Some(LineClickHit::ToggleAssistant(idx)),
                 );
-                let (md_lines, md_hits) = render_markdown_lines_with_hits(
-                    content,
-                    state.code_line_numbers,
-                    w.saturating_sub(2),
-                );
-                for (md_line, md_hit) in md_lines.into_iter().zip(md_hits) {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        prefixed_line(
-                            Span::styled("▏  ", Style::default().fg(theme::assistant())),
-                            md_line,
-                        ),
-                        md_hit,
+                if !collapsed {
+                    let (md_lines, md_hits) = render_markdown_lines_with_hits(
+                        content,
+                        state.code_line_numbers,
+                        w.saturating_sub(2),
                     );
+                    for (md_line, md_hit) in md_lines.into_iter().zip(md_hits) {
+                        push_transcript_line(
+                            &mut lines,
+                            &mut hits,
+                            prefixed_line(
+                                Span::styled("▏  ", Style::default().fg(theme::assistant())),
+                                md_line,
+                            ),
+                            md_hit,
+                        );
+                    }
                 }
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
@@ -418,7 +430,9 @@ pub(crate) fn transcript_lines_and_hits(
                         &mut hits,
                         Line::from(Span::styled(
                             format!("  • {s}"),
-                            Style::default().fg(theme::muted()),
+                            Style::default()
+                                .fg(theme::muted())
+                                .add_modifier(Modifier::DIM),
                         )),
                         None,
                     );

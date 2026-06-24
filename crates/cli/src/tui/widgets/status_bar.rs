@@ -30,6 +30,8 @@ pub struct StatusBar<'a> {
     pub context_compacted: bool,
     /// Pending notification count (events while scrolled away).
     pub notification_count: u16,
+    /// Effort level label (e.g. "HIGH", "LOW").
+    pub effort_label: &'a str,
 }
 
 impl Widget for StatusBar<'_> {
@@ -55,12 +57,20 @@ impl Widget for StatusBar<'_> {
                 format!(" /{} ", model_display),
                 Style::default().fg(provider_model_color(self.model)),
             ),
-            sep.clone(),
-            Span::styled(
-                format!(" {} ", truncate_chars(self.agent, 16)),
-                Style::default().fg(theme::assistant()),
-            ),
         ];
+        if !self.effort_label.is_empty() {
+            spans.push(Span::styled(
+                format!(" [{}] ", self.effort_label),
+                Style::default()
+                    .fg(theme::warn())
+                    .add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans.push(sep.clone());
+        spans.push(Span::styled(
+            format!(" {} ", truncate_chars(self.agent, 16)),
+            Style::default().fg(theme::assistant()),
+        ));
 
         spans.push(sep.clone());
         spans.push(Span::styled(

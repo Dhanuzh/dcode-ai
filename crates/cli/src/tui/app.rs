@@ -88,6 +88,8 @@ pub(crate) enum LineClickHit {
     ToggleThinking,
     /// Open a URL in the browser or a file path in the editor.
     OpenLink(String),
+    /// Toggle collapse/expand of an assistant response block.
+    ToggleAssistant(usize),
 }
 
 /// Per flattened transcript line: click action (same indices as `transcript_lines`).
@@ -1472,8 +1474,13 @@ pub fn run_blocking(
                 } else {
                     String::new()
                 };
+                let session_tag = if g.session_id.len() > 8 {
+                    format!(" {} ", &g.session_id[..8])
+                } else {
+                    format!(" {} ", &g.session_id)
+                };
                 let title = format!(
-                    " transcript —{scroll_info}{search_info}(wheel scroll · Ctrl+F find) ",
+                    " {session_tag}—{scroll_info}{search_info}",
                 );
                 let main = Paragraph::new(Text::from(visible))
                     .block(
@@ -1744,6 +1751,12 @@ pub fn run_blocking(
                     turn_output_tokens: g.turn_output_tokens,
                     context_compacted: g.context_compacted,
                     notification_count: g.notification_count,
+                    effort_label: if g.thinking_enabled {
+                        if g.thinking_budget >= 32768 { "XHIGH" }
+                        else { "HIGH" }
+                    } else {
+                        ""
+                    },
                 };
 
                 crate::tui::tui_viewport::render_status_bar(frame, status_top_row, status_bar);
@@ -3679,6 +3692,18 @@ pub fn run_blocking(
                                                 }
                                                 LineClickHit::ToggleThinking => {
                                                     g.thinking_expanded = !g.thinking_expanded;
+                                                    g.touch_transcript();
+                                                }
+                                                LineClickHit::ToggleAssistant(block_idx) => {
+                                                    if g.collapsed_assistant_blocks
+                                                        .contains(&block_idx)
+                                                    {
+                                                        g.collapsed_assistant_blocks
+                                                            .remove(&block_idx);
+                                                    } else {
+                                                        g.collapsed_assistant_blocks
+                                                            .insert(block_idx);
+                                                    }
                                                     g.touch_transcript();
                                                 }
                                                 LineClickHit::OpenLink(target) => {
@@ -5921,10 +5946,10 @@ mod approval_parse_tests {
             .blocks
             .push(super::DisplayBlock::Assistant("hello world".into()));
         let (_lines, hits) = transcript_lines_and_hits(&state, 80);
-        assert!(hits.iter().any(|h| matches!(
-            h,
-            Some(super::LineClickHit::CopyText(text)) if text == "hello world"
-        )));
+        assert!(
+            hits.iter()
+                .any(|h| matches!(h, Some(super::LineClickHit::ToggleAssistant(_))))
+        );
     }
 
     /// Build a minimal session state for transcript-render tests.
