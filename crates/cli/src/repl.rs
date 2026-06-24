@@ -1371,15 +1371,18 @@ impl Repl {
                     };
                     match target {
                         Some(server) => {
-                            out.println(&format!("[mcp] Testing {}…", server.name));
+                            out.println(&format!("[mcp] Testing {} (15s timeout)…", server.name));
                             let ws = self.runtime.workspace_root().to_path_buf();
                             let srv = server.clone();
-                            match tokio::task::spawn_blocking(move || {
-                                dcode_ai_core::tools::mcp::load_mcp_tools(&ws, &[srv])
-                            })
-                            .await
-                            {
-                                Ok(Ok(tools)) => {
+                            let test_result = tokio::time::timeout(
+                                std::time::Duration::from_secs(15),
+                                tokio::task::spawn_blocking(move || {
+                                    dcode_ai_core::tools::mcp::load_mcp_tools(&ws, &[srv])
+                                }),
+                            )
+                            .await;
+                            match test_result {
+                                Ok(Ok(Ok(tools))) => {
                                     out.println(&format!(
                                         "[mcp] ✓ {} connected — {} tool(s) discovered",
                                         server.name,
@@ -1389,10 +1392,14 @@ impl Repl {
                                         out.println(&format!("  • {}", t.definition().name));
                                     }
                                 }
-                                Ok(Err(e)) => {
+                                Ok(Ok(Err(e))) => {
                                     out.eprintln(&format!("[mcp] ✗ {} failed: {e}", server.name))
                                 }
-                                Err(e) => out.eprintln(&format!("[mcp] ✗ internal: {e}")),
+                                Ok(Err(e)) => out.eprintln(&format!("[mcp] ✗ internal: {e}")),
+                                Err(_) => out.eprintln(&format!(
+                                    "[mcp] ✗ {} timed out after 15s — server may be slow to start",
+                                    server.name
+                                )),
                             }
                         }
                         None => {
