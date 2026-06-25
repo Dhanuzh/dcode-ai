@@ -1371,11 +1371,11 @@ impl Repl {
                     };
                     match target {
                         Some(server) => {
-                            out.println(&format!("[mcp] Testing {} (15s timeout)…", server.name));
+                            out.println(&format!("[mcp] Testing {} (30s timeout)…", server.name));
                             let ws = self.runtime.workspace_root().to_path_buf();
                             let srv = server.clone();
                             let test_result = tokio::time::timeout(
-                                std::time::Duration::from_secs(15),
+                                std::time::Duration::from_secs(30),
                                 tokio::task::spawn_blocking(move || {
                                     dcode_ai_core::tools::mcp::load_mcp_tools(&ws, &[srv])
                                 }),
@@ -1397,7 +1397,7 @@ impl Repl {
                                 }
                                 Ok(Err(e)) => out.eprintln(&format!("[mcp] ✗ internal: {e}")),
                                 Err(_) => out.eprintln(&format!(
-                                    "[mcp] ✗ {} timed out after 15s — server may be slow to start",
+                                    "[mcp] ✗ {} timed out after 30s — try: npm install -g @modelcontextprotocol/server-filesystem",
                                     server.name
                                 )),
                             }

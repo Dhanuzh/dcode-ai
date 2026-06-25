@@ -425,17 +425,20 @@ pub(crate) fn transcript_lines_and_hits(
                 } else if s.is_empty() {
                     push_transcript_line(&mut lines, &mut hits, Line::default(), None);
                 } else {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(Span::styled(
-                            format!("  • {s}"),
-                            Style::default()
-                                .fg(theme::muted())
-                                .add_modifier(Modifier::DIM),
-                        )),
-                        None,
-                    );
+                    let prefixed = format!("  • {s}");
+                    for wline in wrap_text(&prefixed, w) {
+                        push_transcript_line(
+                            &mut lines,
+                            &mut hits,
+                            Line::from(Span::styled(
+                                wline,
+                                Style::default()
+                                    .fg(theme::muted())
+                                    .add_modifier(Modifier::DIM),
+                            )),
+                            None,
+                        );
+                    }
                 }
             }
             DisplayBlock::Question(q) => {
@@ -680,15 +683,17 @@ pub(crate) fn transcript_lines_and_hits(
                 push_transcript_line(&mut lines, &mut hits, Line::default(), None);
             }
             DisplayBlock::ErrorLine(s) => {
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(Span::styled(
-                        format!(" ✗ {s}"),
-                        Style::default().fg(theme::error()),
-                    )),
-                    None,
-                );
+                for wline in wrap_text(&format!(" ✗ {s}"), w) {
+                    push_transcript_line(
+                        &mut lines,
+                        &mut hits,
+                        Line::from(Span::styled(
+                            wline,
+                            Style::default().fg(theme::error()),
+                        )),
+                        None,
+                    );
+                }
             }
         }
     }
