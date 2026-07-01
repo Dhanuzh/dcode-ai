@@ -15,6 +15,7 @@ pub struct QueuePreview<'a> {
 impl<'a> QueuePreview<'a> {
     pub const MAX_VISIBLE: usize = 3;
 
+    #[allow(dead_code)]
     pub fn new(items: &'a [String], total: usize) -> Self {
         Self { items, total }
     }

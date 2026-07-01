@@ -285,9 +285,86 @@ fn push_styled_run(
     text.push(ch);
 }
 
+/// Character-wrap a styled composer `Line` into multiple display lines at
+/// `width` columns, preserving each span's style across breaks and honoring
+/// hard newlines (`\n`). Unlike ratatui's word `Wrap`, this breaks even a long
+/// token with no whitespace (e.g. a pasted path or `;`-separated blob), so
+/// composer input never overflows the box — matching Codex's composer.
+pub(crate) fn wrap_composer_line(line: &Line<'static>, width: usize) -> Vec<Line<'static>> {
+    let width = width.max(1);
+    let mut out: Vec<Line<'static>> = Vec::new();
+    let mut cur: Vec<Span<'static>> = Vec::new();
+    let mut col = 0usize;
+    for span in &line.spans {
+        let style = span.style;
+        let mut buf = String::new();
+        for ch in span.content.chars() {
+            if ch == '\n' {
+                if !buf.is_empty() {
+                    cur.push(Span::styled(std::mem::take(&mut buf), style));
+                }
+                out.push(Line::from(std::mem::take(&mut cur)));
+                col = 0;
+                continue;
+            }
+            if col >= width {
+                if !buf.is_empty() {
+                    cur.push(Span::styled(std::mem::take(&mut buf), style));
+                }
+                out.push(Line::from(std::mem::take(&mut cur)));
+                col = 0;
+            }
+            buf.push(ch);
+            col += 1;
+        }
+        if !buf.is_empty() {
+            cur.push(Span::styled(buf, style));
+        }
+    }
+    out.push(Line::from(cur));
+    out
+}
+
+/// Row (0-based) within the wrapped composer that holds the cursor, using the
+/// same rules as [`wrap_composer_line`]: the `› ` prompt occupies 2 columns on
+/// the first row, `\n` starts a new row, and rows wrap at `width`. Used to keep
+/// the cursor visible when the wrapped input is taller than the box.
+pub(crate) fn composer_cursor_row(buffer: &str, cursor_char_idx: usize, width: usize) -> usize {
+    let width = width.max(1);
+    let mut row = 0usize;
+    let mut col = 2usize; // "› " prompt prefix on the first row
+    for (i, ch) in buffer.chars().enumerate() {
+        if ch == '\n' {
+            if i == cursor_char_idx {
+                return row;
+            }
+            row += 1;
+            col = 0;
+            continue;
+        }
+        if col >= width {
+            row += 1;
+            col = 0;
+        }
+        if i == cursor_char_idx {
+            return row;
+        }
+        col += 1;
+    }
+    // Cursor at end: the trailing cursor cell wraps to a new row if the last
+    // row is already full (matching `wrap_composer_line`).
+    if col >= width {
+        row += 1;
+    }
+    row
+}
+
 pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
-    let prompt = Span::styled("› ", Style::default().fg(theme::user()).bold());
-    let placeholder = "Ask anything…   /  commands   ·   ⏎ send   ·   ⇧⏎ newline";
+    let prompt = Span::styled(
+        "› ",
+        Style::default().add_modifier(ratatui::style::Modifier::BOLD),
+    );
+    let placeholder = "Ask anything…";
     let chars: Vec<char> = buffer.chars().collect();
     let mention_ranges = at_mention_char_ranges(buffer);
     let code_fence_ranges = code_fence_char_ranges(buffer);

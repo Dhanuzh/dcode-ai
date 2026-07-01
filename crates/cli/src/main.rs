@@ -12,6 +12,7 @@ mod slash_commands;
 mod stream;
 mod tool_ui;
 mod tui;
+mod update_check;
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;
 use clap::CommandFactory;

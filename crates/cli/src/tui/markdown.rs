@@ -66,6 +66,40 @@ fn syntect_style_to_ratatui(style: syntect::highlighting::Style) -> Style {
     out
 }
 
+/// Stateful syntax highlighter for a contiguous run of lines (e.g. a diff
+/// hunk). Unlike a per-line call, it preserves syntect parser state across
+/// `line` calls, so multi-line strings / block comments highlight correctly.
+/// Reset (recreate) it at hunk boundaries so unrelated regions don't bleed
+/// state into each other.
+pub(crate) struct DiffHighlighter {
+    inner: HighlightLines<'static>,
+}
+
+impl DiffHighlighter {
+    /// Build a highlighter for `language`, or `None` if the language is unknown
+    /// (caller falls back to plain styling).
+    pub(crate) fn new(language: &str) -> Option<Self> {
+        let ps = SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines);
+        let syntax = ps.find_syntax_by_token(language)?;
+        Some(Self {
+            inner: HighlightLines::new(syntax, syntect_theme()),
+        })
+    }
+
+    /// Highlight one line, advancing parser state. Returns `(style, text)`
+    /// chunks, or an empty vec on failure.
+    pub(crate) fn line(&mut self, code: &str) -> Vec<(Style, String)> {
+        let ps = SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines);
+        match self.inner.highlight_line(code, ps) {
+            Ok(spans) => spans
+                .into_iter()
+                .map(|(style, text)| (syntect_style_to_ratatui(style), text.to_string()))
+                .collect(),
+            Err(_) => Vec::new(),
+        }
+    }
+}
+
 fn render_code_block_lines(
     out: &mut Vec<Line<'static>>,
     hits: &mut Vec<LineAnswerHit>,

@@ -200,18 +200,21 @@ pub fn clamp_selection(selection: usize, rows: &[ConnectRow]) -> usize {
 }
 
 /// Pulsing chevron prefix for the selected row. 250ms duty cycle.
+#[allow(dead_code)]
 pub fn selection_pulse(elapsed_ms: u128) -> &'static str {
     const F: &[&str] = &["▶ ", "▷ ", "▶ ", "▸ "];
     F[(elapsed_ms / 220) as usize % F.len()]
 }
 
 /// Sparkle frame for the modal title. 500ms duty cycle.
+#[allow(dead_code)]
 pub fn title_sparkle(elapsed_ms: u128) -> &'static str {
     const F: &[&str] = &["✦", "✧", "✦", "✧"];
     F[(elapsed_ms / 500) as usize % F.len()]
 }
 
 /// Animated trailing dots for "not logged in" status; max 3 dots.
+#[allow(dead_code)]
 pub fn status_dots(elapsed_ms: u128) -> &'static str {
     const F: &[&str] = &["", ".", "..", "..."];
     F[(elapsed_ms / 380) as usize % F.len()]

@@ -42,6 +42,7 @@ impl ScrollBuffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn len(&self) -> usize {
         self.lines.len()
     }
@@ -76,6 +77,7 @@ impl ScrollBuffer {
         }
     }
 
+    #[allow(dead_code)]
     pub fn scroll_to_bottom(&mut self) {
         self.scroll_offset = 0;
         self.sticky_bottom = true;

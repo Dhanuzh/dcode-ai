@@ -1,8 +1,9 @@
 use dcode_ai_common::config::PermissionMode;
 use dcode_ai_common::event::{AgentEvent, BusyState};
-use dcode_ai_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall};
+use dcode_ai_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall, Role};
 use dcode_ai_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
-use futures_util::future::join_all;
+use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use serde_json::json;
 use std::collections::HashSet;
 use std::path::Path;
@@ -67,6 +68,16 @@ impl AgentLoop {
     /// Add a system prompt once at startup.
     pub fn set_system_prompt(&mut self, prompt: impl Into<String>) {
         self.messages.push(Message::system(prompt));
+    }
+
+    /// Replace the leading system prompt in place (used when config changes
+    /// mid-session, e.g. `/personality`). Keeps the rest of the conversation.
+    pub fn replace_system_prompt(&mut self, prompt: impl Into<String>) {
+        let msg = Message::system(prompt);
+        match self.messages.first_mut() {
+            Some(first) if matches!(first.role, Role::System) => *first = msg,
+            _ => self.messages.insert(0, msg),
+        }
     }
 
     /// Replace the LLM provider (e.g. after user switches provider in-session).
@@ -366,6 +377,13 @@ impl AgentLoop {
                             description: description.clone(),
                         })
                         .await;
+                        // Register the pending approval (inside `resolve`) with no
+                        // awaitable gap after emitting the event above. Running the
+                        // best-effort hook *before* this point left a window where a
+                        // fast verdict could arrive before the pending entry existed,
+                        // get dropped, and hang the turn. The hook can't influence
+                        // the verdict, so we run it after registration instead.
+                        let verdict = self.approval.resolve(call, &description).await;
                         if let Some(hooks) = &self.hooks {
                             hooks
                                 .run_best_effort(
@@ -380,7 +398,6 @@ impl AgentLoop {
                                 )
                                 .await;
                         }
-                        let verdict = self.approval.resolve(call, &description).await;
                         let approved = verdict.is_approved();
                         self.emit(AgentEvent::ApprovalResolved {
                             call_id: call.id.clone(),
@@ -513,13 +530,29 @@ impl AgentLoop {
             }
 
             if !to_execute.is_empty() {
-                let futs = to_execute.iter().map(|(i, call)| {
-                    let fut = self.tools.execute(call);
-                    async move { (*i, fut.await) }
-                });
-                let executed: Vec<(usize, ToolResult)> = join_all(futs).await;
-                for (i, result) in executed {
-                    results[i] = Some(result);
+                let mut futures: FuturesUnordered<_> = to_execute
+                    .iter()
+                    .map(|(i, call)| {
+                        let fut = self.tools.execute(call);
+                        async move { (*i, fut.await) }
+                    })
+                    .collect();
+
+                // Poll tool futures with cancellation checking.
+                // When cancelled, remaining futures are dropped and their
+                // results stay `None` (skipped in final_results below).
+                loop {
+                    if results.iter().all(|r| r.is_some()) {
+                        break;
+                    }
+                    tokio::select! {
+                        Some((i, result)) = futures.next() => {
+                            results[i] = Some(result);
+                        }
+                        _ = self.cancelled() => {
+                            break;
+                        }
+                    }
                 }
             }
 
@@ -680,6 +713,14 @@ impl AgentLoop {
 
     fn is_cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)
+    }
+
+    /// Returns a future that completes when cancellation is requested.
+    /// Polls the cancel flag at 50ms intervals.
+    async fn cancelled(&self) {
+        while !self.is_cancelled() {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 }
 

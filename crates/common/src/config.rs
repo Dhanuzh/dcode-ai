@@ -336,6 +336,20 @@ pub struct UiConfig {
     /// Whether the user has completed the first-run onboarding flow.
     #[serde(default)]
     pub onboarding_completed: bool,
+    /// Communication style preset injected into the system prompt
+    /// ("concise", "friendly", "technical", "default").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub personality: Option<String>,
+    /// Status-bar items to hide. Valid keys: "agent", "effort", "time",
+    /// "context", "model". Empty = show everything (default).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub statusline_hidden: Vec<String>,
+    /// Custom key bindings for global actions (`action = "ctrl+key"`). Rebinds
+    /// the action to the given key; its built-in default key then no longer
+    /// triggers it. Actions: palette, search, history, pin, expand, subagents,
+    /// thinking, clear. Empty = defaults only.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub keymap: BTreeMap<String, String>,
 }
 
 fn default_scroll_speed() -> u16 {
@@ -356,6 +370,9 @@ impl Default for UiConfig {
             mouse_capture: default_mouse_capture(),
             code_line_numbers: false,
             onboarding_completed: false,
+            personality: None,
+            statusline_hidden: Vec::new(),
+            keymap: BTreeMap::new(),
         }
     }
 }
@@ -382,6 +399,15 @@ impl UiConfig {
         }
         if let Some(onboarding_completed) = partial.onboarding_completed {
             self.onboarding_completed = onboarding_completed;
+        }
+        if let Some(personality) = partial.personality {
+            self.personality = Some(personality);
+        }
+        if let Some(statusline_hidden) = partial.statusline_hidden {
+            self.statusline_hidden = statusline_hidden;
+        }
+        if let Some(keymap) = partial.keymap {
+            self.keymap = keymap;
         }
     }
 }
@@ -1401,6 +1427,9 @@ struct PartialUiConfig {
     mouse_capture: Option<bool>,
     code_line_numbers: Option<bool>,
     onboarding_completed: Option<bool>,
+    personality: Option<String>,
+    statusline_hidden: Option<Vec<String>>,
+    keymap: Option<BTreeMap<String, String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

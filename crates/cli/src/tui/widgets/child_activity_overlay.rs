@@ -23,6 +23,7 @@ pub struct ChildActivityOverlay<'a> {
 impl<'a> ChildActivityOverlay<'a> {
     pub const MAX_VISIBLE: usize = 5;
 
+    #[allow(dead_code)]
     pub fn new(rows: &'a [ActivityRow], total: usize) -> Self {
         Self { rows, total }
     }

@@ -1,56 +1,60 @@
-//! Terminal setup/teardown for the full-screen TUI: raw mode, alternate
-//! screen, bracketed paste, selective mouse capture, and a panic hook that
-//! best-effort restores all of the above.
+//! Terminal setup/teardown for the inline-viewport TUI (Codex-style):
+//! raw mode + bracketed paste, a small inline viewport at the bottom of the
+//! terminal, and NO alternate screen. Completed output is flushed into the
+//! terminal's native scrollback; only the live input/streaming pane is drawn
+//! by ratatui. Native terminal scroll shows history.
 
 use std::io::{Stdout, stdout};
 
 use crossterm::{
-    cursor::{Hide, Show},
-    event::{DisableBracketedPaste, EnableBracketedPaste},
+    cursor::Show,
+    event::{DisableBracketedPaste, DisableFocusChange, EnableBracketedPaste, EnableFocusChange},
     execute,
-    terminal::{
-        Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode,
-        enable_raw_mode,
-    },
+    terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
 
-/// Install a panic hook (once) that best-effort restores the terminal before
-/// the process unwinds/aborts. Without this, `panic = "abort"` skips every
-/// `Drop`, so a panic inside the TUI leaves the user's terminal stuck in raw
-/// mode and the alternate screen.
 fn install_terminal_panic_hook() {
     use std::sync::Once;
     static HOOK: Once = Once::new();
     HOOK.call_once(|| {
         let default = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            restore_terminal(true);
+            restore_terminal(false);
             default(info);
         }));
     });
 }
 
-pub fn setup_terminal(mouse_capture: bool) -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
+/// Height of the inline viewport (the live bottom pane). Completed content
+/// scrolls above it in the terminal's native scrollback. Sized to give popups
+/// (command palette, pickers) room to render centered, while keeping the live
+/// input pane close to the latest output.
+pub fn inline_viewport_height() -> u16 {
+    let rows = crossterm::terminal::size().map(|(_, h)| h).unwrap_or(24);
+    (rows / 2).clamp(12, 18)
+}
+
+pub fn setup_terminal(_mouse_capture: bool) -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     install_terminal_panic_hook();
     enable_raw_mode().map_err(|e| anyhow::anyhow!("enable_raw_mode: {e}"))?;
     let res: anyhow::Result<Terminal<CrosstermBackend<Stdout>>> = (|| {
         let mut out = stdout();
-        execute!(out, EnterAlternateScreen)?;
         let _ = execute!(out, EnableBracketedPaste);
+        // Focus reporting lets us suppress completion notifications while the
+        // terminal is focused (Codex parity).
+        let _ = execute!(out, EnableFocusChange);
         use std::io::Write;
-        if mouse_capture {
-            // Koda-style selective mouse capture:
-            // - ?1002h button-event tracking (includes drag with button held)
-            // - ?1006h SGR extended coordinates
-            // This enables click-drag range selection in the in-app transcript.
-            out.write_all(b"\x1b[?1002h\x1b[?1006h")
-                .map_err(|e| anyhow::anyhow!("mouse enable: {e}"))?;
-        }
         let _ = out.flush();
-        execute!(out, Hide)?;
-        execute!(out, Clear(ClearType::All))?;
-        Ok(Terminal::new(CrosstermBackend::new(out))?)
+        let height = inline_viewport_height();
+        let backend = CrosstermBackend::new(out);
+        let terminal = Terminal::with_options(
+            backend,
+            TerminalOptions {
+                viewport: Viewport::Inline(height),
+            },
+        )?;
+        Ok(terminal)
     })();
     if res.is_err() {
         let _ = disable_raw_mode();
@@ -62,9 +66,10 @@ pub fn restore_terminal(_mouse_capture: bool) {
     let mut out = stdout();
     let _ = execute!(out, Show);
     let _ = execute!(out, DisableBracketedPaste);
-    use std::io::Write;
-    let _ = out.write_all(b"\x1b[?1002l\x1b[?1006l");
-    let _ = out.flush();
-    let _ = execute!(out, LeaveAlternateScreen);
+    let _ = execute!(out, DisableFocusChange);
     let _ = disable_raw_mode();
+    use std::io::Write;
+    // Move below the viewport so the shell prompt starts on a clean line.
+    let _ = writeln!(out);
+    let _ = out.flush();
 }

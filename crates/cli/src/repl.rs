@@ -57,6 +57,24 @@ impl ReplOutput<'_> {
         self.print(&format!("{s}\n"));
     }
 
+    /// Push content that should be rendered as markdown (code fences, diffs,
+    /// tables get syntax highlighting / colored lanes). In stdio mode prints raw.
+    fn print_markdown(&self, s: &str) {
+        match self {
+            ReplOutput::Stdio => {
+                print!("{s}");
+                let _ = std::io::stdout().flush();
+            }
+            ReplOutput::Tui(st) => {
+                if let Ok(mut g) = st.lock() {
+                    g.blocks.push(DisplayBlock::Assistant(s.to_string()));
+                    g.touch_transcript();
+                    g.transcript_follow_tail = true;
+                }
+            }
+        }
+    }
+
     fn eprintln(&self, s: &str) {
         match self {
             ReplOutput::Stdio => eprintln!("{s}"),
@@ -78,12 +96,26 @@ impl ReplOutput<'_> {
             ReplOutput::Tui(st) => {
                 if let Ok(mut g) = st.lock() {
                     g.blocks.clear();
+                    g.flushed_block_count = 0;
                     g.streaming_assistant = None;
+                    g.streaming_thinking = None;
                     g.scroll_lines = 0;
+                    g.request_clear = true;
                     g.touch_transcript();
                 }
             }
         }
+    }
+}
+
+/// Compact token/number formatting: 1234 → "1.2k", 1_200_000 → "1.2M".
+fn fmt_count(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
     }
 }
 
@@ -243,6 +275,7 @@ fn keymaps_help_lines() -> Vec<String> {
         "  Ctrl+X C     Compact".into(),
         "  Ctrl+X S     View status".into(),
         "  Ctrl+X A     Agent picker".into(),
+        "  Ctrl+X P     Project picker".into(),
         "  Ctrl+X H     Help".into(),
         "  Ctrl+X Q     Exit".into(),
         String::new(),
@@ -349,6 +382,15 @@ impl std::fmt::Display for AgentProfile {
 }
 
 /// Session state for REPL
+/// A detached shell command tracked by `/run-bg`, `/ps`, `/stop`.
+struct BackgroundJob {
+    id: u32,
+    cmd: String,
+    output: std::sync::Arc<std::sync::Mutex<String>>,
+    done: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    handle: tokio::task::JoinHandle<()>,
+}
+
 pub struct Repl {
     runtime: SessionRuntime,
     prompt: DcodeAiPrompt,
@@ -357,6 +399,10 @@ pub struct Repl {
     history_path: std::path::PathBuf,
     agent_profile: AgentProfile,
     current_agent_label: String,
+    background_jobs: Vec<BackgroundJob>,
+    next_job_id: u32,
+    /// Stack of message snapshots for ephemeral `/side` asides (supports nesting).
+    side_snapshots: Vec<Vec<dcode_ai_common::message::Message>>,
 }
 
 impl Repl {
@@ -372,7 +418,83 @@ impl Repl {
             history_path,
             agent_profile,
             current_agent_label,
+            background_jobs: Vec::new(),
+            next_job_id: 1,
+            side_snapshots: Vec::new(),
         }
+    }
+
+    /// Spawn a detached shell command, capturing its output for `/ps`.
+    fn start_background_job(&mut self, cmd: &str) -> u32 {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        let id = self.next_job_id;
+        self.next_job_id += 1;
+        let output = Arc::new(std::sync::Mutex::new(String::new()));
+        let done = Arc::new(AtomicBool::new(false));
+        let out_clone = output.clone();
+        let done_clone = done.clone();
+        let cmd_str = cmd.to_string();
+        let ws = self.runtime.workspace_root().to_path_buf();
+        let handle = tokio::spawn(async move {
+            // Stream stdout/stderr live so `/ps` reflects progress instead of
+            // staying empty until the process exits.
+            let spawned = tokio::process::Command::new("sh")
+                .arg("-c")
+                .arg(&cmd_str)
+                .current_dir(&ws)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .kill_on_drop(true)
+                .spawn();
+            let mut child = match spawned {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Ok(mut buf) = out_clone.lock() {
+                        buf.push_str(&format!("error: {e}"));
+                    }
+                    done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+                    return;
+                }
+            };
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            let out_a = out_clone.clone();
+            let t_out = tokio::spawn(async move {
+                let Some(r) = stdout else { return };
+                let mut lines = BufReader::new(r).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Ok(mut buf) = out_a.lock() {
+                        buf.push_str(&line);
+                        buf.push('\n');
+                    }
+                }
+            });
+            let out_b = out_clone.clone();
+            let t_err = tokio::spawn(async move {
+                let Some(r) = stderr else { return };
+                let mut lines = BufReader::new(r).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    if let Ok(mut buf) = out_b.lock() {
+                        buf.push_str(&line);
+                        buf.push('\n');
+                    }
+                }
+            });
+            let _ = child.wait().await;
+            let _ = t_out.await;
+            let _ = t_err.await;
+            done_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        self.background_jobs.push(BackgroundJob {
+            id,
+            cmd: cmd.to_string(),
+            output,
+            done,
+            handle,
+        });
+        id
     }
 
     fn should_offer_startup_approve_all_popup(&self) -> bool {
@@ -385,6 +507,10 @@ impl Repl {
 
     /// Run the interactive REPL until the user exits.
     pub async fn run(&mut self) -> anyhow::Result<()> {
+        // Read the cached "update available" version (and refresh in the
+        // background if stale) before entering the TUI. The banner reads the
+        // cached result; the network call never blocks startup.
+        let _ = crate::update_check::init_and_pending_upgrade();
         let mut editor = self.build_editor()?;
 
         let _spawn_task = {
@@ -840,8 +966,72 @@ impl Repl {
         match command {
             "/q" | "/quit" | "/exit" => return Ok(false),
             "/stop" => {
-                self.runtime.request_cancel();
-                out.println("[stop] cancelling current turn…");
+                let arg = rest.trim();
+                if arg.is_empty() {
+                    self.runtime.request_cancel();
+                    out.println("[stop] cancelling current turn…");
+                } else if arg == "all" {
+                    let n = self.background_jobs.len();
+                    for job in self.background_jobs.drain(..) {
+                        job.handle.abort();
+                    }
+                    out.println(&format!("[stop] stopped {n} background job(s)"));
+                } else if let Ok(id) = arg.parse::<u32>() {
+                    if let Some(pos) = self.background_jobs.iter().position(|j| j.id == id) {
+                        let job = self.background_jobs.remove(pos);
+                        job.handle.abort();
+                        out.println(&format!("[stop] stopped job {id} ({})", job.cmd));
+                    } else {
+                        out.eprintln(&format!("[stop] no background job with id {id}"));
+                    }
+                } else {
+                    out.eprintln("[stop] usage: /stop [<id>|all]  (no arg cancels the turn)");
+                }
+            }
+            "/run-bg" => {
+                let cmd = rest.trim();
+                if cmd.is_empty() {
+                    out.println("[run-bg] usage: /run-bg <shell command>");
+                } else {
+                    let id = self.start_background_job(cmd);
+                    out.println(&format!(
+                        "[run-bg] started job {id}: {cmd}  — /ps to view, /stop {id} to kill"
+                    ));
+                }
+            }
+            "/ps" => {
+                // Drop finished+empty handles; report status.
+                if self.background_jobs.is_empty() {
+                    out.println("[ps] no background jobs. Start one with /run-bg <cmd>");
+                } else {
+                    let mut lines = vec!["Background jobs:".to_string(), String::new()];
+                    for job in &self.background_jobs {
+                        let running =
+                            !job.done.load(std::sync::atomic::Ordering::SeqCst);
+                        let status = if running { "running" } else { "done" };
+                        lines.push(format!("[{}] {status}  $ {}", job.id, job.cmd));
+                        // Show the latest output (tail) for both running and
+                        // finished jobs, so re-running /ps tracks live progress.
+                        if let Ok(buf) = job.output.lock() {
+                            let all: Vec<&str> = buf.lines().collect();
+                            let start = all.len().saturating_sub(8);
+                            for l in &all[start..] {
+                                lines.push(format!("    {l}"));
+                            }
+                        }
+                    }
+                    lines.push(String::new());
+                    lines.push("/stop <id> to kill · /stop all to clear".into());
+                    if let ReplOutput::Tui(st) = &out {
+                        if let Ok(mut g) = st.lock() {
+                            g.open_info_modal("background jobs", lines.clone());
+                        }
+                    } else {
+                        for l in &lines {
+                            out.println(l);
+                        }
+                    }
+                }
             }
             "/help" => {
                 let help_lines = vec![
@@ -918,6 +1108,37 @@ impl Repl {
             }
             "/status" => {
                 let snapshot = self.runtime.snapshot();
+                let model = self.runtime.model().to_string();
+                let provider = self.runtime.config().provider.default.display_name();
+                let mcp_count = self
+                    .runtime
+                    .config()
+                    .mcp
+                    .servers
+                    .iter()
+                    .filter(|s| s.enabled)
+                    .count();
+                let window =
+                    dcode_ai_runtime::model_limits::detect_context_window(&model) as u64;
+
+                // Live token/cost/context come from the TUI state (CostUpdated).
+                let (tin, tout, cost, ctx, projects) = if let ReplOutput::Tui(st) = &out {
+                    st.lock()
+                        .ok()
+                        .map(|g| {
+                            (
+                                g.input_tokens,
+                                g.output_tokens,
+                                g.cost_usd,
+                                g.context_tokens,
+                                g.connected_projects.len(),
+                            )
+                        })
+                        .unwrap_or((0, 0, 0.0, 0, 0))
+                } else {
+                    (0, 0, 0.0, 0, 0)
+                };
+
                 let session_line = snapshot
                     .session_name
                     .as_ref()
@@ -925,12 +1146,36 @@ impl Repl {
                     .unwrap_or_else(|| format!("Session:     {}", snapshot.id));
                 let mut lines = vec![
                     session_line,
-                    format!("Model:       {}", self.runtime.model()),
+                    format!("Model:       {model}"),
+                    format!("Provider:    {provider}"),
                     format!("Agent:       @{}", self.agent_profile.label()),
                     format!("Permission:  {:?}", self.runtime.permission_mode()),
-                    format!("Children:    {}", snapshot.child_session_ids.len()),
-                    format!("Memory:      {}", self.runtime.memory_store_path().display()),
+                    format!("Workspace:   {}", self.runtime.workspace_root().display()),
                 ];
+                if window > 0 {
+                    let pct = ((ctx.min(window) as f64 / window as f64) * 100.0).round() as u64;
+                    let filled = ((pct as usize * 16) / 100).min(16);
+                    let bar: String = "█".repeat(filled) + &"░".repeat(16 - filled);
+                    lines.push(format!(
+                        "Context:     {bar} {pct}%  ({} / {} tokens)",
+                        fmt_count(ctx),
+                        fmt_count(window)
+                    ));
+                }
+                lines.push(format!(
+                    "Tokens:      {} in · {} out",
+                    fmt_count(tin),
+                    fmt_count(tout)
+                ));
+                lines.push(format!("Cost:        ${cost:.4}"));
+                if mcp_count > 0 {
+                    lines.push(format!("MCP:         {mcp_count} server(s)"));
+                }
+                if projects > 1 {
+                    lines.push(format!("Projects:    {projects} connected"));
+                }
+                lines.push(format!("Children:    {}", snapshot.child_session_ids.len()));
+                lines.push(format!("Memory:      {}", self.runtime.memory_store_path().display()));
                 if let Some(summary) = &snapshot.session_summary {
                     lines.push(String::new());
                     lines.push(format!("Summary: {}", summary.replace('\n', " ")));
@@ -975,7 +1220,7 @@ impl Repl {
                     }
                 }
             }
-            "/session-name" => {
+            "/session-name" | "/rename" => {
                 let raw = rest.trim();
                 if raw.is_empty() {
                     if let Some(name) = self.runtime.session_name() {
@@ -1058,7 +1303,9 @@ impl Repl {
             }
             "/plan" => {
                 self.run_preset(
-                    "Create a short implementation plan before coding. Focus on steps, risks, and validation.\n\nTask:\n",
+                    "Create a step-by-step implementation plan before coding. Call the `update_plan` \
+tool with the ordered steps (status pending/in_progress/completed) and keep it updated as you \
+work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     rest,
                     out,
                 )
@@ -1113,10 +1360,17 @@ impl Repl {
                 }
             }
             "/diff" => {
-                // Show recent file changes via git
+                // Working-tree diff incl. untracked files (Codex-style), rendered
+                // as a colored ```diff block.
+                let script = "\
+git --no-pager diff --no-color HEAD 2>/dev/null; \
+for f in $(git ls-files --others --exclude-standard 2>/dev/null); do \
+  echo \"diff --git a/$f b/$f\"; echo \"new file\"; echo \"--- /dev/null\"; echo \"+++ b/$f\"; \
+  sed 's/^/+/' \"$f\" 2>/dev/null; \
+done";
                 let output = Command::new("sh")
                     .arg("-c")
-                    .arg("git diff --stat HEAD~5..HEAD 2>/dev/null || git diff --stat 2>/dev/null || echo 'No git changes'")
+                    .arg(script)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output()
@@ -1124,23 +1378,268 @@ impl Repl {
                 match output {
                     Ok(cmd_out) => {
                         let diff = String::from_utf8_lossy(&cmd_out.stdout);
+                        let diff = diff.trim();
                         if diff.is_empty() {
-                            out.println("[diff] No recent changes");
+                            out.println("[diff] No changes in the working tree.");
                         } else {
-                            out.print(&diff);
+                            // Cap very large diffs so the transcript stays usable.
+                            let capped: String = if diff.lines().count() > 600 {
+                                let head: String =
+                                    diff.lines().take(600).collect::<Vec<_>>().join("\n");
+                                format!("{head}\n… (diff truncated)")
+                            } else {
+                                diff.to_string()
+                            };
+                            out.print_markdown(&format!("```diff\n{capped}\n```"));
                         }
                     }
                     Err(e) => out.eprintln(&format!("[diff] Failed: {e}")),
                 }
             }
-            "/cost" => {
-                let snapshot = self.runtime.snapshot();
-                if let Some(name) = snapshot.session_name {
-                    out.eprintln(&format!("[cost] Session: {} ({})", name, snapshot.id));
+            "/copy" => {
+                // Copy the last assistant response to the clipboard.
+                if let ReplOutput::Tui(st) = &out {
+                    let text = st.lock().ok().and_then(|g| {
+                        g.blocks.iter().rev().find_map(|b| match b {
+                            DisplayBlock::Assistant(t) if !t.trim().is_empty() => Some(t.clone()),
+                            _ => None,
+                        })
+                    });
+                    match text {
+                        Some(t) => match crate::tui::clipboard::copy_to_clipboard(&t) {
+                            Ok(_) => out.println("[copy] Last response copied to clipboard."),
+                            Err(e) => out.eprintln(&format!("[copy] {e}")),
+                        },
+                        None => out.println("[copy] No assistant response to copy yet."),
+                    }
                 } else {
-                    out.eprintln(&format!("[cost] Session: {}", snapshot.id));
+                    out.println("[copy] available in TUI mode");
                 }
-                out.eprintln("[cost] Use 'dcode-ai logs --follow' to see real-time token usage");
+            }
+            "/transcript" => {
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.transcript_overlay_open = true;
+                        g.transcript_overlay_scroll = usize::MAX; // open at bottom
+                    }
+                    out.println("[transcript] full-screen view — q to close");
+                } else {
+                    out.println("[transcript] available in TUI mode");
+                }
+            }
+            "/cost" | "/usage" => {
+                let model = self.runtime.model().to_string();
+                let window =
+                    dcode_ai_runtime::model_limits::detect_context_window(&model) as u64;
+                let (tin, tout, cost, ctx) = if let ReplOutput::Tui(st) = &out {
+                    st.lock()
+                        .ok()
+                        .map(|g| (g.input_tokens, g.output_tokens, g.cost_usd, g.context_tokens))
+                        .unwrap_or((0, 0, 0.0, 0))
+                } else {
+                    (0, 0, 0.0, 0)
+                };
+                let mut lines = vec![
+                    format!("Model:    {model}"),
+                    format!("Input:    {} tokens", fmt_count(tin)),
+                    format!("Output:   {} tokens", fmt_count(tout)),
+                    format!("Total:    {} tokens", fmt_count(tin + tout)),
+                    format!("Cost:     ${cost:.4}"),
+                ];
+                if window > 0 {
+                    let pct = ((ctx.min(window) as f64 / window as f64) * 100.0).round() as u64;
+                    let filled = ((pct as usize * 16) / 100).min(16);
+                    let bar: String = "█".repeat(filled) + &"░".repeat(16 - filled);
+                    lines.push(format!(
+                        "Context:  {bar} {pct}%  ({} / {})",
+                        fmt_count(ctx),
+                        fmt_count(window)
+                    ));
+                }
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("usage", lines);
+                    }
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
+                }
+            }
+            "/fork" => {
+                match self.runtime.fork_session().await {
+                    Ok(new_id) => {
+                        if let ReplOutput::Tui(st) = &out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.session_id = new_id.clone();
+                            g.push_block(DisplayBlock::System(format!(
+                                "Forked into new session {new_id} — original is preserved"
+                            )));
+                            g.touch_transcript();
+                        }
+                        out.println(&format!("[fork] now on {new_id}"));
+                    }
+                    Err(e) => out.eprintln(&format!("[fork] {e}")),
+                }
+            }
+            "/approve" => {
+                // dcode has no auto-review pipeline, so this is the feasible
+                // analog of Codex's `/approve`: re-allow the most recently
+                // requested tool for the rest of the session (handy when you
+                // just declined something and want to let it through next time).
+                let pattern = if let ReplOutput::Tui(st) = &out {
+                    st.lock().ok().and_then(|g| g.last_approval_pattern.clone())
+                } else {
+                    None
+                };
+                match pattern {
+                    Some(p) => {
+                        self.runtime.add_session_allow_pattern(p.clone());
+                        if let ReplOutput::Tui(st) = &out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.push_block(DisplayBlock::System(format!(
+                                "[approve] allowing '{p}' for the rest of this session"
+                            )));
+                            g.touch_transcript();
+                        }
+                        out.println(&format!("[approve] allowing '{p}' for this session"));
+                    }
+                    None => {
+                        out.eprintln("[approve] nothing to approve (no recent tool approval request)")
+                    }
+                }
+            }
+            "/input" => {
+                // Send a line straight to an interactive_exec session's stdin,
+                // e.g. a sudo password. Handled entirely locally — the text is
+                // never sent to the model and never echoed to the transcript.
+                let rest = rest.trim();
+                if rest.is_empty() {
+                    let sessions = self.runtime.interactive_sessions();
+                    if sessions.is_empty() {
+                        out.println(
+                            "[input] no interactive sessions (the agent starts one via interactive_exec)",
+                        );
+                    } else {
+                        out.println("[input] active interactive sessions:");
+                        for (id, running, cmd) in sessions {
+                            out.println(&format!(
+                                "  [{id}] {}  $ {cmd}",
+                                if running { "running" } else { "exited" }
+                            ));
+                        }
+                        out.println(
+                            "usage: /input <id> <text>  — sent straight to the command, NOT to the AI",
+                        );
+                    }
+                } else {
+                    let mut parts = rest.splitn(2, char::is_whitespace);
+                    let id_str = parts.next().unwrap_or("");
+                    let text = parts.next().unwrap_or("");
+                    match id_str.parse::<u32>() {
+                        Ok(id) => match self.runtime.interactive_write(id, text) {
+                            Ok(()) => out.println(&format!(
+                                "[input] sent to session {id} (kept local — not shared with the AI)"
+                            )),
+                            Err(e) => out.eprintln(&format!("[input] {e}")),
+                        },
+                        Err(_) => out.eprintln("[input] usage: /input <id> <text>"),
+                    }
+                }
+            }
+            "/goals" => {
+                // Goal tracking: recall the agent's current task plan (set via
+                // the update_plan tool) even after it scrolls out of view.
+                let plan = if let ReplOutput::Tui(st) = &out {
+                    st.lock().ok().and_then(|g| g.current_plan.clone())
+                } else {
+                    None
+                };
+                match plan {
+                    Some(p) => {
+                        out.println("[goals] current task plan:");
+                        for line in p.lines() {
+                            out.println(&format!("  {line}"));
+                        }
+                    }
+                    None => out.println(
+                        "[goals] no active plan yet — the agent sets one via update_plan on multi-step tasks",
+                    ),
+                }
+            }
+            "/side" => {
+                // Ephemeral aside: snapshot the conversation context, let the
+                // user have a throwaway exchange, then `/side end` restores the
+                // main thread's context (the aside is discarded from the model's
+                // memory). The aside stays visible in the transcript for
+                // reference. Supports nesting.
+                let sub = rest.trim().to_ascii_lowercase();
+                if sub == "end" || sub == "return" || sub == "back" {
+                    match self.side_snapshots.pop() {
+                        Some(saved) => {
+                            self.runtime.restore_messages(saved);
+                            let depth = self.side_snapshots.len();
+                            if let ReplOutput::Tui(st) = &out
+                                && let Ok(mut g) = st.lock()
+                            {
+                                g.push_block(DisplayBlock::System(
+                                    "↩ returned from side conversation — main context restored."
+                                        .into(),
+                                ));
+                                g.touch_transcript();
+                            }
+                            out.println(&format!(
+                                "[side] returned to main thread{}",
+                                if depth > 0 { format!(" ({depth} aside(s) still open)") } else { String::new() }
+                            ));
+                        }
+                        None => out.eprintln("[side] not in a side conversation (start one with /side)"),
+                    }
+                } else {
+                    self.side_snapshots.push(self.runtime.snapshot_messages());
+                    if let ReplOutput::Tui(st) = &out
+                        && let Ok(mut g) = st.lock()
+                    {
+                        g.push_block(DisplayBlock::System(
+                            "⤷ side conversation started (ephemeral) — use /side end to return; the aside won't affect the main thread."
+                                .into(),
+                        ));
+                        g.touch_transcript();
+                    }
+                    out.println("[side] side conversation started — /side end to return");
+                }
+            }
+            "/delete" => {
+                let current = self.runtime.session_id().to_string();
+                let store = dcode_ai_runtime::session_store::SessionStore::new(
+                    self.runtime
+                        .workspace_root()
+                        .join(&self.runtime.config().session.history_dir),
+                );
+                match store.delete(&current).await {
+                    Ok(_) => {
+                        out.println(&format!("[delete] removed session {current}"));
+                        if let Err(e) = self.runtime.new_session().await {
+                            out.eprintln(&format!("[delete] new session failed: {e}"));
+                        } else {
+                            if let ReplOutput::Tui(st) = &out
+                                && let Ok(mut g) = st.lock()
+                            {
+                                g.blocks.clear();
+                                g.flushed_block_count = 0;
+                                g.request_clear = true;
+                                g.streaming_assistant = None;
+                                g.session_id = self.runtime.session_id().to_string();
+                                g.transcript_follow_tail = true;
+                                g.touch_transcript();
+                            }
+                            out.println("[delete] started a fresh session");
+                        }
+                    }
+                    Err(e) => out.eprintln(&format!("[delete] {e}")),
+                }
             }
             "/stats" => {
                 let snapshot = self.runtime.snapshot();
@@ -1872,6 +2371,225 @@ impl Repl {
                     out.println(&format!("[theme] set to {}", applied.name));
                 }
             }
+            "/title" => {
+                let t = rest.trim();
+                if t.is_empty() {
+                    out.println("usage: /title <text>   (sets the terminal window title)");
+                } else {
+                    let _ = crossterm::execute!(
+                        std::io::stdout(),
+                        crossterm::terminal::SetTitle(t)
+                    );
+                    out.println(&format!("[title] terminal title set to: {t}"));
+                }
+            }
+            "/raw" => {
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.transcript_overlay_open = true;
+                        g.transcript_overlay_raw = true;
+                        g.transcript_overlay_scroll = usize::MAX;
+                    }
+                    out.println("[raw] raw scrollback view — q to close, r to toggle styling");
+                } else {
+                    out.println("[raw] available in TUI mode");
+                }
+            }
+            "/mention" => {
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.set_input_text("@");
+                    }
+                    out.println("[mention] type a path after @ to attach a file");
+                } else {
+                    out.println("[mention] in TUI, type @ then a path to attach a file");
+                }
+            }
+            "/hooks" => {
+                let h = &self.runtime.config().hooks;
+                let groups: [(&str, &[dcode_ai_common::config::HookCommand]); 8] = [
+                    ("session_start", &h.session_start),
+                    ("session_end", &h.session_end),
+                    ("pre_tool_use", &h.pre_tool_use),
+                    ("post_tool_use", &h.post_tool_use),
+                    ("post_tool_failure", &h.post_tool_failure),
+                    ("approval_requested", &h.approval_requested),
+                    ("subagent_start", &h.subagent_start),
+                    ("subagent_stop", &h.subagent_stop),
+                ];
+                let mut lines = vec!["Lifecycle hooks:".to_string(), String::new()];
+                let mut any = false;
+                for (name, cmds) in groups {
+                    for c in cmds {
+                        any = true;
+                        let m = c
+                            .matcher
+                            .as_deref()
+                            .map(|m| format!(" [{m}]"))
+                            .unwrap_or_default();
+                        let block = if c.blocking { " (blocking)" } else { "" };
+                        lines.push(format!("  {name}{m}{block}: {}", c.command));
+                    }
+                }
+                if !any {
+                    lines.push("  (none configured — add under [hooks] in .dcode.toml)".into());
+                }
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("hooks", lines.clone());
+                    }
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
+                }
+            }
+            "/personality" => {
+                let target = rest.trim().to_ascii_lowercase();
+                let valid = ["concise", "friendly", "technical", "default"];
+                if target.is_empty() {
+                    let cur = self
+                        .runtime
+                        .config()
+                        .ui
+                        .personality
+                        .clone()
+                        .unwrap_or_else(|| "default".into());
+                    out.println(&format!("[personality] current: {cur}"));
+                    out.println("usage: /personality <concise|friendly|technical|default>");
+                } else if valid.contains(&target.as_str()) {
+                    self.runtime.config_mut().ui.personality = if target == "default" {
+                        None
+                    } else {
+                        Some(target.clone())
+                    };
+                    self.runtime.refresh_system_prompt();
+                    if let Err(e) = self
+                        .runtime
+                        .config()
+                        .save_workspace_file(self.runtime.workspace_root())
+                    {
+                        out.eprintln(&format!("warn: failed to persist personality: {e}"));
+                    }
+                    out.println(&format!("[personality] set to {target}"));
+                } else {
+                    out.eprintln(&format!(
+                        "[personality] unknown '{target}'; choose concise|friendly|technical|default"
+                    ));
+                }
+            }
+            "/keymap" => {
+                // /keymap                → list global actions + custom bindings
+                // /keymap <action> <key> → bind a key (e.g. /keymap palette ctrl+b)
+                let args: Vec<&str> = rest.split_whitespace().collect();
+                let actions = [
+                    "palette", "search", "history", "pin", "expand", "subagents", "thinking",
+                    "clear",
+                ];
+                if args.is_empty() {
+                    out.println(&format!("[keymap] remappable actions: {}", actions.join(", ")));
+                    let custom = &self.runtime.config().ui.keymap;
+                    if custom.is_empty() {
+                        out.println(
+                            "usage: /keymap <action> <key>  (e.g. /keymap palette ctrl+b) — rebinds the action to that key",
+                        );
+                    } else {
+                        out.println("[keymap] custom bindings:");
+                        for (a, k) in custom {
+                            out.println(&format!("  {a} = {k}"));
+                        }
+                    }
+                } else if args.len() == 2 {
+                    let action = args[0].to_ascii_lowercase();
+                    let key = args[1].to_ascii_lowercase();
+                    if !actions.contains(&action.as_str()) {
+                        out.eprintln(&format!(
+                            "[keymap] unknown action '{action}'; choose one of: {}",
+                            actions.join(", ")
+                        ));
+                    } else if crate::tui::app::parse_key_combo(&key).is_none() {
+                        out.eprintln(&format!(
+                            "[keymap] could not parse key '{key}' (try ctrl+b, alt+enter, f5)"
+                        ));
+                    } else {
+                        self.runtime
+                            .config_mut()
+                            .ui
+                            .keymap
+                            .insert(action.clone(), key.clone());
+                        let bindings =
+                            crate::tui::app::build_key_bindings(&self.runtime.config().ui.keymap);
+                        if let ReplOutput::Tui(st) = &out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.key_bindings = bindings;
+                        }
+                        if let Err(e) = self
+                            .runtime
+                            .config()
+                            .save_workspace_file(self.runtime.workspace_root())
+                        {
+                            out.eprintln(&format!("warn: failed to persist keymap: {e}"));
+                        }
+                        out.println(&format!(
+                            "[keymap] rebound {action} → {key} (its default key is now inactive)"
+                        ));
+                    }
+                } else {
+                    out.eprintln("[keymap] usage: /keymap [<action> <key>]");
+                }
+            }
+            "/statusline" => {
+                let item = rest.trim().to_ascii_lowercase();
+                let valid = ["agent", "effort", "time", "context", "model"];
+                if item.is_empty() {
+                    let hidden = &self.runtime.config().ui.statusline_hidden;
+                    let status: Vec<String> = valid
+                        .iter()
+                        .map(|&k| {
+                            let on = !hidden.iter().any(|h| h == k);
+                            format!("{k}={}", if on { "on" } else { "off" })
+                        })
+                        .collect();
+                    out.println(&format!("[statusline] {}", status.join("  ")));
+                    out.println(
+                        "usage: /statusline <agent|effort|time|context|model> to toggle an item",
+                    );
+                } else if valid.contains(&item.as_str()) {
+                    let now_hidden = {
+                        let hidden = &mut self.runtime.config_mut().ui.statusline_hidden;
+                        if let Some(pos) = hidden.iter().position(|h| h == &item) {
+                            hidden.remove(pos);
+                            false
+                        } else {
+                            hidden.push(item.clone());
+                            true
+                        }
+                    };
+                    let new_hidden = self.runtime.config().ui.statusline_hidden.clone();
+                    if let ReplOutput::Tui(st) = &out
+                        && let Ok(mut g) = st.lock()
+                    {
+                        g.statusline_hidden = new_hidden;
+                        g.touch_transcript();
+                    }
+                    if let Err(e) = self
+                        .runtime
+                        .config()
+                        .save_workspace_file(self.runtime.workspace_root())
+                    {
+                        out.eprintln(&format!("warn: failed to persist statusline: {e}"));
+                    }
+                    out.println(&format!(
+                        "[statusline] {item} {}",
+                        if now_hidden { "hidden" } else { "shown" }
+                    ));
+                } else {
+                    out.eprintln(&format!(
+                        "[statusline] unknown '{item}'; choose agent|effort|time|context|model"
+                    ));
+                }
+            }
             "/provider" => {
                 let rest = rest.trim();
                 if rest.is_empty() {
@@ -2230,11 +2948,11 @@ impl Repl {
                     && let Ok(mut g) = st.lock()
                 {
                     g.blocks.clear();
-                    g.blocks
-                        .push(DisplayBlock::System(crate::tui::app::session_start_banner()));
-                    g.blocks.push(DisplayBlock::System(
-                        "New session ready — enter a prompt below.".into(),
-                    ));
+                    g.flushed_block_count = 0;
+                    let version = env!("CARGO_PKG_VERSION");
+                    g.blocks.push(DisplayBlock::System(format!(
+                        "dcode-ai v{version} · new session"
+                    )));
                     g.streaming_assistant = None;
                     g.scroll_lines = 0;
                     g.transcript_follow_tail = true;
@@ -2402,32 +3120,67 @@ impl Repl {
 
             // ── /web <url> ────────────────────────────────────────────────────
             "/web" => {
-                let url = rest.trim();
-                if url.is_empty() {
-                    out.eprintln("[web] usage: /web <url>");
+                let arg = rest.trim();
+                if arg.is_empty() {
+                    out.eprintln("[web] usage: /web <url | search query>");
                     return Ok(true);
                 }
-                out.println(&format!("[web] Fetching {url}…"));
-                match fetch_url_as_text(url).await {
+                // Treat the argument as a URL when it has a scheme, or looks like
+                // a bare domain (no spaces, has a dot). Otherwise it's a search
+                // query → fetch DuckDuckGo results and stage them as context.
+                let is_url = arg.starts_with("http://")
+                    || arg.starts_with("https://")
+                    || (!arg.contains(char::is_whitespace)
+                        && arg.contains('.')
+                        && !arg.ends_with('.'));
+
+                let (source_url, fetch_url, label) = if is_url {
+                    let url = if arg.starts_with("http") {
+                        arg.to_string()
+                    } else {
+                        format!("https://{arg}")
+                    };
+                    out.println(&format!("[web] Fetching {url}…"));
+                    (url.clone(), url, format!("Content fetched from <{arg}>"))
+                } else {
+                    out.println(&format!("[web] Searching the web for: {arg}…"));
+                    let search_url = match reqwest::Url::parse_with_params(
+                        "https://html.duckduckgo.com/html/",
+                        &[("q", arg)],
+                    ) {
+                        Ok(u) => u.to_string(),
+                        Err(_) => {
+                            out.eprintln("[web] could not build search URL");
+                            return Ok(true);
+                        }
+                    };
+                    (
+                        arg.to_string(),
+                        search_url,
+                        format!("Web search results for \"{arg}\""),
+                    )
+                };
+
+                match fetch_url_as_text(&fetch_url).await {
                     Ok(text) => {
                         let preview: String = text.lines().take(3).collect::<Vec<_>>().join(" ");
                         let preview = truncate_str_bytes(&preview, 80);
-                        out.println(&format!("[web] {}: {preview}…", text.lines().count()));
+                        out.println(&format!("[web] {} lines: {preview}…", text.lines().count()));
                         out.println("[web] Staged — send a message to use this context");
-                        let block = format!(
-                            "Content fetched from <{url}>:\n```text\n{text}\n```"
-                        );
+                        let block = format!("{label}:\n```text\n{text}\n```");
                         if let ReplOutput::Tui(st) = &out {
                             if let Ok(mut g) = st.lock() {
                                 g.pending_context.push(block);
                             }
                         } else {
-                            // In stdio mode: just run a turn announcing the fetch.
-                            let prompt = format!("Web page context from <{url}>:\n\n```\n{text}\n```\n\nAcknowledge briefly.");
+                            // In stdio mode: run a turn that uses the fetched text.
+                            let prompt = format!(
+                                "{label} <{source_url}>:\n\n```\n{text}\n```\n\nSummarize the most relevant findings."
+                            );
                             let _ = self.runtime.run_turn(&prompt).await;
                         }
                     }
-                    Err(e) => out.eprintln(&format!("[web] fetch failed: {e}")),
+                    Err(e) => out.eprintln(&format!("[web] failed: {e}")),
                 }
             }
 
@@ -2528,17 +3281,207 @@ impl Repl {
                     Ok(canonical) if canonical.is_dir() => {
                         std::env::set_current_dir(&canonical)
                             .map_err(|e| anyhow::anyhow!("chdir: {e}"))?;
-                        out.println(&format!("[cd] moved to {}", canonical.display()));
-                        if let ReplOutput::Tui(st) = &out
-                            && let Ok(mut g) = st.lock()
-                        {
-                            g.workspace_root = canonical.clone();
-                            g.workspace_display = canonical.display().to_string();
-                            g.touch_transcript();
-                        }
+                        out.println(&format!("[cd] shell cwd set to {}", canonical.display()));
+                        out.println(
+                            "[cd] note: the agent's file tools still operate on the session \
+workspace. To fully switch, run dcode-ai in the new directory (or `/project add <path>` \
+then switch).",
+                        );
                     }
                     Ok(_) => out.eprintln(&format!("[cd] not a directory: {target}")),
                     Err(e) => out.eprintln(&format!("[cd] {target}: {e}")),
+                }
+            }
+
+            // ── /project ──────────────────────────────────────────────────────
+            "/project" => {
+                let sub = rest.trim();
+                if sub.is_empty() || sub == "list" || sub.starts_with("switch") {
+                    // Open the picker (or report empty). Never hold the state lock
+                    // across out.println — ReplOutput::Tui re-locks it (deadlock).
+                    let mut opened = false;
+                    let mut count = 0usize;
+                    if let ReplOutput::Tui(st) = &out
+                        && let Ok(mut g) = st.lock()
+                    {
+                        count = g.connected_projects.len();
+                        if count > 0 {
+                            g.open_project_picker();
+                            opened = true;
+                        }
+                    }
+                    if matches!(out, ReplOutput::Tui(_)) {
+                        if opened {
+                            out.println(&format!("[project] {count} project(s) — ↑↓ Enter to switch, Del to remove, Esc to close"));
+                        } else {
+                            out.println("[project] no projects yet. Add one with: /project add <path>");
+                        }
+                    } else {
+                        out.println("[project] use in TUI mode for the project picker");
+                    }
+                } else if let Some(path) = sub.strip_prefix("add ").map(|s| s.trim()) {
+                    let abs = if std::path::Path::new(path).is_absolute() {
+                        std::path::PathBuf::from(path)
+                    } else {
+                        self.runtime.workspace_root().join(path)
+                    };
+                    match abs.canonicalize() {
+                        Ok(canonical) if canonical.is_dir() => {
+                            let name = canonical
+                                .file_name()
+                                .and_then(|n| n.to_str())
+                                .unwrap_or("project")
+                                .to_string();
+                            if let ReplOutput::Tui(st) = &out
+                                && let Ok(mut g) = st.lock()
+                            {
+                                g.add_project(name.clone(), canonical.clone());
+                                g.touch_transcript();
+                            }
+                            out.println(&format!(
+                                "[project] added '{name}' — open the picker with /project or Ctrl+X P"
+                            ));
+                        }
+                        Ok(_) => out.eprintln(&format!("[project] not a directory: {path}")),
+                        Err(e) => out.eprintln(&format!("[project] {path}: {e}")),
+                    }
+                } else {
+                    out.println("[project] usage: /project [list | add <path> | switch]");
+                }
+            }
+
+            // ── /ide ──────────────────────────────────────────────────────────
+            // Pull editor context (selection / open files / active file) into
+            // the conversation. dcode reads `.dcode/ide-context.json`, which an
+            // editor keybinding writes; if it's absent, fall back to the git
+            // working set so /ide is still useful without any editor setup.
+            "/ide" => {
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let ctx_path = ws.join(".dcode").join("ide-context.json");
+                let block = match std::fs::read_to_string(&ctx_path)
+                    .ok()
+                    .and_then(|j| format_ide_context(&j))
+                {
+                    Some(b) => {
+                        out.println("[ide] staged live editor context (.dcode/ide-context.json)");
+                        b
+                    }
+                    None => {
+                        let changed = git_changed_files(&ws);
+                        if changed.is_empty() {
+                            out.println("[ide] no editor bridge and no local changes to attach.");
+                            out.println(
+                                "  To enable live context, have your editor write .dcode/ide-context.json",
+                            );
+                            out.println(
+                                "  (fields: active_file, selection, open_files, cursor.line).",
+                            );
+                            return Ok(true);
+                        }
+                        out.println(&format!(
+                            "[ide] no editor bridge — staged your git working set ({} file(s)).",
+                            changed.len()
+                        ));
+                        out.println(
+                            "  (For live selection/open files, write .dcode/ide-context.json from your editor.)",
+                        );
+                        format!(
+                            "Files you are currently working on (git working set):\n{}",
+                            changed
+                                .iter()
+                                .map(|f| format!("- {f}"))
+                                .collect::<Vec<_>>()
+                                .join("\n")
+                        )
+                    }
+                };
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.pending_context.push(block);
+                        g.touch_transcript();
+                    }
+                    out.println("[ide] staged — send a message to use this context");
+                } else {
+                    let prompt = format!("{block}\n\nAcknowledge the current IDE context briefly.");
+                    let _ = self.runtime.run_turn(&prompt).await;
+                }
+            }
+            // ── /feedback ─────────────────────────────────────────────────────
+            "/feedback" => {
+                let log = self.runtime.event_log_path();
+                out.println("[feedback] Found a bug or have a request? Open an issue:");
+                out.println("  https://github.com/Dhanuzh/dcode-ai/issues/new");
+                out.println(&format!(
+                    "  Attach this session's log if it helps: {}",
+                    log.display()
+                ));
+            }
+
+            // ── /import ───────────────────────────────────────────────────────
+            // Import Claude Code project instructions (CLAUDE.md) into the
+            // dcode-ai instructions file (AGENTS.md).
+            "/import" if rest.trim().eq_ignore_ascii_case("chats") => {
+                // Import the most recent Claude Code chat for this workspace as
+                // context (Claude Code stores sessions as JSONL under
+                // ~/.claude/projects/<encoded-cwd>/).
+                let ws = self.runtime.workspace_root().to_path_buf();
+                match import_latest_claude_chat(&ws) {
+                    Ok((title, text)) => {
+                        out.println(&format!("[import] imported chat: {title}"));
+                        out.println("[import] staged as context — send a message to use it");
+                        let block = format!(
+                            "Imported Claude Code chat \"{title}\":\n```text\n{text}\n```"
+                        );
+                        if let ReplOutput::Tui(st) = &out {
+                            if let Ok(mut g) = st.lock() {
+                                g.pending_context.push(block);
+                            }
+                        } else {
+                            let prompt = format!(
+                                "Context from a prior Claude Code chat \"{title}\":\n\n```\n{text}\n```\n\nAcknowledge briefly."
+                            );
+                            let _ = self.runtime.run_turn(&prompt).await;
+                        }
+                    }
+                    Err(e) => out.eprintln(&format!("[import] {e}")),
+                }
+            }
+            "/import" => {
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let claude_md = ws.join("CLAUDE.md");
+                let agents_md = ws.join("AGENTS.md");
+                const MARKER: &str = "# Imported from CLAUDE.md (Claude Code)";
+                match std::fs::read_to_string(&claude_md) {
+                    Ok(content) => {
+                        let block = format!("{MARKER}\n\n{}", content.trim());
+                        let existing = std::fs::read_to_string(&agents_md).unwrap_or_default();
+                        if existing.contains(MARKER) {
+                            out.println(
+                                "[import] AGENTS.md already has an imported CLAUDE.md section — skipping.",
+                            );
+                        } else {
+                            let merged = if existing.trim().is_empty() {
+                                block
+                            } else {
+                                format!("{}\n\n{block}", existing.trim_end())
+                            };
+                            match std::fs::write(&agents_md, merged) {
+                                Ok(()) => {
+                                    self.runtime.refresh_system_prompt();
+                                    out.println(
+                                        "[import] Imported CLAUDE.md into AGENTS.md and reloaded instructions.",
+                                    );
+                                }
+                                Err(e) => {
+                                    out.eprintln(&format!("[import] failed to write AGENTS.md: {e}"))
+                                }
+                            }
+                        }
+                    }
+                    Err(_) => {
+                        out.println("[import] No CLAUDE.md found in this workspace — nothing to import.");
+                        out.println("  (Imports CLAUDE.md → AGENTS.md. For prior chats, use /import chats.)");
+                    }
                 }
             }
 
@@ -2727,6 +3670,8 @@ impl Repl {
                 .count();
             g.thinking_enabled = self.runtime.config().model.enable_thinking;
             g.thinking_budget = self.runtime.config().model.thinking_budget;
+            g.statusline_hidden = self.runtime.config().ui.statusline_hidden.clone();
+            g.key_bindings = crate::tui::app::build_key_bindings(&self.runtime.config().ui.keymap);
         }
 
         let log_path = self.runtime.event_log_path();
@@ -2812,15 +3757,14 @@ impl Repl {
                     if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
                         continue;
                     }
+                    // A stale answer (double-submit, post-cancel) is not an error;
+                    // clear any leftover prompt UI silently like Codex does.
                     if g.active_question.as_ref().map(|q| q.question_id.as_str())
                         == Some(qid.as_str())
                     {
                         g.active_question = None;
                         g.close_question_modal();
                     }
-                    g.push_error(
-                        "question was no longer pending; cleared stale question state".into(),
-                    );
                 }
             }
         });
@@ -2857,10 +3801,12 @@ impl Repl {
                 if !dispatch_tool_approval(&approval_dispatch, &call_id, verdict)
                     && let Ok(mut g) = approval_state.lock()
                 {
+                    // A verdict with no matching pending entry is normal, not an
+                    // error: it happens on a double-press, after the turn was
+                    // cancelled, or after the approval timed out. Codex silently
+                    // ignores these; clear any stale prompt UI without scaring the
+                    // user with a red error line.
                     g.clear_active_approval_if_matches(&call_id);
-                    g.push_error(
-                        "approval was no longer pending; cleared stale approval state".into(),
-                    );
                 }
             }
         });
@@ -3179,9 +4125,15 @@ impl Repl {
                         .await?;
                 }
                 TuiCmd::ResumeSession(session_id) => {
+                    // Signal busy so the TUI status bar shows activity.
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.set_busy(true);
+                    }
+
                     let current = self.runtime.session_id().to_string();
                     if session_id == current {
                         if let Ok(mut g) = tui_state.lock() {
+                            g.set_busy(false);
                             g.blocks
                                 .push(DisplayBlock::System("Already on this session.".into()));
                         }
@@ -3223,6 +4175,8 @@ impl Repl {
                                 // Reset the TUI transcript and replay the resumed session.
                                 if let Ok(mut g) = tui_state.lock() {
                                     g.blocks.clear();
+                                    g.flushed_block_count = 0;
+                                    g.request_clear = true; // purge native scrollback
                                     g.streaming_assistant = None;
                                     g.streaming_thinking = None;
                                     g.session_id = self.runtime.session_id().to_string();
@@ -3231,15 +4185,18 @@ impl Repl {
                                 }
                                 replay_event_log_into_state(&new_log, &tui_state).await;
                                 if let Ok(mut g) = tui_state.lock() {
-                                    g.blocks.push(DisplayBlock::System(format!(
-                                        "Resumed session {session_id}"
+                                    let restored = g.blocks.len();
+                                    g.push_block(DisplayBlock::System(format!(
+                                        "Resumed session {session_id} — {restored} messages restored"
                                     )));
                                     g.transcript_follow_tail = true;
                                     g.touch_transcript();
+                                    g.set_busy(false);
                                 }
                             }
                             Err(e) => {
                                 if let Ok(mut g) = tui_state.lock() {
+                                    g.set_busy(false);
                                     g.push_error(format!("Failed to resume session: {e}"));
                                 }
                             }
@@ -3405,6 +4362,122 @@ impl Repl {
                             applied.name
                         )));
                         g.touch_transcript();
+                    }
+                }
+                TuiCmd::SwitchProject(idx) => {
+                    // Signal busy so the TUI status bar shows activity.
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.set_busy(true);
+                    }
+
+                    // Read the target, mark it active, then drop the lock before awaiting.
+                    let target = if let Ok(mut g) = tui_state.lock() {
+                        if idx < g.connected_projects.len() {
+                            let name = g.connected_projects[idx].name.clone();
+                            let path = g.connected_projects[idx].path.clone();
+                            g.switch_project(idx);
+                            Some((name, path))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some((proj_name, proj_path)) = target {
+                        let current_ws = self.runtime.workspace_root().to_path_buf();
+                        if proj_path == current_ws {
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.push_block(DisplayBlock::System(
+                                    "Already on this project.".into(),
+                                ));
+                                g.touch_transcript();
+                            }
+                        } else {
+                            let safe_mode = self.safe_mode;
+                            match self
+                                .runtime
+                                .reroot_in_process(&proj_path, safe_mode, true, None)
+                                .await
+                            {
+                                Ok(()) => {
+                                    let _ = std::env::set_current_dir(&proj_path);
+                                    // Old bridge channel is dead after the swap.
+                                    if let Ok(mut h) = bridge_handle.lock()
+                                        && let Some(old) = h.take()
+                                    {
+                                        old.abort();
+                                    }
+                                    let new_rx = self.runtime.take_event_rx();
+                                    let new_log = self.runtime.event_log_path();
+                                    let new_ipc = self.runtime.take_ipc_handle();
+                                    let new_approval = self.runtime.take_ipc_approval_pending();
+                                    let new_question = self.runtime.question_pending();
+                                    if let Some(rx) = new_rx {
+                                        let nb = spawn_tui_bridge(
+                                            rx,
+                                            new_log,
+                                            new_ipc,
+                                            new_approval,
+                                            new_question,
+                                            tui_state.clone(),
+                                        );
+                                        if let Ok(mut h) = bridge_handle.lock() {
+                                            *h = Some(nb);
+                                        }
+                                    }
+                                    let branch = git_current_branch(&proj_path).unwrap_or_default();
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.blocks.clear();
+                                        g.flushed_block_count = 0;
+                                        g.request_clear = true;
+                                        g.streaming_assistant = None;
+                                        g.streaming_thinking = None;
+                                        g.session_id = self.runtime.session_id().to_string();
+                                        g.model = self.runtime.model().to_string();
+                                        g.workspace_root = proj_path.clone();
+                                        g.workspace_display = proj_path.display().to_string();
+                                        g.set_current_branch(&branch);
+                                        g.push_block(DisplayBlock::System(format!(
+                                            "Switched to project: {proj_name}  ({})",
+                                            proj_path.display()
+                                        )));
+                                        g.transcript_follow_tail = true;
+                                        g.touch_transcript();
+                                        g.set_busy(false);
+                                    }
+                                }
+                                Err(e) => {
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.set_busy(false);
+                                        g.push_error(format!("Failed to switch project: {e}"));
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.set_busy(false);
+                        }
+                    }
+                }
+                TuiCmd::AddProject(path) => {
+                    if let Ok(canonical) = path.canonicalize() {
+                        let name = canonical
+                            .file_name()
+                            .and_then(|n| n.to_str())
+                            .unwrap_or("project")
+                            .to_string();
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.add_project(name.clone(), canonical);
+                            g.push_block(DisplayBlock::System(format!("Added project: {name}")));
+                            g.touch_transcript();
+                        }
+                    }
+                }
+                TuiCmd::OpenProjectPicker => {
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.open_project_picker();
                     }
                 }
                 TuiCmd::CompleteOnboarding => {
@@ -4030,6 +5103,174 @@ fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
             Some(PermissionMode::BypassPermissions)
         }
         _ => None,
+    }
+}
+
+// ── /import helper: import a Claude Code chat transcript ──────────────────────
+
+/// Locate `~/.claude` (Claude Code's home), honoring HOME then USERPROFILE.
+fn claude_home_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|h| std::path::PathBuf::from(h).join(".claude"))
+}
+
+/// Encode a workspace path the way Claude Code names its project dirs: path
+/// separators and the drive colon become `-` (e.g. `D:\a\b` → `D--a-b`).
+fn encode_claude_project_dir(path: &std::path::Path) -> String {
+    path.to_string_lossy()
+        .chars()
+        .map(|c| match c {
+            '/' | '\\' | ':' => '-',
+            other => other,
+        })
+        .collect()
+}
+
+/// Pull the readable text out of a Claude Code `message` object (content may be
+/// a plain string or an array of parts; only `text` parts are kept).
+fn claude_message_text(msg: Option<&serde_json::Value>) -> String {
+    let Some(msg) = msg else { return String::new() };
+    match msg.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(parts)) => parts
+            .iter()
+            .filter_map(|p| {
+                if p.get("type").and_then(|t| t.as_str()) == Some("text") {
+                    p.get("text").and_then(|t| t.as_str()).map(str::to_string)
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Import the most recent Claude Code chat for `workspace_root`, returning
+/// `(title, transcript_text)`. Skips images/thinking/tool calls; keeps the
+/// user/assistant text exchange, capped to keep context manageable.
+fn import_latest_claude_chat(workspace_root: &std::path::Path) -> Result<(String, String), String> {
+    let home = claude_home_dir().ok_or("could not locate ~/.claude")?;
+    let dir = home
+        .join("projects")
+        .join(encode_claude_project_dir(workspace_root));
+    if !dir.is_dir() {
+        return Err(format!(
+            "no Claude Code chats found for this workspace ({})",
+            dir.display()
+        ));
+    }
+    // Newest .jsonl by modified time.
+    let mut sessions: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(&dir)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().extension().and_then(|x| x.to_str()) == Some("jsonl"))
+        .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+        .collect();
+    sessions.sort_by_key(|(t, _)| *t);
+    let (_, path) = sessions.pop().ok_or("no chat sessions in this workspace")?;
+
+    let content = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    const MAX_CHARS: usize = 16_384;
+    let mut title = String::new();
+    let mut out = String::new();
+    for line in content.lines() {
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("ai-title") => {
+                if let Some(t) = v.get("aiTitle").and_then(|t| t.as_str()) {
+                    title = t.to_string();
+                }
+            }
+            Some(role @ ("user" | "assistant")) => {
+                let text = claude_message_text(v.get("message"));
+                if text.trim().is_empty() {
+                    continue;
+                }
+                let who = if role == "user" { "User" } else { "Assistant" };
+                out.push_str(&format!("{who}: {}\n\n", text.trim()));
+                if out.len() > MAX_CHARS {
+                    out.push_str("[… transcript truncated]");
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    if out.trim().is_empty() {
+        return Err("the latest chat had no importable text messages".into());
+    }
+    if title.is_empty() {
+        title = path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("chat")
+            .to_string();
+    }
+    Ok((title, out))
+}
+
+// ── /ide helpers: read editor context bridge + git working set ────────────────
+
+/// Format IDE context JSON (written by an editor bridge to
+/// `.dcode/ide-context.json`) into a readable context block. Recognized fields:
+/// `active_file`, `cursor.line`, `open_files` (array), `selection`. Returns
+/// `None` when the JSON is unusable or has nothing useful.
+fn format_ide_context(json: &str) -> Option<String> {
+    let v: serde_json::Value = serde_json::from_str(json).ok()?;
+    let mut out = String::from("Current IDE context:\n");
+    let mut has_content = false;
+    if let Some(f) = v.get("active_file").and_then(|x| x.as_str()) {
+        out.push_str(&format!("Active file: {f}"));
+        if let Some(line) = v
+            .get("cursor")
+            .and_then(|c| c.get("line"))
+            .and_then(|l| l.as_u64())
+        {
+            out.push_str(&format!(" (line {line})"));
+        }
+        out.push('\n');
+        has_content = true;
+    }
+    if let Some(files) = v.get("open_files").and_then(|x| x.as_array()) {
+        let names: Vec<String> = files
+            .iter()
+            .filter_map(|f| f.as_str().map(String::from))
+            .collect();
+        if !names.is_empty() {
+            out.push_str(&format!("Open files: {}\n", names.join(", ")));
+            has_content = true;
+        }
+    }
+    if let Some(sel) = v
+        .get("selection")
+        .and_then(|x| x.as_str())
+        .filter(|s| !s.trim().is_empty())
+    {
+        out.push_str(&format!("\nSelected code:\n```\n{sel}\n```\n"));
+        has_content = true;
+    }
+    has_content.then_some(out)
+}
+
+/// The workspace's git working set (paths from `git status --porcelain`),
+/// used as a fallback "what you're working on" when no editor bridge exists.
+fn git_changed_files(ws: &std::path::Path) -> Vec<String> {
+    match std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .current_dir(ws)
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout)
+            .lines()
+            .filter_map(|l| l.get(3..).map(|s| s.trim().to_string()))
+            .filter(|s| !s.is_empty())
+            .collect(),
+        Err(_) => Vec::new(),
     }
 }
 

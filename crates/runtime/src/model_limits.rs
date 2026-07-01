@@ -294,8 +294,11 @@ pub fn detect_context_window(model: &str) -> usize {
         }
     }
 
-    // Fallback
-    32_000
+    // Fallback for unrecognized models. Modern models are almost always
+    // ≥128k; a too-small guess pins the context gauge at 100% and makes the
+    // summarizer over-compact. If this over-estimates a genuinely small model,
+    // the overflow-retry path compacts and retries safely.
+    128_000
 }
 
 /// Detect the max output tokens for a given model name.
@@ -407,7 +410,7 @@ mod tests {
 
     #[test]
     fn fallback() {
-        assert_eq!(detect_context_window("unknown-model-xyz"), 32_000);
+        assert_eq!(detect_context_window("unknown-model-xyz"), 128_000);
     }
 
     #[test]

@@ -69,6 +69,7 @@ pub struct Supervisor {
     hooks: Option<HookRunner>,
     context_manager: ContextManager,
     last_summary_at_tokens: usize,
+    interactive_handle: crate::interactive_exec::InteractiveExecHandle,
 }
 
 /// Configuration for creating a new supervised session.
@@ -109,6 +110,13 @@ impl SupervisorHandle {
 
     pub fn take_approval_pending(&mut self) -> Option<ApprovalPendingMap> {
         self.approval_pending.take()
+    }
+
+    /// Returns a clone of the approval pending map (shared `Arc` reference)
+    /// without taking ownership. Used by `SessionRuntime` to persist the
+    /// reference for cancel-denial after the handle is consumed.
+    pub fn approval_pending_ref(&self) -> Option<ApprovalPendingMap> {
+        self.approval_pending.clone()
     }
 
     pub fn take_question_pending(&mut self) -> Option<QuestionPendingMap> {
@@ -197,6 +205,11 @@ impl Supervisor {
             pty,
             event_tx.clone(),
         )));
+        // PTY-backed interactive exec (answer prompts like sudo passwords, [y/N]).
+        let interactive_tool =
+            crate::interactive_exec::InteractiveExecTool::new(workspace_root.clone());
+        let interactive_handle = interactive_tool.handle();
+        tools.register(Box::new(interactive_tool));
         let question_pending = Arc::new(Mutex::new(HashMap::new()));
         tools.register(Box::new(AskQuestionTool::new(
             event_tx.clone(),
@@ -274,6 +287,7 @@ impl Supervisor {
             hooks: hook_runner,
             context_manager,
             last_summary_at_tokens: 0,
+            interactive_handle,
         };
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
             .await;
@@ -441,6 +455,10 @@ impl Supervisor {
                         message:
                             "Context limit hit during turn. Compacting and retrying automatically."
                                 .to_string(),
+                        context_tokens: self
+                            .context_manager
+                            .stats(&self.agent.messages)
+                            .estimated_tokens as u64,
                     })
                     .await;
             }
@@ -525,6 +543,7 @@ impl Supervisor {
                             "Proactive compaction before turn ({}% full, {} tokens)",
                             stats.usage_percent, stats.estimated_tokens
                         ),
+                        context_tokens: stats.estimated_tokens as u64,
                     })
                     .await;
             }
@@ -565,6 +584,7 @@ impl Supervisor {
                             "Post-turn compaction ({}% full, {} tokens)",
                             stats.usage_percent, stats.estimated_tokens
                         ),
+                        context_tokens: stats.estimated_tokens as u64,
                     })
                     .await;
             }
@@ -600,6 +620,7 @@ impl Supervisor {
                             new_count + messages_to_summarize.len(),
                             new_count
                         ),
+                        context_tokens: new_stats.estimated_tokens as u64,
                     })
                     .await;
             }
@@ -635,6 +656,7 @@ impl Supervisor {
                         "Context summarized: {} messages → {} messages (~{} tokens)",
                         old_count, new_count, new_stats.estimated_tokens
                     ),
+                    context_tokens: new_stats.estimated_tokens as u64,
                 })
                 .await;
         }
@@ -848,6 +870,41 @@ impl Supervisor {
         }
     }
 
+    /// Fork the current session: keep the full conversation but assign a new
+    /// session ID, recording the original as the parent. The original session
+    /// file is left untouched; future saves go to the new ID.
+    pub fn fork_session(&mut self) -> String {
+        let parent = self.session_id.clone();
+        self.session_id = generate_session_id();
+        self.parent_session_id = Some(parent);
+        self.session_name = self.session_name.take().map(|n| format!("{n} (fork)"));
+        self.child_session_ids.clear();
+        self.session_id.clone()
+    }
+
+    /// Snapshot the conversation messages — used by `/side` to start an
+    /// ephemeral aside whose context is thrown away on return.
+    pub fn snapshot_messages(&self) -> Vec<Message> {
+        self.agent.messages.clone()
+    }
+
+    /// Restore messages captured by [`snapshot_messages`], discarding anything
+    /// added since (returning from a `/side` aside to the main thread).
+    pub fn restore_messages(&mut self, messages: Vec<Message>) {
+        self.agent.messages = messages;
+    }
+
+    /// Write a line to an `interactive_exec` session's stdin locally (e.g. the
+    /// user typing a password via `/input`). The text never reaches the model.
+    pub fn interactive_write(&self, id: u32, text: &str) -> Result<(), String> {
+        self.interactive_handle.write_line(id, text)
+    }
+
+    /// List active interactive sessions as `(id, running, command)`.
+    pub fn interactive_sessions(&self) -> Vec<(u32, bool, String)> {
+        self.interactive_handle.sessions()
+    }
+
     /// Reset for a fresh session: new ID, rebuild system prompt, clear lineage and cost.
     pub fn reset_for_new_session(&mut self) {
         self.session_id = generate_session_id();
@@ -915,6 +972,18 @@ impl Supervisor {
         agent.replace_provider(provider);
         self.rebuild_context_manager_sync();
         Ok(())
+    }
+
+    /// Sync `config` and rebuild the system prompt in place (used when config
+    /// changes mid-session, e.g. `/personality`). No provider rebuild.
+    pub fn refresh_system_prompt(&mut self, config: DcodeAiConfig) {
+        self.config = config;
+        let system_prompt = build_system_prompt(
+            &self.config,
+            &self.workspace_root,
+            self.orchestration.as_ref(),
+        );
+        self.agent.replace_system_prompt(system_prompt);
     }
 
     /// Rebuild context_manager from current config (sync, uses configured window target).
@@ -1245,6 +1314,16 @@ pub fn spawn_command_consumer_with_store(
                     }
                 }
                 AgentCommand::Cancel => {
+                    // Deny all pending approvals so the approval handler
+                    // doesn't stay blocked for 300 seconds while cancel
+                    // was already requested.
+                    if let Some(ref p) = approval_pending
+                        && let Ok(mut m) = p.lock()
+                    {
+                        for (_, tx) in m.drain() {
+                            let _ = tx.send(ApprovalVerdict::Denied);
+                        }
+                    }
                     if let Some(tx) = cancel.take() {
                         let _ = tx.send(());
                     }

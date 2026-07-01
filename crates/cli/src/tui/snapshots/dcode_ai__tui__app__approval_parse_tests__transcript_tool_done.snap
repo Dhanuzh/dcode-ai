@@ -1,8 +1,7 @@
 ---
 source: crates/cli/src/tui/app.rs
-assertion_line: 6281
 expression: lines_to_text(&lines)
 ---
-▾ ◉ Bash  [W write] [DONE] 150ms [exit 0]
-            │ hello world
-            │ exit code: 0
+● Bash  150ms
+    hello world
+    exit code: 0

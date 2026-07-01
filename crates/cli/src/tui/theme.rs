@@ -46,23 +46,30 @@ pub struct Theme {
     pub error: Color,
     /// Warning / caution indicator.
     pub warn: Color,
+    /// Primary accent color for branding, header highlights, and emphasis.
+    pub accent: Color,
+    /// Header/banner background color.
+    #[allow(dead_code)]
+    pub header_bg: Color,
 }
 
-/// Built-in dcode-ai dark theme (refined).
+/// Built-in dcode-ai dark theme — sleek dark with cyan/violet accents.
 pub const DEFAULT_DARK: Theme = Theme {
     name: "default",
-    bg: Color::Rgb(18, 20, 26),
-    surface: Color::Rgb(28, 30, 40),
-    border: Color::Rgb(62, 66, 86),
-    mention_bg: Color::Rgb(55, 72, 110),
-    user: Color::Rgb(86, 207, 250),
-    assistant: Color::Rgb(194, 174, 255),
-    tool: Color::Rgb(110, 240, 215),
-    muted: Color::Rgb(114, 121, 148),
-    text: Color::Rgb(246, 249, 255),
-    success: Color::Rgb(96, 230, 145),
-    error: Color::Rgb(250, 130, 130),
-    warn: Color::Rgb(255, 205, 85),
+    bg: Color::Rgb(15, 17, 23),
+    surface: Color::Rgb(22, 25, 35),
+    border: Color::Rgb(48, 54, 74),
+    mention_bg: Color::Rgb(45, 60, 100),
+    user: Color::Rgb(72, 209, 204),
+    assistant: Color::Rgb(180, 160, 255),
+    tool: Color::Rgb(100, 230, 200),
+    muted: Color::Rgb(100, 108, 138),
+    text: Color::Rgb(240, 244, 255),
+    success: Color::Rgb(80, 220, 140),
+    error: Color::Rgb(245, 110, 120),
+    warn: Color::Rgb(250, 200, 80),
+    accent: Color::Rgb(72, 209, 204),
+    header_bg: Color::Rgb(18, 20, 28),
 };
 
 /// Tokyo Night (storm variant).
@@ -80,6 +87,8 @@ pub const TOKYONIGHT: Theme = Theme {
     success: Color::Rgb(158, 206, 106),
     error: Color::Rgb(247, 118, 142),
     warn: Color::Rgb(224, 175, 104),
+    accent: Color::Rgb(125, 207, 255),
+    header_bg: Color::Rgb(26, 27, 38),
 };
 
 /// Catppuccin Mocha.
@@ -97,6 +106,8 @@ pub const CATPPUCCIN: Theme = Theme {
     success: Color::Rgb(166, 227, 161),
     error: Color::Rgb(243, 139, 168),
     warn: Color::Rgb(249, 226, 175),
+    accent: Color::Rgb(137, 180, 250),
+    header_bg: Color::Rgb(30, 30, 46),
 };
 
 /// Gruvbox Dark (medium contrast).
@@ -114,6 +125,8 @@ pub const GRUVBOX: Theme = Theme {
     success: Color::Rgb(184, 187, 38),
     error: Color::Rgb(251, 73, 52),
     warn: Color::Rgb(250, 189, 47),
+    accent: Color::Rgb(131, 165, 152),
+    header_bg: Color::Rgb(40, 40, 40),
 };
 
 /// Dracula.
@@ -131,6 +144,8 @@ pub const DRACULA: Theme = Theme {
     success: Color::Rgb(80, 250, 123),
     error: Color::Rgb(255, 85, 85),
     warn: Color::Rgb(241, 250, 140),
+    accent: Color::Rgb(139, 233, 253),
+    header_bg: Color::Rgb(40, 42, 54),
 };
 
 /// Nord.
@@ -148,6 +163,8 @@ pub const NORD: Theme = Theme {
     success: Color::Rgb(163, 190, 140),
     error: Color::Rgb(191, 97, 106),
     warn: Color::Rgb(235, 203, 139),
+    accent: Color::Rgb(136, 192, 208),
+    header_bg: Color::Rgb(46, 52, 64),
 };
 
 /// Soft light theme.
@@ -165,6 +182,8 @@ pub const LIGHT: Theme = Theme {
     success: Color::Rgb(22, 150, 80),
     error: Color::Rgb(200, 60, 60),
     warn: Color::Rgb(190, 130, 20),
+    accent: Color::Rgb(14, 116, 178),
+    header_bg: Color::Rgb(245, 245, 250),
 };
 
 /// Transparent — no background fill, inherits terminal/window background.
@@ -183,6 +202,8 @@ pub const TRANSPARENT: Theme = Theme {
     success: Color::Rgb(158, 206, 106),
     error: Color::Rgb(247, 118, 142),
     warn: Color::Rgb(224, 175, 104),
+    accent: Color::Rgb(125, 207, 255),
+    header_bg: Color::Reset,
 };
 
 /// All built-in themes, in display order.
@@ -298,6 +319,17 @@ pub fn error() -> Color {
 #[inline]
 pub fn warn() -> Color {
     current().warn
+}
+
+#[inline]
+pub fn accent() -> Color {
+    current().accent
+}
+
+#[inline]
+#[allow(dead_code)]
+pub fn header_bg() -> Color {
+    current().header_bg
 }
 
 #[cfg(test)]

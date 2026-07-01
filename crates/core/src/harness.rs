@@ -67,6 +67,10 @@ pub fn build_system_prompt(
         }
     }
 
+    if let Some(section) = personality_section(config.ui.personality.as_deref()) {
+        sections.push(section);
+    }
+
     if let Some(text) = read_if_exists(&workspace_root.join("AGENTS.md"))
         && !text.trim().is_empty()
     {
@@ -109,6 +113,25 @@ fn read_if_exists(path: &Path) -> Option<String> {
         return None;
     }
     std::fs::read_to_string(path).ok()
+}
+
+/// Communication-style preset injected into the system prompt (`/personality`).
+fn personality_section(personality: Option<&str>) -> Option<String> {
+    let p = personality?.trim().to_ascii_lowercase();
+    let body = match p.as_str() {
+        "concise" | "terse" => {
+            "Communication Style: concise\n- Answer directly with no preamble or filler.\n- Prefer short sentences and tight bullet points.\n- Skip restating the question; lead with the result."
+        }
+        "friendly" | "warm" => {
+            "Communication Style: friendly\n- Be warm, encouraging, and conversational.\n- Briefly acknowledge the user's intent before diving in.\n- Stay professional; keep it genuine, not effusive."
+        }
+        "technical" | "detailed" => {
+            "Communication Style: technical\n- Be precise and thorough; use exact names, types, and paths.\n- Explain trade-offs and edge cases when relevant.\n- Cite file:line references where useful."
+        }
+        "default" | "balanced" => return None,
+        _ => return None,
+    };
+    Some(body.to_string())
 }
 
 fn permission_mode_section(mode: PermissionMode) -> Option<String> {

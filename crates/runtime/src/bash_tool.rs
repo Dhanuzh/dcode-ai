@@ -36,7 +36,11 @@ impl ToolExecutor for RuntimeBashTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "execute_bash".into(),
-            description: "Execute a shell command in the workspace".into(),
+            description: "Execute a NON-INTERACTIVE shell command in the workspace. Stdin is \
+detached, so any command that prompts for input — a `sudo` password, a `[y/N]` confirmation, an \
+installer wizard, a REPL — will fail or time out here. For those, use the `interactive_exec` \
+tool instead (it runs in a real PTY and lets the user answer prompts)."
+                .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -81,16 +85,30 @@ impl ToolExecutor for RuntimeBashTool {
             .exec_streaming(command, timeout_secs, line_tx)
             .await
         {
-            Ok(out) => ToolResult {
-                call_id: call.id.clone(),
-                success: out.exit_code == 0,
-                output: if out.stdout.is_empty() {
+            Ok(out) => {
+                let success = out.exit_code == 0;
+                let mut output = if out.stdout.is_empty() {
                     format!("Command exited with status {}", out.exit_code)
                 } else {
                     out.stdout
-                },
-                error: None,
-            },
+                };
+                // If the command failed because it needed interactive input
+                // (stdin is detached here), point the model at the PTY-backed
+                // interactive_exec tool that can answer such prompts.
+                if !success && looks_interactive(&output) {
+                    output.push_str(
+                        "\n\n[hint] This command appears to need interactive input (e.g. a \
+password or confirmation). Re-run it with the `interactive_exec` tool, which runs in a real \
+terminal and lets you answer prompts.",
+                    );
+                }
+                ToolResult {
+                    call_id: call.id.clone(),
+                    success,
+                    output,
+                    error: None,
+                }
+            }
             Err(err) => ToolResult {
                 call_id: call.id.clone(),
                 success: false,
@@ -99,4 +117,21 @@ impl ToolExecutor for RuntimeBashTool {
             },
         }
     }
+}
+
+/// Heuristic: does this command output indicate it failed because it needed an
+/// interactive terminal (so the agent should retry via `interactive_exec`)?
+fn looks_interactive(output: &str) -> bool {
+    let lower = output.to_ascii_lowercase();
+    [
+        "a terminal is required",
+        "no tty",
+        "askpass",
+        "a password is required",
+        "sudo: a password",
+        "must be run from a terminal",
+        "not a terminal",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }

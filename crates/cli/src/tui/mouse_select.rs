@@ -38,6 +38,7 @@ impl Selection {
         }
     }
 
+    #[allow(dead_code)]
     pub fn contains_row(&self, row: u16) -> bool {
         let (start, end) = self.ordered();
         row >= start.row && row <= end.row
@@ -116,6 +117,7 @@ pub fn extract_selected_text(rows: &[String], gutters: &[u16], selection: &Selec
 /// - the end row is highlighted from column 0 to `end.col` (inclusive)
 ///
 /// Selection coordinates are in buffer space (absolute visual rows).
+#[allow(dead_code)]
 pub fn apply_selection_highlight<'a>(
     lines: Vec<Line<'a>>,
     selection: &Selection,
@@ -162,6 +164,7 @@ pub fn apply_selection_highlight<'a>(
 
 /// Rebuild a span list, applying `highlight` style only to characters in
 /// `[col_start, col_end)` (column indices into the concatenated text).
+#[allow(dead_code)]
 fn highlight_span_range<'a>(
     spans: Vec<Span<'a>>,
     col_start: usize,

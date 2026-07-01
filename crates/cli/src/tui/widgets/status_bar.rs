@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::tui::theme;
 use ratatui::{
     buffer::Buffer,
@@ -14,25 +16,16 @@ pub struct StatusBar<'a> {
     pub elapsed_secs: u64,
     pub mcp_servers: usize,
     pub sandbox_status: Option<bool>,
-    /// Estimated current context-window occupancy, for the ctx gauge.
     pub context_tokens: u64,
-    /// Cumulative session token counts and estimated cost.
     pub tokens_in: u64,
     pub tokens_out: u64,
     pub cost_usd: f64,
     pub permission_bypass: bool,
-    /// Latency of the last completed assistant turn (ms), shown as `↩ 1.2s`.
     pub last_turn_latency_ms: Option<u64>,
-    /// Output tokens streamed in the current turn (live counter while busy).
-    /// When non-zero and the agent is busy, shown as `~Nt` in the status bar.
     pub turn_output_tokens: u64,
-    /// True after context has been compacted at least once this session.
     pub context_compacted: bool,
-    /// Pending notification count (events while scrolled away).
     pub notification_count: u16,
-    /// Effort level label (e.g. "HIGH", "LOW").
     pub effort_label: &'a str,
-    /// True when context compaction is actively running.
     pub compaction_in_progress: bool,
 }
 
@@ -42,128 +35,178 @@ impl Widget for StatusBar<'_> {
             return;
         }
 
-        let sep = Span::styled(" │ ", Style::default().fg(theme::border()));
-        let model_display = truncate_chars(self.model, 20);
-        let (_busy_icon, busy_color) = busy_badge(self.busy_label);
+        for x in area.x..area.x + area.width {
+            for y in area.y..area.y + area.height {
+                buf[(x, y)].set_style(Style::default().bg(theme::surface()));
+            }
+        }
+
+        let dot_sep = Span::styled(
+            " · ",
+            Style::default().fg(theme::border()).bg(theme::surface()),
+        );
+
+        let (status_icon, status_color) = busy_badge(self.busy_label);
+        let model_display = truncate_chars(self.model, 28);
         let version = env!("CARGO_PKG_VERSION");
 
-        let mut spans = vec![
+        // ── Line 1: Status + Model + Agent + Live Info ──
+        let mut line1 = vec![
             Span::styled(
-                // The indicator text already carries its own state glyph, so no
-                // extra leading dot here.
-                format!(" {} ", self.busy_label.trim().to_ascii_uppercase()),
-                Style::default().fg(busy_color).add_modifier(Modifier::BOLD),
+                format!(" {status_icon} "),
+                Style::default()
+                    .fg(status_color)
+                    .bg(theme::surface())
+                    .add_modifier(Modifier::BOLD),
             ),
-            sep.clone(),
             Span::styled(
-                format!(" /{} ", model_display),
-                Style::default().fg(provider_model_color(self.model)),
+                self.busy_label.trim().to_ascii_uppercase(),
+                Style::default()
+                    .fg(status_color)
+                    .bg(theme::surface())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            dot_sep.clone(),
+            Span::styled(
+                model_display,
+                Style::default()
+                    .fg(provider_model_color(self.model))
+                    .bg(theme::surface()),
             ),
         ];
+
         if !self.effort_label.is_empty() {
-            spans.push(Span::styled(
-                format!(" [{}] ", self.effort_label),
+            line1.push(Span::styled(
+                format!(" [{}]", self.effort_label),
                 Style::default()
                     .fg(theme::warn())
+                    .bg(theme::surface())
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        spans.push(sep.clone());
-        spans.push(Span::styled(
-            format!(" {} ", truncate_chars(self.agent, 16)),
-            Style::default().fg(theme::assistant()),
-        ));
 
-        spans.push(sep.clone());
-        spans.push(Span::styled(
-            format!(" {}s ", self.elapsed_secs),
-            Style::default().fg(theme::muted()),
-        ));
+        if !self.agent.is_empty() && self.agent != "default" {
+            line1.push(dot_sep.clone());
+            line1.push(Span::styled(
+                truncate_chars(self.agent, 16),
+                Style::default().fg(theme::assistant()).bg(theme::surface()),
+            ));
+        }
 
-        // Live per-turn token counter while streaming; latency badge when idle.
         if self.turn_output_tokens > 0 && !self.busy_label.eq_ignore_ascii_case("idle") {
-            spans.push(sep.clone());
-            spans.push(Span::styled(
-                format!(" ~{}t ", self.turn_output_tokens),
-                Style::default().fg(theme::assistant()),
+            line1.push(dot_sep.clone());
+            line1.push(Span::styled(
+                format!("~{}t", self.turn_output_tokens),
+                Style::default().fg(theme::accent()).bg(theme::surface()),
             ));
         } else if let Some(latency_ms) = self.last_turn_latency_ms {
-            spans.push(sep.clone());
+            line1.push(dot_sep.clone());
             let label = if latency_ms < 1000 {
-                format!(" ↩ {}ms ", latency_ms)
+                format!("{}ms", latency_ms)
             } else {
-                format!(" ↩ {:.1}s ", latency_ms as f64 / 1000.0)
+                format!("{:.1}s", latency_ms as f64 / 1000.0)
             };
-            spans.push(Span::styled(label, Style::default().fg(theme::muted())));
+            line1.push(Span::styled(
+                format!("↩ {label}"),
+                Style::default().fg(theme::muted()).bg(theme::surface()),
+            ));
         }
 
         if self.mcp_servers > 0 {
-            spans.push(sep.clone());
-            spans.push(Span::styled(
-                format!(" ◇mcp {} ", self.mcp_servers),
-                Style::default().fg(theme::tool()),
+            line1.push(dot_sep.clone());
+            line1.push(Span::styled(
+                format!("◇{}", self.mcp_servers),
+                Style::default().fg(theme::tool()).bg(theme::surface()),
             ));
         }
 
         if let Some(sandboxed) = self.sandbox_status {
-            spans.push(sep.clone());
-            let (icon, label, color) = if sandboxed {
-                ("▣", "sandboxed", theme::success())
+            line1.push(dot_sep.clone());
+            let (icon, color) = if sandboxed {
+                ("▣", theme::success())
             } else {
-                ("△", "unsandboxed", theme::warn())
+                ("△", theme::warn())
             };
-            spans.push(Span::styled(
-                format!(" {icon} {label} "),
-                Style::default().fg(color).add_modifier(Modifier::BOLD),
-            ));
-        }
-
-        // (context gauge, tokens, badges, version moved to line 2 below)
-
-        // ── Line 2: tokens, cost, context gauge, badges ──────────
-        let mut line2 = Vec::new();
-        if self.compaction_in_progress {
-            line2.push(Span::styled(
-                " ⟳ compacting context… ",
+            line1.push(Span::styled(
+                icon,
                 Style::default()
-                    .fg(theme::warn())
+                    .fg(color)
+                    .bg(theme::surface())
                     .add_modifier(Modifier::BOLD),
             ));
-            line2.push(sep.clone());
         }
+
+        // Right-align: elapsed time
+        {
+            let elapsed = format!(" {}s ", self.elapsed_secs);
+            let used_w: usize = line1.iter().map(|s| s.content.len()).sum();
+            let remaining = (area.width as usize).saturating_sub(used_w + elapsed.len());
+            if remaining > 0 {
+                line1.push(Span::styled(
+                    " ".repeat(remaining),
+                    Style::default().bg(theme::surface()),
+                ));
+            }
+            line1.push(Span::styled(
+                elapsed,
+                Style::default().fg(theme::muted()).bg(theme::surface()),
+            ));
+        }
+
+        // ── Line 2: Tokens + Cost + Context gauge + Badges ──
+        let mut line2 = Vec::new();
+
+        if self.compaction_in_progress {
+            line2.push(Span::styled(
+                " ⟳ compacting… ",
+                Style::default()
+                    .fg(theme::warn())
+                    .bg(theme::surface())
+                    .add_modifier(Modifier::BOLD),
+            ));
+            line2.push(dot_sep.clone());
+        }
+
         if self.context_tokens > 0 {
             line2.extend(context_gauge_spans(self.context_tokens, self.model));
         }
+
         if self.tokens_in > 0 || self.tokens_out > 0 {
             line2.push(Span::styled(
                 format!(
-                    " {} in / {} out · ${:.4} ",
-                    self.tokens_in, self.tokens_out, self.cost_usd
+                    " {}↓ {}↑ · ${:.4}",
+                    format_tokens(self.tokens_in),
+                    format_tokens(self.tokens_out),
+                    self.cost_usd
                 ),
-                Style::default().fg(theme::muted()),
+                Style::default().fg(theme::muted()).bg(theme::surface()),
             ));
         }
+
         if self.context_compacted {
-            line2.push(sep.clone());
+            line2.push(dot_sep.clone());
             line2.push(Span::styled(
-                " compacted ",
+                "compacted",
                 Style::default()
                     .fg(theme::warn())
+                    .bg(theme::surface())
                     .add_modifier(Modifier::BOLD),
             ));
         }
+
         if self.notification_count > 0 {
-            line2.push(sep.clone());
+            line2.push(dot_sep.clone());
             line2.push(Span::styled(
-                format!(" ↓{} new ", self.notification_count),
+                format!("↓{} new", self.notification_count),
                 Style::default()
                     .fg(Color::Black)
                     .bg(theme::warn())
                     .add_modifier(Modifier::BOLD),
             ));
         }
+
         if self.permission_bypass {
-            line2.push(sep.clone());
+            line2.push(dot_sep.clone());
             line2.push(Span::styled(
                 " BYPASS ",
                 Style::default()
@@ -172,37 +215,55 @@ impl Widget for StatusBar<'_> {
                     .add_modifier(Modifier::BOLD),
             ));
         }
-        line2.push(sep);
-        line2.push(Span::styled(
-            format!(" v{} ", version),
-            Style::default().fg(theme::muted()),
-        ));
 
-        // Render two lines into the 2-row area.
+        // Right-align: version
+        {
+            let ver = format!(" v{version} ");
+            let used_w: usize = line2.iter().map(|s| s.content.len()).sum();
+            let remaining = (area.width as usize).saturating_sub(used_w + ver.len());
+            if remaining > 0 {
+                line2.push(Span::styled(
+                    " ".repeat(remaining),
+                    Style::default().bg(theme::surface()),
+                ));
+            }
+            line2.push(Span::styled(
+                ver,
+                Style::default().fg(theme::muted()).bg(theme::surface()),
+            ));
+        }
+
         if area.height >= 2 {
             let row1 = Rect::new(area.x, area.y, area.width, 1);
             let row2 = Rect::new(area.x, area.y + 1, area.width, 1);
-            Line::from(spans).render(row1, buf);
+            Line::from(line1).render(row1, buf);
             Line::from(line2).render(row2, buf);
         } else {
-            // Fallback: squeeze everything into one line.
-            spans.extend(line2);
-            Line::from(spans).render(area, buf);
+            line1.extend(line2);
+            Line::from(line1).render(area, buf);
         }
     }
 }
 
-/// A 5-segment context-window gauge (`ctx ▰▰▰▱▱ 62%`), colored by fullness:
-/// green < 70%, amber < 90%, red ≥ 90%. Empty if the model window is unknown.
+fn format_tokens(n: u64) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}k", n as f64 / 1_000.0)
+    } else {
+        n.to_string()
+    }
+}
+
 pub fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> {
     let window = dcode_ai_runtime::model_limits::detect_context_window(model) as u64;
     if window == 0 {
         return Vec::new();
     }
     let pct = ((used_tokens.min(window) as f64 / window as f64) * 100.0).round() as u64;
-    const SEGS: usize = 5;
+    const SEGS: usize = 8;
     let filled = ((pct as usize * SEGS) / 100).min(SEGS);
-    let bar: String = "▰".repeat(filled) + &"▱".repeat(SEGS - filled);
+    let bar: String = "█".repeat(filled) + &"░".repeat(SEGS - filled);
     let color = if pct >= 90 {
         theme::error()
     } else if pct >= 70 {
@@ -210,33 +271,39 @@ pub fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> 
     } else {
         theme::success()
     };
-    let sep = Span::styled(" │ ", Style::default().fg(theme::border()));
+    let dot_sep = Span::styled(
+        " · ",
+        Style::default().fg(theme::border()).bg(theme::surface()),
+    );
     vec![
-        Span::styled(format!(" ctx {bar} {pct}% "), Style::default().fg(color)),
-        sep,
+        Span::styled(
+            format!(" {bar} {pct}%"),
+            Style::default().fg(color).bg(theme::surface()),
+        ),
+        dot_sep,
     ]
 }
 
 fn provider_model_color(model: &str) -> Color {
     let m = model.to_ascii_lowercase();
     if m.contains("claude") || m.contains("fable") {
-        Color::Rgb(204, 139, 72) // Anthropic amber
+        Color::Rgb(204, 139, 72)
     } else if m.starts_with("gpt")
         || m.starts_with("o1")
         || m.starts_with("o3")
         || m.starts_with("o4")
     {
-        Color::Rgb(116, 184, 134) // OpenAI green
+        Color::Rgb(116, 184, 134)
     } else if m.contains("gemini") {
-        Color::Rgb(102, 153, 255) // Google blue
+        Color::Rgb(102, 153, 255)
     } else if m.contains("deepseek") {
-        Color::Rgb(85, 170, 255) // DeepSeek light blue
+        Color::Rgb(85, 170, 255)
     } else if m.contains("minimax") {
-        Color::Rgb(255, 153, 51) // MiniMax orange
+        Color::Rgb(255, 153, 51)
     } else if m.contains("mistral") || m.contains("codestral") {
-        Color::Rgb(255, 119, 51) // Mistral orange-red
+        Color::Rgb(255, 119, 51)
     } else if m.contains("llama") || m.contains("meta") {
-        Color::Rgb(51, 153, 255) // Meta blue
+        Color::Rgb(51, 153, 255)
     } else {
         theme::text()
     }
@@ -247,11 +314,15 @@ fn busy_badge(label: &str) -> (&'static str, Color) {
     if lower.contains("error") {
         ("✖", theme::error())
     } else if lower.contains("idle") {
-        ("•", theme::muted())
+        ("●", theme::muted())
     } else if lower.contains("wait") || lower.contains("tool") {
         ("◐", theme::warn())
+    } else if lower.contains("stream") {
+        ("◉", theme::success())
+    } else if lower.contains("think") {
+        ("◎", theme::accent())
     } else {
-        ("•", theme::success())
+        ("●", theme::success())
     }
 }
 
@@ -278,20 +349,15 @@ mod tests {
 
     #[test]
     fn context_gauge_shows_percentage_and_label() {
-        // gpt-4o has a known 128k window in model_limits.
         let empty = gauge_text(0, "gpt-4o");
-        assert!(empty.contains("ctx"), "got: {empty}");
         assert!(empty.contains("0%"), "got: {empty}");
 
         let full = gauge_text(128_000, "gpt-4o");
         assert!(full.contains("100%"), "got: {full}");
-        // Full bar uses only filled segments.
-        assert!(full.contains("▰▰▰▰▰"), "got: {full}");
     }
 
     #[test]
     fn context_gauge_clamps_overflow() {
-        // Beyond the window still caps at 100%.
         let over = gauge_text(10_000_000, "gpt-4o");
         assert!(over.contains("100%"), "got: {over}");
     }

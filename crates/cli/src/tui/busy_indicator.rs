@@ -1,4 +1,5 @@
 //! Advanced animated busy indicator (Claude-style).
+#![allow(dead_code)]
 
 use dcode_ai_common::event::BusyState;
 use std::time::Instant;

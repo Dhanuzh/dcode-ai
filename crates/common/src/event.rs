@@ -170,6 +170,10 @@ pub enum AgentEvent {
     ContextCompaction {
         phase: String,
         message: String,
+        /// Current estimated context tokens at this point, so the UI gauge can
+        /// reflect the post-compaction size immediately (not just on next turn).
+        #[serde(default)]
+        context_tokens: u64,
     },
     /// Busy state transition (for animated indicator rendering).
     BusyStateChanged {

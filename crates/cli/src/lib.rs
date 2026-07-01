@@ -9,3 +9,4 @@ pub mod slash_commands;
 pub mod stream;
 pub mod tool_ui;
 pub mod tui;
+pub mod update_check;

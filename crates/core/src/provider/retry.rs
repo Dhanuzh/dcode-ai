@@ -10,8 +10,11 @@ use std::time::Duration;
 
 use super::ProviderError;
 
-/// Default attempt budget for a transient provider request (1 try + 2 retries).
-pub const DEFAULT_MAX_ATTEMPTS: u32 = 3;
+/// Default attempt budget for a transient provider request (1 try + 4 retries).
+/// Only rate-limit (429) errors retry — non-retryable errors still fail on the
+/// first attempt — so a higher budget just gives free-tier rolling limits more
+/// chances to clear without affecting auth/model errors.
+pub const DEFAULT_MAX_ATTEMPTS: u32 = 5;
 
 /// Exponential backoff floor for the Nth attempt: 250ms, 500ms, 1s, … capped 8s.
 fn base_backoff_ms(attempt: u32) -> u64 {

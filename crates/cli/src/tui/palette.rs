@@ -43,6 +43,35 @@ pub(crate) const PALETTE_CATALOG: &[PaletteRow] = &[
         label: "Export session",
         shortcut: "",
     },
+    PaletteRow::Entry {
+        label: "Rename session",
+        shortcut: "",
+    },
+    PaletteRow::Entry {
+        label: "Fork session",
+        shortcut: "",
+    },
+    PaletteRow::Entry {
+        label: "Delete session",
+        shortcut: "",
+    },
+    PaletteRow::Entry {
+        label: "Usage",
+        shortcut: "",
+    },
+    PaletteRow::Section("Code"),
+    PaletteRow::Entry {
+        label: "Full transcript",
+        shortcut: "ctrl+x v",
+    },
+    PaletteRow::Entry {
+        label: "Show diff",
+        shortcut: "",
+    },
+    PaletteRow::Entry {
+        label: "Copy last response",
+        shortcut: "",
+    },
     PaletteRow::Section("Prompt"),
     PaletteRow::Entry {
         label: "Skills",
@@ -54,6 +83,10 @@ pub(crate) const PALETTE_CATALOG: &[PaletteRow] = &[
     },
     PaletteRow::Entry {
         label: "Toggle thinking",
+        shortcut: "",
+    },
+    PaletteRow::Entry {
+        label: "Personality",
         shortcut: "",
     },
     PaletteRow::Section("Provider"),
@@ -106,6 +139,19 @@ pub(crate) const PALETTE_CATALOG: &[PaletteRow] = &[
         label: "Clear screen",
         shortcut: "ctrl+l",
     },
+    PaletteRow::Section("Projects"),
+    PaletteRow::Entry {
+        label: "Switch project",
+        shortcut: "ctrl+x p",
+    },
+    PaletteRow::Entry {
+        label: "Add project",
+        shortcut: "",
+    },
+    PaletteRow::Entry {
+        label: "List projects",
+        shortcut: "",
+    },
     PaletteRow::Entry {
         label: "Exit",
         shortcut: "ctrl+x q",
@@ -121,9 +167,14 @@ pub(crate) fn palette_command_for_label(label: &str) -> &'static str {
         "New session" => "/new",
         "Compact" => "/compact",
         "Export session" => "/export",
+        "Rename session" => "/rename ",
+        "Fork session" => "/fork",
+        "Delete session" => "/delete",
+        "Usage" => "/usage",
         "Skills" => "/skills",
         "Agent profile" => "/agent",
         "Toggle thinking" => "/thinking",
+        "Personality" => "/personality",
         "Switch provider" => "/provider",
         "View status" => "/status",
         "Config" => "/config",
@@ -135,6 +186,12 @@ pub(crate) fn palette_command_for_label(label: &str) -> &'static str {
         "Logs" => "/logs",
         "MCP servers" => "/mcp",
         "Clear screen" => "/clear",
+        "Full transcript" => "/transcript",
+        "Show diff" => "/diff",
+        "Copy last response" => "/copy",
+        "Switch project" => "/project switch",
+        "Add project" => "/project add ",
+        "List projects" => "/project list",
         "Exit" => "/exit",
         _ => "/help",
     }

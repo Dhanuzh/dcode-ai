@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::tui::widgets::{
     child_activity_overlay::ChildActivityOverlay, queue_preview::QueuePreview,
     status_bar::StatusBar,
@@ -6,6 +8,7 @@ use ratatui::layout::{Constraint, Layout, Rect};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ViewportLayout {
+    pub header: Rect,
     pub transcript: Rect,
     pub status: Rect,
     pub slash: Option<Rect>,
@@ -27,42 +30,47 @@ pub fn layout(
 
     if slash_h > 0 {
         let c = Layout::vertical([
-            Constraint::Min(4),
+            Constraint::Min(1),
             Constraint::Length(activity_h),
             Constraint::Length(queue_h),
             Constraint::Length(slash_h),
             Constraint::Length(input_h),
-            Constraint::Length(2),
-            Constraint::Length(2),
         ])
         .split(area);
         ViewportLayout {
+            header: Rect::ZERO,
             transcript: c[0],
             activity_overlay: c[1],
             queue_preview: c[2],
             slash: Some(c[3]),
             input: c[4],
-            status: c[5],
+            status: Rect::ZERO,
         }
     } else {
         let c = Layout::vertical([
-            Constraint::Min(4),
+            Constraint::Min(1),
             Constraint::Length(activity_h),
             Constraint::Length(queue_h),
             Constraint::Length(input_h),
-            Constraint::Length(2),
-            Constraint::Length(2),
         ])
         .split(area);
         ViewportLayout {
+            header: Rect::ZERO,
             transcript: c[0],
             activity_overlay: c[1],
             queue_preview: c[2],
             input: c[3],
-            status: c[4],
             slash: None,
+            status: Rect::ZERO,
         }
     }
+}
+
+pub fn render_header(
+    _frame: &mut ratatui::Frame<'_>,
+    _area: Rect,
+    _header: crate::tui::widgets::header_banner::HeaderBanner<'_>,
+) {
 }
 
 pub fn render_queue_preview(

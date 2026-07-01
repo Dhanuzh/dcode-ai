@@ -56,6 +56,10 @@ pub struct SessionRuntime {
     handle: Option<SupervisorHandle>,
     question_pending: Option<QuestionPendingMap>,
     config: DcodeAiConfig,
+    /// Shared map of pending tool-call approvals. Stored so `request_cancel()`
+    /// can deny all pending approvals immediately instead of letting the
+    /// approval handler block for up to 300 seconds.
+    ipc_approval_pending: Option<ApprovalPendingMap>,
 }
 
 impl SessionRuntime {
@@ -94,7 +98,9 @@ impl SessionRuntime {
     }
 
     pub fn take_ipc_approval_pending(&mut self) -> Option<ApprovalPendingMap> {
-        self.handle.as_mut()?.take_approval_pending()
+        let map = self.handle.as_mut()?.take_approval_pending();
+        self.ipc_approval_pending = map.clone();
+        map
     }
 
     /// Pending `ask_question` resolvers (same map the runtime tool waits on).
@@ -173,6 +179,15 @@ impl SessionRuntime {
 
     pub fn request_cancel(&self) {
         self.supervisor.request_cancel();
+        // Also deny all pending approvals so the approval handler doesn't
+        // block for up to 300 seconds while the cancel flag goes unchecked.
+        if let Some(ref map) = self.ipc_approval_pending
+            && let Ok(mut m) = map.lock()
+        {
+            for (_, tx) in m.drain() {
+                let _ = tx.send(ApprovalVerdict::Denied);
+            }
+        }
     }
 
     pub fn cancel_handle(&self) -> Arc<AtomicBool> {
@@ -210,6 +225,12 @@ impl SessionRuntime {
         self.supervisor.apply_dcode_ai_config(config.clone())?;
         self.config = config;
         Ok(())
+    }
+
+    /// Sync the current config into the supervisor and rebuild the system prompt
+    /// in place (e.g. after `/personality`). No provider rebuild.
+    pub fn refresh_system_prompt(&mut self) {
+        self.supervisor.refresh_system_prompt(self.config.clone());
     }
 
     pub fn snapshot(&self) -> SessionSnapshot {
@@ -260,6 +281,37 @@ impl SessionRuntime {
         Ok(())
     }
 
+    /// Fork the current session: save the original, then continue with the same
+    /// conversation under a new session ID. Returns the new ID.
+    pub async fn fork_session(&mut self) -> Result<String, String> {
+        self.supervisor.save().await?;
+        let new_id = self.supervisor.fork_session();
+        self.supervisor.save().await?;
+        Ok(new_id)
+    }
+
+    /// Snapshot conversation messages for an ephemeral `/side` aside.
+    pub fn snapshot_messages(&self) -> Vec<dcode_ai_common::message::Message> {
+        self.supervisor.snapshot_messages()
+    }
+
+    /// Restore messages captured by [`Self::snapshot_messages`], discarding the
+    /// aside (returning to the main thread).
+    pub fn restore_messages(&mut self, messages: Vec<dcode_ai_common::message::Message>) {
+        self.supervisor.restore_messages(messages);
+    }
+
+    /// Write a line to an interactive_exec session's stdin (local — the text
+    /// never reaches the model). Used by `/input` for e.g. sudo passwords.
+    pub fn interactive_write(&self, id: u32, text: &str) -> Result<(), String> {
+        self.supervisor.interactive_write(id, text)
+    }
+
+    /// List active interactive sessions as `(id, running, command)`.
+    pub fn interactive_sessions(&self) -> Vec<(u32, bool, String)> {
+        self.supervisor.interactive_sessions()
+    }
+
     /// Save the current session and swap in a resumed one in-process.
     pub async fn resume_in_process(
         &mut self,
@@ -268,10 +320,14 @@ impl SessionRuntime {
         interactive_approvals: bool,
         approval_handler: Option<Arc<dyn dcode_ai_core::approval::ApprovalHandler>>,
     ) -> Result<(), ProviderError> {
+        // Preserve session-scoped allow patterns (e.g. startup-approve-all `*`)
+        // so they survive across session resume boundaries.
+        let old_allow = self.supervisor.agent().approval.session_allow.clone();
+
         let _ = self.supervisor.save().await;
         self.supervisor.finish(EndReason::Completed).await;
 
-        let new_runtime = build_resumed_session_runtime(
+        let mut new_runtime = build_resumed_session_runtime(
             self.config.clone(),
             &self.supervisor.workspace_root.clone(),
             safe_mode,
@@ -280,6 +336,66 @@ impl SessionRuntime {
             approval_handler,
         )
         .await?;
+
+        // Carry over session-scoped allow patterns from the old supervisor.
+        for pattern in old_allow {
+            new_runtime.add_session_allow_pattern(pattern);
+        }
+
+        // Refresh the approval-pending map reference so the new supervisor's
+        // pending approvals can be resolved on cancel.
+        new_runtime.ipc_approval_pending = new_runtime
+            .handle
+            .as_mut()
+            .and_then(|h| h.take_approval_pending());
+
+        *self = new_runtime;
+        Ok(())
+    }
+
+    /// Save the current session, then re-root the whole runtime to a different
+    /// workspace directory (rebuilds tools/provider/MCP) and start a fresh
+    /// session there. Used by `/project` switching.
+    pub async fn reroot_in_process(
+        &mut self,
+        workspace_root: &Path,
+        safe_mode: bool,
+        interactive_approvals: bool,
+        approval_handler: Option<Arc<dyn dcode_ai_core::approval::ApprovalHandler>>,
+    ) -> Result<(), ProviderError> {
+        // Preserve session-scoped allow patterns across the reroot.
+        let old_allow = self.supervisor.agent().approval.session_allow.clone();
+
+        let _ = self.supervisor.save().await;
+        self.supervisor.finish(EndReason::Completed).await;
+
+        // Re-layer config for the target workspace (global → project
+        // `.dcode.toml` → local) so each project picks up its own settings.
+        // Fall back to the current config if the new workspace has none.
+        let config = DcodeAiConfig::load_for_workspace(workspace_root)
+            .unwrap_or_else(|_| self.config.clone());
+
+        let mut new_runtime = build_session_runtime(
+            config,
+            workspace_root,
+            safe_mode,
+            interactive_approvals,
+            None,
+            approval_handler,
+            None,
+        )
+        .await?;
+
+        // Carry over session-scoped allow patterns.
+        for pattern in old_allow {
+            new_runtime.add_session_allow_pattern(pattern);
+        }
+
+        // Refresh the approval-pending map reference for cancel.
+        new_runtime.ipc_approval_pending = new_runtime
+            .handle
+            .as_mut()
+            .and_then(|h| h.take_approval_pending());
 
         *self = new_runtime;
         Ok(())
@@ -310,11 +426,13 @@ pub async fn build_session_runtime(
 
     let mut handle = supervisor.take_handle();
     let question_pending = handle.take_question_pending();
+    let approval_pending = handle.approval_pending_ref();
     Ok(SessionRuntime {
         supervisor,
         handle: Some(handle),
         question_pending,
         config,
+        ipc_approval_pending: approval_pending,
     })
 }
 
@@ -337,10 +455,12 @@ pub async fn build_resumed_session_runtime(
     .await?;
     let mut handle = supervisor.take_handle();
     let question_pending = handle.take_question_pending();
+    let approval_pending = handle.approval_pending_ref();
     Ok(SessionRuntime {
         supervisor,
         handle: Some(handle),
         question_pending,
         config,
+        ipc_approval_pending: approval_pending,
     })
 }

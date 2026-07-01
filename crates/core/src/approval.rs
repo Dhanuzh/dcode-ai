@@ -178,6 +178,7 @@ impl ApprovalPolicy {
                 | "web_search"
                 | "fetch_url"
                 | "ask_question"
+                | "update_plan"
         );
         let file_edit = matches!(
             tool_name,
@@ -198,7 +199,7 @@ impl ApprovalPolicy {
             PermissionMode::BypassPermissions => {
                 // Keep bypass permissive for workspace reads/edits, but require
                 // one explicit approval for shell execution per session.
-                if tool_name == "execute_bash" && !explicitly_allowed {
+                if matches!(tool_name, "execute_bash" | "run_background") && !explicitly_allowed {
                     PermissionTier::Ask
                 } else {
                     PermissionTier::Allowed

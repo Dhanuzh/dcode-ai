@@ -12,21 +12,8 @@ pub(crate) fn layout_chunks(
     activity_total: usize,
 ) -> (Rect, Rect, Option<Rect>, Rect) {
     let vp = crate::tui::tui_viewport::layout(area, slash_h, input_h, queue_total, activity_total);
+    // Return transcript rect only (callers don't need header separately from here).
     (vp.transcript, vp.status, vp.slash, vp.input)
-}
-
-pub(crate) fn sidebar_fit(s: &str, max_chars: usize) -> String {
-    let t = s.trim();
-    if t.chars().count() <= max_chars {
-        t.to_string()
-    } else {
-        format!(
-            "{}…",
-            t.chars()
-                .take(max_chars.saturating_sub(1))
-                .collect::<String>()
-        )
-    }
 }
 
 pub(crate) fn layout_with_sidebar(area: Rect, _sidebar_open: bool) -> (Rect, Option<Rect>) {

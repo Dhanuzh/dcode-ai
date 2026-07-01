@@ -52,21 +52,24 @@ impl SlashEntry {
         }
     }
 
-    pub(crate) fn display_text(&self) -> String {
+    /// One-line description shown beside the command in the popup (Codex-style).
+    pub(crate) fn description_text(&self) -> String {
         match self {
-            SlashEntry::Command(s) => s.to_string(),
+            SlashEntry::Command(s) => {
+                crate::slash_commands::slash_command_description(s).to_string()
+            }
             SlashEntry::Skill {
-                command,
                 description,
                 source,
+                ..
             } => {
                 let tag = match source {
-                    SkillSource::AgentsMd => " (AGENTS.md)",
-                    SkillSource::FileSystem => " (skill dir)",
+                    SkillSource::AgentsMd => "AGENTS.md skill",
+                    SkillSource::FileSystem => "skill",
                 };
                 match description {
-                    Some(desc) => format!("/{command:<20} — {desc}{tag}"),
-                    None => format!("/{command}{tag}"),
+                    Some(desc) => desc.clone(),
+                    None => tag.to_string(),
                 }
             }
         }
@@ -81,6 +84,9 @@ pub(crate) fn collect_skill_entries(
     match SkillCatalog::discover(workspace_root, skill_dirs) {
         Ok(skills) => skills
             .into_iter()
+            // Hide the auto-generated AGENTS.md "learned-*" memory skills —
+            // they clutter the command list and aren't user-invokable commands.
+            .filter(|s| !s.command.starts_with("learned-"))
             .map(|s| SlashEntry::Skill {
                 command: s.command,
                 description: s.description,

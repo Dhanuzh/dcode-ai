@@ -1,6 +1,6 @@
 pub mod apply_patch;
 pub mod ask_question;
-pub mod bash;
+pub mod background_exec;
 pub mod code_intel_tool;
 pub mod copy_path;
 pub mod create_directory;
@@ -20,6 +20,7 @@ pub mod run_validation;
 pub mod search;
 pub mod spawn_subagent;
 pub mod types;
+pub mod update_plan;
 pub mod web_search;
 pub mod write_file;
 
@@ -62,6 +63,7 @@ impl ToolRegistry {
         registry.register(Box::new(git::GitDiffTool::new(workspace_root)));
         registry.register(Box::new(web_search::WebSearchTool::new(web_config.clone())));
         registry.register(Box::new(fetch_url::FetchUrlTool::new(web_config)));
+        registry.register(Box::new(update_plan::UpdatePlanTool::new()));
         registry
     }
 
@@ -101,6 +103,9 @@ impl ToolRegistry {
             workspace_root.clone(),
         )));
         registry.register(Box::new(run_validation::RunValidationTool::new(
+            workspace_root.clone(),
+        )));
+        registry.register(Box::new(background_exec::BackgroundExecTool::new(
             workspace_root,
         )));
         registry

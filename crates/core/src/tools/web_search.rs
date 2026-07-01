@@ -24,9 +24,13 @@ impl WebSearchTool {
         Self {
             client,
             config,
-            result_selector: Selector::parse(".result").ok(),
-            title_selector: Selector::parse(".result__title a, a.result__a").ok(),
-            snippet_selector: Selector::parse(".result__snippet").ok(),
+            // DuckDuckGo's HTML endpoint has used several class names over time;
+            // accept the historical and current variants so parsing is resilient
+            // to markup churn.
+            result_selector: Selector::parse(".result, .web-result, div.results_links").ok(),
+            title_selector: Selector::parse(".result__title a, a.result__a, .result__a, h2 a").ok(),
+            snippet_selector: Selector::parse(".result__snippet, .result__body, a.result__snippet")
+                .ok(),
             body_selector: Selector::parse("body").ok(),
         }
     }
@@ -132,12 +136,24 @@ impl ToolExecutor for WebSearchTool {
         }
 
         if rows.is_empty() {
+            // Structured parsing failed (markup changed). Rather than a hard
+            // error, return the page's readable text so the agent still has
+            // something to work with.
             let fallback = clean_text(&extract_text(&document, self.body_selector.as_ref()));
+            let body: String = fallback.chars().take(self.config.max_fetch_chars).collect();
             return ToolResult {
                 call_id: call.id.clone(),
-                success: false,
-                output: fallback.chars().take(self.config.max_fetch_chars).collect(),
-                error: Some("no structured search results parsed".into()),
+                success: !body.trim().is_empty(),
+                output: if body.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("(unstructured results for \"{query}\")\n{body}")
+                },
+                error: if body.trim().is_empty() {
+                    Some("no search results found".into())
+                } else {
+                    None
+                },
             };
         }
 

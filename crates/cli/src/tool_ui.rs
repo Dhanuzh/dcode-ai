@@ -18,6 +18,7 @@ pub fn metadata(name: &str) -> ToolUi {
 
     let (icon, label, family) = match name {
         "bash" | "execute_bash" | "shell" | "run_shell" => ("$", "Bash", "shell"),
+        "run_background" => ("⛗", "Background", "shell"),
         "read_file" => ("R", "Read file", "file"),
         "list_directory" => ("L", "List directory", "file"),
         "search" | "search_code" => ("S", "File search", "search"),
@@ -38,6 +39,7 @@ pub fn metadata(name: &str) -> ToolUi {
         "code_intel" | "code_intel_tool" => ("I", "Code intel", "code"),
         "spawn_subagent" => ("A", "Sub-agent", "agent"),
         "ask_question" => ("?", "Question", "input"),
+        "update_plan" => ("✓", "Plan", "plan"),
         "invoke_skill" => ("K", "Skill", "skill"),
         _ => ("T", "", "tool"),
     };
@@ -148,23 +150,10 @@ pub fn completed_message(
         "edit_file" | "apply_patch" | "replace_match" => Some(
             crate::activity::format_edit_summary_for_tool_ui(output, workspace_root),
         ),
-        _ => {
-            let ui = metadata(tool);
-            let action = match ui.family {
-                "shell" => "Command finished",
-                "web" => "Web context ready",
-                "search" => "Search complete",
-                "file" => "File context ready",
-                "git" => "Git context ready",
-                "check" => "Validation complete",
-                "agent" => "Sub-agent updated",
-                "skill" => "Skill loaded",
-                "input" => "Question handled",
-                "mcp" => "MCP tool finished",
-                _ => "Tool finished",
-            };
-            Some(action.to_string())
-        }
+        // Generic tool completions ("File context ready", "Git context ready",
+        // etc.) are redundant with the tool-call line itself (`● Read ✓ 18ms`),
+        // so we don't emit a separate System block for them.
+        _ => None,
     }
 }
 

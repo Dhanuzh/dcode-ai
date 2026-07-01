@@ -3,7 +3,7 @@
 //! No `TuiSessionState` access — extracted from `tui::app` ahead of lifting the
 //! larger transcript renderer.
 
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, BorderType, Borders};
 
@@ -27,6 +27,7 @@ pub(crate) fn popup_block(title: impl Into<String>) -> Block<'static> {
 }
 
 /// Map a sub-agent phase string to a 0–100 progress estimate.
+#[allow(dead_code)]
 pub(crate) fn subagent_phase_progress(phase: &str, running: bool) -> u8 {
     let p = phase.to_ascii_lowercase();
     if !running
@@ -53,6 +54,7 @@ pub(crate) fn subagent_phase_progress(phase: &str, running: bool) -> u8 {
 }
 
 /// Slice `width` chars from `s` starting at char index `start`.
+#[allow(dead_code)]
 pub(crate) fn char_window(s: &str, start: usize, width: usize) -> String {
     if width == 0 {
         return String::new();
@@ -60,38 +62,8 @@ pub(crate) fn char_window(s: &str, start: usize, width: usize) -> String {
     s.chars().skip(start).take(width).collect()
 }
 
-pub(crate) fn tool_effect_badge(name: &str) -> Span<'static> {
-    use crate::tui::tool_classify::ToolEffect;
-    let effect = crate::tui::tool_classify::classify_tool(name);
-    let display = effect.display();
-    let style = match effect {
-        ToolEffect::ReadOnly => Style::default().fg(theme::success()),
-        ToolEffect::RemoteAction => Style::default().fg(theme::assistant()),
-        ToolEffect::LocalMutation => Style::default().fg(theme::warn()),
-        ToolEffect::Destructive => Style::default().fg(theme::error()),
-    }
-    .add_modifier(Modifier::BOLD);
-    Span::styled(format!("[{} {}]", display.badge, display.label), style)
-}
-
-pub(crate) fn tool_dot_style(name: &str) -> Style {
-    use crate::tui::tool_classify::ToolEffect;
-    match crate::tui::tool_classify::classify_tool(name) {
-        ToolEffect::ReadOnly => Style::default().fg(theme::muted()),
-        ToolEffect::RemoteAction => Style::default().fg(theme::assistant()),
-        ToolEffect::LocalMutation => Style::default().fg(theme::warn()),
-        ToolEffect::Destructive => Style::default().fg(theme::error()),
-    }
-}
-
-pub(crate) fn tool_status_chip(label: &str, color: Color) -> Span<'static> {
-    Span::styled(
-        format!("[{label}]"),
-        Style::default().fg(color).add_modifier(Modifier::BOLD),
-    )
-}
-
 /// Render a `[===···] NN%` progress bar of the given cell width.
+#[allow(dead_code)]
 pub(crate) fn progress_bar(percent: u8, width: usize) -> String {
     let w = width.max(8);
     let filled = (usize::from(percent) * w) / 100;
@@ -192,6 +164,7 @@ pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
 
 /// A colored permission-mode pill for the composer title bar, so the active
 /// mode (default / plan / accept-edits / dont-ask / bypass) is always visible.
+#[cfg(test)]
 pub(crate) fn permission_mode_pill(mode: &str) -> Span<'static> {
     // Default mode is branded "DCODE"; other modes name the active permission
     // level. Colors follow the active theme.
@@ -210,46 +183,6 @@ pub(crate) fn permission_mode_pill(mode: &str) -> Span<'static> {
         format!(" {label} "),
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     )
-}
-
-/// Render an image file as a block of Unicode half-block lines (`▄`) using
-/// true-color ANSI, scaled to `cols×rows` terminal cells (each cell covers
-/// 1×2 pixels via upper/lower half-blocks).  Returns `None` if the file
-/// cannot be read or the crate feature is not available.
-///
-/// The returned `Vec<Line>` is ready to be pushed into a transcript or
-/// composer overlay.  Each entry is one terminal row.
-pub(crate) fn image_thumbnail_lines(
-    path: &std::path::Path,
-    cols: u16,
-    rows: u16,
-) -> Option<Vec<ratatui::text::Line<'static>>> {
-    use image::imageops::FilterType;
-    use ratatui::style::Style;
-    use ratatui::text::{Line, Span};
-
-    let cols = cols.max(4) as u32;
-    let rows = rows.max(2) as u32;
-
-    let img = image::open(path).ok()?.into_rgba8();
-    // Scale to (cols × rows*2) pixels — each terminal cell = 1 col × 2 px.
-    let scaled = image::imageops::resize(&img, cols, rows * 2, FilterType::Lanczos3);
-
-    let mut lines = Vec::with_capacity(rows as usize);
-    for row in 0..rows {
-        let top_y = row * 2;
-        let bot_y = top_y + 1;
-        let mut spans: Vec<Span<'static>> = Vec::with_capacity(cols as usize);
-        for x in 0..cols {
-            let top = scaled.get_pixel(x, top_y);
-            let bot = scaled.get_pixel(x, bot_y);
-            let fg = Color::Rgb(bot[0], bot[1], bot[2]);
-            let bg = Color::Rgb(top[0], top[1], top[2]);
-            spans.push(Span::styled("▄", Style::default().fg(fg).bg(bg)));
-        }
-        lines.push(Line::from(spans));
-    }
-    Some(lines)
 }
 
 #[cfg(test)]

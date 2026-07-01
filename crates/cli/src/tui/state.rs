@@ -79,6 +79,7 @@ pub struct SubagentRow {
 
 #[derive(Debug, Clone)]
 pub struct PinnedNote {
+    #[allow(dead_code)]
     pub title: String,
     pub body: String,
 }
@@ -86,7 +87,9 @@ pub struct PinnedNote {
 /// A brief floating notification that auto-dismisses after a timeout.
 #[derive(Debug, Clone)]
 pub struct Toast {
+    #[allow(dead_code)]
     pub message: String,
+    #[allow(dead_code)]
     pub kind: ToastKind,
     pub expires_at: Instant,
 }
@@ -109,6 +112,7 @@ pub struct SessionPickerEntry {
     pub label: String,
     pub search_text: String,
     /// Last few messages as a preview (populated from event log).
+    #[allow(dead_code)]
     pub preview: String,
 }
 
@@ -182,6 +186,9 @@ pub struct TuiSessionState {
     pub command_palette_query: String,
     /// Approval request currently waiting for a local TUI answer.
     pub active_approval: Option<ApprovalRequest>,
+    /// Allow-pattern of the most recent approval request (persists after the
+    /// request resolves) so `/approve` can re-allow it for the session.
+    pub last_approval_pattern: Option<String>,
     /// Selected action in approval popup: 0=approve, 1=always approve, 2=deny.
     pub approval_option_index: usize,
     /// Per-hunk accept/reject selection for the active approval (git add -p style).
@@ -335,6 +342,15 @@ pub struct TuiSessionState {
     /// Global "collapse all tool blocks" toggle (z key). When true, `ToolDone`/
     /// `ToolRunning` blocks render header only unless overridden in `tool_block_collapsed`.
     pub all_tools_collapsed: bool,
+    /// Status-bar items the user has hidden via `/statusline` (keys: "agent",
+    /// "effort", "time", "context", "model"). Populated from config at startup.
+    pub statusline_hidden: Vec<String>,
+    /// Latest `update_plan` checklist (goal tracking) — the current task plan,
+    /// recalled anytime via `/goals`. `None` until the agent sets a plan.
+    pub current_plan: Option<String>,
+    /// Resolved custom keybindings (default + effective key per action) from
+    /// config, applied before key dispatch. Empty = built-in keys only.
+    pub key_bindings: Vec<crate::tui::app::KeyBinding>,
     /// Active mouse text-selection. `Some` while user is dragging or after
     /// release until input/scroll clears it.
     pub mouse_selection: Option<crate::tui::mouse_select::Selection>,
@@ -374,6 +390,42 @@ pub struct TuiSessionState {
     pub thinking_enabled: bool,
     /// Current thinking budget (for effort level detection).
     pub thinking_budget: u32,
+    /// Connected project directories for multi-project switching.
+    pub connected_projects: Vec<ConnectedProject>,
+    /// Project picker popup state.
+    pub project_picker_open: bool,
+    pub project_picker_index: usize,
+    /// Number of blocks already flushed to terminal scrollback via insert_before.
+    pub flushed_block_count: usize,
+    /// When set, the draw loop purges the terminal scrollback + screen and
+    /// re-flushes the banner (used by `/clear` and Ctrl+L in inline mode).
+    pub request_clear: bool,
+    /// When set, the main loop enters the full-screen transcript overlay
+    /// (expand/collapse, scroll, reflow, raw copy mode).
+    pub transcript_overlay_open: bool,
+    /// Scroll offset (from top, in lines) for the transcript overlay.
+    pub transcript_overlay_scroll: usize,
+    /// When true, the overlay renders plain unstyled text for copy-friendly
+    /// terminal selection.
+    pub transcript_overlay_raw: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ConnectedProject {
+    pub name: String,
+    pub path: std::path::PathBuf,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProjectPickerKey {
+    Cancel,
+    Up,
+    Down,
+    Accept,
+    #[allow(dead_code)]
+    Add,
+    Remove,
 }
 
 #[derive(Debug, Clone)]
@@ -567,6 +619,7 @@ impl TuiSessionState {
             command_palette_open: false,
             command_palette_query: String::new(),
             active_approval: None,
+            last_approval_pattern: None,
             approval_option_index: 0,
             approval_hunk_selection: Vec::new(),
             approval_hunk_cursor: 0,
@@ -655,6 +708,9 @@ impl TuiSessionState {
             menu_content: crate::tui::tui_types::MenuContent::None,
             tool_block_collapsed: HashMap::new(),
             all_tools_collapsed: false,
+            statusline_hidden: Vec::new(),
+            current_plan: None,
+            key_bindings: Vec::new(),
             mouse_selection: None,
             history_rect: None,
             block_timestamps: Vec::new(),
@@ -669,6 +725,14 @@ impl TuiSessionState {
             collapsed_assistant_blocks: std::collections::HashSet::new(),
             thinking_enabled: false,
             thinking_budget: 0,
+            connected_projects: Vec::new(),
+            project_picker_open: false,
+            project_picker_index: 0,
+            flushed_block_count: 0,
+            request_clear: false,
+            transcript_overlay_open: false,
+            transcript_overlay_scroll: 0,
+            transcript_overlay_raw: false,
         }
     }
 
@@ -702,14 +766,35 @@ impl TuiSessionState {
         }
     }
 
-    /// Returns true if the tool block with `call_id` should render header-only.
-    /// Per-block override wins over the global toggle; default is collapsed for
-    /// finished tools when global toggle on, otherwise expanded.
-    pub fn is_tool_block_collapsed(&self, call_id: &str) -> bool {
+    /// Returns true if the tool block should render header-only. Bulky reading
+    /// tools (file reads, grep, listings) collapse by default so their output
+    /// doesn't clutter the transcript, while edits/writes stay expanded so the
+    /// diff is visible. An explicit per-block toggle (ctrl+o) or the global
+    /// collapse always wins over the type default.
+    pub fn is_tool_block_collapsed_for(&self, call_id: &str, name: &str) -> bool {
         if let Some(v) = self.tool_block_collapsed.get(call_id) {
             return *v;
         }
-        self.all_tools_collapsed
+        if self.all_tools_collapsed {
+            return true;
+        }
+        // Collapse only the *bulky reading* tools (file contents, matches,
+        // listings). Edits/diffs, the plan, git status/diff, and command output
+        // stay expanded so the useful content is visible.
+        matches!(
+            name,
+            "Read"
+                | "read_file"
+                | "Grep"
+                | "search"
+                | "search_code"
+                | "Glob"
+                | "List"
+                | "list_directory"
+                | "code_intel"
+                | "code_intel_tool"
+                | "MemoryRead"
+        )
     }
 
     pub fn sync_legacy_from_composer(&mut self) {
@@ -848,8 +933,15 @@ impl TuiSessionState {
         let Some(q) = self.active_question.clone() else {
             return QuestionModalOutcome::Stay;
         };
-        // Items: suggested (1) + options + optional "chat about this" (allow_custom).
-        let total = 1 + q.options.len() + if q.allow_custom { 1 } else { 0 };
+        // Items: suggested (1, the "(recommended)" row) + the *other* options
+        // (the suggested one is excluded here so it isn't listed twice) +
+        // optional "chat about this" (allow_custom).
+        let others: Vec<_> = q
+            .options
+            .iter()
+            .filter(|o| o.id != q.suggested_answer)
+            .collect();
+        let total = 1 + others.len() + if q.allow_custom { 1 } else { 0 };
         match key {
             QuestionModalKey::Cancel => {
                 if q.allow_custom {
@@ -872,9 +964,9 @@ impl TuiSessionState {
                 let idx = self.question_modal_index;
                 let selection = if idx == 0 {
                     Some(QuestionSelection::Suggested)
-                } else if idx <= q.options.len() {
+                } else if idx <= others.len() {
                     Some(QuestionSelection::Option {
-                        option_id: q.options[idx - 1].id.clone(),
+                        option_id: others[idx - 1].id.clone(),
                     })
                 } else {
                     None // "Chat about this" → inline text input
@@ -1367,13 +1459,17 @@ impl TuiSessionState {
     /// Toggle the most recent tool block (ToolRunning or ToolDone) by call_id.
     /// Returns true if a block was toggled.
     pub fn toggle_last_tool_block(&mut self) -> bool {
-        let last_id = self.blocks.iter().rev().find_map(|b| match b {
-            DisplayBlock::ToolRunning { call_id, .. } => Some(call_id.clone()),
-            DisplayBlock::ToolDone { call_id, .. } => Some(call_id.clone()),
+        let last = self.blocks.iter().rev().find_map(|b| match b {
+            DisplayBlock::ToolRunning { call_id, name, .. } => {
+                Some((call_id.clone(), name.clone()))
+            }
+            DisplayBlock::ToolDone { call_id, name, .. } => Some((call_id.clone(), name.clone())),
             _ => None,
         });
-        if let Some(id) = last_id {
-            let cur = self.is_tool_block_collapsed(&id);
+        if let Some((id, name)) = last {
+            // Toggle relative to the *effective* default (which is type-aware),
+            // so the first ctrl+o always flips what's actually on screen.
+            let cur = self.is_tool_block_collapsed_for(&id, &name);
             self.tool_block_collapsed.insert(id, !cur);
             self.transcript_rev = self.transcript_rev.wrapping_add(1);
             true
@@ -1401,6 +1497,7 @@ impl TuiSessionState {
         self.theme_picker_index = 0;
     }
 
+    #[allow(dead_code)]
     pub fn open_pins_modal(&mut self) {
         self.pins_modal_open = true;
         self.pins_modal_index = self
@@ -1588,6 +1685,88 @@ impl TuiSessionState {
         self.provider_picker_for_api_key = false;
     }
 
+    pub fn open_project_picker(&mut self) {
+        self.project_picker_open = true;
+        self.project_picker_index = self
+            .connected_projects
+            .iter()
+            .position(|p| p.active)
+            .unwrap_or(0);
+    }
+
+    pub fn close_project_picker(&mut self) {
+        self.project_picker_open = false;
+        self.project_picker_index = 0;
+    }
+
+    pub fn add_project(&mut self, name: String, path: std::path::PathBuf) {
+        if !self.connected_projects.iter().any(|p| p.path == path) {
+            self.connected_projects.push(ConnectedProject {
+                name,
+                path,
+                active: false,
+            });
+        }
+    }
+
+    pub fn remove_project(&mut self, index: usize) {
+        if index < self.connected_projects.len() {
+            let is_active = self.connected_projects[index].active;
+            self.connected_projects.remove(index);
+            if is_active && !self.connected_projects.is_empty() {
+                self.connected_projects[0].active = true;
+            }
+        }
+    }
+
+    pub fn switch_project(&mut self, index: usize) {
+        for p in &mut self.connected_projects {
+            p.active = false;
+        }
+        if let Some(p) = self.connected_projects.get_mut(index) {
+            p.active = true;
+            self.workspace_root = p.path.clone();
+            self.workspace_display = p.path.display().to_string();
+        }
+    }
+
+    pub fn apply_project_picker_key(&mut self, key: ProjectPickerKey) -> Option<usize> {
+        let n = self.connected_projects.len();
+        match key {
+            ProjectPickerKey::Cancel => {
+                self.close_project_picker();
+            }
+            ProjectPickerKey::Up => {
+                if n > 0 {
+                    self.project_picker_index = self.project_picker_index.saturating_sub(1);
+                }
+            }
+            ProjectPickerKey::Down => {
+                if n > 0 {
+                    self.project_picker_index = (self.project_picker_index + 1).min(n - 1);
+                }
+            }
+            ProjectPickerKey::Accept => {
+                if n > 0 {
+                    let idx = self.project_picker_index.min(n - 1);
+                    self.close_project_picker();
+                    return Some(idx);
+                }
+            }
+            ProjectPickerKey::Add => {}
+            ProjectPickerKey::Remove => {
+                if n > 0 {
+                    let idx = self.project_picker_index.min(n - 1);
+                    self.remove_project(idx);
+                    self.project_picker_index = self
+                        .project_picker_index
+                        .min(self.connected_projects.len().saturating_sub(1));
+                }
+            }
+        }
+        None
+    }
+
     pub fn set_busy(&mut self, busy: bool) {
         self.busy = busy;
     }
@@ -1719,6 +1898,18 @@ impl TuiSessionState {
                 self.model = model.clone();
                 self.workspace_root = workspace.clone();
                 self.workspace_display = workspace.display().to_string();
+                if self.connected_projects.is_empty() {
+                    let name = workspace
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("workspace")
+                        .to_string();
+                    self.connected_projects.push(ConnectedProject {
+                        name,
+                        path: workspace.clone(),
+                        active: true,
+                    });
+                }
                 self.set_process("session ready", model.clone());
             }
             AgentEvent::MessageReceived { role, content } => {
@@ -1856,6 +2047,11 @@ impl TuiSessionState {
                     ) {
                         self.push_block(DisplayBlock::System(message));
                     }
+                    // Goal tracking: remember the latest plan so `/goals` can
+                    // recall it after it scrolls out of the transcript.
+                    if name == "update_plan" && ok {
+                        self.current_plan = Some(detail.clone());
+                    }
                     self.blocks[idx] = DisplayBlock::ToolDone {
                         name,
                         call_id: call_id.clone(),
@@ -1912,6 +2108,7 @@ impl TuiSessionState {
                     description: description.clone(),
                     input,
                 };
+                self.last_approval_pattern = Some(req.allow_pattern());
                 self.active_approval = Some(req.clone());
                 self.approval_option_index = 0;
                 self.set_busy_state(BusyState::ApprovalPending);
@@ -2003,12 +2200,22 @@ impl TuiSessionState {
                 self.push_block(DisplayBlock::System(format!("⚠ {message}")));
                 transcript_dirty = true;
             }
-            AgentEvent::ContextCompaction { phase, message } => {
+            AgentEvent::ContextCompaction {
+                phase,
+                message,
+                context_tokens,
+            } => {
                 if phase == "completed" {
                     self.context_compacted = true;
                     self.compaction_in_progress = false;
                 } else {
                     self.compaction_in_progress = true;
+                }
+                // Refresh the context gauge immediately so it reflects the
+                // post-compaction size instead of staying pinned at the old
+                // (pre-compaction) value until the next turn's CostUpdated.
+                if *context_tokens > 0 {
+                    self.context_tokens = *context_tokens;
                 }
                 self.push_block(DisplayBlock::System(format!("⟳ {message}")));
                 transcript_dirty = true;
@@ -2790,11 +2997,8 @@ mod tests {
         assert!(st.blocks.iter().any(
             |block| matches!(block, DisplayBlock::System(s) if s == "Using web context: tokio tutorial")
         ));
-        assert!(
-            st.blocks
-                .iter()
-                .any(|block| matches!(block, DisplayBlock::System(s) if s == "Web context ready"))
-        );
+        // Generic "context ready" completions are intentionally suppressed now
+        // (redundant with the tool-call line), so we only assert the start line.
     }
 
     #[test]

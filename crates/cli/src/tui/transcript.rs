@@ -1,10 +1,11 @@
-//! Transcript rendering: turns the session's `DisplayBlock` history into the
-//! scrollable, styled lines shown in the TUI, along with per-line click targets
-//! (`LineAnswerHit`) used by mouse handling. Extracted from `tui::app`.
+//! Transcript rendering — Antigravity/Codex-style inline output.
 //!
-//! This is the single largest renderer; its pure sub-helpers live in
-//! `render_helpers` and `markdown`, while a few line-assembly helpers it shares
-//! with the rest of `app` are imported back from there.
+//! User: `› text` (bold, dim prefix)
+//! Assistant: `• text` (dim prefix), `  ` continuation
+//! Tool running: `● ToolName(args)  running…` (yellow dot)
+//! Tool done: `● ToolName(args)  120ms (ctrl+o to expand)` (green/red dot)
+//! Thinking: `• text` (dim, italic)
+//! Approval: `● tool  awaiting approval`
 
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -13,17 +14,300 @@ use dcode_ai_common::event::QuestionSelection;
 
 use crate::tool_ui;
 use crate::tui::app::{
-    LineAnswerHit, LineClickHit, line_has_text, prefixed_line, push_section_gap,
-    push_tool_detail_lines, push_tool_separator, push_transcript_line, tool_header_detail_spans,
+    LineAnswerHit, LineClickHit, line_has_text, prefixed_line, push_transcript_line,
+    tool_header_detail_spans,
 };
 use crate::tui::markdown::render_markdown_lines_with_hits;
-use crate::tui::render_helpers::{
-    tool_dot_style, tool_effect_badge, tool_status_chip, truncate_chars, wrap_text,
-};
+use crate::tui::render_helpers::{truncate_chars, wrap_text};
 use crate::tui::state::{DisplayBlock, TuiSessionState};
 use crate::tui::theme;
 
-/// Build scrollable transcript lines + optional mouse/click targets per line.
+const DIM: Modifier = Modifier::DIM;
+const BOLD: Modifier = Modifier::BOLD;
+const ITALIC: Modifier = Modifier::ITALIC;
+
+fn dim() -> Style {
+    Style::default().add_modifier(DIM)
+}
+/// Light grey used for reasoning/thinking text — readable but de-emphasized.
+fn thinking_grey() -> Color {
+    Color::Rgb(150, 155, 170)
+}
+
+/// Whether the active theme uses a light background — picks the diff tint set.
+fn theme_is_light() -> bool {
+    if let Color::Rgb(r, g, b) = theme::bg() {
+        // Rec. 601 perceived luminance; >150/255 reads as a light background.
+        let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+        lum > 150.0
+    } else {
+        false
+    }
+}
+
+/// Codex-style diff background tints: subtle green/red fills that stay distinct
+/// from syntax colors. Dark terminals get muted tints; light terminals get
+/// GitHub-style pastels (matching Codex's palette).
+fn diff_add_bg() -> Color {
+    if theme_is_light() {
+        Color::Rgb(218, 251, 225)
+    } else {
+        Color::Rgb(33, 58, 43)
+    }
+}
+fn diff_del_bg() -> Color {
+    if theme_is_light() {
+        Color::Rgb(255, 235, 233)
+    } else {
+        Color::Rgb(74, 34, 29)
+    }
+}
+
+/// Index of the first line of a unified diff within a tool-output `detail`,
+/// or `None` when there's no diff. Recognizes `git diff` headers, `---`/`+++`
+/// file markers, and bare `@@` hunk headers.
+fn diff_body_line_index(detail: &str) -> Option<usize> {
+    detail
+        .lines()
+        .position(|l| l.starts_with("@@ ") || l.starts_with("--- ") || l.starts_with("diff "))
+}
+
+/// Derive a syntect language token from a file path's extension, e.g.
+/// `src/foo.rs` → `rs`. Returns `None` when there's no usable extension.
+fn lang_from_path_ext(path: &str) -> Option<String> {
+    std::path::Path::new(path.trim())
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|s| s.to_string())
+}
+
+/// Parse a `@@ -old[,n] +new[,m] @@` hunk header into
+/// `(old_start, new_start, max_line_seen)`. Returns `None` for non-headers.
+fn parse_hunk_header(s: &str) -> Option<(usize, usize, usize)> {
+    let body = s.strip_prefix("@@ ")?;
+    let end = body.find(" @@")?;
+    let mut parts = body[..end].split_whitespace();
+    let old = parts.next()?.strip_prefix('-')?;
+    let new = parts.next()?.strip_prefix('+')?;
+    let pair = |p: &str| -> (usize, usize) {
+        let mut it = p.split(',');
+        let start = it.next().and_then(|x| x.parse().ok()).unwrap_or(0);
+        let count = it.next().and_then(|x| x.parse().ok()).unwrap_or(1);
+        (start, count)
+    };
+    let (os, oc) = pair(old);
+    let (ns, nc) = pair(new);
+    Some((os, ns, (os + oc).max(ns + nc)))
+}
+
+/// Render a unified diff Codex-style: a right-aligned line-number gutter, a
+/// `+`/`-`/` ` sign column, green/red foreground over subtle background tints,
+/// and `⋮` separators between hunks. Caps output at `max_preview` rendered
+/// lines with a fold hint, matching the rest of the tool-output preview model.
+fn render_unified_diff(
+    lines: &mut Vec<Line<'static>>,
+    hits: &mut Vec<LineAnswerHit>,
+    diff: &str,
+    width: usize,
+    max_preview: usize,
+    lang: Option<&str>,
+) {
+    // Pre-scan hunk headers so the gutter width fits the widest line number.
+    let mut max_line = 1usize;
+    for l in diff.lines() {
+        if let Some((_, _, m)) = parse_hunk_header(l) {
+            max_line = max_line.max(m);
+        }
+    }
+    let gutter_w = max_line.to_string().len().max(2);
+
+    let mut old_ln = 0usize;
+    let mut new_ln = 0usize;
+    let mut first_hunk = true;
+    let mut shown = 0usize;
+    let mut total = 0usize;
+    // Stateful highlighter, reset at each hunk boundary so syntect parser state
+    // (multi-line strings/comments) carries correctly within a hunk but doesn't
+    // leak across the `⋮` gaps.
+    let mut hl = lang.and_then(crate::tui::markdown::DiffHighlighter::new);
+
+    for raw in diff.lines() {
+        // The block header already names the file; skip diff file headers.
+        if raw.starts_with("--- ")
+            || raw.starts_with("+++ ")
+            || raw.starts_with("diff ")
+            || raw.starts_with("index ")
+        {
+            continue;
+        }
+        if let Some((os, ns, _)) = parse_hunk_header(raw) {
+            old_ln = os;
+            new_ln = ns;
+            hl = lang.and_then(crate::tui::markdown::DiffHighlighter::new);
+            if !first_hunk {
+                total += 1;
+                if shown < max_preview {
+                    push_transcript_line(
+                        lines,
+                        hits,
+                        Line::from(Span::styled(format!("    {:>gutter_w$} ⋮", ""), dim())),
+                        None,
+                    );
+                    shown += 1;
+                }
+            }
+            first_hunk = false;
+            continue;
+        }
+
+        let first = raw.chars().next().unwrap_or(' ');
+        let (sign, content, fg, bg, num) = if first == '+' {
+            let n = new_ln;
+            new_ln += 1;
+            ('+', &raw[1..], theme::success(), Some(diff_add_bg()), n)
+        } else if first == '-' {
+            let n = old_ln;
+            old_ln += 1;
+            ('-', &raw[1..], theme::error(), Some(diff_del_bg()), n)
+        } else {
+            let c = raw.strip_prefix(' ').unwrap_or(raw);
+            let n = new_ln;
+            old_ln += 1;
+            new_ln += 1;
+            (' ', c, theme::muted(), None, n)
+        };
+
+        total += 1;
+        if shown >= max_preview {
+            continue;
+        }
+
+        // On light themes the pastel background carries the add/delete signal,
+        // so content uses a dark foreground; the sign char keeps green/red.
+        let content_fg = if bg.is_some() && theme_is_light() {
+            theme::text()
+        } else {
+            fg
+        };
+        let mut sign_style = Style::default().fg(fg);
+        let mut content_style = Style::default().fg(content_fg);
+        if let Some(b) = bg {
+            sign_style = sign_style.bg(b);
+            content_style = content_style.bg(b);
+        }
+        let num_str = format!("{num:>gutter_w$}");
+        // "    " indent + gutter + " " + sign char.
+        let prefix_cols = 4 + gutter_w + 2;
+        let avail = width.saturating_sub(prefix_cols).max(8);
+        let wrapped = wrap_text(content, avail);
+
+        // Feed every content line to the stateful highlighter so syntect parser
+        // state stays in sync even for lines we render plain (wrapped). Use the
+        // highlighted spans only when the line fits on one row. The diff
+        // add/delete signal stays on the background tint + sign char; deletes get
+        // a DIM overlay like Codex.
+        let hl_spans = hl.as_mut().map(|h| h.line(content));
+        let syntax_spans = if wrapped.len() == 1 && !content.trim().is_empty() {
+            hl_spans.filter(|s| !s.is_empty())
+        } else {
+            None
+        };
+
+        if let Some(syn) = syntax_spans {
+            let mut row_spans = vec![
+                Span::styled(format!("    {num_str} "), dim()),
+                Span::styled(sign.to_string(), sign_style),
+            ];
+            for (st, text) in syn {
+                let mut s = st;
+                if let Some(b) = bg {
+                    s = s.bg(b);
+                }
+                if first == '-' {
+                    s = s.add_modifier(DIM);
+                }
+                row_spans.push(Span::styled(text, s));
+            }
+            push_transcript_line(lines, hits, Line::from(row_spans), None);
+            shown += 1;
+        } else {
+            for (i, wl) in wrapped.into_iter().enumerate() {
+                if shown >= max_preview {
+                    break;
+                }
+                let row = if i == 0 {
+                    Line::from(vec![
+                        Span::styled(format!("    {num_str} "), dim()),
+                        Span::styled(sign.to_string(), sign_style),
+                        Span::styled(wl, content_style),
+                    ])
+                } else {
+                    Line::from(vec![
+                        Span::styled(format!("    {:gutter_w$}  ", ""), dim()),
+                        Span::styled(wl, content_style),
+                    ])
+                };
+                push_transcript_line(lines, hits, row, None);
+                shown += 1;
+            }
+        }
+    }
+
+    if total > shown {
+        push_transcript_line(
+            lines,
+            hits,
+            Line::from(Span::styled(
+                format!("    … +{} more lines (ctrl+o to fold)", total - shown),
+                dim(),
+            )),
+            None,
+        );
+    }
+}
+
+/// Render a range of committed blocks into styled lines for flushing to
+/// terminal scrollback via `insert_before`. Uses a temporary state view
+/// that skips streaming content.
+pub(crate) fn render_blocks_range(
+    state: &TuiSessionState,
+    start: usize,
+    end: usize,
+    width: u16,
+) -> Vec<Line<'static>> {
+    let w = width.max(20) as usize;
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut hits: Vec<LineAnswerHit> = Vec::new();
+    for block in state.blocks[start..end].iter() {
+        render_block(block, state, w, &mut lines, &mut hits);
+    }
+    let (lines, _) = collapse_blank_runs(lines, hits);
+    lines
+}
+
+/// For a width-resize reflow, return the first block index to re-emit so the
+/// restored scrollback stays within `max_rows` rendered rows. Walks backward
+/// from the transcript tail (newest first), mirroring Codex's row-capped reflow:
+/// older blocks beyond the cap are dropped from scrollback but kept in memory
+/// for the transcript overlay. Returns 0 when everything fits (or there are no
+/// blocks), so small transcripts behave exactly as before.
+pub(crate) fn reflow_start_block(state: &TuiSessionState, width: u16, max_rows: usize) -> usize {
+    let n = state.blocks.len();
+    let mut rows = 0usize;
+    let mut start = n;
+    while start > 0 {
+        let candidate = start - 1;
+        rows += render_blocks_range(state, candidate, start, width).len();
+        // Always include this block (so the newest block shows even if it alone
+        // exceeds the cap), then stop once we've crossed the row budget.
+        start = candidate;
+        if rows > max_rows {
+            break;
+        }
+    }
+    start
+}
+
 pub(crate) fn transcript_lines_and_hits(
     state: &TuiSessionState,
     width: u16,
@@ -32,834 +316,72 @@ pub(crate) fn transcript_lines_and_hits(
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut hits: Vec<LineAnswerHit> = Vec::new();
 
-    if !state.pinned_notes.is_empty() {
-        push_transcript_line(
-            &mut lines,
-            &mut hits,
-            Line::from(vec![
-                Span::styled(
-                    " pinned ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(theme::warn())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(
-                    format!(
-                        " {} item(s) · Ctrl+O list · Ctrl+K pin last",
-                        state.pinned_notes.len()
-                    ),
-                    Style::default().fg(theme::muted()),
-                ),
-            ]),
-            None,
-        );
-        for (idx, note) in state.pinned_notes.iter().enumerate().take(4) {
-            let preview = truncate_chars(note.body.trim(), w.saturating_sub(24).max(24));
-            push_transcript_line(
-                &mut lines,
-                &mut hits,
-                Line::from(vec![
-                    Span::styled(
-                        format!("  [{}] ", idx + 1),
-                        Style::default().fg(theme::warn()),
-                    ),
-                    Span::styled(
-                        format!("{:<18}", truncate_chars(&note.title, 18)),
-                        Style::default().fg(theme::assistant()),
-                    ),
-                    Span::styled(" · ", Style::default().fg(theme::muted())),
-                    Span::styled(preview, Style::default().fg(theme::text())),
-                    Span::styled(
-                        "  copy",
-                        Style::default()
-                            .fg(theme::tool())
-                            .add_modifier(Modifier::UNDERLINED),
-                    ),
-                ]),
-                Some(LineClickHit::CopyText(note.body.clone())),
-            );
-        }
-        if state.pinned_notes.len() > 4 {
-            push_transcript_line(
-                &mut lines,
-                &mut hits,
-                Line::from(Span::styled(
-                    format!("  … +{} more pinned", state.pinned_notes.len() - 4),
-                    Style::default().fg(theme::muted()),
-                )),
-                None,
-            );
-        }
-        push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+    // Live pane only renders blocks not yet flushed to terminal scrollback.
+    let start = state.flushed_block_count.min(state.blocks.len());
+    for block in state.blocks[start..].iter() {
+        render_block(block, state, w, &mut lines, &mut hits);
     }
 
-    for (idx, block) in state.blocks.iter().enumerate() {
-        let ts_label = state
-            .block_timestamps
-            .get(idx)
-            .copied()
-            .and_then(fmt_wall_time);
-        match block {
-            DisplayBlock::User(content) => {
-                push_section_gap(&mut lines, &mut hits);
-                let user_chip = format!(" {:<9} ", "user");
-                let mut user_header = vec![Span::styled(
-                    user_chip,
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(theme::user())
-                        .add_modifier(Modifier::BOLD),
-                )];
-                if let Some(t) = &ts_label {
-                    user_header.push(Span::styled(
-                        format!("  {t}"),
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::from(user_header), None);
-                for text_line in wrap_text(content, w) {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        prefixed_line(
-                            Span::styled("▏  ", Style::default().fg(theme::user())),
-                            Line::from(Span::styled(text_line, Style::default().fg(theme::text()))),
-                        ),
-                        None,
-                    );
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::Assistant(content) => {
-                push_section_gap(&mut lines, &mut hits);
-                let collapsed = state.collapsed_assistant_blocks.contains(&idx);
-                let fold_icon = if collapsed { "▸" } else { "▾" };
-                let assistant_chip = format!(" {:<9} ", "assistant");
-                let mut asst_header = vec![
-                    Span::styled(format!("{fold_icon} "), Style::default().fg(theme::muted())),
-                    Span::styled(
-                        assistant_chip,
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::assistant())
-                            .bold(),
-                    ),
-                    Span::styled(
-                        " response ",
-                        Style::default()
-                            .fg(theme::assistant())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ];
-                if let Some(t) = &ts_label {
-                    asst_header.push(Span::styled(
-                        format!("  {t}"),
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                if collapsed {
-                    let preview: String = content.chars().take(60).collect();
-                    asst_header.push(Span::styled(
-                        format!("  {preview}…"),
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(asst_header),
-                    Some(LineClickHit::ToggleAssistant(idx)),
-                );
-                if !collapsed {
-                    let (md_lines, md_hits) = render_markdown_lines_with_hits(
-                        content,
-                        state.code_line_numbers,
-                        w.saturating_sub(2),
-                    );
-                    for (md_line, md_hit) in md_lines.into_iter().zip(md_hits) {
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            prefixed_line(
-                                Span::styled("▏  ", Style::default().fg(theme::assistant())),
-                                md_line,
-                            ),
-                            md_hit,
-                        );
-                    }
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::ToolRunning {
-                name,
-                input,
-                call_id,
-            } => {
-                push_section_gap(&mut lines, &mut hits);
-                let ui = tool_ui::metadata(name);
-                let collapsed = state.is_tool_block_collapsed(call_id);
-                let fold_indicator = if collapsed { "▸" } else { "▾" };
-                let mut header_spans = vec![
-                    Span::styled(
-                        format!("{fold_indicator} "),
-                        Style::default().fg(theme::muted()),
-                    ),
-                    Span::styled("◉ ", tool_dot_style(name)),
-                    Span::styled(
-                        ui.label,
-                        Style::default()
-                            .fg(theme::tool())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                ];
-                let detail_spans = tool_header_detail_spans(name, input);
-                if !detail_spans.is_empty() {
-                    header_spans.push(Span::raw(" · "));
-                    header_spans.extend(detail_spans);
-                }
-                header_spans.push(Span::raw("  "));
-                header_spans.push(tool_effect_badge(name));
-                header_spans.push(Span::raw(" "));
-                header_spans.push(tool_status_chip("RUNNING", theme::warn()));
-                if let Some(t) = &ts_label {
-                    header_spans.push(Span::styled(
-                        format!("  {t}"),
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::from(header_spans), None);
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::ApprovalPending(req) => {
-                // Full approval UI lives in a popup overlay; transcript only shows a
-                // compact placeholder so the user has visual continuity in scrollback.
-                push_section_gap(&mut lines, &mut hits);
-                let ui = tool_ui::metadata(&req.tool);
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![
-                        Span::styled(
-                            format!(" {} ", ui.icon),
-                            Style::default().fg(Color::Black).bg(theme::warn()).bold(),
-                        ),
-                        Span::styled(" ", Style::default()),
-                        Span::styled(
-                            ui.label,
-                            Style::default()
-                                .fg(theme::warn())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                        Span::styled(" ", Style::default()),
-                        tool_effect_badge(&req.tool),
-                        Span::styled(
-                            "  awaiting approval — see popup",
-                            Style::default().fg(theme::muted()),
-                        ),
-                    ]),
-                    None,
-                );
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-                let _ = w; // width still consumed in popup renderer
-            }
-            DisplayBlock::ApprovalResolved { tool, approved } => {
-                push_section_gap(&mut lines, &mut hits);
-                let ui = tool_ui::metadata(tool);
-                let (label, style) = if *approved {
-                    (
-                        " approved ",
-                        Style::default().fg(Color::Black).bg(theme::success()),
-                    )
-                } else {
-                    (
-                        " denied ",
-                        Style::default().fg(Color::Black).bg(theme::error()),
-                    )
-                };
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![
-                        Span::styled(label, style.add_modifier(Modifier::BOLD)),
-                        Span::styled(format!(" {tool}"), Style::default().fg(theme::text())),
-                        Span::styled(
-                            format!("  {}", ui.label),
-                            Style::default().fg(theme::muted()),
-                        ),
-                    ]),
-                    None,
-                );
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::ToolDone {
-                name,
-                call_id,
-                ok,
-                detail,
-                duration_ms,
-            } => {
-                // Add a thin separator between consecutive tool blocks.
-                let prev_is_tool = idx > 0
-                    && matches!(
-                        state.blocks.get(idx - 1),
-                        Some(DisplayBlock::ToolDone { .. } | DisplayBlock::ToolRunning { .. })
-                    );
-                if prev_is_tool {
-                    push_tool_separator(&mut lines, &mut hits, w);
-                } else {
-                    push_section_gap(&mut lines, &mut hits);
-                }
-                let ui = tool_ui::metadata(name);
-                let collapsed = state.is_tool_block_collapsed(call_id);
-                let fold_indicator = if collapsed { "▸" } else { "▾" };
-                let status_chip = if *ok {
-                    tool_status_chip("DONE", theme::success())
-                } else {
-                    tool_status_chip("FAILED", theme::error())
-                };
-                let mut header = vec![
-                    Span::styled(
-                        format!("{fold_indicator} "),
-                        Style::default().fg(theme::muted()),
-                    ),
-                    Span::styled("◉ ", tool_dot_style(name)),
-                    Span::styled(
-                        ui.label,
-                        Style::default()
-                            .fg(theme::tool())
-                            .add_modifier(Modifier::BOLD),
-                    ),
-                    Span::raw("  "),
-                    tool_effect_badge(name),
-                    Span::raw(" "),
-                    status_chip,
-                ];
-                if let Some(ms) = duration_ms {
-                    header.push(Span::raw(" "));
-                    header.push(Span::styled(
-                        format_duration_badge(*ms),
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                // Exit-code chip: parse "exit N" from tool output for shell/exec tools.
-                if let Some(code) = parse_exit_code(detail) {
-                    header.push(Span::raw(" "));
-                    let (label, color) = if code == 0 {
-                        ("[exit 0]".to_string(), theme::success())
-                    } else {
-                        (format!("[exit {code}]"), theme::error())
-                    };
-                    header.push(Span::styled(
-                        label,
-                        Style::default().fg(color).add_modifier(Modifier::BOLD),
-                    ));
-                }
-                // Extract file path from the first line (e.g. "Wrote src/main.rs")
-                // and show it on the header for file-writing tools.
-                let first_line = detail.lines().next().unwrap_or("");
-                let file_path = first_line
-                    .strip_prefix("Wrote ")
-                    .or_else(|| first_line.strip_prefix("Edited "))
-                    .or_else(|| first_line.strip_prefix("Patched "))
-                    .or_else(|| first_line.strip_prefix("Created "))
-                    .or_else(|| first_line.strip_prefix("Deleted "));
-                if let Some(fp) = file_path {
-                    header.push(Span::styled(
-                        format!(" {}", truncate_chars(fp.trim(), 30)),
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                // Diff scale chip on the header so a collapsed edit still shows
-                // how big the change was without expanding the body.
-                let (adds, dels) = crate::tui::app::diff_change_counts(detail);
-                if adds > 0 || dels > 0 {
-                    header.push(Span::raw("  "));
-                    header.push(Span::styled(
-                        format!("+{adds}"),
-                        Style::default()
-                            .fg(theme::success())
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                    header.push(Span::raw(" "));
-                    header.push(Span::styled(
-                        format!("−{dels}"),
-                        Style::default()
-                            .fg(theme::error())
-                            .add_modifier(Modifier::BOLD),
-                    ));
-                }
-                if let Some(t) = &ts_label {
-                    header.push(Span::styled(
-                        format!("  {t}"),
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                // Clicking the tool header copies its output to clipboard.
-                let copy_hit = if detail.trim().is_empty() {
-                    None
-                } else {
-                    Some(LineClickHit::CopyText(detail.clone()))
-                };
-                push_transcript_line(&mut lines, &mut hits, Line::from(header), copy_hit);
-                if !collapsed && !detail.trim().is_empty() {
-                    push_tool_detail_lines(&mut lines, &mut hits, detail, w.saturating_sub(6), 80);
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::System(s) => {
-                // Multiline system blocks (e.g. startup logo) render as raw rows
-                // without bullet prefixes so ASCII art alignment is preserved.
-                if s.contains('\n') {
-                    for part in s.split('\n') {
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            Line::from(Span::styled(
-                                part.to_string(),
-                                Style::default().fg(theme::muted()),
-                            )),
-                            None,
-                        );
-                    }
-                } else if s.is_empty() {
-                    push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-                } else {
-                    let prefixed = format!("  • {s}");
-                    for wline in wrap_text(&prefixed, w) {
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            Line::from(Span::styled(
-                                wline,
-                                Style::default()
-                                    .fg(theme::muted())
-                                    .add_modifier(Modifier::DIM),
-                            )),
-                            None,
-                        );
-                    }
-                }
-            }
-            DisplayBlock::Question(q) => {
-                let selected_answer = state.answered_questions.get(&q.question_id);
-                push_section_gap(&mut lines, &mut hits);
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(vec![
-                        Span::styled(
-                            " ? ",
-                            Style::default().fg(Color::Black).bg(theme::warn()).bold(),
-                        ),
-                        Span::styled(
-                            " question ",
-                            Style::default()
-                                .fg(theme::warn())
-                                .add_modifier(Modifier::BOLD),
-                        ),
-                    ]),
-                    None,
-                );
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-                for text_line in wrap_text(&q.prompt, w.saturating_sub(2)) {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(vec![
-                            Span::styled("  ", Style::default().fg(theme::muted())),
-                            Span::styled(text_line, Style::default().fg(theme::text())),
-                        ]),
-                        None,
-                    );
-                }
-                // When the modal is open, skip inline options — the popup handles selection.
-                if !state.question_modal_open {
-                    let suggested_selected =
-                        matches!(selected_answer, Some(QuestionSelection::Suggested));
-                    for (idx, row) in wrap_text(
-                        &format!("suggested: {}", q.suggested_answer),
-                        w.saturating_sub(12).max(20),
-                    )
-                    .into_iter()
-                    .enumerate()
-                    {
-                        let row_style = if suggested_selected {
-                            Style::default()
-                                .fg(Color::Black)
-                                .bg(theme::success())
-                                .add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(theme::success())
-                        };
-                        let prefix_style = if suggested_selected {
-                            row_style
-                        } else {
-                            Style::default()
-                                .fg(theme::success())
-                                .add_modifier(Modifier::BOLD)
-                        };
-                        let line = if idx == 0 {
-                            Line::from(vec![
-                                Span::styled("  [0] ", prefix_style),
-                                Span::styled(row, row_style),
-                                Span::styled(
-                                    "  (click)",
-                                    if suggested_selected {
-                                        row_style
-                                    } else {
-                                        Style::default().fg(theme::muted())
-                                    },
-                                ),
-                            ])
-                        } else {
-                            Line::from(vec![
-                                Span::styled("      ", Style::default().fg(theme::muted())),
-                                Span::styled(row, row_style),
-                            ])
-                        };
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            line,
-                            Some(LineClickHit::Question(QuestionSelection::Suggested)),
-                        );
-                    }
-                    for (i, o) in q.options.iter().enumerate() {
-                        let opt_selected = matches!(
-                            selected_answer,
-                            Some(QuestionSelection::Option { option_id }) if option_id == &o.id
-                        );
-                        let choice_text = format!("({}) {}", o.id, o.label);
-                        for (idx, row) in wrap_text(&choice_text, w.saturating_sub(12).max(20))
-                            .into_iter()
-                            .enumerate()
-                        {
-                            let row_style = if opt_selected {
-                                Style::default()
-                                    .fg(Color::Black)
-                                    .bg(theme::user())
-                                    .add_modifier(Modifier::BOLD)
-                            } else {
-                                Style::default().fg(theme::text())
-                            };
-                            let prefix_style = if opt_selected {
-                                row_style
-                            } else {
-                                Style::default()
-                                    .fg(theme::assistant())
-                                    .add_modifier(Modifier::BOLD)
-                            };
-                            let line = if idx == 0 {
-                                Line::from(vec![
-                                    Span::styled(format!("  [{}] ", i + 1), prefix_style),
-                                    Span::styled(row, row_style),
-                                    Span::styled(
-                                        "  (click)",
-                                        if opt_selected {
-                                            row_style
-                                        } else {
-                                            Style::default().fg(theme::muted())
-                                        },
-                                    ),
-                                ])
-                            } else {
-                                Line::from(vec![
-                                    Span::styled("      ", Style::default().fg(theme::muted())),
-                                    Span::styled(row, row_style),
-                                ])
-                            };
-                            push_transcript_line(
-                                &mut lines,
-                                &mut hits,
-                                line,
-                                Some(LineClickHit::Question(QuestionSelection::Option {
-                                    option_id: o.id.clone(),
-                                })),
-                            );
-                        }
-                    }
-                    if q.allow_custom {
-                        let custom_selected =
-                            matches!(selected_answer, Some(QuestionSelection::Custom { .. }));
-                        push_transcript_line(
-                            &mut lines,
-                            &mut hits,
-                            Line::from(Span::styled(
-                                "  [c] type your own answer below, then Enter",
-                                if custom_selected {
-                                    Style::default()
-                                        .fg(Color::Black)
-                                        .bg(theme::assistant())
-                                        .add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(theme::muted())
-                                },
-                            )),
-                            None,
-                        );
-                        if let Some(QuestionSelection::Custom { text }) = selected_answer {
-                            push_transcript_line(
-                                &mut lines,
-                                &mut hits,
-                                Line::from(Span::styled(
-                                    format!("      selected: {}", truncate_chars(text, 80)),
-                                    Style::default().fg(theme::assistant()),
-                                )),
-                                None,
-                            );
-                        }
-                    }
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(Span::styled(
-                            "  Tip: /auto-answer or Enter on empty = suggested · click an option above",
-                            Style::default().fg(theme::muted()),
-                        )),
-                        None,
-                    );
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::Thinking(content) => {
-                push_section_gap(&mut lines, &mut hits);
-                let wrapped = wrap_text(content, w.saturating_sub(2));
-                let shown = if state.thinking_expanded {
-                    wrapped.len()
-                } else {
-                    wrapped.len().min(3)
-                };
-                let mut header = vec![Span::styled(
-                    " ✦ thinking ",
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(theme::muted())
-                        .add_modifier(Modifier::BOLD),
-                )];
-                if wrapped.len() > 3 {
-                    header.push(Span::styled(
-                        if state.thinking_expanded {
-                            "  ▾ click to collapse"
-                        } else {
-                            "  ▸ click to expand"
-                        },
-                        Style::default().fg(theme::muted()),
-                    ));
-                }
-                push_transcript_line(
-                    &mut lines,
-                    &mut hits,
-                    Line::from(header),
-                    Some(LineClickHit::ToggleThinking),
-                );
-                for text_line in wrapped.iter().take(shown) {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(vec![
-                            Span::styled(" │ ", Style::default().fg(theme::muted())),
-                            Span::styled(
-                                text_line.clone(),
-                                Style::default()
-                                    .fg(theme::muted())
-                                    .add_modifier(Modifier::ITALIC),
-                            ),
-                        ]),
-                        None,
-                    );
-                }
-                if wrapped.len() > shown {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(Span::styled(
-                            format!(" … +{} more — click to expand", wrapped.len() - shown),
-                            Style::default().fg(theme::muted()),
-                        )),
-                        Some(LineClickHit::ToggleThinking),
-                    );
-                }
-                push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-            }
-            DisplayBlock::ErrorLine(s) => {
-                for wline in wrap_text(&format!(" ✗ {s}"), w) {
-                    push_transcript_line(
-                        &mut lines,
-                        &mut hits,
-                        Line::from(Span::styled(
-                            wline,
-                            Style::default().fg(theme::error()),
-                        )),
-                        None,
-                    );
-                }
-            }
-        }
-    }
-
+    // ── Streaming thinking ── show the last few lines, light grey
     if let Some(thinking) = &state.streaming_thinking
         && !thinking.is_empty()
     {
-        let wrapped = wrap_text(thinking, w.saturating_sub(2));
+        let think_style = Style::default().fg(thinking_grey()).add_modifier(ITALIC);
+        let wrapped = wrap_text(thinking, w.saturating_sub(4));
         let shown = if state.thinking_expanded {
             wrapped.len()
         } else {
-            wrapped.len().min(10)
+            6
         };
-        let mut header = vec![Span::styled(
-            " ✦ thinking… ",
-            Style::default()
-                .fg(Color::Black)
-                .bg(theme::muted())
-                .add_modifier(Modifier::BOLD),
-        )];
-        if wrapped.len() > 10 {
-            header.push(Span::styled(
-                if state.thinking_expanded {
-                    "  ▾ click to collapse"
-                } else {
-                    "  ▸ click to expand"
-                },
-                Style::default().fg(theme::muted()),
-            ));
-        }
-        push_transcript_line(
-            &mut lines,
-            &mut hits,
-            Line::from(header),
-            Some(LineClickHit::ToggleThinking),
-        );
-        for text_line in wrapped.iter().take(shown) {
+        let start = wrapped.len().saturating_sub(shown);
+        for (i, text_line) in wrapped.iter().enumerate().skip(start) {
+            let prefix = if i == start { "• thinking… " } else { "  " };
             push_transcript_line(
                 &mut lines,
                 &mut hits,
                 Line::from(vec![
-                    Span::styled(" │ ", Style::default().fg(theme::muted())),
-                    Span::styled(
-                        text_line.clone(),
-                        Style::default()
-                            .fg(theme::muted())
-                            .add_modifier(Modifier::ITALIC),
-                    ),
+                    Span::styled(prefix, think_style),
+                    Span::styled(text_line.clone(), think_style),
                 ]),
                 None,
             );
         }
-        if wrapped.len() > shown {
-            push_transcript_line(
-                &mut lines,
-                &mut hits,
-                Line::from(Span::styled(
-                    format!(" … +{} more — click to expand", wrapped.len() - shown),
-                    Style::default().fg(theme::muted()),
-                )),
-                Some(LineClickHit::ToggleThinking),
-            );
-        }
-        push_transcript_line(&mut lines, &mut hits, Line::default(), None);
     }
 
+    // ── Streaming assistant ── identical styling to the finalized block so
+    // there's no visual jump when generation completes.
     if let Some(stream) = &state.streaming_assistant
         && !stream.is_empty()
     {
-        push_transcript_line(
-            &mut lines,
-            &mut hits,
-            Line::from(vec![
-                Span::styled(
-                    " dcode-ai ",
-                    Style::default().fg(Color::Black).bg(theme::assistant()),
-                ),
-                Span::styled(" streaming ", Style::default().fg(theme::muted())),
-            ]),
-            Some(LineClickHit::CopyText(stream.clone())),
-        );
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
+        let marker_style = Style::default().fg(theme::assistant()).add_modifier(BOLD);
         let (md_lines, md_hits) =
-            render_markdown_lines_with_hits(stream, state.code_line_numbers, w.saturating_sub(2));
-        let md_count = md_lines.len();
+            render_markdown_lines_with_hits(stream, state.code_line_numbers, w.saturating_sub(3));
         for (i, (md_line, md_hit)) in md_lines.into_iter().zip(md_hits).enumerate() {
-            let mut line = prefixed_line(
-                Span::styled("▏ ", Style::default().fg(theme::assistant())),
-                md_line,
+            let prefix_style = if i == 0 { marker_style } else { dim() };
+            let prefix = if i == 0 { "• " } else { "  " };
+            push_transcript_line(
+                &mut lines,
+                &mut hits,
+                prefixed_line(Span::styled(prefix, prefix_style), md_line),
+                md_hit,
             );
-            // Blinking cursor at the end of the last streaming line.
-            if i == md_count - 1 {
-                line.spans
-                    .push(Span::styled("▌", Style::default().fg(theme::assistant())));
-            }
-            push_transcript_line(&mut lines, &mut hits, line, md_hit);
         }
     }
 
+    // ── Empty state ──
     if lines.is_empty() {
-        push_transcript_line(
-            &mut lines,
-            &mut hits,
-            Line::from(vec![
-                Span::styled(
-                    "dcode-ai",
-                    Style::default()
-                        .fg(theme::assistant())
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(" — session ready", Style::default().fg(theme::muted())),
-            ]),
-            None,
-        );
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-        // Context chips: workspace, branch, model, agent — so a fresh session
-        // shows where you are and what you're driving without running /status.
-        let mut ctx_spans: Vec<Span<'static>> = Vec::new();
-        let push_chip = |spans: &mut Vec<Span<'static>>, label: &str, value: &str| {
-            if value.trim().is_empty() {
-                return;
-            }
-            if !spans.is_empty() {
-                spans.push(Span::styled("  ·  ", Style::default().fg(theme::muted())));
-            }
-            spans.push(Span::styled(
-                format!("{label} "),
-                Style::default().fg(theme::muted()),
-            ));
-            spans.push(Span::styled(
-                value.to_string(),
-                Style::default().fg(theme::text()),
-            ));
-        };
-        push_chip(
-            &mut ctx_spans,
-            "cwd",
-            &truncate_chars(&state.workspace_display, 40),
-        );
-        push_chip(&mut ctx_spans, "branch", &state.current_branch);
-        push_chip(&mut ctx_spans, "model", &truncate_chars(&state.model, 24));
-        push_chip(&mut ctx_spans, "agent", &state.agent_profile);
-        if !ctx_spans.is_empty() {
-            push_transcript_line(&mut lines, &mut hits, Line::from(ctx_spans), None);
-            push_transcript_line(&mut lines, &mut hits, Line::default(), None);
-        }
-        push_transcript_line(
-            &mut lines,
-            &mut hits,
-            Line::from(Span::styled(
-                "Tab agent · Shift+Enter/Ctrl+I/Ctrl+J newline · Ctrl+P palette · /keymaps · Ctrl+V image",
-                Style::default().fg(theme::muted()),
-            )),
-            None,
-        );
     }
 
     let (lines, mut hits) = collapse_blank_runs(lines, hits);
 
-    // Post-process: upgrade None hits to OpenLink when the line contains a URL.
     for (i, hit) in hits.iter_mut().enumerate() {
         if hit.is_some() {
             continue;
         }
         if let Some(line) = lines.get(i) {
-            let text = line_plain_text(line);
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             if let Some(url) = extract_first_url(&text) {
                 *hit = Some(LineClickHit::OpenLink(url));
             }
@@ -869,50 +391,439 @@ pub(crate) fn transcript_lines_and_hits(
     (lines, hits)
 }
 
-fn line_plain_text(line: &Line<'_>) -> String {
-    line.spans.iter().map(|s| s.content.as_ref()).collect()
-}
+fn render_block(
+    block: &DisplayBlock,
+    state: &TuiSessionState,
+    w: usize,
+    lines: &mut Vec<Line<'static>>,
+    hits: &mut Vec<LineAnswerHit>,
+) {
+    match block {
+        DisplayBlock::User(content) => {
+            // User messages: highlighted in the user accent color (bold), with
+            // a `›` prompt — stands out from assistant text.
+            push_transcript_line(lines, hits, Line::default(), None);
+            let user_style = Style::default().fg(theme::user()).add_modifier(BOLD);
+            for (i, raw_line) in content.lines().enumerate() {
+                for wl in wrap_text(raw_line, w.saturating_sub(3)) {
+                    let prefix = if i == 0 { "› " } else { "  " };
+                    push_transcript_line(
+                        lines,
+                        hits,
+                        Line::from(vec![
+                            Span::styled(prefix, user_style),
+                            Span::styled(wl, user_style),
+                        ]),
+                        None,
+                    );
+                }
+            }
+            push_transcript_line(lines, hits, Line::default(), None);
+        }
+        DisplayBlock::Assistant(content) => {
+            // Assistant: accent-colored `•` marker so replies are easy to spot.
+            push_transcript_line(lines, hits, Line::default(), None);
+            let (md_lines, md_hits) = render_markdown_lines_with_hits(
+                content,
+                state.code_line_numbers,
+                w.saturating_sub(3),
+            );
+            let marker_style = Style::default().fg(theme::assistant()).add_modifier(BOLD);
+            for (i, (md_line, md_hit)) in md_lines.into_iter().zip(md_hits).enumerate() {
+                let prefix_style = if i == 0 { marker_style } else { dim() };
+                let prefix = if i == 0 { "• " } else { "  " };
+                push_transcript_line(
+                    lines,
+                    hits,
+                    prefixed_line(Span::styled(prefix, prefix_style), md_line),
+                    md_hit,
+                );
+            }
+            push_transcript_line(lines, hits, Line::default(), None);
+        }
+        DisplayBlock::ToolRunning {
+            name,
+            input,
+            call_id: _,
+        } => {
+            let ui = tool_ui::metadata(name);
+            // Blank line before so the tool call gets breathing room.
+            push_transcript_line(lines, hits, Line::default(), None);
+            // ● ToolName(args)  running…
+            let mut spans = vec![
+                Span::styled("● ", Style::default().fg(theme::warn())),
+                Span::styled(
+                    ui.label,
+                    Style::default().fg(theme::text()).add_modifier(BOLD),
+                ),
+            ];
+            let detail_spans = tool_header_detail_spans(name, input);
+            if !detail_spans.is_empty() {
+                spans.push(Span::styled("(", dim()));
+                spans.extend(detail_spans);
+                spans.push(Span::styled(")", dim()));
+            }
+            spans.push(Span::styled(
+                "  running…",
+                Style::default().fg(theme::warn()),
+            ));
+            push_transcript_line(lines, hits, Line::from(spans), None);
+        }
+        DisplayBlock::ToolDone {
+            name,
+            call_id,
+            ok,
+            detail,
+            duration_ms,
+        } => {
+            let ui = tool_ui::metadata(name);
+            let dot_color = if *ok {
+                theme::success()
+            } else {
+                theme::error()
+            };
+            // Read-only tools (file reads, grep, status) collapse to a header by
+            // default so their output doesn't clutter the transcript; edits/
+            // writes stay expanded so the diff is visible.
+            let collapsed = state.is_tool_block_collapsed_for(call_id, name);
+            // Blank line before for spacing.
+            push_transcript_line(lines, hits, Line::default(), None);
+            let mut spans = vec![
+                Span::styled("● ", Style::default().fg(dot_color)),
+                Span::styled(
+                    ui.label,
+                    Style::default().fg(theme::text()).add_modifier(BOLD),
+                ),
+            ];
+            let first_line = detail.lines().next().unwrap_or("");
+            let file_path = first_line
+                .strip_prefix("Wrote ")
+                .or_else(|| first_line.strip_prefix("Edited "))
+                .or_else(|| first_line.strip_prefix("Patched "))
+                .or_else(|| first_line.strip_prefix("Created "))
+                .or_else(|| first_line.strip_prefix("Deleted "));
+            if let Some(fp) = file_path {
+                // Drop any trailing "(replaced N occurrences)" annotation so the
+                // header shows just the path, like Codex.
+                let path_only = fp.trim().split(" (").next().unwrap_or(fp).trim();
+                spans.push(Span::styled(
+                    format!("({})", truncate_chars(path_only, 48)),
+                    dim(),
+                ));
+            }
+            if !*ok {
+                let code = parse_exit_code(detail);
+                let label = match code {
+                    Some(c) => format!("  ✗ exit {c}"),
+                    None => "  ✗".to_string(),
+                };
+                spans.push(Span::styled(
+                    label,
+                    Style::default().fg(theme::error()).add_modifier(BOLD),
+                ));
+            }
+            if let Some(ms) = duration_ms {
+                spans.push(Span::styled(format!("  {}", format_duration(*ms)), dim()));
+            }
+            let (adds, dels) = crate::tui::app::diff_change_counts(detail);
+            if adds > 0 || dels > 0 {
+                spans.push(Span::styled(format!("  +{adds} -{dels}"), dim()));
+            }
+            if collapsed && !detail.trim().is_empty() {
+                spans.push(Span::styled("  (ctrl+o to expand)", dim()));
+            }
+            push_transcript_line(
+                lines,
+                hits,
+                Line::from(spans),
+                if detail.trim().is_empty() {
+                    None
+                } else {
+                    Some(LineClickHit::CopyText(detail.clone()))
+                },
+            );
 
-fn extract_first_url(text: &str) -> Option<String> {
-    for word in text.split_whitespace() {
-        let trimmed = word.trim_matches(|c: char| {
-            c == '('
-                || c == ')'
-                || c == '['
-                || c == ']'
-                || c == '<'
-                || c == '>'
-                || c == '"'
-                || c == '\''
-                || c == ','
-        });
-        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
-            return Some(trimmed.to_string());
+            // Show a capped preview of the output unless collapsed. A unified
+            // diff (file edits, `git diff`) renders Codex-style with line
+            // numbers, sign column, and tinted add/delete backgrounds. Other
+            // output falls back to the plain capped preview.
+            let diff_idx = if !collapsed && !detail.trim().is_empty() {
+                diff_body_line_index(detail)
+            } else {
+                None
+            };
+            if let Some(di) = diff_idx {
+                let diff_body = detail.lines().skip(di).collect::<Vec<_>>().join("\n");
+                // Derive the language for syntax highlighting from the edited
+                // file's extension (header path or the diff's `+++` line).
+                let lang = file_path
+                    .map(|fp| {
+                        fp.trim()
+                            .split(" (")
+                            .next()
+                            .unwrap_or(fp)
+                            .trim()
+                            .to_string()
+                    })
+                    .and_then(|p| lang_from_path_ext(&p));
+                render_unified_diff(lines, hits, &diff_body, w, 40, lang.as_deref());
+                push_transcript_line(lines, hits, Line::default(), None);
+            } else if !collapsed && !detail.trim().is_empty() && file_path.is_none() {
+                const MAX_PREVIEW: usize = 14;
+                let mut shown = 0usize;
+                let mut total = 0usize;
+                for raw in detail.lines() {
+                    total += 1;
+                    if shown >= MAX_PREVIEW {
+                        continue;
+                    }
+                    // Color diff-style lines (+/- /@@) and plan checkboxes.
+                    let line_style = if raw.starts_with("[x]") {
+                        Style::default().fg(theme::success())
+                    } else if raw.starts_with("[~]") {
+                        Style::default().fg(theme::accent()).add_modifier(BOLD)
+                    } else if raw.starts_with("[ ]") {
+                        Style::default().fg(theme::text())
+                    } else if raw.starts_with('+') && !raw.starts_with("+++") {
+                        Style::default().fg(theme::success())
+                    } else if raw.starts_with('-') && !raw.starts_with("---") {
+                        Style::default().fg(theme::error())
+                    } else if raw.starts_with("@@") || raw.starts_with("diff ") {
+                        Style::default().fg(theme::warn())
+                    } else {
+                        Style::default().fg(theme::muted())
+                    };
+                    for wl in wrap_text(raw, w.saturating_sub(4)) {
+                        if shown >= MAX_PREVIEW {
+                            break;
+                        }
+                        push_transcript_line(
+                            lines,
+                            hits,
+                            Line::from(Span::styled(format!("    {wl}"), line_style)),
+                            None,
+                        );
+                        shown += 1;
+                    }
+                }
+                if total > MAX_PREVIEW {
+                    push_transcript_line(
+                        lines,
+                        hits,
+                        Line::from(Span::styled(
+                            format!("    … +{} more lines (ctrl+o to fold)", total - MAX_PREVIEW),
+                            dim(),
+                        )),
+                        None,
+                    );
+                }
+            }
+        }
+        DisplayBlock::ApprovalPending(req) => {
+            let ui = tool_ui::metadata(&req.tool);
+            push_transcript_line(lines, hits, Line::default(), None);
+            push_transcript_line(
+                lines,
+                hits,
+                Line::from(vec![
+                    Span::styled("● ", Style::default().fg(theme::warn())),
+                    Span::styled(
+                        ui.label,
+                        Style::default().fg(theme::warn()).add_modifier(BOLD),
+                    ),
+                    Span::styled("  awaiting approval", dim()),
+                ]),
+                None,
+            );
+            push_transcript_line(
+                lines,
+                hits,
+                Line::from(Span::styled(
+                    "  y approve · n deny · a always allow",
+                    Style::default().fg(theme::muted()),
+                )),
+                None,
+            );
+            push_transcript_line(lines, hits, Line::default(), None);
+        }
+        DisplayBlock::ApprovalResolved { tool, approved } => {
+            let (icon, color) = if *approved {
+                ("approved", theme::success())
+            } else {
+                ("denied", theme::error())
+            };
+            push_transcript_line(
+                lines,
+                hits,
+                Line::from(vec![
+                    Span::styled("● ", Style::default().fg(color)),
+                    Span::styled(format!("{tool} "), Style::default().fg(theme::text())),
+                    Span::styled(icon, Style::default().fg(color).add_modifier(BOLD)),
+                ]),
+                None,
+            );
+        }
+        DisplayBlock::System(s) => {
+            if s.is_empty() {
+                return;
+            }
+            for part in s.lines() {
+                if part.is_empty() {
+                    push_transcript_line(lines, hits, Line::default(), None);
+                } else {
+                    for wl in wrap_text(part, w.saturating_sub(3)) {
+                        push_transcript_line(
+                            lines,
+                            hits,
+                            Line::from(Span::styled(format!("  {wl}"), dim())),
+                            None,
+                        );
+                    }
+                }
+            }
+        }
+        DisplayBlock::Question(q) => {
+            let selected_answer = state.answered_questions.get(&q.question_id);
+            push_transcript_line(lines, hits, Line::default(), None);
+            for text_line in wrap_text(&q.prompt, w.saturating_sub(4)) {
+                push_transcript_line(
+                    lines,
+                    hits,
+                    Line::from(vec![
+                        Span::styled("? ", Style::default().fg(theme::warn()).add_modifier(BOLD)),
+                        Span::styled(text_line, Style::default().fg(theme::text())),
+                    ]),
+                    None,
+                );
+            }
+            if !state.question_modal_open {
+                let sug_sel = matches!(selected_answer, Some(QuestionSelection::Suggested));
+                let sug_style = if sug_sel {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(theme::success())
+                        .add_modifier(BOLD)
+                } else {
+                    Style::default().fg(theme::success())
+                };
+                push_transcript_line(
+                    lines,
+                    hits,
+                    Line::from(vec![
+                        Span::styled("  [0] ", sug_style),
+                        Span::styled(
+                            truncate_chars(&q.suggested_answer, w.saturating_sub(10)),
+                            sug_style,
+                        ),
+                    ]),
+                    Some(LineClickHit::Question(QuestionSelection::Suggested)),
+                );
+                for (i, o) in q.options.iter().enumerate() {
+                    let opt_sel = matches!(
+                        selected_answer,
+                        Some(QuestionSelection::Option { option_id }) if option_id == &o.id
+                    );
+                    let style = if opt_sel {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(theme::user())
+                            .add_modifier(BOLD)
+                    } else {
+                        Style::default().fg(theme::text())
+                    };
+                    push_transcript_line(
+                        lines,
+                        hits,
+                        Line::from(vec![
+                            Span::styled(format!("  [{}] ", i + 1), style),
+                            Span::styled(truncate_chars(&o.label, w.saturating_sub(10)), style),
+                        ]),
+                        Some(LineClickHit::Question(QuestionSelection::Option {
+                            option_id: o.id.clone(),
+                        })),
+                    );
+                }
+            }
+            push_transcript_line(lines, hits, Line::default(), None);
+        }
+        DisplayBlock::Thinking(content) => {
+            // Light grey, italic — clearly distinct from replies but readable.
+            let think_style = Style::default().fg(thinking_grey()).add_modifier(ITALIC);
+            if state.thinking_expanded {
+                let wrapped = wrap_text(content, w.saturating_sub(4));
+                for (i, text_line) in wrapped.iter().enumerate() {
+                    let prefix = if i == 0 { "• thinking  " } else { "  " };
+                    push_transcript_line(
+                        lines,
+                        hits,
+                        Line::from(vec![
+                            Span::styled(prefix, think_style),
+                            Span::styled(text_line.clone(), think_style),
+                        ]),
+                        Some(LineClickHit::ToggleThinking),
+                    );
+                }
+            } else {
+                let preview =
+                    truncate_chars(content.lines().next().unwrap_or(""), w.saturating_sub(28));
+                let multiline =
+                    content.lines().count() > 1 || content.chars().count() > w.saturating_sub(28);
+                let hint = if multiline {
+                    "  (ctrl+t to expand)"
+                } else {
+                    ""
+                };
+                push_transcript_line(
+                    lines,
+                    hits,
+                    Line::from(vec![
+                        Span::styled(format!("• thinking: {preview}"), think_style),
+                        Span::styled(hint.to_string(), dim()),
+                    ]),
+                    Some(LineClickHit::ToggleThinking),
+                );
+            }
+        }
+        DisplayBlock::ErrorLine(s) => {
+            for wl in wrap_text(s, w.saturating_sub(4)) {
+                push_transcript_line(
+                    lines,
+                    hits,
+                    Line::from(Span::styled(
+                        format!("  {wl}"),
+                        Style::default().fg(theme::error()).add_modifier(DIM),
+                    )),
+                    None,
+                );
+            }
         }
     }
-    None
 }
 
-#[allow(dead_code)]
-pub fn transcript_line_count_for_bench(state: &TuiSessionState, width: u16) -> usize {
-    transcript_lines_and_hits(state, width).0.len()
-}
-
-/// Tighten vertical rhythm: collapse runs of blank lines to a single blank and
-/// trim leading/trailing blanks. Keeps the `lines`/`hits` arrays parallel.
 fn collapse_blank_runs(
     lines: Vec<Line<'static>>,
     hits: Vec<LineAnswerHit>,
 ) -> (Vec<Line<'static>>, Vec<LineAnswerHit>) {
+    // Allow up to 2 consecutive blank lines so messages get breathing room,
+    // but trim leading blanks and runaway whitespace.
     let mut out_lines: Vec<Line<'static>> = Vec::with_capacity(lines.len());
     let mut out_hits: Vec<LineAnswerHit> = Vec::with_capacity(hits.len());
-    let mut prev_blank = true; // seeded true so leading blanks are trimmed
+    let mut leading = true;
+    let mut blank_run = 0u8;
     for (line, hit) in lines.into_iter().zip(hits) {
         let blank = !line_has_text(&line);
-        if blank && prev_blank {
-            continue;
+        if blank {
+            if leading {
+                continue;
+            }
+            blank_run += 1;
+            if blank_run > 2 {
+                continue;
+            }
+        } else {
+            blank_run = 0;
+            leading = false;
         }
-        prev_blank = blank;
         out_lines.push(line);
         out_hits.push(hit);
     }
@@ -923,28 +834,19 @@ fn collapse_blank_runs(
     (out_lines, out_hits)
 }
 
-/// Format a Unix-seconds timestamp as local `HH:MM`, or `None` if zero.
-fn fmt_wall_time(secs: u64) -> Option<String> {
-    if secs == 0 {
-        return None;
+fn extract_first_url(text: &str) -> Option<String> {
+    for word in text.split_whitespace() {
+        let trimmed = word.trim_matches(|c: char| {
+            matches!(c, '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\'' | ',')
+        });
+        if trimmed.starts_with("https://") || trimmed.starts_with("http://") {
+            return Some(trimmed.to_string());
+        }
     }
-    use chrono::{Local, TimeZone};
-    let dt = Local.timestamp_opt(secs as i64, 0).single()?;
-    let now = Local::now();
-    let age = now.signed_duration_since(dt);
-    if age.num_seconds() < 60 {
-        Some("just now".to_string())
-    } else if age.num_minutes() < 60 {
-        Some(format!("{}m ago", age.num_minutes()))
-    } else if age.num_hours() < 12 {
-        Some(format!("{}h ago", age.num_hours()))
-    } else {
-        Some(dt.format("%H:%M").to_string())
-    }
+    None
 }
 
-/// Format a tool duration as a compact badge: `120ms` under 1s, else `1.2s`.
-fn format_duration_badge(ms: u64) -> String {
+fn format_duration(ms: u64) -> String {
     if ms < 1000 {
         format!("{ms}ms")
     } else {
@@ -952,44 +854,33 @@ fn format_duration_badge(ms: u64) -> String {
     }
 }
 
-/// Parse an exit code from shell/exec tool output.
-/// Looks for patterns like "exit code: 1", "Exit code 0", or "exited with 2".
 fn parse_exit_code(detail: &str) -> Option<i32> {
-    for line in detail.lines().take(8) {
-        let lower = line.to_ascii_lowercase();
-        // Match "exit code: N", "exit code N", "exited with N", "exit status: N"
-        for prefix in &[
-            "exit code:",
-            "exit code ",
-            "exited with ",
-            "exit status:",
-            "exit status ",
-        ] {
-            if let Some(rest) = lower.find(prefix).map(|i| &lower[i + prefix.len()..]) {
-                let num_str: String = rest
-                    .trim_start()
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit() || *c == '-')
-                    .collect();
-                if let Ok(n) = num_str.parse::<i32>() {
-                    return Some(n);
-                }
-            }
+    for line in detail.lines().rev().take(3) {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("exit code: ") {
+            return rest.trim().parse().ok();
+        }
+        if let Some(rest) = trimmed.strip_prefix("exit ") {
+            return rest.trim().parse().ok();
         }
     }
     None
 }
 
-#[cfg(test)]
-mod tests {
-    use super::format_duration_badge;
+#[allow(dead_code)]
+pub fn transcript_line_count_for_bench(state: &TuiSessionState, width: u16) -> usize {
+    transcript_lines_and_hits(state, width).0.len()
+}
 
-    #[test]
-    fn duration_badge_formats_ms_and_seconds() {
-        assert_eq!(format_duration_badge(0), "0ms");
-        assert_eq!(format_duration_badge(120), "120ms");
-        assert_eq!(format_duration_badge(999), "999ms");
-        assert_eq!(format_duration_badge(1200), "1.2s");
-        assert_eq!(format_duration_badge(60_000), "60.0s");
+#[allow(dead_code)]
+fn fmt_wall_time(epoch_secs: u64) -> Option<String> {
+    if epoch_secs == 0 {
+        return None;
     }
+    let secs_today = epoch_secs % 86400;
+    Some(format!(
+        "{:02}:{:02}",
+        secs_today / 3600,
+        (secs_today % 3600) / 60
+    ))
 }
