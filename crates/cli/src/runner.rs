@@ -198,6 +198,10 @@ impl SessionRuntime {
         self.supervisor.event_tx()
     }
 
+    pub fn mcp_manager(&self) -> &Arc<dcode_ai_core::tools::mcp::McpConnectionManager> {
+        self.supervisor.mcp_manager()
+    }
+
     pub async fn list_session_ids(&self) -> Result<Vec<String>, String> {
         let store = dcode_ai_runtime::session_store::SessionStore::new(
             self.workspace_root().join(&self.config.session.history_dir),

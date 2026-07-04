@@ -1,6 +1,7 @@
 pub mod anthropic;
 pub mod anthropic_compat;
 pub mod anthropic_with_claude_fallback;
+pub mod antigravity;
 pub mod claude_cli;
 pub mod factory;
 pub mod minimax;
@@ -90,6 +91,11 @@ pub enum ProviderError {
     Configuration(String),
     #[error("API request failed: {0}")]
     RequestFailed(String),
+    /// A transient transport-level failure (connection reset, timeout, stale
+    /// keep-alive, DNS blip) that occurred *before* a response was received.
+    /// Retryable — the request never reached/completed at the model.
+    #[error("network error (transient): {0}")]
+    Transient(String),
     #[error("Authentication error: {0}")]
     AuthError(String),
     #[error("Rate limited, retry after {retry_after_ms}ms")]
@@ -98,6 +104,31 @@ pub enum ProviderError {
     ModelNotFound(String),
     #[error("{0}")]
     Other(String),
+}
+
+impl ProviderError {
+    /// Classify a `reqwest` error returned from `.send()`. Such errors are
+    /// transport-level (HTTP 4xx/5xx come back as `Ok` with a non-success
+    /// status), so connection/timeout/reset/incomplete failures map to
+    /// [`ProviderError::Transient`] (retryable). Only a malformed-request
+    /// *builder* error is treated as permanent. The full `source` chain is
+    /// included so the real cause (e.g. "connection reset by peer") is visible
+    /// instead of just reqwest's opaque "error sending request for url".
+    pub fn from_reqwest_send(err: reqwest::Error) -> Self {
+        use std::error::Error;
+        let mut msg = err.to_string();
+        let mut src = err.source();
+        while let Some(s) = src {
+            msg.push_str(": ");
+            msg.push_str(&s.to_string());
+            src = s.source();
+        }
+        if err.is_builder() {
+            ProviderError::RequestFailed(msg)
+        } else {
+            ProviderError::Transient(msg)
+        }
+    }
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use dcode_ai_common::provider_runtime::has_claude_cli;
 
 use super::anthropic::AnthropicProvider;
 use super::anthropic_with_claude_fallback::AnthropicWithClaudeFallbackProvider;
+use super::antigravity::AntigravityProvider;
 use super::claude_cli::ClaudeCliProvider;
 use super::minimax::MiniMaxProvider;
 use super::openai::OpenAiProvider;
@@ -32,9 +33,11 @@ pub fn build_provider(config: &DcodeAiConfig) -> Result<Box<dyn Provider>, Provi
             }
             Err(error) => Err(error),
         },
-        ProviderKind::OpenAi | ProviderKind::Antigravity => Ok(Box::new(
-            OpenAiProvider::from_config(config, config.provider.default)?,
-        )),
+        ProviderKind::Antigravity => Ok(Box::new(AntigravityProvider::from_config(config)?)),
+        ProviderKind::OpenAi => Ok(Box::new(OpenAiProvider::from_config(
+            config,
+            config.provider.default,
+        )?)),
     }
 }
 

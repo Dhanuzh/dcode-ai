@@ -7,6 +7,7 @@ mod ipc_pending;
 mod oauth_login;
 mod prompt;
 mod repl;
+mod repl_helpers;
 mod runner;
 mod slash_commands;
 mod stream;
@@ -434,6 +435,11 @@ impl CliPermissionMode {
 }
 
 fn main() -> ExitCode {
+    // Load .env file from the current directory (if present) so that secrets
+    // configured via environment variables are available without requiring
+    // users to `source` the file manually.
+    load_dotenv();
+
     // Run on a thread with an enlarged stack (32 MiB) to avoid stack overflows
     // in debug builds on Windows where the default stack is only 1 MiB.
     let result = std::thread::Builder::new()
@@ -478,6 +484,46 @@ fn print_connect_hint_if_missing_provider_auth(error: &anyhow::Error) {
         eprintln!("  /login");
         eprintln!("  /connect");
         eprintln!("Then choose provider and continue.");
+    }
+}
+
+/// Minimal `.env` file loader.  Reads `KEY=VALUE` lines from `.env` in the
+/// current directory (and parent directories up to the filesystem root) and
+/// sets them as environment variables — but **never** overwrites variables
+/// that are already set in the process environment.
+fn load_dotenv() {
+    use std::io::{BufRead, BufReader};
+
+    // Walk up from cwd looking for .env
+    let mut dir = std::env::current_dir().unwrap_or_default();
+    loop {
+        let candidate = dir.join(".env");
+        if candidate.is_file() {
+            let Ok(file) = std::fs::File::open(&candidate) else {
+                break;
+            };
+            let reader = BufReader::new(file);
+            for line in reader.lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                if let Some((key, value)) = line.split_once('=') {
+                    let key = key.trim();
+                    let value = value.trim().trim_matches('"').trim_matches('\'');
+                    // Only set if not already present in the environment.
+                    if std::env::var(key).is_err() {
+                        // SAFETY: we are in single-threaded init code (before tokio spawns)
+                        // and only setting vars that don't already exist.
+                        unsafe { std::env::set_var(key, value) };
+                    }
+                }
+            }
+            break;
+        }
+        if !dir.pop() {
+            break;
+        }
     }
 }
 
@@ -2389,6 +2435,13 @@ fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
     let store = AuthStore::load().unwrap_or_default();
     if let Some(pref) = store.preferred_provider {
         match pref {
+            LoggedProvider::Antigravity if store.antigravity.is_some() => {
+                config.set_default_provider(ProviderKind::Antigravity);
+                if is_copilot_base_url(&config.provider.openai.base_url) {
+                    config.provider.openai.base_url = "https://api.openai.com".to_string();
+                }
+                return;
+            }
             LoggedProvider::Opencodezen if store.opencodezen_oauth.is_some() => {
                 config.set_default_provider(ProviderKind::OpenCodeZen);
                 return;
@@ -2415,6 +2468,11 @@ fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
 
     if store.opencodezen_oauth.is_some() {
         config.set_default_provider(ProviderKind::OpenCodeZen);
+    } else if store.antigravity.is_some() {
+        config.set_default_provider(ProviderKind::Antigravity);
+        if is_copilot_base_url(&config.provider.openai.base_url) {
+            config.provider.openai.base_url = "https://api.openai.com".to_string();
+        }
     } else if store.openai_oauth.is_some() {
         config.set_default_provider(ProviderKind::OpenAi);
         if is_copilot_base_url(&config.provider.openai.base_url) {
@@ -2431,6 +2489,12 @@ fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
 fn runtime_provider_from_auth(store: &AuthStore) -> Option<ProviderKind> {
     if let Some(pref) = store.preferred_provider {
         match pref {
+            LoggedProvider::Antigravity if store.antigravity.is_some() => {
+                return Some(ProviderKind::Antigravity);
+            }
+            LoggedProvider::Opencodezen if store.opencodezen_oauth.is_some() => {
+                return Some(ProviderKind::OpenCodeZen);
+            }
             LoggedProvider::Openai if store.openai_oauth.is_some() => {
                 return Some(ProviderKind::OpenAi);
             }
@@ -2444,10 +2508,16 @@ fn runtime_provider_from_auth(store: &AuthStore) -> Option<ProviderKind> {
         }
     }
 
-    if store.openai_oauth.is_some() || store.copilot.is_some() {
+    if store.openai_oauth.is_some() {
+        Some(ProviderKind::OpenAi)
+    } else if store.antigravity.is_some() {
+        Some(ProviderKind::Antigravity)
+    } else if store.copilot.is_some() {
         Some(ProviderKind::OpenAi)
     } else if store.anthropic.is_some() {
         Some(ProviderKind::Anthropic)
+    } else if store.opencodezen_oauth.is_some() {
+        Some(ProviderKind::OpenCodeZen)
     } else {
         None
     }

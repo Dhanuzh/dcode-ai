@@ -323,6 +323,11 @@ pub struct UiConfig {
     /// Hide hint text in the composer area.
     #[serde(default)]
     pub hide_tips: bool,
+    /// Suppress transient startup notices (MCP server starting/ready and the
+    /// "[permissions] startup approval granted" line). Defaults to hidden; the
+    /// `/quiet` command toggles it. Failures are always shown regardless.
+    #[serde(default = "default_quiet_startup")]
+    pub quiet_startup: bool,
     /// Lines per scroll event (default 3).
     #[serde(default = "default_scroll_speed")]
     pub scroll_speed: u16,
@@ -360,12 +365,17 @@ fn default_mouse_capture() -> bool {
     false
 }
 
+fn default_quiet_startup() -> bool {
+    true
+}
+
 impl Default for UiConfig {
     fn default() -> Self {
         Self {
             editor: None,
             theme: None,
             hide_tips: false,
+            quiet_startup: default_quiet_startup(),
             scroll_speed: default_scroll_speed(),
             mouse_capture: default_mouse_capture(),
             code_line_numbers: false,
@@ -387,6 +397,9 @@ impl UiConfig {
         }
         if let Some(hide_tips) = partial.hide_tips {
             self.hide_tips = hide_tips;
+        }
+        if let Some(quiet_startup) = partial.quiet_startup {
+            self.quiet_startup = quiet_startup;
         }
         if let Some(scroll_speed) = partial.scroll_speed {
             self.scroll_speed = scroll_speed;
@@ -1423,6 +1436,7 @@ struct PartialUiConfig {
     editor: Option<String>,
     theme: Option<String>,
     hide_tips: Option<bool>,
+    quiet_startup: Option<bool>,
     scroll_speed: Option<u16>,
     mouse_capture: Option<bool>,
     code_line_numbers: Option<bool>,

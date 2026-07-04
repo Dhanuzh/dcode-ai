@@ -21,6 +21,7 @@ pub mod onboarding;
 pub mod palette;
 pub mod paste;
 pub mod path_parse;
+pub mod render;
 pub mod render_helpers;
 pub mod replay;
 pub mod scroll_buffer;

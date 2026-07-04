@@ -1,9 +1,10 @@
 //! Shared transient-error retry for provider requests.
 //!
-//! Only [`ProviderError::RateLimited`] is treated as retryable — it is the one
-//! error every provider classifies unambiguously as transient. Auth, config,
-//! model-not-found, and generic request failures are surfaced immediately
-//! (retrying a 400/401 just wastes time and tokens).
+//! Retryable: [`ProviderError::RateLimited`] (429) and
+//! [`ProviderError::Transient`] (connection reset / timeout / stale keep-alive
+//! that failed before a response). Auth, config, model-not-found, and generic
+//! request failures are surfaced immediately (retrying a 400/401 just wastes
+//! time and tokens).
 
 use std::future::Future;
 use std::time::Duration;
@@ -29,6 +30,10 @@ pub fn retry_delay(err: &ProviderError, attempt: u32) -> Option<Duration> {
         ProviderError::RateLimited { retry_after_ms } => Some(Duration::from_millis(
             (*retry_after_ms).max(base_backoff_ms(attempt)),
         )),
+        // Transient transport failures (connection reset, timeout, stale
+        // keep-alive) happen before any response — retrying almost always
+        // succeeds. Use plain exponential backoff (no server hint available).
+        ProviderError::Transient(_) => Some(Duration::from_millis(base_backoff_ms(attempt))),
         _ => None,
     }
 }

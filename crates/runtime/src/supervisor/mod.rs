@@ -23,16 +23,21 @@ use dcode_ai_core::provider::factory::build_provider;
 use dcode_ai_core::tools::AskQuestionTool;
 use dcode_ai_core::tools::InvokeSkillTool;
 use dcode_ai_core::tools::ToolRegistry;
-use dcode_ai_core::tools::mcp::load_mcp_tools;
+use dcode_ai_core::tools::mcp::{McpConnectionManager, load_mcp_tools};
 use dcode_ai_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{mpsc, oneshot};
+
+pub mod session;
+pub use self::session::*;
+pub mod subagent;
+pub use self::subagent::*;
 
 pub type ApprovalPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalVerdict>>>>;
 pub type QuestionPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<QuestionSelection>>>>;
@@ -70,6 +75,7 @@ pub struct Supervisor {
     context_manager: ContextManager,
     last_summary_at_tokens: usize,
     interactive_handle: crate::interactive_exec::InteractiveExecHandle,
+    mcp_manager: Arc<McpConnectionManager>,
 }
 
 /// Configuration for creating a new supervised session.
@@ -148,24 +154,39 @@ impl Supervisor {
         } else {
             ToolRegistry::with_default_full_tools(workspace_root.clone(), config.web.clone())
         };
+        let (event_tx, event_rx) = mpsc::channel(256);
+
+        let (mcp_event_tx, mut mcp_event_rx) = mpsc::unbounded_channel();
+        let mcp_manager = Arc::new(McpConnectionManager::new(
+            workspace_root.clone(),
+            Some(mcp_event_tx),
+        ));
+
+        // Forward MCP events to the main event bus
+        let etx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = mcp_event_rx.recv().await {
+                let _ = etx.send(event).await;
+            }
+        });
+
         if !config.mcp.servers.is_empty() && (!cfg.safe_mode || config.mcp.expose_in_safe_mode) {
             let mcp_servers = config.mcp.servers.clone();
-            let mcp_root = workspace_root.clone();
+            let manager = Arc::clone(&mcp_manager);
             // Load MCP tools with a timeout to prevent startup hangs.
             let mcp_result = tokio::time::timeout(
                 std::time::Duration::from_secs(15),
-                tokio::task::spawn_blocking(move || load_mcp_tools(&mcp_root, &mcp_servers)),
+                load_mcp_tools(&manager, &mcp_servers),
             )
             .await;
             match mcp_result {
-                Ok(Ok(Ok(mcp_tools))) => {
+                Ok(Ok(mcp_tools)) => {
                     tracing::info!("loaded {} MCP tool(s)", mcp_tools.len());
                     for tool in mcp_tools {
                         tools.register(tool);
                     }
                 }
-                Ok(Ok(Err(error))) => tracing::warn!("MCP tool load failed: {}", error),
-                Ok(Err(error)) => tracing::warn!("MCP tool load panicked: {}", error),
+                Ok(Err(error)) => tracing::warn!("MCP tool load failed: {}", error),
                 Err(_) => tracing::warn!("MCP tool load timed out after 15s — skipping"),
             }
         }
@@ -199,8 +220,6 @@ impl Supervisor {
                 .fail_on_ask()
                 .with_handler(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>)
         };
-
-        let (event_tx, event_rx) = mpsc::channel(256);
         tools.register(Box::new(crate::bash_tool::RuntimeBashTool::with_event_tx(
             pty,
             event_tx.clone(),
@@ -258,6 +277,20 @@ impl Supervisor {
         let context_manager =
             Self::make_context_manager(&config, &config.model.default_model).await;
 
+        // Refresh the accurate context window from the provider API in the
+        // background and persist it for the next launch — never on the startup
+        // path (a `/models` lookup can take seconds). Only when auto-detection
+        // is enabled and the API-query opt-in is on.
+        if config.memory.context.auto_detect_context_window
+            && config.memory.context.query_provider_models_api
+        {
+            let cfg = config.clone();
+            let model = config.model.default_model.clone();
+            tokio::spawn(async move {
+                model_limits_api::refresh_and_persist(cfg, model).await;
+            });
+        }
+
         let sup = Self {
             session_id,
             session_name: None,
@@ -288,6 +321,7 @@ impl Supervisor {
             context_manager,
             last_summary_at_tokens: 0,
             interactive_handle,
+            mcp_manager,
         };
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
             .await;
@@ -468,6 +502,79 @@ impl Supervisor {
                     .run_turn(prompt, self.workspace_root.as_path(), attachments)
                     .await;
             }
+
+            // Some backends (notably the Claude CLI bridge) reject prompts well
+            // under the model's nominal window because of system-prompt/tool
+            // overhead and token-estimate slack — a single summarize pass that
+            // still keeps ~50 recent (possibly huge) messages isn't enough. Fall
+            // back to progressively harder trimming until the turn fits or we can
+            // no longer shrink the history.
+            let mut keep = self.context_manager.config().max_retained_messages;
+            let mut guard = 0u32;
+            while guard < 4 && matches!(&output, Err(e) if is_context_limit_error(e)) {
+                guard += 1;
+                keep = (keep / 2).max(3);
+                let before = self.agent.messages.len();
+                let trimmed = self
+                    .context_manager
+                    .get_sliding_window(&self.agent.messages, Some(keep));
+                self.agent.compact_messages(trimmed);
+                if self.agent.messages.len() >= before {
+                    break; // already minimal; further retries won't help
+                }
+                if let Some(tx) = self.agent.event_sender() {
+                    let _ = tx
+                        .send(AgentEvent::ContextCompaction {
+                            phase: "retry".to_string(),
+                            message:
+                                "Prompt still too large — trimming older context and retrying."
+                                    .to_string(),
+                            context_tokens: self
+                                .context_manager
+                                .stats(&self.agent.messages)
+                                .estimated_tokens as u64,
+                        })
+                        .await;
+                }
+                output = self
+                    .agent
+                    .run_turn(prompt, self.workspace_root.as_path(), attachments)
+                    .await;
+            }
+
+            // Final safety net: if trimming message COUNT still isn't enough, a
+            // single retained message (e.g. a giant tool output) alone exceeds
+            // the budget — truncate oversized message contents until it fits.
+            // `truncate_message_contents` leaves messages under the cap untouched,
+            // so this only affects the genuinely huge ones.
+            let mut cap_chars = 16_000usize;
+            let mut guard2 = 0u32;
+            while guard2 < 4 && matches!(&output, Err(e) if is_context_limit_error(e)) {
+                guard2 += 1;
+                cap_chars = (cap_chars / 2).max(1_000);
+                let capped = self
+                    .context_manager
+                    .truncate_message_contents(&self.agent.messages, cap_chars);
+                self.agent.compact_messages(capped);
+                if let Some(tx) = self.agent.event_sender() {
+                    let _ = tx
+                        .send(AgentEvent::ContextCompaction {
+                            phase: "retry".to_string(),
+                            message:
+                                "Prompt still too large — truncating large messages and retrying."
+                                    .to_string(),
+                            context_tokens: self
+                                .context_manager
+                                .stats(&self.agent.messages)
+                                .estimated_tokens as u64,
+                        })
+                        .await;
+                }
+                output = self
+                    .agent
+                    .run_turn(prompt, self.workspace_root.as_path(), attachments)
+                    .await;
+            }
         }
         let output = output?;
 
@@ -488,17 +595,35 @@ impl Supervisor {
     }
 
     async fn make_context_manager(config: &DcodeAiConfig, model: &str) -> ContextManager {
-        let model_limits = model_limits_api::resolve_model_limits(config, model).await;
-        let context_window = if config.memory.context.auto_detect_context_window {
-            tracing::info!(
-                "Context window target for {}: {} tokens",
-                model,
-                model_limits.context_window
-            );
-            model_limits.context_window
+        // Startup must not block on the network. Use the on-disk cached window
+        // (from a previous run's background refresh) if present, else the static
+        // built-in table. The accurate value is refreshed in the background (see
+        // `create`) and persisted for the next launch.
+        let raw_window = if config.memory.context.auto_detect_context_window {
+            let window = model_limits_api::cached_context_window(config, model)
+                .unwrap_or_else(|| crate::model_limits::detect_context_window(model));
+            tracing::info!("Context window for {model}: {window} tokens (cached/static)");
+            window
         } else {
             config.memory.context.context_window_target
         };
+
+        // Reserve headroom so the retained *input* never fills the whole window:
+        // the request also needs room for the model's output plus the system
+        // prompt and tool definitions. Without this the input alone can reach the
+        // limit and the provider returns "prompt is too long". The Claude CLI
+        // bridge carries an especially large system prompt, so it reserves more.
+        let claude_cli_bridge = matches!(
+            config.provider.default,
+            dcode_ai_common::config::ProviderKind::Anthropic
+        ) && config.provider.anthropic.resolve_api_key().is_none()
+            && dcode_ai_common::provider_runtime::has_claude_cli();
+        let output_reserve = crate::model_limits::detect_max_output_tokens(model);
+        let overhead_reserve = if claude_cli_bridge { 40_000 } else { 16_000 };
+        let context_window = raw_window
+            .saturating_sub(output_reserve + overhead_reserve)
+            .max(raw_window / 2)
+            .max(8_000);
 
         let context_config = ContextManagerConfig {
             context_window_target: context_window,
@@ -735,6 +860,10 @@ impl Supervisor {
             }),
         )
         .await;
+
+        // Shutdown MCP servers
+        self.mcp_manager.shutdown_all().await;
+
         if self.should_persist_session() {
             let _ = self.save().await;
             let _ = self.update_last_session().await;
@@ -1063,6 +1192,9 @@ impl Supervisor {
             hooks.run_best_effort(event, None, &payload).await;
         }
     }
+    pub fn mcp_manager(&self) -> &Arc<McpConnectionManager> {
+        &self.mcp_manager
+    }
 }
 
 fn is_context_limit_error(err: &ProviderError) -> bool {
@@ -1130,80 +1262,6 @@ async fn recover_messages_from_event_log(path: &Path) -> Vec<Message> {
         }
     }
     dedup
-}
-
-fn truncate_child_detail(s: &str, max_chars: usize) -> String {
-    let t = s.trim();
-    if t.chars().count() <= max_chars {
-        t.to_string()
-    } else {
-        format!(
-            "{}…",
-            t.chars()
-                .take(max_chars.saturating_sub(1))
-                .collect::<String>()
-        )
-    }
-}
-
-fn summarize_child_error_message(s: &str, max_chars: usize) -> String {
-    let one_line = s
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .unwrap_or("unknown child error");
-    truncate_child_detail(one_line, max_chars)
-}
-
-fn tool_input_one_line(input: &serde_json::Value) -> String {
-    if let Some(s) = input.as_str() {
-        if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-            return tool_input_one_line(&v);
-        }
-        return truncate_child_detail(s, 120);
-    }
-    if let Some(cmd) = input.get("command").and_then(|v| v.as_str()) {
-        return truncate_child_detail(cmd, 120);
-    }
-    if let Some(p) = input
-        .get("path")
-        .or_else(|| input.get("file_path"))
-        .and_then(|v| v.as_str())
-    {
-        return truncate_child_detail(p, 120);
-    }
-    let s = serde_json::to_string(input).unwrap_or_default();
-    truncate_child_detail(&s, 120)
-}
-
-/// Maps a child session event to a parent-visible activity line (sidebar + transcript).
-fn map_child_event_for_parent_broadcast(
-    child_session_id: &str,
-    event: &AgentEvent,
-) -> Option<AgentEvent> {
-    match event {
-        AgentEvent::ToolCallStarted { tool, input, .. } => Some(AgentEvent::ChildSessionActivity {
-            child_session_id: child_session_id.to_string(),
-            phase: tool.clone(),
-            detail: tool_input_one_line(input),
-        }),
-        AgentEvent::Checkpoint { phase, detail, .. } => Some(AgentEvent::ChildSessionActivity {
-            child_session_id: child_session_id.to_string(),
-            phase: phase.clone(),
-            detail: truncate_child_detail(detail, 120),
-        }),
-        AgentEvent::ChildSessionSpawned { task, .. } => Some(AgentEvent::ChildSessionActivity {
-            child_session_id: child_session_id.to_string(),
-            phase: "nested_subagent".to_string(),
-            detail: truncate_child_detail(task, 120),
-        }),
-        AgentEvent::Error { message } => Some(AgentEvent::ChildSessionActivity {
-            child_session_id: child_session_id.to_string(),
-            phase: "error".to_string(),
-            detail: truncate_child_detail(message, 160),
-        }),
-        _ => None,
-    }
 }
 
 /// Spawns the event fanout task: writes events to disk as `EventEnvelope`,
@@ -1435,839 +1493,8 @@ impl ApprovalHandler for AutoDenyHandler {
     }
 }
 
-fn generate_session_id() -> String {
-    static SESSION_COUNTER: AtomicU64 = AtomicU64::new(0);
-    let counter = SESSION_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("session-{}-{counter}", Utc::now().timestamp_micros())
-}
-
-fn derive_session_name(prompt: &str) -> Option<String> {
-    let first_line = prompt
-        .lines()
-        .find(|line| !line.trim().is_empty())
-        .map(str::trim)?;
-    normalize_session_name(first_line)
-}
-
-fn normalize_session_name(raw: &str) -> Option<String> {
-    if raw.trim().is_empty() {
-        return None;
-    }
-    let collapsed = raw
-        .chars()
-        .map(|ch| if ch.is_control() { ' ' } else { ch })
-        .collect::<String>();
-    let compact = collapsed.split_whitespace().collect::<Vec<_>>().join(" ");
-    if compact.is_empty() {
-        return None;
-    }
-    const MAX: usize = 72;
-    let mut out = String::new();
-    for ch in compact.chars().take(MAX) {
-        out.push(ch);
-    }
-    if compact.chars().count() > MAX {
-        out.push('…');
-    }
-    Some(out)
-}
-
-/// Query the current state of a session from its store.
-pub async fn query_session_state(
-    session_store: &SessionStore,
-    session_id: &str,
-) -> Result<SessionState, String> {
-    session_store
-        .load(session_id)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-/// List all session IDs in a workspace.
-pub async fn list_sessions(session_store: &SessionStore) -> Result<Vec<String>, String> {
-    session_store.list().await.map_err(|e| e.to_string())
-}
-
-/// Remove sessions that have no meaningful interaction history.
-/// Returns the deleted session IDs.
-pub async fn cleanup_empty_sessions(session_store: &SessionStore) -> Result<Vec<String>, String> {
-    let ids = session_store.list().await.map_err(|e| e.to_string())?;
-    let mut to_delete = Vec::new();
-    for id in ids {
-        let session = match session_store.load(&id).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-        if session.meta.status == SessionStatus::Running {
-            continue;
-        }
-        if !session_state_has_meaningful_interaction(&session) {
-            to_delete.push(id);
-        }
-    }
-    session_store
-        .delete_many(&to_delete)
-        .await
-        .map_err(|e| e.to_string())
-}
-
-fn session_state_has_meaningful_interaction(session: &SessionState) -> bool {
-    let has_non_system_message = session.messages.iter().any(|m| {
-        !matches!(m.role, Role::System)
-            && match &m.content {
-                MessageContent::Text(text) => !text.trim().is_empty(),
-                MessageContent::Parts(parts) => !parts.is_empty(),
-            }
-    });
-    has_non_system_message
-        || session.total_input_tokens > 0
-        || session.total_output_tokens > 0
-        || session.estimated_cost_usd > 0.0
-        || session
-            .meta
-            .session_name
-            .as_ref()
-            .is_some_and(|name| !name.trim().is_empty())
-        || session
-            .meta
-            .session_summary
-            .as_ref()
-            .is_some_and(|summary| !summary.trim().is_empty())
-        || session.meta.parent_session_id.is_some()
-        || !session.meta.child_session_ids.is_empty()
-        || session.meta.orchestration.is_some()
-}
-
-/// Clean up stale sessions: sessions marked as Running whose PID is no longer alive
-/// and whose socket no longer exists. Marks them as Error.
-pub async fn cleanup_stale_sessions(session_store: &SessionStore) {
-    let ids = match session_store.list().await {
-        Ok(ids) => ids,
-        Err(_) => return,
-    };
-
-    for id in ids {
-        let mut session = match session_store.load(&id).await {
-            Ok(s) => s,
-            Err(_) => continue,
-        };
-
-        if session.meta.status != SessionStatus::Running {
-            continue;
-        }
-
-        let pid_alive = session.meta.pid.map(is_pid_alive).unwrap_or(false);
-
-        let socket_exists = session
-            .meta
-            .socket_path
-            .as_ref()
-            .map(|p| p.exists())
-            .unwrap_or(false);
-
-        if !pid_alive && !socket_exists {
-            session.meta.status = SessionStatus::Error;
-            session.meta.updated_at = Utc::now();
-            let _ = session_store.save(&session).await;
-        }
-    }
-}
-
-/// Configuration for pruning sessions.
-#[derive(Debug, Clone)]
-pub struct PruneConfig {
-    /// Keep only this many most-recent sessions (by updated_at).
-    /// Sessions beyond this count are deleted. Set to 0 to delete all eligible.
-    pub keep_last: usize,
-    /// Delete sessions older than this duration.
-    pub older_than: chrono::Duration,
-    /// Only prune sessions matching these statuses. Empty = all statuses.
-    pub status_filter: Vec<SessionStatus>,
-    /// If true, only report what would be deleted without actually deleting.
-    pub dry_run: bool,
-    /// Also remove associated worktrees.
-    pub remove_worktrees: bool,
-}
-
-impl Default for PruneConfig {
-    fn default() -> Self {
-        Self {
-            keep_last: 20,
-            older_than: chrono::Duration::hours(7 * 24), // 7 days
-            status_filter: Vec::new(),
-            dry_run: false,
-            remove_worktrees: true,
-        }
-    }
-}
-
-/// Result of a prune operation.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PruneResult {
-    pub deleted: Vec<String>,
-    pub skipped_running: Vec<String>,
-    pub worktrees_removed: Vec<String>,
-    pub dry_run: bool,
-}
-
-/// Prune sessions based on age and count limits.
-/// Always preserves Running sessions.
-pub async fn prune_sessions(
-    session_store: &SessionStore,
-    workspace_root: &Path,
-    cfg: &PruneConfig,
-) -> Result<PruneResult, String> {
-    let (snapshots, _unreadable) = session_store
-        .load_all_snapshots()
-        .await
-        .map_err(|e| e.to_string())?;
-
-    let now = Utc::now();
-
-    // Separate running sessions from the rest
-    let running_ids: Vec<String> = snapshots
-        .iter()
-        .filter(|s| s.status == SessionStatus::Running)
-        .map(|s| s.id.clone())
-        .collect();
-
-    // Sort non-running by updated_at descending (most recent first)
-    let mut candidates: Vec<_> = snapshots
-        .iter()
-        .filter(|s| s.status != SessionStatus::Running)
-        .collect();
-    candidates.sort_by_key(|b| std::cmp::Reverse(b.updated_at));
-
-    // Apply status filter
-    let candidates: Vec<_> = if cfg.status_filter.is_empty() {
-        candidates
-    } else {
-        candidates
-            .into_iter()
-            .filter(|s| cfg.status_filter.contains(&s.status))
-            .collect()
-    };
-
-    // Apply age filter: keep sessions within the time window
-    let mut to_delete: Vec<String> = candidates
-        .iter()
-        .filter(|s| now.signed_duration_since(s.updated_at) > cfg.older_than)
-        .map(|s| s.id.clone())
-        .collect();
-
-    // Apply keep-last: the first N (most recent) are protected
-    if cfg.keep_last > 0 && candidates.len() > cfg.keep_last {
-        // Candidates are sorted newest-first; keep first N, delete the rest
-        let protected: std::collections::HashSet<String> = candidates
-            .iter()
-            .take(cfg.keep_last)
-            .map(|s| s.id.clone())
-            .collect();
-        to_delete.retain(|id| !protected.contains(id));
-        // Also add candidates beyond keep-last that aren't already in to_delete
-        for s in candidates.iter().skip(cfg.keep_last) {
-            if !to_delete.contains(&s.id) {
-                to_delete.push(s.id.clone());
-            }
-        }
-    }
-
-    // Deduplicate
-    to_delete.sort();
-    to_delete.dedup();
-
-    // Remove running sessions from delete list
-    let mut skipped_running = Vec::new();
-    to_delete.retain(|id| {
-        if running_ids.contains(id) {
-            skipped_running.push(id.clone());
-            false
-        } else {
-            true
-        }
-    });
-
-    if cfg.dry_run {
-        return Ok(PruneResult {
-            deleted: to_delete,
-            skipped_running,
-            worktrees_removed: Vec::new(),
-            dry_run: true,
-        });
-    }
-
-    // Perform deletion
-    let deleted = session_store
-        .delete_many(&to_delete)
-        .await
-        .map_err(|e| e.to_string())?;
-
-    // Remove worktrees
-    let mut worktrees_removed = Vec::new();
-    if cfg.remove_worktrees {
-        let wt_mgr = crate::worktree::WorktreeManager::new(workspace_root);
-        for id in &deleted {
-            if let Err(e) = wt_mgr.remove_worktree(id, true) {
-                tracing::warn!("failed to remove worktree for session {id}: {e}");
-            } else {
-                worktrees_removed.push(id.clone());
-            }
-        }
-    }
-
-    Ok(PruneResult {
-        deleted,
-        skipped_running,
-        worktrees_removed,
-        dry_run: false,
-    })
-}
-
 /// Spawns a background task that consumes spawn requests from the sub-agent tool
 /// and runs child sessions. Each child session inherits parent context.
-pub fn spawn_subagent_consumer(
-    mut spawn_rx: mpsc::Receiver<SpawnRequest>,
-    parent_session_id: String,
-    workspace_root: PathBuf,
-    config: DcodeAiConfig,
-    parent_messages: Vec<dcode_ai_common::message::Message>,
-    event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let parent_sessions_dir = workspace_root.join(&config.session.history_dir);
-        let parent_summary = build_parent_summary(&parent_messages);
-
-        while let Some(req) = spawn_rx.recv().await {
-            let parent_session_id = parent_session_id.clone();
-            let workspace_root = workspace_root.clone();
-            let config = config.clone();
-            let event_tx = event_tx.clone();
-            let parent_store = SessionStore::new(parent_sessions_dir.clone());
-            let parent_summary = parent_summary.clone();
-
-            let child_cfg = ChildSessionConfig {
-                parent_session_id: parent_session_id.clone(),
-                task: req.task.clone(),
-                workspace_root: workspace_root.clone(),
-                config,
-                parent_summary,
-                use_worktree: req.use_worktree,
-                focus_files: req.focus_files,
-            };
-
-            tokio::spawn(async move {
-                let hook_runner = {
-                    let runner = HookRunner::new(child_cfg.config.hooks.clone());
-                    runner.has_any().then_some(runner)
-                };
-                if let Some(hooks) = &hook_runner {
-                    hooks
-                        .run_best_effort(
-                            HookEventKind::SubagentStart,
-                            None,
-                            &json!({
-                                "parent_session_id": parent_session_id.clone(),
-                                "task": child_cfg.task.clone(),
-                                "workspace": child_cfg.workspace_root.clone(),
-                            }),
-                        )
-                        .await;
-                }
-                let result = spawn_child_session(child_cfg, event_tx.clone()).await;
-                match result {
-                    Ok(res) => {
-                        let completion_status = if res.status == "error" {
-                            format!("error: {}", summarize_child_error_message(&res.output, 140))
-                        } else {
-                            res.status.clone()
-                        };
-                        append_child_to_parent(
-                            &parent_store,
-                            &parent_session_id,
-                            &res.child_session_id,
-                        )
-                        .await;
-
-                        if let Some(ref tx) = event_tx {
-                            let _ = tx
-                                .send(AgentEvent::ChildSessionCompleted {
-                                    parent_session_id: parent_session_id.clone(),
-                                    child_session_id: res.child_session_id.clone(),
-                                    status: completion_status,
-                                })
-                                .await;
-                        }
-                        if let Some(hooks) = &hook_runner {
-                            hooks
-                                .run_best_effort(
-                                    HookEventKind::SubagentStop,
-                                    None,
-                                    &json!({
-                                        "parent_session_id": parent_session_id.clone(),
-                                        "child_session_id": res.child_session_id.clone(),
-                                        "status": res.status.clone(),
-                                    }),
-                                )
-                                .await;
-                        }
-                        let response = dcode_ai_core::tools::spawn_subagent::SpawnResponse {
-                            child_session_id: res.child_session_id,
-                            status: res.status,
-                            output: res.output,
-                            workspace: res.workspace,
-                            branch: res.branch,
-                            worktree_path: res.worktree_path,
-                        };
-                        let _ = req.reply.send(response);
-                    }
-                    Err(e) => {
-                        if let Some(hooks) = &hook_runner {
-                            hooks
-                                .run_best_effort(
-                                    HookEventKind::SubagentStop,
-                                    None,
-                                    &json!({
-                                        "parent_session_id": parent_session_id.clone(),
-                                        "status": "error",
-                                        "error": e.clone(),
-                                    }),
-                                )
-                                .await;
-                        }
-                        if let Some(ref tx) = event_tx {
-                            let _ = tx
-                                .send(AgentEvent::Error {
-                                    message: format!("Failed to spawn child session: {e}"),
-                                })
-                                .await;
-                        }
-                        let response = dcode_ai_core::tools::spawn_subagent::SpawnResponse {
-                            child_session_id: String::new(),
-                            status: "error".into(),
-                            output: e,
-                            workspace: workspace_root.display().to_string(),
-                            branch: None,
-                            worktree_path: None,
-                        };
-                        let _ = req.reply.send(response);
-                    }
-                }
-            });
-        }
-    })
-}
-
-/// Append a child session ID to the parent session's metadata on disk.
-async fn append_child_to_parent(store: &SessionStore, parent_id: &str, child_id: &str) {
-    if let Ok(mut parent) = store.load(parent_id).await
-        && !parent
-            .meta
-            .child_session_ids
-            .contains(&child_id.to_string())
-    {
-        parent.meta.child_session_ids.push(child_id.to_string());
-        let _ = store.save(&parent).await;
-    }
-}
-
-/// Build a concise summary of the parent conversation for context inheritance.
-fn build_parent_summary(messages: &[dcode_ai_common::message::Message]) -> String {
-    use dcode_ai_common::message::Role;
-
-    let mut summary = String::new();
-    let recent: Vec<_> = messages
-        .iter()
-        .filter(|m| matches!(m.role, Role::User | Role::Assistant | Role::System))
-        .collect();
-
-    let window = if recent.len() > 10 {
-        &recent[recent.len() - 10..]
-    } else {
-        &recent
-    };
-
-    for msg in window {
-        let role = match msg.role {
-            Role::User => "User",
-            Role::Assistant => "Assistant",
-            Role::System => "System",
-            Role::Tool => continue,
-        };
-        let body = msg.content.event_preview();
-        let content = if body.len() > 500 {
-            let truncated: String = body.chars().take(500).collect();
-            format!("{truncated}...")
-        } else {
-            body
-        };
-        summary.push_str(&format!("[{role}]: {content}\n\n"));
-    }
-
-    summary
-}
-
-fn build_compaction_fallback_summary(messages: &[dcode_ai_common::message::Message]) -> String {
-    // Semantic compaction: a plain conversation digest loses the concrete state
-    // an agent needs to continue (which files it touched, what it ran, what
-    // broke). Pull those artifacts out of *all* messages — including tool
-    // results, which the conversation digest skips — and pin them above the digest.
-    let artifacts = extract_session_artifacts(messages);
-    let convo = build_parent_summary(messages);
-
-    let mut out = String::new();
-    if !artifacts.is_empty() {
-        out.push_str("## Preserved Artifacts\n");
-        out.push_str(&artifacts);
-        out.push('\n');
-    }
-    if convo.trim().is_empty() {
-        if out.is_empty() {
-            out.push_str("Earlier conversation context was compacted due to token limits.");
-        }
-    } else {
-        out.push_str("## Recent Conversation\n");
-        out.push_str(&convo);
-    }
-    out
-}
-
-fn build_compaction_preview_summary(
-    context_manager: &ContextManager,
-    messages: &[dcode_ai_common::message::Message],
-) -> String {
-    if !messages.iter().any(|message| {
-        matches!(
-            message.role,
-            dcode_ai_common::message::Role::User
-                | dcode_ai_common::message::Role::Assistant
-                | dcode_ai_common::message::Role::Tool
-        )
-    }) {
-        return build_compaction_fallback_summary(&[]);
-    }
-
-    let messages_to_summarize = context_manager.get_messages_to_summarize(messages);
-    if messages_to_summarize.is_empty() {
-        build_compaction_fallback_summary(messages)
-    } else {
-        build_compaction_fallback_summary(&messages_to_summarize)
-    }
-}
-
-/// Scan every message (tool results included) for the durable state worth
-/// preserving across compaction: files touched, shell commands run, and error
-/// lines. Dependency-free heuristics; capped so the summary stays small.
-fn extract_session_artifacts(messages: &[dcode_ai_common::message::Message]) -> String {
-    use std::collections::BTreeSet;
-
-    let mut files: Vec<String> = Vec::new();
-    let mut seen_files: BTreeSet<String> = BTreeSet::new();
-    let mut commands: Vec<String> = Vec::new();
-    let mut errors: Vec<String> = Vec::new();
-
-    let mut push_file = |path: &str| {
-        let p = path
-            .trim()
-            .trim_matches(|c| matches!(c, '"' | '\'' | '`' | ',' | ';' | ')' | '('));
-        if looks_like_path(p) && seen_files.insert(p.to_string()) && files.len() < 20 {
-            files.push(p.to_string());
-        }
-    };
-
-    for msg in messages {
-        // Shell commands and edited paths from tool calls.
-        if let Some(calls) = &msg.tool_calls {
-            for call in calls {
-                if matches!(call.name.as_str(), "execute_bash" | "bash")
-                    && let Some(cmd) = call.arguments.get("command").and_then(|v| v.as_str())
-                    && commands.len() < 10
-                {
-                    commands.push(cmd.lines().next().unwrap_or(cmd).trim().to_string());
-                }
-                if let Some(path) = call.arguments.get("path").and_then(|v| v.as_str()) {
-                    push_file(path);
-                }
-            }
-        }
-
-        let text = msg.content.to_summary_text();
-        for token in text.split(|c: char| c.is_whitespace()) {
-            if token.contains('/') {
-                push_file(token);
-            }
-        }
-        for line in text.lines() {
-            let lower = line.to_ascii_lowercase();
-            if (lower.contains("error") || lower.contains("failed") || lower.contains("panic"))
-                && errors.len() < 8
-            {
-                let trimmed = line.trim();
-                let clipped: String = trimmed.chars().take(160).collect();
-                if !clipped.is_empty() {
-                    errors.push(clipped);
-                }
-            }
-        }
-    }
-
-    let mut out = String::new();
-    if !files.is_empty() {
-        out.push_str("Files: ");
-        out.push_str(&files.join(", "));
-        out.push('\n');
-    }
-    if !commands.is_empty() {
-        out.push_str("Commands run:\n");
-        for c in &commands {
-            out.push_str(&format!("- {c}\n"));
-        }
-    }
-    if !errors.is_empty() {
-        out.push_str("Errors/failures seen:\n");
-        for e in &errors {
-            out.push_str(&format!("- {e}\n"));
-        }
-    }
-    out
-}
-
-/// Heuristic: does `token` look like a workspace file path worth keeping?
-fn looks_like_path(token: &str) -> bool {
-    if token.len() < 3 || token.len() > 120 {
-        return false;
-    }
-    if token.starts_with("http://") || token.starts_with("https://") {
-        return false;
-    }
-    // Either a path with a separator, or a bare filename with a code-ish extension.
-    let has_sep = token.contains('/');
-    let has_ext = token.rsplit('.').next().is_some_and(|ext| {
-        (1..=5).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric())
-    });
-    has_sep && has_ext
-}
-
-/// Configuration for spawning a child session.
-pub struct ChildSessionConfig {
-    pub parent_session_id: String,
-    pub task: String,
-    pub workspace_root: PathBuf,
-    pub config: DcodeAiConfig,
-    pub parent_summary: String,
-    pub use_worktree: bool,
-    pub focus_files: Vec<String>,
-}
-
-/// Result of a spawned child session.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ChildSessionResult {
-    pub child_session_id: String,
-    pub status: String,
-    pub output: String,
-    pub workspace: String,
-    pub branch: Option<String>,
-    pub worktree_path: Option<String>,
-}
-
-/// Spawn a child session that inherits parent context and runs to completion.
-/// Returns the result of the child run. This is a blocking async call.
-pub async fn spawn_child_session(
-    cfg: ChildSessionConfig,
-    event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
-) -> Result<ChildSessionResult, String> {
-    // Child sessions are non-interactive and already authorized by the parent
-    // approval. Elevate to BypassPermissions so sub-agents can write files,
-    // run tools, and spawn their own children without being auto-denied.
-    // Pre-authorize execute_bash since the parent's spawn approval already
-    // delegates authority for the child to do its work.
-    let mut child_config = cfg.config.clone();
-    child_config.permissions.mode = dcode_ai_common::config::PermissionMode::BypassPermissions;
-
-    let mut sup = Supervisor::create(SupervisorConfig {
-        config: child_config,
-        workspace_root: cfg.workspace_root.clone(),
-        safe_mode: false,
-        interactive_approvals: false,
-        session_id: None,
-        approval_handler: Some(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>),
-        orchestration_context: None,
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-
-    // Pre-authorize execute_bash for the child session so it can run shell
-    // commands without interactive approval. The parent's spawn already
-    // represents user consent for the child to execute its task.
-    sup.agent_mut()
-        .approval
-        .add_session_allow("execute_bash:*".into());
-
-    let child_id = sup.session_id.clone();
-
-    sup.set_parent(
-        cfg.parent_session_id.clone(),
-        Some(cfg.parent_summary.clone()),
-        Some(cfg.task.clone()),
-    );
-
-    if cfg.use_worktree {
-        let wt_mgr = crate::worktree::WorktreeManager::new(&cfg.workspace_root);
-        if wt_mgr.is_git_repo() {
-            match wt_mgr.create_worktree(&child_id) {
-                Ok(info) => {
-                    sup.set_worktree_info(
-                        info.worktree_path.clone(),
-                        info.branch_name.clone(),
-                        info.base_branch.clone(),
-                    );
-                    sup.workspace_root = info.worktree_path;
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to create worktree for child session: {e}");
-                }
-            }
-        }
-    }
-
-    if let Some(ref tx) = event_tx {
-        let _ = tx
-            .send(AgentEvent::ChildSessionSpawned {
-                parent_session_id: cfg.parent_session_id.clone(),
-                child_session_id: child_id.clone(),
-                task: cfg.task.clone(),
-                workspace: sup.workspace_root.clone(),
-                branch: sup.branch.clone(),
-            })
-            .await;
-    }
-
-    let mut context_prompt = format!(
-        "You are a sub-agent spawned by a parent session to handle a specific task.\n\n\
-         ## Parent Context\n{}\n\n\
-         ## Your Task\n{}",
-        cfg.parent_summary, cfg.task
-    );
-
-    if !cfg.focus_files.is_empty() {
-        context_prompt.push_str("\n\n## Focus Files\n");
-        for f in &cfg.focus_files {
-            context_prompt.push_str(&format!("- {f}\n"));
-        }
-    }
-
-    let mut handle = sup.take_handle();
-    let event_rx = handle.take_event_rx();
-    let log_path = handle.event_log_path.clone();
-
-    let parent_forward = event_tx.map(|tx| (child_id.clone(), tx));
-    let fanout = event_rx.map(|rx| spawn_event_fanout(rx, log_path, None, None, parent_forward));
-
-    let result = sup.run_turn(&context_prompt).await;
-
-    let (status, output) = match result {
-        Ok(text) => {
-            sup.finish(EndReason::Completed).await;
-            ("completed".to_string(), text)
-        }
-        Err(e) => {
-            sup.finish(EndReason::Error).await;
-            ("error".to_string(), e.to_string())
-        }
-    };
-
-    if let Some(f) = fanout {
-        f.abort();
-    }
-
-    let branch = sup.branch.clone();
-    let wt_path = sup.worktree_path.clone().map(|p| p.display().to_string());
-
-    Ok(ChildSessionResult {
-        child_session_id: child_id,
-        status,
-        output,
-        workspace: sup.workspace_root.display().to_string(),
-        branch,
-        worktree_path: wt_path,
-    })
-}
-
-fn is_pid_alive(pid: u32) -> bool {
-    #[cfg(unix)]
-    {
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-        false
-    }
-}
-
-/// Get the last session ID from `.dcode-ai/.last_session`, if it exists and is valid.
-/// Falls back to finding the most recently updated session in the sessions directory.
-pub async fn get_last_session_id(
-    config: &DcodeAiConfig,
-    workspace_root: &Path,
-) -> anyhow::Result<Option<String>> {
-    // First, try the explicit last-session pointer
-    let store = LastSessionStore::new(workspace_root.join(&config.session.last_session_file));
-    match store.load().await {
-        Ok(Some(id)) => {
-            // Verify the session still exists on disk.
-            let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
-            match session_store.load(&id).await {
-                Ok(_) => return Ok(Some(id)),
-                Err(_) => {
-                    // Session file missing or corrupted; clear the stale pointer.
-                    let _ = store.clear().await;
-                }
-            }
-        }
-        Ok(None) => {
-            // No pointer file - fall through to scan sessions dir
-        }
-        Err(e) => {
-            tracing::warn!("failed to load last session pointer: {}", e);
-            // Fall through to scan sessions dir
-        }
-    }
-
-    // Fallback: find the most recently updated session in the sessions directory
-    let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
-    let ids = match session_store.list().await {
-        Ok(ids) => ids,
-        Err(e) => {
-            tracing::debug!("failed to list sessions: {}", e);
-            return Ok(None);
-        }
-    };
-
-    let mut latest: Option<(String, chrono::DateTime<chrono::Utc>)> = None;
-    for id in ids {
-        match session_store.load(&id).await {
-            Ok(session) => {
-                let should_replace = latest
-                    .as_ref()
-                    .map(|(_, updated_at)| session.meta.updated_at > *updated_at)
-                    .unwrap_or(true);
-                if should_replace {
-                    latest = Some((session.meta.id, session.meta.updated_at));
-                }
-            }
-            Err(_) => continue,
-        }
-    }
-
-    if let Some((id, _)) = latest {
-        // Update the last-session pointer for future runs
-        let _ = store.save(&id).await;
-        Ok(Some(id))
-    } else {
-        Ok(None)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

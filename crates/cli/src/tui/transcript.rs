@@ -278,11 +278,84 @@ pub(crate) fn render_blocks_range(
     let w = width.max(20) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut hits: Vec<LineAnswerHit> = Vec::new();
-    for block in state.blocks[start..end].iter() {
+    for (offset, block) in state.blocks[start..end].iter().enumerate() {
+        let idx = start + offset;
+        // Codex-style turn separator: a dim full-width rule before a user
+        // message that opens a new turn (i.e. follows a response block), giving
+        // clear visual boundaries between turns in the scrollback.
+        if idx > 0
+            && matches!(block, DisplayBlock::User(_))
+            && starts_new_turn(&state.blocks[idx - 1])
+        {
+            let label = turn_summary(&state.blocks, idx);
+            push_transcript_line(&mut lines, &mut hits, turn_rule(w, label), None);
+        }
         render_block(block, state, w, &mut lines, &mut hits);
     }
     let (lines, _) = collapse_blank_runs(lines, hits);
     lines
+}
+
+/// True when `prev` is a block produced by the assistant's turn — used to draw a
+/// turn separator only at real turn boundaries (not before the first message or
+/// after a system notice).
+fn starts_new_turn(prev: &DisplayBlock) -> bool {
+    matches!(
+        prev,
+        DisplayBlock::Assistant(_)
+            | DisplayBlock::ToolDone { .. }
+            | DisplayBlock::ToolRunning { .. }
+            | DisplayBlock::Thinking(_)
+    )
+}
+
+/// A dim full-width horizontal rule marking a turn boundary, optionally opened
+/// with a Codex-style label (`─ 3 tool calls · 1.2s ─────`).
+fn turn_rule(w: usize, label: Option<String>) -> Line<'static> {
+    let style = Style::default().fg(theme::border());
+    match label {
+        Some(lbl) => {
+            let text = format!("─ {lbl} ");
+            let text_w = text.chars().count().min(w);
+            let dashes = w.saturating_sub(text_w);
+            Line::from(vec![
+                Span::styled(text, style),
+                Span::styled("─".repeat(dashes), style),
+            ])
+        }
+        None => Line::from(Span::styled("─".repeat(w), style)),
+    }
+}
+
+/// Summarize the just-finished turn (from the previous user message up to
+/// `user_idx`) as a Codex-style tool-activity label, or `None` for a purely
+/// conversational turn. Computed straight from the block list — no extra timing
+/// plumbing needed.
+fn turn_summary(blocks: &[DisplayBlock], user_idx: usize) -> Option<String> {
+    let mut calls = 0u32;
+    let mut ms = 0u64;
+    let mut i = user_idx;
+    while i > 0 {
+        i -= 1;
+        match &blocks[i] {
+            DisplayBlock::User(_) => break,
+            DisplayBlock::ToolDone { duration_ms, .. } => {
+                calls += 1;
+                ms += duration_ms.unwrap_or(0);
+            }
+            _ => {}
+        }
+    }
+    if calls == 0 {
+        return None;
+    }
+    let dur = if ms >= 1000 {
+        format!("{:.1}s", ms as f64 / 1000.0)
+    } else {
+        format!("{ms}ms")
+    };
+    let noun = if calls == 1 { "tool call" } else { "tool calls" };
+    Some(format!("{calls} {noun} · {dur}"))
 }
 
 /// For a width-resize reflow, return the first block index to re-emit so the
@@ -318,7 +391,15 @@ pub(crate) fn transcript_lines_and_hits(
 
     // Live pane only renders blocks not yet flushed to terminal scrollback.
     let start = state.flushed_block_count.min(state.blocks.len());
-    for block in state.blocks[start..].iter() {
+    for (offset, block) in state.blocks[start..].iter().enumerate() {
+        let idx = start + offset;
+        if idx > 0
+            && matches!(block, DisplayBlock::User(_))
+            && starts_new_turn(&state.blocks[idx - 1])
+        {
+            let label = turn_summary(&state.blocks, idx);
+            push_transcript_line(&mut lines, &mut hits, turn_rule(w, label), None);
+        }
         render_block(block, state, w, &mut lines, &mut hits);
     }
 
@@ -400,26 +481,32 @@ fn render_block(
 ) {
     match block {
         DisplayBlock::User(content) => {
-            // User messages: highlighted in the user accent color (bold), with
-            // a `›` prompt — stands out from assistant text.
+            // User messages render as a full-width highlighted bar — bold accent
+            // text on a subtle surface fill — so the prompt carries visual weight
+            // and stays clearly separated from the assistant text around it.
             push_transcript_line(lines, hits, Line::default(), None);
-            let user_style = Style::default().fg(theme::user()).add_modifier(BOLD);
+            let user_style = Style::default()
+                .fg(theme::user())
+                .bg(theme::user_bar_bg())
+                .add_modifier(BOLD);
             for (i, raw_line) in content.lines().enumerate() {
                 for wl in wrap_text(raw_line, w.saturating_sub(3)) {
                     let prefix = if i == 0 { "› " } else { "  " };
+                    // Pad to full width so the highlight spans the whole line.
+                    let mut text = format!("{prefix}{wl}");
+                    let pad = w.saturating_sub(text.chars().count());
+                    text.push_str(&" ".repeat(pad));
                     push_transcript_line(
                         lines,
                         hits,
-                        Line::from(vec![
-                            Span::styled(prefix, user_style),
-                            Span::styled(wl, user_style),
-                        ]),
+                        Line::from(Span::styled(text, user_style)),
                         None,
                     );
                 }
             }
             push_transcript_line(lines, hits, Line::default(), None);
         }
+
         DisplayBlock::Assistant(content) => {
             // Assistant: accent-colored `•` marker so replies are easy to spot.
             push_transcript_line(lines, hits, Line::default(), None);
@@ -597,10 +684,16 @@ fn render_block(
                         if shown >= MAX_PREVIEW {
                             break;
                         }
+                        // Codex-style tree connector on the first output line ties
+                        // the output to its tool header; plain indent thereafter.
+                        let prefix = if shown == 0 { "  └ " } else { "    " };
                         push_transcript_line(
                             lines,
                             hits,
-                            Line::from(Span::styled(format!("    {wl}"), line_style)),
+                            Line::from(vec![
+                                Span::styled(prefix, dim()),
+                                Span::styled(wl, line_style),
+                            ]),
                             None,
                         );
                         shown += 1;
@@ -785,14 +878,22 @@ fn render_block(
             }
         }
         DisplayBlock::ErrorLine(s) => {
-            for wl in wrap_text(s, w.saturating_sub(4)) {
+            // Errors get a red `✗` marker and full (non-dim) color so they are
+            // easy to spot in the scrollback instead of blending in.
+            let err = Style::default().fg(theme::error());
+            for (i, wl) in wrap_text(s, w.saturating_sub(4)).into_iter().enumerate() {
+                let (prefix, style) = if i == 0 {
+                    ("✗ ", err.add_modifier(BOLD))
+                } else {
+                    ("  ", err)
+                };
                 push_transcript_line(
                     lines,
                     hits,
-                    Line::from(Span::styled(
-                        format!("  {wl}"),
-                        Style::default().fg(theme::error()).add_modifier(DIM),
-                    )),
+                    Line::from(vec![
+                        Span::styled(prefix, err.add_modifier(BOLD)),
+                        Span::styled(wl, style),
+                    ]),
                     None,
                 );
             }
@@ -804,25 +905,23 @@ fn collapse_blank_runs(
     lines: Vec<Line<'static>>,
     hits: Vec<LineAnswerHit>,
 ) -> (Vec<Line<'static>>, Vec<LineAnswerHit>) {
-    // Allow up to 2 consecutive blank lines so messages get breathing room,
-    // but trim leading blanks and runaway whitespace.
+    // Collapse runs of blank lines to a single blank so turns get exactly one
+    // line of separation. Crucially we KEEP a block's leading blank: blocks flush
+    // to scrollback one batch at a time, and trimming the leading blank made a
+    // freshly-sent user message butt directly against the previous reply.
+    // Trailing blanks are still trimmed so the composer sits under the last line.
     let mut out_lines: Vec<Line<'static>> = Vec::with_capacity(lines.len());
     let mut out_hits: Vec<LineAnswerHit> = Vec::with_capacity(hits.len());
-    let mut leading = true;
     let mut blank_run = 0u8;
     for (line, hit) in lines.into_iter().zip(hits) {
         let blank = !line_has_text(&line);
         if blank {
-            if leading {
-                continue;
-            }
             blank_run += 1;
-            if blank_run > 2 {
+            if blank_run > 1 {
                 continue;
             }
         } else {
             blank_run = 0;
-            leading = false;
         }
         out_lines.push(line);
         out_hits.push(hit);

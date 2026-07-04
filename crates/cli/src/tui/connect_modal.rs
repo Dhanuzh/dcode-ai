@@ -23,9 +23,11 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         section: "Recommended",
         kind: ProviderKind::OpenCodeZen,
-        title: "MiniMax",
-        subtitle: "MiniMax M2.5 via OpenCode Zen (OAuth)",
-        action: ConnectAction::OAuthLogin("opencodezen"),
+        title: "MiniMax (OpenCode Zen)",
+        // OpenCode Zen is API-key only (no OAuth): sign in at opencode.ai/auth,
+        // add billing, copy the key. This prompts for it and saves to config.
+        subtitle: "MiniMax/Kimi/GLM — paste API key from opencode.ai/auth",
+        action: ConnectAction::PromptApiKey(ProviderKind::OpenCodeZen),
     },
     CatalogEntry {
         section: "Recommended",
@@ -54,6 +56,13 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
         title: "GitHub Copilot",
         subtitle: "Copilot models (OAuth)",
         action: ConnectAction::OAuthLogin("copilot"),
+    },
+    CatalogEntry {
+        section: "Recommended",
+        kind: ProviderKind::Antigravity,
+        title: "Antigravity",
+        subtitle: "Gemini 3 Pro via Google Cloud Code Assist (OAuth)",
+        action: ConnectAction::OAuthLogin("antigravity"),
     },
     CatalogEntry {
         section: "Recommended",
@@ -267,17 +276,18 @@ mod tests {
     }
 
     #[test]
-    fn opencodezen_row_uses_oauth_slug() {
+    fn opencodezen_row_prompts_for_api_key() {
+        // OpenCode Zen is API-key only (no OAuth), so its row prompts for a key.
         let rows = build_connect_rows("minimax");
         let found = rows.into_iter().find_map(|row| match row {
             ConnectRow::Provider {
-                title: "MiniMax",
-                action: ConnectAction::OAuthLogin(slug),
+                kind: ProviderKind::OpenCodeZen,
+                action: ConnectAction::PromptApiKey(kind),
                 ..
-            } => Some(slug),
+            } => Some(kind),
             _ => None,
         });
-        assert_eq!(found, Some("opencodezen"));
+        assert_eq!(found, Some(ProviderKind::OpenCodeZen));
     }
 
     #[test]

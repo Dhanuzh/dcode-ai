@@ -103,11 +103,34 @@ async fn run_claude_once(
     if let Some(model) = model {
         cmd.arg("--model").arg(model);
     }
-    cmd.arg(prompt);
+    // Feed the prompt via stdin, not argv: a long conversation easily exceeds
+    // the OS argument-size limit, which fails as E2BIG / "Argument list too
+    // long" (os error 7). `claude -p` reads the prompt from stdin when piped,
+    // and stdin has no such size cap.
+    cmd.stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
-    let output = cmd.output().await.map_err(|err| {
+    let mut child = cmd.spawn().map_err(|err| {
         ProviderError::Configuration(format!(
             "failed to execute `claude` CLI bridge: {err}. Ensure `claude` is installed and in PATH."
+        ))
+    })?;
+
+    if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
+        stdin.write_all(prompt.as_bytes()).await.map_err(|err| {
+            ProviderError::Configuration(format!(
+                "failed to send prompt to `claude` CLI bridge: {err}"
+            ))
+        })?;
+        // Close stdin so `claude` sees EOF and starts processing.
+        drop(stdin);
+    }
+
+    let output = child.wait_with_output().await.map_err(|err| {
+        ProviderError::Configuration(format!(
+            "failed to run `claude` CLI bridge: {err}. Ensure `claude` is installed and in PATH."
         ))
     })?;
 

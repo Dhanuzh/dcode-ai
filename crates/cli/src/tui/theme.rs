@@ -326,10 +326,41 @@ pub fn accent() -> Color {
     current().accent
 }
 
+/// Readable foreground for text drawn on top of the accent color (selected
+/// rows / highlights). Picks a dark or light foreground from the accent's
+/// perceived luminance, so highlights stay legible on any theme instead of
+/// hardcoding black (which is low-contrast on a dark accent).
+pub fn on_accent() -> Color {
+    match accent() {
+        Color::Rgb(r, g, b) => {
+            let lum = 0.299 * r as f32 + 0.587 * g as f32 + 0.114 * b as f32;
+            if lum > 140.0 {
+                Color::Rgb(15, 17, 23)
+            } else {
+                Color::Rgb(240, 244, 255)
+            }
+        }
+        _ => Color::Black,
+    }
+}
+
 #[inline]
 #[allow(dead_code)]
 pub fn header_bg() -> Color {
     current().header_bg
+}
+
+/// A faint accent-tinted background band for user messages (Codex-style):
+/// mostly the base background with a small amount of the accent mixed in, so the
+/// user turn is subtly highlighted without competing with the turn separator.
+pub fn user_bar_bg() -> Color {
+    match (bg(), accent()) {
+        (Color::Rgb(br, bg_, bb), Color::Rgb(ar, ag, ab)) => {
+            let mix = |base: u8, acc: u8| ((base as u16 * 86 + acc as u16 * 14) / 100) as u8;
+            Color::Rgb(mix(br, ar), mix(bg_, ag), mix(bb, ab))
+        }
+        _ => surface(),
+    }
 }
 
 #[cfg(test)]

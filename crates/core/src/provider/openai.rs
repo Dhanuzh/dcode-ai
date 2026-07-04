@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use dcode_ai_common::auth::{AuthStore, OpenAiOAuth};
+use dcode_ai_common::auth::{AntigravityAuth, AuthStore, OpenAiOAuth};
 use dcode_ai_common::config::{DcodeAiConfig, OpenAiConfig, ProviderKind};
 use dcode_ai_common::message::Message;
 use dcode_ai_common::tool::ToolDefinition;
@@ -39,7 +39,7 @@ impl OpenAiProvider {
         config: &DcodeAiConfig,
         provider: ProviderKind,
     ) -> Result<Self, ProviderError> {
-        let openai = match provider {
+        let mut openai = match provider {
             ProviderKind::OpenAi | ProviderKind::Antigravity => config.provider.openai.clone(),
             ProviderKind::OpenCodeZen => config.provider.opencodezen.clone(),
             _ => {
@@ -49,9 +49,13 @@ impl OpenAiProvider {
                 )));
             }
         };
+        if matches!(provider, ProviderKind::Antigravity) && is_copilot_base_url(&openai.base_url) {
+            openai.base_url = "https://api.openai.com".to_string();
+        }
         let auth_store = AuthStore::load().ok().unwrap_or_default();
         let has_openai_oauth = auth_store.openai_oauth.is_some();
-        let copilot_mode = is_copilot_base_url(&openai.base_url);
+        let copilot_mode =
+            is_copilot_base_url(&openai.base_url) && matches!(provider, ProviderKind::OpenAi);
         let use_chatgpt_codex_backend = matches!(provider, ProviderKind::OpenAi)
             && has_openai_oauth
             && openai.resolve_api_key().is_none()
@@ -82,7 +86,16 @@ impl OpenAiProvider {
             }
         } else if let Some(key) = openai.resolve_api_key() {
             key
-        } else if matches!(provider, ProviderKind::OpenAi | ProviderKind::Antigravity) {
+        } else if matches!(provider, ProviderKind::Antigravity) {
+            let oauth = auth_store.antigravity.ok_or_else(|| {
+                ProviderError::Configuration(format!(
+                    "missing Antigravity API key; set {} or provide `provider.{}.api_key` in config (or run `dcode-ai login antigravity`)",
+                    openai.api_key_env,
+                    provider.to_config_key()
+                ))
+            })?;
+            resolve_antigravity_oauth_access_token(oauth)?
+        } else if matches!(provider, ProviderKind::OpenAi) {
             let oauth = auth_store.openai_oauth.ok_or_else(|| {
                 ProviderError::Configuration(format!(
                     "missing {} API key; set {} or provide `provider.{}.api_key` in config (or run `dcode-ai login openai`)",
@@ -185,6 +198,108 @@ fn oauth_token_expired(expires_at: Option<i64>) -> bool {
         return false;
     };
     chrono::Utc::now().timestamp() >= expires_at - 60
+}
+
+fn resolve_antigravity_oauth_access_token(oauth: AntigravityAuth) -> Result<String, ProviderError> {
+    Ok(resolve_antigravity_auth(oauth)?.access_token)
+}
+
+/// Resolve a usable Antigravity auth record, refreshing the access token
+/// (and persisting it) if it is expired. Returns the full record so callers
+/// that need `project_id` (the dedicated Antigravity provider) can read it.
+pub(crate) fn resolve_antigravity_auth(
+    oauth: AntigravityAuth,
+) -> Result<AntigravityAuth, ProviderError> {
+    if !oauth_token_expired(oauth.expires_at) {
+        return Ok(oauth);
+    }
+    refresh_antigravity_access_token_blocking(oauth)
+}
+
+fn refresh_antigravity_access_token_blocking(
+    oauth: AntigravityAuth,
+) -> Result<AntigravityAuth, ProviderError> {
+    let run = move || async move { refresh_antigravity_access_token(oauth).await };
+
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        let j = std::thread::spawn(move || handle.block_on(run()));
+        return j.join().map_err(|_| {
+            ProviderError::RequestFailed("antigravity oauth refresh thread panicked".into())
+        })?;
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| ProviderError::RequestFailed(format!("failed to build runtime: {e}")))?;
+    rt.block_on(run())
+}
+
+async fn refresh_antigravity_access_token(
+    oauth: AntigravityAuth,
+) -> Result<AntigravityAuth, ProviderError> {
+    #[derive(serde::Deserialize)]
+    struct TokenResp {
+        access_token: String,
+        expires_in: Option<u64>,
+    }
+
+    let client_id = dcode_ai_common::secrets::antigravity_client_id();
+    let client_secret = dcode_ai_common::secrets::antigravity_client_secret();
+
+    let client = reqwest::Client::new();
+    let params = [
+        ("client_id", client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
+        ("refresh_token", oauth.refresh_token.as_str()),
+        ("grant_type", "refresh_token"),
+    ];
+
+    let response = client
+        .post("https://oauth2.googleapis.com/token")
+        .form(&params)
+        .send()
+        .await
+        .map_err(|e| {
+            ProviderError::RequestFailed(format!("antigravity oauth refresh failed: {e}"))
+        })?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(ProviderError::AuthError(format!(
+            "antigravity oauth token refresh failed {status}: {text}"
+        )));
+    }
+
+    let data: TokenResp = response.json().await.map_err(|e| {
+        ProviderError::RequestFailed(format!("antigravity oauth refresh parse error: {e}"))
+    })?;
+    let expires_at = data
+        .expires_in
+        .map(|s| chrono::Utc::now().timestamp() + s as i64 - 300);
+
+    let refreshed = AntigravityAuth {
+        access_token: data.access_token,
+        refresh_token: oauth.refresh_token.clone(),
+        expires_at,
+        project_id: oauth.project_id.clone(),
+        email: oauth.email.clone(),
+    };
+
+    let mut store = AuthStore::load().map_err(|e| {
+        ProviderError::RequestFailed(format!(
+            "failed to load auth store while saving refreshed antigravity oauth token: {e}"
+        ))
+    })?;
+    store.antigravity = Some(refreshed.clone());
+    store.save().map_err(|e| {
+        ProviderError::RequestFailed(format!(
+            "failed to persist refreshed antigravity oauth token: {e}"
+        ))
+    })?;
+
+    Ok(refreshed)
 }
 
 fn resolve_openai_oauth_access_token(oauth: OpenAiOAuth) -> Result<String, ProviderError> {
@@ -406,7 +521,7 @@ impl Provider for OpenAiProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+                .map_err(ProviderError::from_reqwest_send)?;
             let status = resp.status();
             if status.as_u16() == 429 {
                 let body_text = resp.text().await.unwrap_or_default();

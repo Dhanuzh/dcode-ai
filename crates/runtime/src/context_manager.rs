@@ -6,7 +6,7 @@
 //! - Automatic summarization when context approaches limits
 //! - Preservation of critical messages (system prompt, memory, etc.)
 
-use dcode_ai_common::message::{Message, MessageContent, Role};
+use dcode_ai_common::message::{ContentPart, Message, MessageContent, Role};
 use serde::{Deserialize, Serialize};
 
 /// Configuration for context management behavior.
@@ -319,6 +319,35 @@ impl ContextManager {
         result
     }
 
+    /// Truncate the textual content of each message to at most `max_chars`
+    /// (middle-elided, keeping head and tail). Last-resort compaction for when a
+    /// single retained message — typically a huge tool output — alone exceeds
+    /// the budget. Structure (roles, tool ids, tool_calls) is preserved so
+    /// tool_use / tool_result pairing stays intact.
+    pub fn truncate_message_contents(&self, messages: &[Message], max_chars: usize) -> Vec<Message> {
+        messages
+            .iter()
+            .map(|m| {
+                let mut out = m.clone();
+                out.content = match &m.content {
+                    MessageContent::Text(t) => MessageContent::Text(truncate_middle(t, max_chars)),
+                    MessageContent::Parts(parts) => MessageContent::Parts(
+                        parts
+                            .iter()
+                            .map(|p| match p {
+                                ContentPart::Text { text } => ContentPart::Text {
+                                    text: truncate_middle(text, max_chars),
+                                },
+                                other => other.clone(),
+                            })
+                            .collect(),
+                    ),
+                };
+                out
+            })
+            .collect()
+    }
+
     /// Truncate very long messages for summary generation.
     pub fn prepare_for_summary(&self, messages: &[Message]) -> Vec<Message> {
         messages
@@ -442,6 +471,22 @@ fn render_summary_conversation(messages: &[Message]) -> String {
         .join("\n\n")
 }
 
+/// Truncate a string to at most `max_chars` characters, keeping the head and
+/// tail and eliding the middle with a marker. Operates on `char`s so it never
+/// splits a UTF-8 boundary.
+fn truncate_middle(s: &str, max_chars: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max_chars {
+        return s.to_string();
+    }
+    let head = max_chars / 2;
+    let tail = max_chars.saturating_sub(head).saturating_sub(1);
+    let omitted = chars.len().saturating_sub(head).saturating_sub(tail);
+    let head_str: String = chars[..head].iter().collect();
+    let tail_str: String = chars[chars.len() - tail..].iter().collect();
+    format!("{head_str}\n…[{omitted} chars truncated]…\n{tail_str}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -460,6 +505,29 @@ mod tests {
     fn test_estimate_tokens() {
         let msg = make_message(Role::User, "Hello, world!");
         assert!(ContextManager::estimate_tokens(&msg) > 0);
+    }
+
+    #[test]
+    fn truncate_message_contents_only_shrinks_oversized() {
+        let cm = ContextManager::new(ContextManagerConfig::default(), "m".into());
+        let small = make_message(Role::User, "short");
+        let mut big = make_message(Role::Tool, &"x".repeat(50_000));
+        big.tool_call_id = Some("call_1".into());
+
+        let out = cm.truncate_message_contents(&[small.clone(), big], 10_000);
+
+        // Small message is left untouched.
+        assert_eq!(out[0].content, small.content);
+        // Big message is truncated but keeps its role + tool_call_id.
+        assert_eq!(out[1].role, Role::Tool);
+        assert_eq!(out[1].tool_call_id.as_deref(), Some("call_1"));
+        match &out[1].content {
+            MessageContent::Text(t) => {
+                assert!(t.contains("chars truncated"));
+                assert!(t.chars().count() < 50_000);
+            }
+            _ => panic!("expected text content"),
+        }
     }
 
     #[test]

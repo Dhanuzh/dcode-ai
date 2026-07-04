@@ -12,8 +12,10 @@
 use crate::model_limits::ModelLimits;
 use dcode_ai_common::config::{DcodeAiConfig, ProviderKind};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -36,6 +38,63 @@ fn api_key_tag(secret: &str) -> u64 {
 
 fn cache_stale(fetched_at: Instant, ttl: Duration) -> bool {
     fetched_at.elapsed() >= ttl
+}
+
+// --- On-disk context-window cache -------------------------------------------
+//
+// The in-memory catalog caches above are empty on every fresh process, so
+// without this a cold start would block on the `/models` API. This persists
+// the last-known context window per (provider, model) to disk so startup can
+// read it instantly (no network) and a background refresh keeps it current for
+// the next launch — the same "static/cached value, refreshed out-of-band"
+// model Codex uses.
+
+fn disk_cache_path() -> Option<PathBuf> {
+    // `-v2`: drops pre-fix cached context windows (e.g. the stale 128k persisted
+    // for Antigravity `gemini-3-*` before they were recognized) so the corrected
+    // large window applies on the very next launch, not the one after.
+    dcode_ai_common::config::dcode_ai_home_dir().map(|d| d.join("model_limits-v2.json"))
+}
+
+fn disk_cache_key(config: &DcodeAiConfig, model: &str) -> String {
+    format!("{:?}/{model}", config.provider.default)
+}
+
+/// Last-known context window for `(provider, model)` from the on-disk cache, or
+/// `None`. Pure disk read — safe on the startup path, never touches the network.
+pub fn cached_context_window(config: &DcodeAiConfig, model: &str) -> Option<usize> {
+    let path = disk_cache_path()?;
+    let text = std::fs::read_to_string(path).ok()?;
+    let map: HashMap<String, usize> = serde_json::from_str(&text).ok()?;
+    map.get(&disk_cache_key(config, model)).copied()
+}
+
+fn persist_context_window(config: &DcodeAiConfig, model: &str, window: usize) {
+    let Some(path) = disk_cache_path() else {
+        return;
+    };
+    let mut map: HashMap<String, usize> = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default();
+    if map.get(&disk_cache_key(config, model)) == Some(&window) {
+        return; // unchanged — avoid a pointless rewrite
+    }
+    map.insert(disk_cache_key(config, model), window);
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(text) = serde_json::to_string_pretty(&map) {
+        let _ = std::fs::write(path, text);
+    }
+}
+
+/// Fetch the model's context window from the provider API and persist it to the
+/// on-disk cache for the next launch. Intended to be spawned in the background
+/// so it never blocks startup.
+pub async fn refresh_and_persist(config: DcodeAiConfig, model: String) {
+    let limits = resolve_model_limits(&config, &model).await;
+    persist_context_window(&config, &model, limits.context_window);
 }
 
 // --- OpenRouter ---
@@ -449,8 +508,18 @@ pub async fn fetch_provider_model_ids(
     let ids = match provider {
         ProviderKind::OpenRouter => fetch_openrouter_model_ids(&client, config).await?,
         ProviderKind::Anthropic => fetch_anthropic_model_ids(&client, config).await?,
-        ProviderKind::OpenAi | ProviderKind::Antigravity => {
-            fetch_openai_model_ids(&client, config).await?
+        ProviderKind::OpenAi => fetch_openai_model_ids(&client, config).await?,
+        // Antigravity (Cloud Code Assist) has no OpenAI `/v1/models` endpoint;
+        // it exposes its live catalog via `fetchAvailableModels`. Fall back to a
+        // minimal known-good list only if that fetch fails (expired token/offline).
+        ProviderKind::Antigravity => {
+            let mut ids = fetch_antigravity_model_ids(&client)
+                .await
+                .unwrap_or_default();
+            if ids.is_empty() {
+                ids = antigravity_fallback_model_ids();
+            }
+            ids
         }
         ProviderKind::OpenCodeZen => fetch_opencodezen_model_ids(&client, config).await?,
     };
@@ -459,6 +528,84 @@ pub async fn fetch_provider_model_ids(
     // Persist to disk for next cold start.
     disk_cache_write(&cache_tag, &ids);
     Ok(ids)
+}
+
+/// Fetch the live Antigravity model catalog via Cloud Code Assist
+/// `fetchAvailableModels`. The response is `{"models": {"<id>": {...}}}`, so the
+/// model ids are the map keys (an array shape is handled defensively too).
+async fn fetch_antigravity_model_ids(
+    client: &reqwest::Client,
+) -> Result<Vec<String>, ModelCatalogError> {
+    let auth = dcode_ai_common::auth::AuthStore::load().map_err(|error| {
+        ModelCatalogError::Authentication {
+            provider: "Antigravity",
+            message: error.to_string(),
+        }
+    })?;
+    let ag = auth.antigravity.ok_or(ModelCatalogError::Authentication {
+        provider: "Antigravity",
+        message: "run `dcode-ai login antigravity`".into(),
+    })?;
+    let project = if ag.project_id.trim().is_empty() {
+        "rising-fact-p41fc"
+    } else {
+        ag.project_id.as_str()
+    };
+    let user_agent = std::env::var("DCODE_ANTIGRAVITY_USER_AGENT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "antigravity/1.104.0 windows/amd64".to_string());
+
+    let resp = client
+        .post("https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels")
+        .bearer_auth(&ag.access_token)
+        .header("User-Agent", user_agent)
+        .header(
+            "X-Goog-Api-Client",
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        )
+        .header(
+            "Client-Metadata",
+            r#"{"ideType":"ANTIGRAVITY","platform":"WINDOWS","pluginType":"GEMINI"}"#,
+        )
+        .json(&serde_json::json!({ "project": project }))
+        .send()
+        .await
+        .map_err(|error| ModelCatalogError::Request {
+            provider: "Antigravity",
+            message: error.to_string(),
+        })?;
+    let value = response_json("Antigravity", resp).await?;
+
+    let ids: Vec<String> = match value.get("models") {
+        Some(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|m| {
+                m.get("name")
+                    .or_else(|| m.get("modelId"))
+                    .or_else(|| m.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim_start_matches("models/").to_string())
+            })
+            .collect(),
+        _ => {
+            return Err(ModelCatalogError::InvalidResponse {
+                provider: "Antigravity",
+                message: "missing `models` field".into(),
+            });
+        }
+    };
+    Ok(ids)
+}
+
+/// Minimal known-good catalog used only when the live fetch fails (expired
+/// token / offline). `gemini-2.5-flash` is confirmed available.
+fn antigravity_fallback_model_ids() -> Vec<String> {
+    ["gemini-2.5-flash", "gemini-3-pro-preview"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect()
 }
 
 fn finish_catalog(
@@ -478,7 +625,9 @@ fn finish_catalog(
 // ── Disk cache for model ID catalogs ──────────────────────────────────────────
 
 fn disk_cache_dir() -> std::path::PathBuf {
-    std::env::temp_dir().join("dcode-ai-model-cache")
+    // `-v2`: invalidates pre-live-catalog caches (e.g. the old hardcoded
+    // Antigravity list) so users pick up the new model discovery immediately.
+    std::env::temp_dir().join("dcode-ai-model-cache-v2")
 }
 
 fn disk_cache_tag(config: &DcodeAiConfig) -> String {
@@ -726,16 +875,32 @@ async fn fetch_openai_model_ids(
     client: &reqwest::Client,
     config: &DcodeAiConfig,
 ) -> Result<Vec<String>, ModelCatalogError> {
-    let base = config.provider.openai.base_url.trim_end_matches('/');
-    if is_copilot_base_url(base) {
+    let mut base_str = config.provider.openai.base_url.trim_end_matches('/');
+    if matches!(config.provider.default, ProviderKind::Antigravity) && is_copilot_base_url(base_str)
+    {
+        base_str = "https://api.openai.com";
+    }
+    let base = base_str;
+    let is_copilot =
+        is_copilot_base_url(base) && matches!(config.provider.default, ProviderKind::OpenAi);
+    if is_copilot {
         return fetch_copilot_model_ids(client, base).await;
     }
 
     let auth = dcode_ai_common::auth::AuthStore::load().ok();
-    let oauth_access = auth
-        .as_ref()
-        .and_then(|store| store.openai_oauth.as_ref())
-        .map(|oauth| oauth.access_token.clone());
+    let oauth_access = auth.as_ref().and_then(|store| {
+        if matches!(config.provider.default, ProviderKind::Antigravity) {
+            store
+                .antigravity
+                .as_ref()
+                .map(|oauth| oauth.access_token.clone())
+        } else {
+            store
+                .openai_oauth
+                .as_ref()
+                .map(|oauth| oauth.access_token.clone())
+        }
+    });
 
     let chatgpt_catalog = matches!(config.provider.default, ProviderKind::OpenAi)
         && config.provider.openai.resolve_api_key().is_none();
@@ -760,8 +925,16 @@ async fn fetch_openai_model_ids(
         token
     } else {
         return Err(ModelCatalogError::Authentication {
-            provider: "OpenAI",
-            message: "run `dcode-ai login openai` or configure OPENAI_API_KEY".into(),
+            provider: if matches!(config.provider.default, ProviderKind::Antigravity) {
+                "Antigravity"
+            } else {
+                "OpenAI"
+            },
+            message: if matches!(config.provider.default, ProviderKind::Antigravity) {
+                "run `dcode-ai login antigravity` or configure OPENAI_API_KEY".into()
+            } else {
+                "run `dcode-ai login openai` or configure OPENAI_API_KEY".into()
+            },
         });
     };
     let ttl = catalog_cache_ttl();

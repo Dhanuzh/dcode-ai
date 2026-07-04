@@ -4,7 +4,6 @@
 //! Depends on [`crate::tui::slash_entries`] for the slash-panel primitives;
 //! the dependency only goes one way (slash → composer never the reverse).
 
-use dcode_ai_common::event::BusyState;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 
@@ -118,7 +117,7 @@ pub(crate) fn composer_input_height(state: &TuiSessionState, area_width: u16) ->
     let show_hint = state.active_approval.is_some()
         || (state.active_question.is_some() && !state.question_modal_open)
         || state.busy
-        || !matches!(state.current_busy_state, BusyState::Idle);
+        || state.current_busy_state.is_active();
     if show_hint {
         content_lines = content_lines.saturating_add(1);
     }
@@ -134,7 +133,7 @@ pub(crate) fn should_hide_composer_when_scrolling(state: &TuiSessionState) -> bo
         && state.active_approval.is_none()
         && state.active_question.is_none()
         && !state.busy
-        && matches!(state.current_busy_state, BusyState::Idle)
+        && !state.current_busy_state.is_active()
 }
 
 /// Replace `@prefix` before cursor with `@choice` (relative path).

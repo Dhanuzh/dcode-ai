@@ -207,6 +207,19 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
         context_window: 1_000_000,
         max_output_tokens: 8192,
     },
+    ModelContextLimits {
+        pattern: "gemini-3",
+        context_window: 1_048_576,
+        max_output_tokens: 65_536,
+    },
+    // Catch-all for any current/future Gemini id (Antigravity serves a live
+    // catalog, so new names like `gemini-3-pro-preview` must not fall back to
+    // the tiny default and pin the context gauge at 100%).
+    ModelContextLimits {
+        pattern: "gemini",
+        context_window: 1_000_000,
+        max_output_tokens: 65_536,
+    },
     // ── DeepSeek ─────────────────────────────────────────────────────
     ModelContextLimits {
         pattern: "deepseek-r1",
@@ -385,8 +398,13 @@ mod tests {
     fn gemini() {
         assert_eq!(detect_context_window("gemini-2.5-pro"), 1_000_000);
         assert_eq!(detect_context_window("gemini-2.5-flash"), 1_000_000);
+        assert_eq!(detect_context_window("gemini-2.5-flash-lite"), 1_000_000);
         assert_eq!(detect_context_window("gemini-2.0-flash"), 1_000_000);
         assert_eq!(detect_context_window("gemini-1.5-pro-latest"), 2_000_000);
+        // Antigravity live-catalog ids that previously fell back to 128k.
+        assert_eq!(detect_context_window("gemini-3-pro"), 1_048_576);
+        assert_eq!(detect_context_window("gemini-3-pro-preview"), 1_048_576);
+        assert_eq!(detect_context_window("gemini-3-flash"), 1_048_576);
     }
 
     #[test]

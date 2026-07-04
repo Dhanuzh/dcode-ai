@@ -117,7 +117,7 @@ impl Provider for AnthropicProvider {
                 .json(&body)
                 .send()
                 .await
-                .map_err(|err| ProviderError::RequestFailed(err.to_string()))?;
+                .map_err(ProviderError::from_reqwest_send)?;
 
             let status = resp.status();
             if status.is_success() {

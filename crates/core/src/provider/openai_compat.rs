@@ -137,6 +137,38 @@ fn extract_internal_reasoning_delta(delta: &Value) -> Option<String> {
     None
 }
 
+/// Sanitize a tool `parameters` JSON Schema for strict validators (e.g.
+/// MiniMax/Xiaomi via OpenCode Zen), which reject structural keywords set to
+/// `null`. Some tools — and especially MCP servers — emit `"required": null`
+/// (or a null `properties`/`items`/`enum`) instead of omitting the key, which
+/// fails schema meta-validation ("None is not of type 'array'"). Drops those
+/// null-valued structural keywords recursively; everything else is preserved.
+pub(crate) fn sanitize_tool_schema(value: &Value) -> Value {
+    const STRUCTURAL_KEYS: &[&str] = &[
+        "required",
+        "properties",
+        "items",
+        "enum",
+        "allOf",
+        "anyOf",
+        "oneOf",
+    ];
+    match value {
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map {
+                if v.is_null() && STRUCTURAL_KEYS.contains(&k.as_str()) {
+                    continue;
+                }
+                out.insert(k.clone(), sanitize_tool_schema(v));
+            }
+            Value::Object(out)
+        }
+        Value::Array(arr) => Value::Array(arr.iter().map(sanitize_tool_schema).collect()),
+        other => other.clone(),
+    }
+}
+
 pub fn openai_request_body(
     messages: &[Message],
     tools: &[ToolDefinition],
@@ -157,7 +189,7 @@ pub fn openai_request_body(
                         "function": {
                             "name": tool.name,
                             "description": tool.description,
-                            "parameters": tool.parameters,
+                            "parameters": sanitize_tool_schema(&tool.parameters),
                         }
                     })
                 })
@@ -223,7 +255,7 @@ pub fn openai_responses_request_body(
                         "type": "function",
                         "name": tool.name,
                         "description": tool.description,
-                        "parameters": tool.parameters,
+                        "parameters": sanitize_tool_schema(&tool.parameters),
                     })
                 })
                 .collect(),
@@ -1081,6 +1113,32 @@ mod tests {
         assert!(model_supports_vision("claude-opus-4"));
         assert!(!model_supports_vision("deepseek-chat"));
         assert!(!model_supports_vision("DeepSeek-R1"));
+    }
+
+    #[test]
+    fn sanitize_tool_schema_drops_null_structural_keywords() {
+        // `"required": null` (what MCP/tools sometimes emit) is dropped so strict
+        // validators (MiniMax/Xiaomi) don't reject it as "None is not of type 'array'".
+        let schema = json!({
+            "type": "object",
+            "properties": { "path": { "type": "string" } },
+            "required": null
+        });
+        let out = sanitize_tool_schema(&schema);
+        assert!(out.get("required").is_none());
+        assert_eq!(out["properties"]["path"]["type"], "string");
+
+        // Nested null keywords are dropped too.
+        let nested = json!({
+            "type": "object",
+            "properties": { "obj": { "type": "object", "required": null } }
+        });
+        let out2 = sanitize_tool_schema(&nested);
+        assert!(out2["properties"]["obj"].get("required").is_none());
+
+        // A valid `required` array is preserved untouched.
+        let ok = json!({ "type": "object", "required": ["a", "b"] });
+        assert_eq!(sanitize_tool_schema(&ok)["required"], json!(["a", "b"]));
     }
 
     #[test]

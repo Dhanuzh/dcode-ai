@@ -43,9 +43,9 @@ const OAUTH_CHOICES: &[OAuthChoice] = &[
     },
     OAuthChoice {
         title: "Antigravity",
-        subtitle: "Google OAuth login (login only)",
+        subtitle: "Gemini 3 Pro via Google Cloud Code Assist (OAuth)",
         oauth: OAuthProvider::Antigravity,
-        runtime_provider: None,
+        runtime_provider: Some(ProviderKind::Antigravity),
     },
     OAuthChoice {
         title: "MiniMax (OpenCode Zen)",
@@ -101,6 +101,18 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
                             if matches!(choice.oauth, OAuthProvider::Copilot) {
                                 config.provider.openai.base_url =
                                     "https://api.githubcopilot.com".to_string();
+                            }
+                            // Antigravity shares the `openai` model slot; default
+                            // to a Gemini model so the Google backend accepts it.
+                            if matches!(choice.oauth, OAuthProvider::Antigravity)
+                                && !config
+                                    .provider
+                                    .openai
+                                    .model
+                                    .to_ascii_lowercase()
+                                    .contains("gemini")
+                            {
+                                config.provider.openai.model = "gemini-3-pro".to_string();
                             }
                             config.ui.onboarding_completed = true;
                             if let Err(e) = config.save_global() {

@@ -38,6 +38,13 @@ impl BusyState {
             BusyState::Error => "error",
         }
     }
+
+    /// Whether the agent is actively working (drives the "working" status and
+    /// spinner). Both `Idle` and terminal `Error` are inactive: after an error
+    /// the turn is over, so the UI must read idle — not stay stuck on "working".
+    pub fn is_active(&self) -> bool {
+        !matches!(self, BusyState::Idle | BusyState::Error)
+    }
 }
 
 /// Envelope for events written to disk, with stable id and timestamp for ordering.
@@ -175,6 +182,11 @@ pub enum AgentEvent {
         #[serde(default)]
         context_tokens: u64,
     },
+    /// MCP server startup progress.
+    McpStartupUpdate {
+        server: String,
+        status: McpStartupStatus,
+    },
     /// Busy state transition (for animated indicator rendering).
     BusyStateChanged {
         state: BusyState,
@@ -212,6 +224,15 @@ pub enum QuestionSelection {
     Option { option_id: String },
     Custom { text: String },
     Suggested,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum McpStartupStatus {
+    Starting,
+    Initializing,
+    Ready,
+    Failed { message: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

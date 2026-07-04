@@ -5,13 +5,14 @@
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::Span;
-use ratatui::widgets::{Block, BorderType, Borders};
+use ratatui::widgets::{Block, BorderType, Borders, Padding};
 
 use crate::tui::theme;
 
-/// Standard popup/overlay frame: rounded themed border, surface fill, and a
-/// bold muted title. Unifies the look of the command palette, theme picker,
-/// pins, sessions, branch, and similar modals.
+/// Standard popup/overlay frame: rounded themed border, surface fill, a bold
+/// title, and one column of horizontal padding so content never touches the
+/// border. Unifies the look of the command palette, model/theme pickers,
+/// `/connect`, pins, sessions, branch, and similar modals.
 pub(crate) fn popup_block(title: impl Into<String>) -> Block<'static> {
     Block::default()
         .borders(Borders::ALL)
@@ -20,9 +21,10 @@ pub(crate) fn popup_block(title: impl Into<String>) -> Block<'static> {
         .title(Span::styled(
             format!(" {} ", title.into().trim()),
             Style::default()
-                .fg(theme::muted())
+                .fg(theme::accent())
                 .add_modifier(Modifier::BOLD),
         ))
+        .padding(Padding::horizontal(1))
         .style(Style::default().bg(theme::surface()))
 }
 

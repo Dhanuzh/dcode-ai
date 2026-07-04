@@ -562,10 +562,10 @@ async fn login_antigravity<F>(emit: &mut F) -> anyhow::Result<()>
 where
     F: FnMut(&str),
 {
-    let client_id = std::env::var("DCODE_ANTIGRAVITY_CLIENT_ID")
-        .context("Missing DCODE_ANTIGRAVITY_CLIENT_ID")?;
-    let client_secret = std::env::var("DCODE_ANTIGRAVITY_CLIENT_SECRET")
-        .context("Missing DCODE_ANTIGRAVITY_CLIENT_SECRET")?;
+    // Use the bundled Antigravity desktop-app credentials by default; allow an
+    // env-var override for anyone who wants to use their own OAuth client.
+    let client_id = dcode_ai_common::secrets::antigravity_client_id();
+    let client_secret = dcode_ai_common::secrets::antigravity_client_secret();
 
     let pkce = generate_pkce();
     let scopes = [
@@ -729,77 +729,149 @@ where
 async fn wait_for_opencodezen_callback() -> anyhow::Result<(String, String)> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:51122").await?;
-    let (mut stream, _) = listener.accept().await?;
-    let (reader, mut writer) = stream.split();
-    let mut buf_reader = BufReader::new(reader);
-    let mut request_line = String::new();
-    buf_reader.read_line(&mut request_line).await?;
+    // Bind both IPv4 and IPv6 loopback (see `wait_for_callback` for why the
+    // IPv4-only bind breaks on Windows where `localhost` resolves to `::1`).
+    let v4 = tokio::net::TcpListener::bind("127.0.0.1:51122").await.ok();
+    let v6 = tokio::net::TcpListener::bind("[::1]:51122").await.ok();
+    if v4.is_none() && v6.is_none() {
+        bail!(
+            "failed to bind OAuth callback listener on port 51122 (already in use? close other dcode-ai logins)"
+        );
+    }
 
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
-    let url = url::Url::parse(&format!("http://localhost{path}"))?;
-    let code = url
-        .query_pairs()
-        .find(|(k, _)| k == "code")
-        .map(|(_, v)| v.to_string())
-        .ok_or_else(|| anyhow::anyhow!("missing code"))?;
-    let state = url
-        .query_pairs()
-        .find(|(k, _)| k == "state")
-        .map(|(_, v)| v.to_string())
-        .ok_or_else(|| anyhow::anyhow!("missing state"))?;
+    loop {
+        let (mut stream, _) = accept_either(v4.as_ref(), v6.as_ref()).await?;
+        let (reader, mut writer) = stream.split();
+        let mut buf_reader = BufReader::new(reader);
+        let mut request_line = String::new();
+        buf_reader.read_line(&mut request_line).await?;
 
-    let body =
-        "<html><body><h2>Authentication complete.</h2><p>You can close this tab.</p></body></html>";
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = writer.write_all(resp.as_bytes()).await;
-    Ok((code, state))
+        let path = request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("")
+            .to_string();
+        let url = url::Url::parse(&format!("http://localhost{path}"))?;
+        let code = url
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.to_string());
+        let state = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string());
+        let error = url
+            .query_pairs()
+            .find(|(k, _)| k == "error")
+            .map(|(_, v)| v.to_string());
+
+        if code.is_none() && error.is_none() {
+            let _ = writer
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await;
+            continue;
+        }
+
+        let body = "<html><body><h2>Authentication complete.</h2><p>You can close this tab.</p></body></html>";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = writer.write_all(resp.as_bytes()).await;
+
+        if let Some(err) = error {
+            bail!("OAuth authorization was denied or failed: {err}");
+        }
+        let code = code.ok_or_else(|| anyhow::anyhow!("missing code"))?;
+        let state = state.ok_or_else(|| anyhow::anyhow!("missing state"))?;
+        return Ok((code, state));
+    }
 }
 
 async fn wait_for_callback() -> anyhow::Result<(String, String)> {
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:51121").await?;
-    let (mut stream, _) = listener.accept().await?;
-    let (reader, mut writer) = stream.split();
-    let mut buf_reader = BufReader::new(reader);
-    let mut request_line = String::new();
-    buf_reader.read_line(&mut request_line).await?;
+    // Bind BOTH IPv4 and IPv6 loopback on port 51121. On Windows, `localhost`
+    // frequently resolves to `::1` (IPv6) first, so an IPv4-only listener makes
+    // the browser fail the OAuth redirect with ERR_CONNECTION_REFUSED.
+    let v4 = tokio::net::TcpListener::bind("127.0.0.1:51121").await.ok();
+    let v6 = tokio::net::TcpListener::bind("[::1]:51121").await.ok();
+    if v4.is_none() && v6.is_none() {
+        bail!(
+            "failed to bind OAuth callback listener on port 51121 (already in use? close other dcode-ai logins)"
+        );
+    }
 
-    let path = request_line
-        .split_whitespace()
-        .nth(1)
-        .unwrap_or("")
-        .to_string();
-    let url = url::Url::parse(&format!("http://localhost{path}"))?;
-    let code = url
-        .query_pairs()
-        .find(|(k, _)| k == "code")
-        .map(|(_, v)| v.to_string())
-        .ok_or_else(|| anyhow::anyhow!("missing code"))?;
-    let state = url
-        .query_pairs()
-        .find(|(k, _)| k == "state")
-        .map(|(_, v)| v.to_string())
-        .ok_or_else(|| anyhow::anyhow!("missing state"))?;
+    loop {
+        let (mut stream, _) = accept_either(v4.as_ref(), v6.as_ref()).await?;
+        let (reader, mut writer) = stream.split();
+        let mut buf_reader = BufReader::new(reader);
+        let mut request_line = String::new();
+        buf_reader.read_line(&mut request_line).await?;
 
-    let body =
-        "<html><body><h2>Authentication complete.</h2><p>You can close this tab.</p></body></html>";
-    let resp = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    let _ = writer.write_all(resp.as_bytes()).await;
-    Ok((code, state))
+        let path = request_line
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("")
+            .to_string();
+        let url = url::Url::parse(&format!("http://localhost{path}"))?;
+        let code = url
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.to_string());
+        let state = url
+            .query_pairs()
+            .find(|(k, _)| k == "state")
+            .map(|(_, v)| v.to_string());
+        let error = url
+            .query_pairs()
+            .find(|(k, _)| k == "error")
+            .map(|(_, v)| v.to_string());
+
+        // Browsers fire incidental requests (favicon, prefetch) that carry no
+        // OAuth params — answer them and keep waiting for the real redirect
+        // instead of aborting with "missing code".
+        if code.is_none() && error.is_none() {
+            let _ = writer
+                .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+                .await;
+            continue;
+        }
+
+        let body = "<html><body><h2>Authentication complete.</h2><p>You can close this tab.</p></body></html>";
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let _ = writer.write_all(resp.as_bytes()).await;
+
+        if let Some(err) = error {
+            bail!("OAuth authorization was denied or failed: {err}");
+        }
+        let code = code.ok_or_else(|| anyhow::anyhow!("missing code"))?;
+        let state = state.ok_or_else(|| anyhow::anyhow!("missing state"))?;
+        return Ok((code, state));
+    }
+}
+
+/// Accept the next connection from whichever loopback listener (IPv4 / IPv6)
+/// receives it first.
+async fn accept_either(
+    a: Option<&tokio::net::TcpListener>,
+    b: Option<&tokio::net::TcpListener>,
+) -> anyhow::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    let accepted = match (a, b) {
+        (Some(a), Some(b)) => tokio::select! {
+            r = a.accept() => r?,
+            r = b.accept() => r?,
+        },
+        (Some(a), None) => a.accept().await?,
+        (None, Some(b)) => b.accept().await?,
+        (None, None) => bail!("no OAuth callback listener bound"),
+    };
+    Ok(accepted)
 }
 
 #[derive(Debug, Clone)]

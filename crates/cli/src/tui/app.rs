@@ -9,21 +9,25 @@ use crate::file_mentions;
 use crate::tool_ui;
 use crate::tui::answer_parse::{parse_approval_verdict, parse_tui_question_answer};
 use crate::tui::composer_input::*;
-use crate::tui::connect_modal::{
-    ConnectAction, ConnectRow, build_connect_rows, selectable_row_indices,
-};
+use crate::tui::connect_modal::{ConnectAction, build_connect_rows, selectable_row_indices};
 use crate::tui::layout::{centered_rect, layout_chunks, layout_with_sidebar};
 use crate::tui::mouse::{is_click_jitter, mouse_left_activated, mouse_scroll_step, rect_contains};
 use crate::tui::oauth_status::{
     oauth_logged_in_for_slug, oauth_login_provider_slug, oauth_switch_command_for_slug,
 };
-use crate::tui::palette::{PaletteRow, filter_palette_rows, palette_selectable_indices};
 use crate::tui::paste::{expand_paste_tokens, pasted_lines_token};
 use crate::tui::path_parse::{extract_embedded_path_fragments, parse_candidate_image_path};
-use crate::tui::render_helpers::{popup_block, truncate_chars, wrap_text};
-use crate::tui::slash_entries::*;
+use crate::tui::render::modals::{
+    render_api_key_modal, render_approval_popup, render_at_panel, render_command_palette,
+    render_connect_modal, render_info_modal, render_question_modal, render_slash_panel,
+};
+use crate::tui::render_helpers::{popup_block, truncate_chars};
+use crate::tui::slash_entries::{
+    SLASH_PANEL_MAX_ROWS, SlashEntry, filter_slash_entries, load_slash_entries, slash_panel_height,
+    slash_panel_visible,
+};
 use crate::tui::state::{
-    ApprovalRequest, BranchPickerKey, CommandPaletteKey, ConnectModalKey, DisplayBlock,
+    BranchPickerKey, CommandPaletteKey, ConnectModalKey, DisplayBlock,
     HistorySearchKey, InfoModalKey, ModelPickerAction, ModelPickerKey, PinnedNote, PinsModalKey,
     ProviderPickerKey, ProviderPickerOutcome, QuestionModalKey, QuestionModalOutcome,
     SessionPickerKey, TuiSessionState,
@@ -44,9 +48,9 @@ use dcode_ai_common::config::ProviderKind;
 use dcode_ai_common::event::{BusyState, QuestionSelection};
 use ratatui::{
     layout::{Constraint, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span, Text},
-    widgets::{Block, BorderType, Borders, Clear as ClearWidget, Padding, Paragraph, Widget, Wrap},
+    widgets::{Block, BorderType, Borders, Clear as ClearWidget, Padding, Paragraph, Widget},
 };
 use std::io::stdout;
 use std::sync::{Arc, Mutex};
@@ -718,7 +722,11 @@ use crate::tui::diff_hunk::{build_hunk_modified_input, extract_approval_hunks};
 
 /// Build a compact colorized diff preview for file-write/edit tool approvals.
 /// Returns up to ~6 colored `Line`s showing +/- changes, or empty if not applicable.
-fn approval_diff_preview(tool: &str, input_json: &str, max_cols: usize) -> Vec<Line<'static>> {
+pub(crate) fn approval_diff_preview(
+    tool: &str,
+    input_json: &str,
+    max_cols: usize,
+) -> Vec<Line<'static>> {
     let lower = tool.to_ascii_lowercase();
     if !lower.contains("write")
         && !lower.contains("edit")
@@ -857,104 +865,9 @@ fn approval_diff_preview(tool: &str, input_json: &str, max_cols: usize) -> Vec<L
 
 // ── Codex-style popup/panel renderers ──────────────────────────────────
 
-/// Slash command panel docked above the input.
-fn render_slash_panel(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    entries: &[&crate::tui::slash_entries::SlashEntry],
-    selected: usize,
-) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::surface())),
-        area,
-    );
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let start = selected
-        .saturating_sub(inner_h.saturating_sub(1))
-        .min(entries.len().saturating_sub(inner_h));
-    // Align the command column so descriptions line up (Codex-style
-    // `/command   description`). Cap the command column width.
-    let cmd_col = entries
-        .iter()
-        .map(|e| e.command_str().chars().count())
-        .max()
-        .unwrap_or(8)
-        .clamp(8, 22);
-    let avail = area.width.saturating_sub(4) as usize;
+// (Renderers moved to tui/render/modals.rs)
 
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, e) in entries.iter().enumerate().skip(start).take(inner_h) {
-        let sel = i == selected;
-        let marker = if sel { "› " } else { "  " };
-        let cmd = e.command_str();
-        let desc = e.description_text();
-        let cmd_style = if sel {
-            Style::default()
-                .fg(Color::Black)
-                .bg(theme::accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::accent())
-        };
-        let desc_style = if sel {
-            Style::default().fg(Color::Black).bg(theme::accent())
-        } else {
-            Style::default().fg(theme::muted())
-        };
-        let mut spans = vec![
-            Span::styled(marker.to_string(), cmd_style),
-            Span::styled(format!("{cmd:<cmd_col$}"), cmd_style),
-        ];
-        if !desc.is_empty() {
-            let desc_room = avail.saturating_sub(cmd_col + 2);
-            spans.push(Span::styled("  ".to_string(), desc_style));
-            spans.push(Span::styled(
-                truncate_chars(&desc, desc_room.max(8)),
-                desc_style,
-            ));
-        }
-        lines.push(Line::from(spans));
-    }
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(popup_block("commands")),
-        area,
-    );
-}
-
-/// `@`-mention file completion panel docked above the input.
-fn render_at_panel(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    matches: &[String],
-    selected: usize,
-) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::surface())),
-        area,
-    );
-    let inner_h = area.height.saturating_sub(2) as usize;
-    let start = selected
-        .saturating_sub(inner_h.saturating_sub(1))
-        .min(matches.len().saturating_sub(inner_h));
-    let mut lines: Vec<Line> = Vec::new();
-    for (i, m) in matches.iter().enumerate().skip(start).take(inner_h) {
-        let sel = i == selected;
-        let style = if sel {
-            Style::default()
-                .fg(Color::Black)
-                .bg(theme::accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::text())
-        };
-        let marker = if sel { "› " } else { "  " };
-        lines.push(Line::from(Span::styled(format!("{marker}{m}"), style)));
-    }
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(popup_block("files")),
-        area,
-    );
-}
+// (Renderers moved to tui/render/modals.rs)
 
 /// Generic centered list picker (model/theme/agent/project/session).
 fn render_list_picker(
@@ -1009,7 +922,7 @@ fn render_list_picker(
         let sel = i == selected;
         let style = if sel {
             Style::default()
-                .fg(Color::Black)
+                .fg(theme::on_accent())
                 .bg(theme::accent())
                 .add_modifier(Modifier::BOLD)
         } else {
@@ -1081,527 +994,23 @@ fn session_picker_labels(g: &TuiSessionState) -> Vec<String> {
         .collect()
 }
 
-fn render_command_palette(frame: &mut ratatui::Frame<'_>, area: Rect, g: &TuiSessionState) {
-    let filtered = filter_palette_rows(&g.command_palette_query);
-    let selectable = palette_selectable_indices(&filtered);
-    let pick_abs = selectable
-        .get(g.palette_index.min(selectable.len().saturating_sub(1)))
-        .copied()
-        .unwrap_or(0);
+// (Renderers moved to tui/render/modals.rs)
 
-    // Build all body lines (sections + entries), tracking which body line is
-    // the selected entry so we can scroll-window around it.
-    let mut body: Vec<Line> = Vec::new();
-    let mut sel_line = 0usize;
-    for (abs_idx, row) in filtered.iter().enumerate() {
-        match row {
-            PaletteRow::Section(name) => {
-                body.push(Line::from(Span::styled(
-                    format!(" {name}"),
-                    Style::default()
-                        .fg(theme::muted())
-                        .add_modifier(Modifier::BOLD),
-                )));
-            }
-            PaletteRow::Entry { label, shortcut } => {
-                let sel = abs_idx == pick_abs;
-                if sel {
-                    sel_line = body.len();
-                }
-                let style = if sel {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(theme::accent())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::text())
-                };
-                let marker = if sel { "› " } else { "  " };
-                let mut spans = vec![Span::styled(format!("{marker}{label}"), style)];
-                if !shortcut.is_empty() {
-                    spans.push(Span::styled(
-                        format!("   {shortcut}"),
-                        if sel {
-                            style
-                        } else {
-                            Style::default().fg(theme::muted())
-                        },
-                    ));
-                }
-                body.push(Line::from(spans));
-            }
-        }
-    }
+// (Renderers moved to tui/render/modals.rs)
 
-    // Popup as large as the viewport comfortably allows (centered).
-    let want_h = (body.len() as u16).saturating_add(4).clamp(8, 24);
-    let popup = centered_rect(area, COMMAND_PALETTE_WIDTH, want_h);
-    frame.render_widget(ClearWidget, popup);
+// (Renderers moved to tui/render/modals.rs)
 
-    // 1 row for the search line; rest scrolls.
-    let body_rows = popup.height.saturating_sub(3).max(1) as usize;
-    let start = sel_line
-        .saturating_sub(body_rows / 2)
-        .min(body.len().saturating_sub(body_rows));
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled(
-            "› ",
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if g.command_palette_query.is_empty() {
-                "type to filter…".to_string()
-            } else {
-                g.command_palette_query.clone()
-            },
-            if g.command_palette_query.is_empty() {
-                Style::default().fg(theme::muted())
-            } else {
-                Style::default().fg(theme::text())
-            },
-        ),
-    ]));
-    for line in body.into_iter().skip(start).take(body_rows) {
-        lines.push(line);
-    }
-
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(theme::surface()))
-            .block(popup_block("commands")),
-        popup,
-    );
-}
-
-fn render_connect_modal(frame: &mut ratatui::Frame<'_>, area: Rect, g: &TuiSessionState) {
-    let rows = build_connect_rows(&g.connect_search);
-    let selectable = selectable_row_indices(&rows);
-    let pick_abs = selectable
-        .get(g.connect_menu_index.min(selectable.len().saturating_sub(1)))
-        .copied()
-        .unwrap_or(usize::MAX);
-
-    let mut body: Vec<Line> = Vec::new();
-    let mut sel_line = 0usize;
-    for (abs_idx, row) in rows.iter().enumerate() {
-        match row {
-            ConnectRow::Section { title } => {
-                body.push(Line::from(Span::styled(
-                    format!(" {title}"),
-                    Style::default()
-                        .fg(theme::muted())
-                        .add_modifier(Modifier::BOLD),
-                )));
-            }
-            ConnectRow::Provider {
-                title, subtitle, ..
-            } => {
-                let sel = abs_idx == pick_abs;
-                if sel {
-                    sel_line = body.len();
-                }
-                let style = if sel {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(theme::accent())
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().fg(theme::text())
-                };
-                let marker = if sel { "› " } else { "  " };
-                body.push(Line::from(vec![
-                    Span::styled(format!("{marker}{title}"), style),
-                    Span::styled(
-                        format!("  {subtitle}"),
-                        if sel {
-                            style
-                        } else {
-                            Style::default().fg(theme::muted())
-                        },
-                    ),
-                ]));
-            }
-        }
-    }
-
-    let want_h = (body.len() as u16).saturating_add(4).clamp(8, 24);
-    let popup = centered_rect(area, 60, want_h);
-    frame.render_widget(ClearWidget, popup);
-    let body_rows = popup.height.saturating_sub(3).max(1) as usize;
-    let start = sel_line
-        .saturating_sub(body_rows / 2)
-        .min(body.len().saturating_sub(body_rows));
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled(
-            "› ",
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(
-            if g.connect_search.is_empty() {
-                "search providers…".to_string()
-            } else {
-                g.connect_search.clone()
-            },
-            if g.connect_search.is_empty() {
-                Style::default().fg(theme::muted())
-            } else {
-                Style::default().fg(theme::text())
-            },
-        ),
-    ]));
-    for line in body.into_iter().skip(start).take(body_rows) {
-        lines.push(line);
-    }
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(theme::surface()))
-            .block(popup_block("connect a provider")),
-        popup,
-    );
-}
-
-fn render_api_key_modal(frame: &mut ratatui::Frame<'_>, area: Rect, g: &TuiSessionState) {
-    use crate::tui::state::OnboardingValidation;
-    let provider = g
-        .api_key_target_provider
-        .map(|p| p.display_name().to_string())
-        .unwrap_or_else(|| "provider".into());
-    let masked: String = "•".repeat(g.api_key_input.chars().count().min(48));
-
-    let mut lines: Vec<Line> = Vec::new();
-    lines.push(Line::from(Span::styled(
-        format!("Enter API key for {provider}"),
-        Style::default()
-            .fg(theme::text())
-            .add_modifier(Modifier::BOLD),
-    )));
-    if g.api_key_target_has_existing {
-        lines.push(Line::from(Span::styled(
-            "(a key is already saved — entering a new one replaces it)",
-            Style::default().fg(theme::muted()),
-        )));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled(
-            "› ",
-            Style::default()
-                .fg(theme::accent())
-                .add_modifier(Modifier::BOLD),
-        ),
-        if masked.is_empty() {
-            Span::styled("paste your key…", Style::default().fg(theme::muted()))
-        } else {
-            Span::styled(masked, Style::default().fg(theme::text()))
-        },
-    ]));
-    lines.push(Line::default());
-    match &g.validation_status {
-        Some(OnboardingValidation::Validating) => lines.push(Line::from(Span::styled(
-            "  validating…",
-            Style::default().fg(theme::warn()),
-        ))),
-        Some(OnboardingValidation::Valid) => lines.push(Line::from(Span::styled(
-            "  ✓ valid",
-            Style::default().fg(theme::success()),
-        ))),
-        Some(OnboardingValidation::Failed(msg)) => lines.push(Line::from(Span::styled(
-            format!("  ✗ {}", truncate_chars(msg, 50)),
-            Style::default().fg(theme::error()),
-        ))),
-        None => {}
-    }
-    lines.push(Line::from(Span::styled(
-        "Enter save · Esc cancel",
-        Style::default().fg(theme::muted()),
-    )));
-
-    let h = (lines.len() as u16).saturating_add(2).clamp(7, 14);
-    let popup = centered_rect(area, 60, h);
-    frame.render_widget(ClearWidget, popup);
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(theme::surface()))
-            .block(popup_block("api key"))
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
-
-fn render_info_modal(frame: &mut ratatui::Frame<'_>, area: Rect, g: &TuiSessionState) {
-    let popup = centered_rect(area, 80, 22);
-    frame.render_widget(ClearWidget, popup);
-    let inner_h = popup.height.saturating_sub(2) as usize;
-    let start = g
-        .info_modal_scroll
-        .min(g.info_modal_lines.len().saturating_sub(1));
-    let lines: Vec<Line> = g
-        .info_modal_lines
-        .iter()
-        .skip(start)
-        .take(inner_h)
-        .map(|l| Line::from(Span::styled(l.clone(), Style::default().fg(theme::text()))))
-        .collect();
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(theme::surface()))
-            .block(popup_block(g.info_modal_title.as_str()))
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
+// (Renderers moved to tui/render/modals.rs)
 
 /// Render the interactive question as a centered popup with arrow-key options.
-fn render_question_modal(frame: &mut ratatui::Frame<'_>, area: Rect, g: &TuiSessionState) {
-    let Some(q) = &g.active_question else { return };
-    // Items: index 0 = suggested (recommended), then each option.
-    let suggested_label = q
-        .options
-        .iter()
-        .find(|o| o.id == q.suggested_answer)
-        .map(|o| o.label.clone())
-        .unwrap_or_else(|| q.suggested_answer.clone());
-    let mut items: Vec<String> = vec![format!("{suggested_label}  (recommended)")];
-    for o in &q.options {
-        // The suggested option is already shown as the "(recommended)" row above.
-        if o.id == q.suggested_answer {
-            continue;
-        }
-        items.push(o.label.clone());
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-    for pl in wrap_text(&q.prompt, 60) {
-        lines.push(Line::from(Span::styled(
-            pl,
-            Style::default().fg(theme::text()),
-        )));
-    }
-    lines.push(Line::default());
-    for (i, label) in items.iter().enumerate() {
-        let sel = i == g.question_modal_index;
-        let style = if sel {
-            Style::default()
-                .fg(Color::Black)
-                .bg(theme::accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::text())
-        };
-        let marker = if sel { "› " } else { "  " };
-        lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "Enter select · ↑↓ move · Esc cancel",
-        Style::default().fg(theme::muted()),
-    )));
-
-    let h = (lines.len() as u16).saturating_add(2).clamp(6, 20);
-    let popup = centered_rect(area, 64, h);
-    frame.render_widget(ClearWidget, popup);
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(theme::surface()))
-            .block(popup_block("approval"))
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
+// (Renderers moved to tui/render/modals.rs)
 
 /// Render the approval request as a centered popup overlay. The popup body
 /// reuses the same content layout as `render_approval_block` (icon + label,
 /// description, full input, action hint) but lives above the transcript so
 /// the user can't miss it while scrolling tool output.
 #[allow(dead_code)]
-fn render_approval_popup(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    req: &ApprovalRequest,
-    selected: usize,
-    hunk_mode: bool,
-    hunk_selection: &[bool],
-    hunk_cursor: usize,
-) {
-    // Keep approval modal compact but allow extra rows when diff preview is shown.
-    let max_w = area.width.saturating_sub(2);
-    let popup_w = max_w.min(84).max(max_w.min(56));
-    let max_h = area.height.saturating_sub(2);
-    let has_diff = !approval_diff_preview(
-        req.tool.as_str(),
-        req.input.as_str(),
-        (popup_w as usize).saturating_sub(4),
-    )
-    .is_empty();
-    let popup_h = if hunk_mode {
-        max_h.min(30).max(max_h.min(18))
-    } else if has_diff {
-        max_h.min(20).max(max_h.min(13))
-    } else {
-        max_h.min(13).max(max_h.min(9))
-    };
-    let popup_area = centered_rect(area, popup_w, popup_h);
-
-    let selected = selected.min(2);
-    let inner_w = popup_area.width.saturating_sub(4) as usize;
-    let ui = tool_ui::metadata(&req.tool);
-    let preview = tool_input_preview(&req.tool, &req.input);
-
-    let mut lines: Vec<Line<'static>> = Vec::new();
-    lines.push(Line::from(vec![
-        Span::styled("◆ ", Style::default().fg(theme::success())),
-        Span::styled(
-            ui.label,
-            Style::default()
-                .fg(theme::success())
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled(" requires approval", Style::default().fg(theme::muted())),
-    ]));
-    lines.push(Line::default());
-    lines.push(Line::from(vec![
-        Span::styled("name:", Style::default().fg(theme::success())),
-        Span::styled(" ", Style::default()),
-        Span::styled(
-            format!("\"{}\"", req.tool),
-            Style::default().fg(theme::text()),
-        ),
-    ]));
-    lines.push(Line::default());
-
-    let option_row = |idx: usize, label: &str| -> Line<'static> {
-        let active = selected == idx;
-        let marker = if active { "● " } else { "○ " };
-        let mut style = Style::default().fg(theme::muted());
-        if active {
-            style = Style::default()
-                .fg(theme::success())
-                .add_modifier(Modifier::BOLD);
-        }
-        Line::from(vec![
-            Span::styled(marker, style),
-            Span::styled(label.to_string(), style),
-        ])
-    };
-    lines.push(option_row(0, "Approve (y)"));
-    lines.push(option_row(1, "Always approve (a)"));
-    lines.push(option_row(2, "Deny (n)"));
-    lines.push(Line::default());
-
-    // Show hunk-selection mode or mini diff preview.
-    if hunk_mode && !hunk_selection.is_empty() {
-        let hunks = extract_approval_hunks(&req.tool, &req.input);
-        for (i, hunk) in hunks.iter().enumerate() {
-            let accepted = hunk_selection.get(i).copied().unwrap_or(true);
-            let is_focused = i == hunk_cursor;
-            let marker = if accepted { "[✓]" } else { "[✗]" };
-            let hdr_style = if is_focused {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(theme::user())
-                    .add_modifier(Modifier::BOLD)
-            } else if accepted {
-                Style::default().fg(theme::success())
-            } else {
-                Style::default().fg(theme::error())
-            };
-            lines.push(Line::from(vec![
-                Span::styled(format!("{marker} "), hdr_style),
-                Span::styled(
-                    truncate_chars(&hunk.header, inner_w.saturating_sub(6)),
-                    hdr_style,
-                ),
-            ]));
-            // Show up to 4 lines of each hunk as context.
-            let max_hunk_lines = if is_focused { 6 } else { 2 };
-            for (sigil, text) in hunk.lines.iter().take(max_hunk_lines) {
-                let color = match sigil {
-                    '+' => theme::success(),
-                    '-' => theme::error(),
-                    _ => theme::muted(),
-                };
-                let dimmed = if !accepted && *sigil != ' ' {
-                    Style::default().fg(color).add_modifier(Modifier::DIM)
-                } else {
-                    Style::default().fg(color)
-                };
-                lines.push(Line::from(Span::styled(
-                    format!(
-                        "  {sigil}{}",
-                        truncate_chars(text, inner_w.saturating_sub(4))
-                    ),
-                    dimmed,
-                )));
-            }
-            if hunk.lines.len() > max_hunk_lines {
-                lines.push(Line::from(Span::styled(
-                    format!("  … {} more lines", hunk.lines.len() - max_hunk_lines),
-                    Style::default().fg(theme::muted()),
-                )));
-            }
-        }
-        let accepted = hunk_selection.iter().filter(|&&s| s).count();
-        let total = hunk_selection.len();
-        lines.push(Line::from(Span::styled(
-            format!("{accepted}/{total} hunks selected — ↑↓ navigate · space toggle · y/n accept/reject · Enter apply"),
-            Style::default().fg(theme::muted()),
-        )));
-    } else {
-        let diff_preview = approval_diff_preview(&req.tool, &req.input, inner_w);
-        if !diff_preview.is_empty() {
-            lines.push(Line::from(Span::styled(
-                "diff preview (h = per-hunk staging):",
-                Style::default().fg(theme::muted()),
-            )));
-            for dl in diff_preview {
-                lines.push(dl);
-            }
-        } else if !preview.is_empty() {
-            lines.push(Line::from(Span::styled(
-                truncate_chars(
-                    &format!("input: {preview}"),
-                    inner_w.saturating_sub(2).max(24),
-                ),
-                Style::default().fg(theme::muted()),
-            )));
-        } else {
-            lines.push(Line::from(Span::styled(
-                truncate_chars(&req.description, inner_w.saturating_sub(2).max(24)),
-                Style::default().fg(theme::muted()),
-            )));
-        }
-        lines.push(Line::from(Span::styled(
-            "↑↓ select  Enter confirm  Esc cancel  h hunks",
-            Style::default().fg(theme::muted()),
-        )));
-    }
-
-    frame.render_widget(ClearWidget, popup_area);
-    let popup = Paragraph::new(Text::from(lines))
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .border_type(BorderType::Rounded)
-                .border_style(Style::default().fg(theme::warn()))
-                .title(Span::styled(
-                    " Tool Approval ",
-                    Style::default()
-                        .fg(theme::warn())
-                        .add_modifier(Modifier::BOLD),
-                )),
-        )
-        .style(Style::default().bg(theme::surface()))
-        .wrap(Wrap { trim: false });
-    frame.render_widget(popup, popup_area);
-}
+// (Renderers moved to tui/render/modals.rs)
 
 /// Full-screen transcript overlay (Codex `/transcript`). Renders ALL blocks at
 /// the current terminal width — so it expands/collapses and reflows freely,
@@ -1675,7 +1084,7 @@ pub(crate) fn run_transcript_overlay(state: &Arc<Mutex<TuiSessionState>>) -> any
                     Span::styled(
                         " transcript ",
                         Style::default()
-                            .fg(Color::Black)
+                            .fg(theme::on_accent())
                             .bg(theme::accent())
                             .add_modifier(Modifier::BOLD),
                     ),
@@ -2295,7 +1704,7 @@ pub fn run_blocking(
 
                 // ── Status bar: brand · agent · effort · state · context ──
                 if status_r.height > 0 {
-                    let busy = g.busy || !matches!(g.current_busy_state, BusyState::Idle);
+                    let busy = g.busy || g.current_busy_state.is_active();
                     let state_icon = if busy { busy_spinner(g.started) } else { "●" };
                     let state_label = if busy { "working" } else { "idle" };
                     let state_color = if busy {
@@ -2385,6 +1794,26 @@ pub fn run_blocking(
                         left.push(Span::styled(
                             format!("ctx {ctx_pct}%"),
                             Style::default().fg(theme::muted()).bg(theme::bg()),
+                        ));
+                    }
+                    if g.mcp_server_count > 0 {
+                        let ready_count = g
+                            .mcp_server_statuses
+                            .values()
+                            .filter(|s| {
+                                matches!(s, dcode_ai_common::event::McpStartupStatus::Ready)
+                            })
+                            .count();
+                        left.push(sep.clone());
+                        left.push(Span::styled(
+                            format!("mcp {}/{}", ready_count, g.mcp_server_count),
+                            Style::default()
+                                .fg(if ready_count == g.mcp_server_count {
+                                    theme::success()
+                                } else {
+                                    theme::warn()
+                                })
+                                .bg(theme::bg()),
                         ));
                     }
                     let right = if hidden("model") {
@@ -2494,7 +1923,7 @@ pub fn run_blocking(
             // promptly after the drag stops.
             Duration::from_millis(50)
         } else if let Ok(g) = state.lock() {
-            if g.busy || !matches!(g.current_busy_state, BusyState::Idle) {
+            if g.busy || g.current_busy_state.is_active() {
                 Duration::from_millis(40)
             } else if g.connect_modal_open {
                 // Tick fast enough to drive the modal's animation.
@@ -2876,14 +2305,40 @@ pub fn run_blocking(
                         let value = normalized.trim_end_matches('\n');
                         g.anthropic_oauth_code_input.push_str(value);
                     } else {
-                        match stage_pasted_image_paths(&mut g, &pasted) {
-                            Ok(0) => {
-                                insert_pasted_text(&mut g, &slash_entries, &pasted);
-                                composer_history_index = None;
-                                composer_history_draft.clear();
+                        // Image paste: many terminals (e.g. Windows Terminal)
+                        // consume Ctrl+V as a bracketed paste, so the raw Ctrl+V
+                        // key handler never runs. Bracketed paste is text-only,
+                        // so a clipboard *image* arrives here as an empty paste.
+                        // When the paste is empty but the clipboard holds an
+                        // image, stage the image instead of inserting nothing.
+                        let staged_image = if pasted.trim().is_empty() {
+                            let ws = g.workspace_root.clone();
+                            let sid = g.session_id.clone();
+                            match crate::image_attach::paste_clipboard_image(&ws, &sid) {
+                                Ok(att) => {
+                                    let label = att.path.clone();
+                                    g.staged_image_attachments.push(att);
+                                    g.push_block(DisplayBlock::System(format!(
+                                        "[image] staged {label} — Enter to send"
+                                    )));
+                                    g.touch_transcript();
+                                    true
+                                }
+                                Err(_) => false,
                             }
-                            Ok(_) => {}
-                            Err(e) => g.push_error(format!("[image] {e}")),
+                        } else {
+                            false
+                        };
+                        if !staged_image {
+                            match stage_pasted_image_paths(&mut g, &pasted) {
+                                Ok(0) => {
+                                    insert_pasted_text(&mut g, &slash_entries, &pasted);
+                                    composer_history_index = None;
+                                    composer_history_draft.clear();
+                                }
+                                Ok(_) => {}
+                                Err(e) => g.push_error(format!("[image] {e}")),
+                            }
                         }
                     }
                 }
@@ -4279,8 +3734,7 @@ pub fn run_blocking(
                             }
                             composer_history_index = None;
                             composer_history_draft.clear();
-                            let busy_turn =
-                                g.busy || !matches!(g.current_busy_state, BusyState::Idle);
+                            let busy_turn = g.busy || g.current_busy_state.is_active();
                             if busy_turn {
                                 if mods.contains(KeyModifiers::ALT) {
                                     g.queued_followup = g.queued_followup.saturating_add(1);
