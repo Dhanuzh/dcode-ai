@@ -116,7 +116,8 @@ dcode-ai attach <session-id>   # attach to live output
 | `Ctrl+P` | Command palette                                                         |
 | `F2`     | Cycle model                                                             |
 | `Tab`    | Cycle agent profile (`@build` / `@plan` / `@review` / `@fix` / `@test`) |
-| `Esc`    | Cancel current turn                                                     |
+| `Esc`    | Cancel current turn (while running)                                     |
+| `Esc` (idle) | Backtrack — pick a past message, edit it, rewind the conversation   |
 | `Ctrl+V` | Paste image from clipboard                                              |
 
 ### Slash commands (type `/` in TUI)
@@ -191,6 +192,13 @@ Configured in `~/.dcode-ai/config.toml` (global) or `.dcode-ai/config.local.toml
 | OpenAI-compatible      | —                    | any `base_url` + model |
 
 Switch provider inline: `/provider minimax`, `/provider openai`, `/provider anthropic`, `/provider opencodezen`.
+
+**Local models:** `/connect ollama`, `/connect lmstudio`, or `/connect vllm` probes the local
+server, picks an available model, and persists the provider config — no manual base-URL setup.
+
+API keys entered via `/apikey` or onboarding are stored in `~/.dcode-ai/credentials.toml`
+(created `0600`), not in the shareable config files. Env vars and existing inline
+config keys keep working.
 
 Switch model within provider: `/model <name>`.
 
@@ -333,6 +341,22 @@ Switch mode in TUI: `/permission`, or via CLI flag: `--permission-mode bypass-pe
 - **Allowed tier** — auto-executed (reads, searches, web fetches)
 - **Ask tier** — prompts for approval before execution (writes, unknown commands)
 - **Denied tier** — always blocked (destructive operations like `rm -rf /`, `sudo`)
+
+Shell commands are classified structurally (quoting-aware parsing, pipeline splitting),
+not by substring match: provably read-only commands (`ls`, `cat`, `grep`, `rg`,
+`git status/log/diff`, …) auto-run in every mode except Plan, while known-destructive
+shapes (`sudo`, `rm -rf /`, `mkfs`, `curl | sh`, fork bombs) are denied outright.
+
+### Sandbox (Linux)
+
+```toml
+[permissions]
+sandbox_bash = true
+```
+
+Confines `execute_bash` children with Landlock: read/execute everywhere, writes only
+beneath the workspace and scratch dirs (`/tmp`, `/dev/null`, …). Best-effort on kernels
+without Landlock support.
 
 ### Headless runs
 
@@ -488,6 +512,13 @@ dcode-ai discovers skills automatically from:
 - `~/.dcode-ai/skills/` (user-level)
 
 Each skill is a directory with a `SKILL.md` file containing structured instructions. Skills are loaded on-demand via the `invoke_skill` tool or `/command` invocation.
+
+### Custom commands
+
+Flat prompt files become slash commands: `.dcode-ai/commands/<name>.md` (or
+`.claude/commands/`, workspace or user level) runs as `/name`. The file body is sent
+as the prompt with `$ARGUMENTS` replaced by whatever you type after the command.
+Optional YAML frontmatter sets `description`, `model`, and `permission_mode`.
 
 ---
 
