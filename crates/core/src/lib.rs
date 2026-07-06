@@ -2,6 +2,7 @@ pub mod agent;
 pub mod approval;
 pub mod code_intel;
 pub mod code_map;
+pub mod command_safety;
 pub mod cost;
 pub mod harness;
 pub mod hooks;
