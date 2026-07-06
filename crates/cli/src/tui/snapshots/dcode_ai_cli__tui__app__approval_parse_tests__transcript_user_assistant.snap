@@ -1,8 +1,9 @@
 ---
 source: crates/cli/src/tui/app.rs
+assertion_line: 4759
 expression: lines_to_text(&lines)
 ---
-› Hello world
 
+› Hello world                                               
 
 • Hi! How can I help you today?

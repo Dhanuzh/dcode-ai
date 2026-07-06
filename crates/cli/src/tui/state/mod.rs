@@ -133,6 +133,7 @@ impl TuiSessionState {
             paste_store: HashMap::new(),
             paste_counter: 0,
             mouse_capture_on: true,
+            notifications_enabled: true,
             theme_picker_open: false,
             theme_picker_index: 0,
             theme_picker_entries: Vec::new(),

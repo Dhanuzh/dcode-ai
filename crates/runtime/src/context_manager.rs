@@ -324,7 +324,11 @@ impl ContextManager {
     /// single retained message — typically a huge tool output — alone exceeds
     /// the budget. Structure (roles, tool ids, tool_calls) is preserved so
     /// tool_use / tool_result pairing stays intact.
-    pub fn truncate_message_contents(&self, messages: &[Message], max_chars: usize) -> Vec<Message> {
+    pub fn truncate_message_contents(
+        &self,
+        messages: &[Message],
+        max_chars: usize,
+    ) -> Vec<Message> {
         messages
             .iter()
             .map(|m| {

@@ -532,7 +532,8 @@ impl Supervisor {
                             context_tokens: self
                                 .context_manager
                                 .stats(&self.agent.messages)
-                                .estimated_tokens as u64,
+                                .estimated_tokens
+                                as u64,
                         })
                         .await;
                 }
@@ -566,7 +567,8 @@ impl Supervisor {
                             context_tokens: self
                                 .context_manager
                                 .stats(&self.agent.messages)
-                                .estimated_tokens as u64,
+                                .estimated_tokens
+                                as u64,
                         })
                         .await;
                 }

@@ -355,6 +355,14 @@ pub struct UiConfig {
     /// thinking, clear. Empty = defaults only.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub keymap: BTreeMap<String, String>,
+    /// Desktop notifications (OSC 9 + terminal bell) when a turn finishes or
+    /// an approval is requested while the terminal is unfocused.
+    #[serde(default = "default_notifications")]
+    pub notifications: bool,
+}
+
+fn default_notifications() -> bool {
+    true
 }
 
 fn default_scroll_speed() -> u16 {
@@ -383,6 +391,7 @@ impl Default for UiConfig {
             personality: None,
             statusline_hidden: Vec::new(),
             keymap: BTreeMap::new(),
+            notifications: default_notifications(),
         }
     }
 }
@@ -421,6 +430,9 @@ impl UiConfig {
         }
         if let Some(keymap) = partial.keymap {
             self.keymap = keymap;
+        }
+        if let Some(notifications) = partial.notifications {
+            self.notifications = notifications;
         }
     }
 }
@@ -1444,6 +1456,7 @@ struct PartialUiConfig {
     personality: Option<String>,
     statusline_hidden: Option<Vec<String>>,
     keymap: Option<BTreeMap<String, String>>,
+    notifications: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -1818,6 +1831,7 @@ onboarding_completed = true
         config.provider.openai.api_key_env = "__DCODE_AI_TEST_NONE__".into();
         config.provider.anthropic.api_key_env = "__DCODE_AI_TEST_NONE__".into();
         config.provider.openrouter.api_key_env = "__DCODE_AI_TEST_NONE__".into();
+        config.provider.opencodezen.api_key_env = "__DCODE_AI_TEST_NONE__".into();
         config
     }
 

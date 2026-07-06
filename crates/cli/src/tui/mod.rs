@@ -40,6 +40,4 @@ pub use app::{TuiCmd, run_blocking};
 pub use bridge::spawn_tui_bridge;
 pub use git::{git_create_branch, git_current_branch, git_list_branches, git_switch_branch};
 pub use replay::replay_event_log_into_state;
-pub use state::{
-    DisplayBlock, ModelPickerAction, ModelPickerEntry, SessionPickerEntry, TuiSessionState,
-};
+pub use state::{DisplayBlock, SessionPickerEntry, TuiSessionState};

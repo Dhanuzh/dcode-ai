@@ -1182,17 +1182,19 @@ impl Repl {
                 lines.push(format!("Cost:        ${cost:.4}"));
                 if mcp_count > 0 {
                     lines.push(format!("MCP:         {mcp_count} server(s)"));
-                    if let ReplOutput::Tui(st) = &out {
-                        if let Ok(g) = st.lock() {
-                            for (name, status) in &g.mcp_server_statuses {
-                                let status_str = match status {
-                                    dcode_ai_common::event::McpStartupStatus::Starting => "starting",
-                                    dcode_ai_common::event::McpStartupStatus::Initializing => "initializing",
-                                    dcode_ai_common::event::McpStartupStatus::Ready => "ready",
-                                    dcode_ai_common::event::McpStartupStatus::Failed { .. } => "failed",
-                                };
-                                lines.push(format!("  • {:<10} {}", name, status_str));
-                            }
+                    if let ReplOutput::Tui(st) = &out
+                        && let Ok(g) = st.lock()
+                    {
+                        for (name, status) in &g.mcp_server_statuses {
+                            let status_str = match status {
+                                dcode_ai_common::event::McpStartupStatus::Starting => "starting",
+                                dcode_ai_common::event::McpStartupStatus::Initializing => {
+                                    "initializing"
+                                }
+                                dcode_ai_common::event::McpStartupStatus::Ready => "ready",
+                                dcode_ai_common::event::McpStartupStatus::Failed { .. } => "failed",
+                            };
+                            lines.push(format!("  • {:<10} {}", name, status_str));
                         }
                     }
                 }
@@ -3743,6 +3745,7 @@ then switch).",
         let effective_mouse_capture = true;
         if let Ok(mut g) = tui_state.lock() {
             g.mouse_capture_on = effective_mouse_capture;
+            g.notifications_enabled = self.runtime.config().ui.notifications;
             g.mcp_server_count = self
                 .runtime
                 .config()

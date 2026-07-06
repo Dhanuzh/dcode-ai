@@ -1,7 +1,9 @@
 ---
 source: crates/cli/src/tui/app.rs
+assertion_line: 4794
 expression: lines_to_text(&lines)
 ---
+
 ● Bash  150ms
-    hello world
+  └ hello world
     exit code: 0

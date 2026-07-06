@@ -1,6 +1,5 @@
 use crate::tui::state::{ModelPickerAction, ModelPickerEntry};
-use dcode_ai_common::auth::AuthStore;
-use dcode_ai_common::config::{DcodeAiConfig, PermissionMode, ProviderKind};
+use dcode_ai_common::config::{PermissionMode, ProviderKind};
 use dcode_ai_common::provider_runtime::has_claude_cli;
 
 pub(crate) fn provider_label(

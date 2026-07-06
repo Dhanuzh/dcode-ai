@@ -354,7 +354,11 @@ fn turn_summary(blocks: &[DisplayBlock], user_idx: usize) -> Option<String> {
     } else {
         format!("{ms}ms")
     };
-    let noun = if calls == 1 { "tool call" } else { "tool calls" };
+    let noun = if calls == 1 {
+        "tool call"
+    } else {
+        "tool calls"
+    };
     Some(format!("{calls} {noun} · {dur}"))
 }
 

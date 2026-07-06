@@ -27,10 +27,10 @@ use crate::tui::slash_entries::{
     slash_panel_visible,
 };
 use crate::tui::state::{
-    BranchPickerKey, CommandPaletteKey, ConnectModalKey, DisplayBlock,
-    HistorySearchKey, InfoModalKey, ModelPickerAction, ModelPickerKey, PinnedNote, PinsModalKey,
-    ProviderPickerKey, ProviderPickerOutcome, QuestionModalKey, QuestionModalOutcome,
-    SessionPickerKey, TuiSessionState,
+    BranchPickerKey, CommandPaletteKey, ConnectModalKey, DisplayBlock, HistorySearchKey,
+    InfoModalKey, ModelPickerAction, ModelPickerKey, PinnedNote, PinsModalKey, ProviderPickerKey,
+    ProviderPickerOutcome, QuestionModalKey, QuestionModalOutcome, SessionPickerKey,
+    TuiSessionState,
 };
 use crate::tui::terminal::{restore_terminal, setup_terminal};
 use crate::tui::transcript::transcript_lines_and_hits;
@@ -169,8 +169,6 @@ pub enum TuiCmd {
 }
 
 use super::theme;
-
-const COMMAND_PALETTE_WIDTH: u16 = 56;
 
 /// Gentle hint when the configured model is a clearly-superseded Anthropic
 /// generation (claude-2 / claude-3 / instant). Returns `None` for current 4.x /
@@ -1000,18 +998,6 @@ fn session_picker_labels(g: &TuiSessionState) -> Vec<String> {
 
 // (Renderers moved to tui/render/modals.rs)
 
-// (Renderers moved to tui/render/modals.rs)
-
-/// Render the interactive question as a centered popup with arrow-key options.
-// (Renderers moved to tui/render/modals.rs)
-
-/// Render the approval request as a centered popup overlay. The popup body
-/// reuses the same content layout as `render_approval_block` (icon + label,
-/// description, full input, action hint) but lives above the transcript so
-/// the user can't miss it while scrolling tool output.
-#[allow(dead_code)]
-// (Renderers moved to tui/render/modals.rs)
-
 /// Full-screen transcript overlay (Codex `/transcript`). Renders ALL blocks at
 /// the current terminal width — so it expands/collapses and reflows freely,
 /// unlike the frozen native scrollback. Scrollable; supports a raw copy mode.
@@ -1360,6 +1346,7 @@ pub fn run_blocking(
     // true; terminals without focus reporting simply never suppress.
     let mut terminal_focused = true;
     let mut was_busy = false;
+    let mut had_active_approval = false;
 
     // Flush the Antigravity-style startup banner once into the terminal's
     // native scrollback (it scrolls away as the conversation grows). Shown on
@@ -1441,13 +1428,25 @@ pub fn run_blocking(
             // (`ESC ] 9 ; <msg> BEL`) shows a desktop notification on supporting
             // terminals; terminals without focus reporting keep focused=true and
             // simply never trigger it.
-            if was_busy && !g.busy && !terminal_focused {
-                use std::io::Write;
-                let mut so = std::io::stdout();
-                let _ = write!(so, "\x1b]9;dcode-ai finished responding\x07");
-                let _ = so.flush();
+            if g.notifications_enabled && !terminal_focused {
+                let msg = if was_busy && !g.busy {
+                    Some("dcode-ai finished responding")
+                } else if !had_active_approval && g.active_approval.is_some() {
+                    Some("dcode-ai needs approval")
+                } else {
+                    None
+                };
+                if let Some(msg) = msg {
+                    use std::io::Write;
+                    let mut so = std::io::stdout();
+                    // OSC 9 desktop notification + audible bell for terminals
+                    // that only support the latter.
+                    let _ = write!(so, "\x1b]9;{msg}\x07\x07");
+                    let _ = so.flush();
+                }
             }
             was_busy = g.busy;
+            had_active_approval = g.active_approval.is_some();
 
             // Width-drift safety net (Codex's `note_width`/`reflow_needed_for_width`
             // model): the terminal can widen without us receiving a clean
@@ -4235,7 +4234,7 @@ mod approval_parse_tests {
         stage_pasted_image_paths, transcript_lines_and_hits,
     };
     use crate::tui::branch_picker::{branch_picker_enter_command, filtered_branch_indices};
-    use crate::tui::diff_hunk::{DiffHunk, apply_selected_hunks, parse_diff_hunks};
+    use crate::tui::diff_hunk::parse_diff_hunks;
     use crate::tui::markdown::{
         parse_md_line, render_markdown_lines, render_markdown_lines_with_hits,
     };

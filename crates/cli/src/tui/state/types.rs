@@ -304,6 +304,8 @@ pub struct TuiSessionState {
     /// Runtime mouse-capture state for fullscreen TUI mouse handling.
     /// Kept true for koda-style wheel + drag-select behavior.
     pub mouse_capture_on: bool,
+    /// Desktop notifications (OSC 9 + bell) on turn-done/approval while unfocused.
+    pub notifications_enabled: bool,
     /// Theme picker popup state.
     pub theme_picker_open: bool,
     pub theme_picker_index: usize,
