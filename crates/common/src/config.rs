@@ -1600,6 +1600,9 @@ fn resolve_api_key_value(inline: &Option<String>, env_name: &str) -> Option<Stri
         .map(String::from)
         .or_else(|| env::var(env_name).ok())
         .filter(|v| !v.trim().is_empty())
+        // Last: the 0600 credentials store (~/.dcode-ai/credentials.toml),
+        // keyed by the same env name.
+        .or_else(|| crate::credentials::get(env_name))
 }
 
 fn default_skill_directories() -> Vec<PathBuf> {

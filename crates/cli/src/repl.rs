@@ -1009,20 +1009,21 @@ impl Repl {
             return Ok(());
         }
 
+        // Secrets go to the 0600 credentials store, not the shareable config
+        // files. A leftover inline plaintext key is cleared so old configs
+        // migrate on the next save.
         let mut cfg = self.runtime.config().clone();
-        cfg.set_provider_api_key(p, key);
+        let env_name = cfg.provider.api_key_env_for(p).to_string();
+        if let Err(e) = dcode_ai_common::credentials::set(&env_name, key) {
+            out.eprintln(&format!("[apikey] failed to store credential: {e}"));
+            return Ok(());
+        }
+        cfg.set_provider_api_key(p, "");
         match self.runtime.apply_dcode_ai_config(cfg) {
-            Ok(()) => {
-                if let Err(e) = self
-                    .runtime
-                    .config()
-                    .save_workspace_file(self.runtime.workspace_root())
-                {
-                    out.eprintln(&format!("[apikey] applied but workspace save failed: {e}"));
-                } else {
-                    out.println(&format!("[apikey] saved for {}", p.display_name()));
-                }
-            }
+            Ok(()) => out.println(&format!(
+                "[apikey] saved for {} (~/.dcode-ai/credentials.toml)",
+                p.display_name()
+            )),
             Err(e) => out.eprintln(&format!("[apikey] {e}")),
         }
         Ok(())
@@ -4502,9 +4503,14 @@ then switch).",
                         result,
                         dcode_ai_core::provider::validate::ValidationResult::Valid
                     ) {
-                        // Apply key + switch provider in one step
+                        // Store the secret in the credentials file, then
+                        // switch provider (resolution reads the store).
                         let mut cfg = self.runtime.config().clone();
-                        cfg.set_provider_api_key(provider, &api_key);
+                        let env_name = cfg.provider.api_key_env_for(provider).to_string();
+                        if let Err(e) = dcode_ai_common::credentials::set(&env_name, &api_key) {
+                            tracing::warn!("onboarding: credential store failed: {e}");
+                            cfg.set_provider_api_key(provider, &api_key);
+                        }
                         cfg.set_default_provider(provider);
                         if let Err(e) = self.runtime.apply_dcode_ai_config(cfg) {
                             tracing::warn!("onboarding: provider apply failed: {e}");
@@ -4822,23 +4828,22 @@ then switch).",
                     {
                         if !line.starts_with('/') {
                             let mut cfg = self.runtime.config().clone();
-                            cfg.set_provider_api_key(p, &line);
+                            let env_name = cfg.provider.api_key_env_for(p).to_string();
+                            if let Err(e) =
+                                dcode_ai_common::credentials::set(&env_name, line.trim())
+                            {
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.push_error(format!("[apikey] credential store failed: {e}"));
+                                }
+                                continue;
+                            }
+                            cfg.set_provider_api_key(p, "");
                             match self.runtime.apply_dcode_ai_config(cfg) {
                                 Ok(()) => {
-                                    if let Err(e) = self
-                                        .runtime
-                                        .config()
-                                        .save_workspace_file(self.runtime.workspace_root())
-                                    {
-                                        if let Ok(mut g) = tui_state.lock() {
-                                            g.push_error(format!(
-                                                "[apikey] applied but save failed: {e}"
-                                            ));
-                                        }
-                                    } else if let Ok(mut g) = tui_state.lock() {
+                                    if let Ok(mut g) = tui_state.lock() {
                                         g.pending_api_key_provider = None;
                                         g.blocks.push(DisplayBlock::System(format!(
-                                            "[apikey] saved for {}",
+                                            "[apikey] saved for {} (~/.dcode-ai/credentials.toml)",
                                             p.display_name()
                                         )));
                                         g.touch_transcript();
