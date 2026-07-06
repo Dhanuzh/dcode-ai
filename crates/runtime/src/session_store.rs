@@ -1,6 +1,20 @@
 use dcode_ai_common::session::{SessionSnapshot, SessionState};
 use std::path::{Path, PathBuf};
 
+/// Current session-file schema version. Bump when the on-disk layout changes
+/// incompatibly, and add a migration step in `migrate_session_value`.
+/// Files without a `schema_version` field predate versioning and read as 0.
+pub const SESSION_SCHEMA_VERSION: u32 = 1;
+
+/// Migrate a raw session JSON value from `from_version` to the current
+/// schema. Runs before deserialization so old files keep loading after
+/// upgrades. Each arm upgrades one step; fall-through chains them.
+fn migrate_session_value(_value: &mut serde_json::Value, from_version: u32) {
+    // 0 -> 1: versioning introduced; layout unchanged. Future migrations
+    // mutate `_value` in place, stepping one version at a time.
+    let _ = from_version;
+}
+
 /// Persists and loads session state to/from disk.
 pub struct SessionStore {
     sessions_dir: PathBuf,
@@ -22,8 +36,13 @@ impl SessionStore {
         let tmp_path = self
             .sessions_dir
             .join(format!("{}.json.tmp", session.meta.id));
+        let mut value = serde_json::to_value(session)
+            .map_err(|e| SessionStoreError::Serialize(e.to_string()))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("schema_version".into(), SESSION_SCHEMA_VERSION.into());
+        }
         let json =
-            serde_json::to_vec(session).map_err(|e| SessionStoreError::Serialize(e.to_string()))?;
+            serde_json::to_vec(&value).map_err(|e| SessionStoreError::Serialize(e.to_string()))?;
 
         tokio::fs::create_dir_all(&self.sessions_dir)
             .await
@@ -52,7 +71,22 @@ impl SessionStore {
             .await
             .map_err(|e| SessionStoreError::Io(e.to_string()))?;
 
-        serde_json::from_str(&json).map_err(|e| SessionStoreError::Deserialize(e.to_string()))
+        let mut value: serde_json::Value = serde_json::from_str(&json)
+            .map_err(|e| SessionStoreError::Deserialize(e.to_string()))?;
+        let version = value
+            .get("schema_version")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as u32;
+        if version > SESSION_SCHEMA_VERSION {
+            return Err(SessionStoreError::Deserialize(format!(
+                "session {session_id} uses schema v{version}, but this build reads up to \
+                 v{SESSION_SCHEMA_VERSION} — upgrade dcode-ai to resume it"
+            )));
+        }
+        if version < SESSION_SCHEMA_VERSION {
+            migrate_session_value(&mut value, version);
+        }
+        serde_json::from_value(value).map_err(|e| SessionStoreError::Deserialize(e.to_string()))
     }
 
     pub async fn load_snapshot(
@@ -213,6 +247,62 @@ mod tests {
         let second = tokio::fs::read(&path).await.expect("read second");
 
         assert_eq!(first, second, "unchanged session should not rewrite bytes");
+    }
+
+    #[tokio::test]
+    async fn save_stamps_schema_version_and_load_roundtrips() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        store.save(&make_session_state("versioned")).await.unwrap();
+
+        let raw = tokio::fs::read_to_string(dir.path().join("versioned.json"))
+            .await
+            .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            value["schema_version"].as_u64(),
+            Some(SESSION_SCHEMA_VERSION as u64)
+        );
+
+        let loaded = store.load("versioned").await.expect("load");
+        assert_eq!(loaded.meta.id, "versioned");
+    }
+
+    #[tokio::test]
+    async fn load_accepts_pre_versioning_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        // Simulate a file written before schema_version existed.
+        let session = make_session_state("legacy");
+        let json = serde_json::to_string(&session).unwrap();
+        assert!(!json.contains("schema_version"));
+        tokio::fs::write(dir.path().join("legacy.json"), json)
+            .await
+            .unwrap();
+
+        let loaded = store.load("legacy").await.expect("legacy load");
+        assert_eq!(loaded.meta.id, "legacy");
+    }
+
+    #[tokio::test]
+    async fn load_rejects_future_schema_version() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        let session = make_session_state("future");
+        let mut value = serde_json::to_value(&session).unwrap();
+        value["schema_version"] = serde_json::json!(SESSION_SCHEMA_VERSION + 1);
+        tokio::fs::write(
+            dir.path().join("future.json"),
+            serde_json::to_vec(&value).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let err = store.load("future").await.unwrap_err();
+        assert!(
+            err.to_string().contains("upgrade dcode-ai"),
+            "expected future-version error, got: {err}"
+        );
     }
 
     #[tokio::test]
