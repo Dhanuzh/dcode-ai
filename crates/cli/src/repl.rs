@@ -4115,6 +4115,31 @@ then switch).",
             };
 
             match cmd {
+                TuiCmd::Backtrack {
+                    user_index_from_end,
+                    text,
+                } => {
+                    match self
+                        .runtime
+                        .rewind_to_user_message(user_index_from_end, &text)
+                    {
+                        Ok(()) => {
+                            let _ = self.runtime.save().await;
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.push_block(DisplayBlock::System(
+                                    "Rewound — edit the restored message and press Enter".into(),
+                                ));
+                                g.touch_transcript();
+                            }
+                        }
+                        Err(e) => {
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.push_error(format!("[backtrack] {e}"));
+                            }
+                        }
+                    }
+                    continue;
+                }
                 TuiCmd::QueueSteering(line) => {
                     queued_steering.push_back(line);
                     if let Ok(mut g) = tui_state.lock() {

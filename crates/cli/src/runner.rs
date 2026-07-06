@@ -156,6 +156,54 @@ impl SessionRuntime {
         &self.supervisor.agent().messages
     }
 
+    /// Rewind the conversation to just before the `user_index_from_end`-th
+    /// user message (0 = most recent), dropping it and everything after.
+    /// The message text is verified first so a transcript/history divergence
+    /// (e.g. after compaction) fails loudly instead of truncating the wrong
+    /// spot. Files on disk are not touched — that's /undo's job.
+    pub fn rewind_to_user_message(
+        &mut self,
+        user_index_from_end: usize,
+        expected_text: &str,
+    ) -> Result<(), String> {
+        use dcode_ai_common::message::{ContentPart, MessageContent, Role};
+
+        let messages = &self.supervisor.agent().messages;
+        let user_positions: Vec<usize> = messages
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| matches!(m.role, Role::User))
+            .map(|(i, _)| i)
+            .collect();
+        if user_index_from_end >= user_positions.len() {
+            return Err(
+                "that message is no longer in the model context (history was compacted)".into(),
+            );
+        }
+        let pos = user_positions[user_positions.len() - 1 - user_index_from_end];
+        let actual = match &messages[pos].content {
+            MessageContent::Text(t) => t.clone(),
+            MessageContent::Parts(parts) => parts
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text { text } => Some(text.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n"),
+        };
+        // The stored message may be an expanded form of what the transcript
+        // shows (@file mentions inlined), so accept either direction of
+        // containment, not only exact equality.
+        let a = actual.trim();
+        let e = expected_text.trim();
+        if a != e && !a.contains(e) && !e.contains(a) {
+            return Err("transcript and model history diverged — not rewinding".into());
+        }
+        self.supervisor.agent_mut().messages.truncate(pos);
+        Ok(())
+    }
+
     pub fn set_model(&mut self, model: impl Into<String>) {
         let model = model.into();
         self.supervisor.model = model.clone();

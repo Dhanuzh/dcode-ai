@@ -134,6 +134,8 @@ impl TuiSessionState {
             paste_counter: 0,
             mouse_capture_on: true,
             notifications_enabled: true,
+            backtrack_open: false,
+            backtrack_index: 0,
             theme_picker_open: false,
             theme_picker_index: 0,
             theme_picker_entries: Vec::new(),
@@ -683,6 +685,105 @@ impl TuiSessionState {
             }
         }
         None
+    }
+
+    /// Block indices of user messages, chronological order.
+    pub fn user_block_positions(&self) -> Vec<usize> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| match b {
+                DisplayBlock::User(_) => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Newest-first one-line labels for the backtrack picker.
+    pub fn backtrack_labels(&self) -> Vec<String> {
+        self.user_block_positions()
+            .iter()
+            .rev()
+            .map(|&i| {
+                let text = match &self.blocks[i] {
+                    DisplayBlock::User(t) => t.as_str(),
+                    _ => "",
+                };
+                let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let mut label: String = one_line.chars().take(72).collect();
+                if one_line.chars().count() > 72 {
+                    label.push('…');
+                }
+                label
+            })
+            .collect()
+    }
+
+    /// Open the backtrack picker (Esc while idle). No-op when a turn is
+    /// running or there is nothing to rewind to.
+    pub fn open_backtrack(&mut self) -> bool {
+        if self.busy || self.user_block_positions().is_empty() {
+            return false;
+        }
+        self.backtrack_open = true;
+        self.backtrack_index = 0;
+        true
+    }
+
+    pub fn close_backtrack(&mut self) {
+        self.backtrack_open = false;
+        self.backtrack_index = 0;
+    }
+
+    /// Apply one key to the open backtrack picker. `Accept` truncates the
+    /// visible transcript at the chosen user message, prefills the composer
+    /// with its text, and returns the rewind request for the runtime.
+    pub fn apply_backtrack_key(&mut self, key: BacktrackKey) -> Option<BacktrackRewind> {
+        let count = self.user_block_positions().len();
+        match key {
+            BacktrackKey::Cancel => {
+                self.close_backtrack();
+                None
+            }
+            BacktrackKey::Up => {
+                self.backtrack_index = self.backtrack_index.saturating_sub(1);
+                None
+            }
+            BacktrackKey::Down => {
+                if count > 0 {
+                    self.backtrack_index = (self.backtrack_index + 1).min(count - 1);
+                }
+                None
+            }
+            BacktrackKey::Accept => {
+                let positions = self.user_block_positions();
+                if positions.is_empty() {
+                    self.close_backtrack();
+                    return None;
+                }
+                let pick = self.backtrack_index.min(positions.len() - 1);
+                // Picker is newest-first; positions are chronological.
+                let block_idx = positions[positions.len() - 1 - pick];
+                let text = match &self.blocks[block_idx] {
+                    DisplayBlock::User(t) => t.clone(),
+                    _ => return None,
+                };
+                // Truncate the visible transcript at (and including) the
+                // chosen message; force a scrollback purge + re-flush since
+                // flushed lines can't be edited in place.
+                self.blocks.truncate(block_idx);
+                self.flushed_block_count = 0;
+                self.request_clear = true;
+                self.input_buffer = text.clone();
+                self.cursor_char_idx = self.input_buffer.chars().count();
+                self.close_backtrack();
+                self.touch_transcript();
+                Some(BacktrackRewind {
+                    user_index_from_end: pick,
+                    text,
+                })
+            }
+        }
     }
 
     /// Apply one key to the open read-only info modal (scroll/close only).
@@ -2156,6 +2257,72 @@ mod tests {
         st.provider_picker_index = n - 1;
         st.apply_provider_picker_key(ProviderPickerKey::Down);
         assert_eq!(st.provider_picker_index, 0); // wraps
+    }
+
+    fn backtrack_test_state() -> TuiSessionState {
+        let mut st = test_state();
+        st.blocks = vec![
+            DisplayBlock::User("first question".into()),
+            DisplayBlock::Assistant("first answer".into()),
+            DisplayBlock::User("second question".into()),
+            DisplayBlock::Assistant("second answer".into()),
+        ];
+        st
+    }
+
+    #[test]
+    fn backtrack_opens_only_when_idle_with_user_messages() {
+        let mut st = test_state();
+        assert!(!st.open_backtrack(), "no user messages -> no backtrack");
+        let mut st = backtrack_test_state();
+        st.busy = true;
+        assert!(!st.open_backtrack(), "busy -> no backtrack");
+        st.busy = false;
+        assert!(st.open_backtrack());
+        assert!(st.backtrack_open);
+        assert_eq!(st.backtrack_index, 0);
+    }
+
+    #[test]
+    fn backtrack_labels_are_newest_first() {
+        let st = backtrack_test_state();
+        let labels = st.backtrack_labels();
+        assert_eq!(labels, vec!["second question", "first question"]);
+    }
+
+    #[test]
+    fn backtrack_accept_truncates_blocks_and_prefills_composer() {
+        let mut st = backtrack_test_state();
+        st.open_backtrack();
+        // Index 0 = newest = "second question".
+        let rewind = st.apply_backtrack_key(BacktrackKey::Accept).unwrap();
+        assert_eq!(rewind.user_index_from_end, 0);
+        assert_eq!(rewind.text, "second question");
+        assert_eq!(st.blocks.len(), 2, "blocks truncated at chosen message");
+        assert_eq!(st.input_buffer, "second question");
+        assert!(st.request_clear, "scrollback purge requested");
+        assert!(!st.backtrack_open);
+    }
+
+    #[test]
+    fn backtrack_selects_older_message_with_down() {
+        let mut st = backtrack_test_state();
+        st.open_backtrack();
+        st.apply_backtrack_key(BacktrackKey::Down);
+        let rewind = st.apply_backtrack_key(BacktrackKey::Accept).unwrap();
+        assert_eq!(rewind.user_index_from_end, 1);
+        assert_eq!(rewind.text, "first question");
+        assert_eq!(st.blocks.len(), 0, "everything from first message dropped");
+    }
+
+    #[test]
+    fn backtrack_cancel_leaves_state_untouched() {
+        let mut st = backtrack_test_state();
+        st.open_backtrack();
+        assert!(st.apply_backtrack_key(BacktrackKey::Cancel).is_none());
+        assert!(!st.backtrack_open);
+        assert_eq!(st.blocks.len(), 4);
+        assert!(st.input_buffer.is_empty());
     }
 
     #[test]

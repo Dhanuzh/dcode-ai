@@ -306,6 +306,11 @@ pub struct TuiSessionState {
     pub mouse_capture_on: bool,
     /// Desktop notifications (OSC 9 + bell) on turn-done/approval while unfocused.
     pub notifications_enabled: bool,
+    /// Backtrack picker (Esc while idle): pick a past user message, edit it,
+    /// and rewind the conversation to just before it.
+    pub backtrack_open: bool,
+    /// Selection into the newest-first backtrack list.
+    pub backtrack_index: usize,
     /// Theme picker popup state.
     pub theme_picker_open: bool,
     pub theme_picker_index: usize,
@@ -502,6 +507,27 @@ pub enum ModelPickerKey {
     Accept,
     Backspace,
     Char(char),
+}
+
+/// A key event for the backtrack picker overlay (crossterm-decoupled).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BacktrackKey {
+    Cancel,
+    Up,
+    Down,
+    Accept,
+}
+
+/// Result of accepting a backtrack selection: rewind the conversation to just
+/// before this user message and put its text back in the composer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktrackRewind {
+    /// 0-based index of the chosen user message counting from the END of the
+    /// conversation (0 = most recent). From-end indexing survives history
+    /// compaction better than from-start.
+    pub user_index_from_end: usize,
+    /// Full text of the chosen user message (for verification runtime-side).
+    pub text: String,
 }
 
 /// A key event for the session picker overlay (crossterm-decoupled).

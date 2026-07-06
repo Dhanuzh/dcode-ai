@@ -27,10 +27,10 @@ use crate::tui::slash_entries::{
     slash_panel_visible,
 };
 use crate::tui::state::{
-    BranchPickerKey, CommandPaletteKey, ConnectModalKey, DisplayBlock, HistorySearchKey,
-    InfoModalKey, ModelPickerAction, ModelPickerKey, PinnedNote, PinsModalKey, ProviderPickerKey,
-    ProviderPickerOutcome, QuestionModalKey, QuestionModalOutcome, SessionPickerKey,
-    TuiSessionState,
+    BacktrackKey, BranchPickerKey, CommandPaletteKey, ConnectModalKey, DisplayBlock,
+    HistorySearchKey, InfoModalKey, ModelPickerAction, ModelPickerKey, PinnedNote, PinsModalKey,
+    ProviderPickerKey, ProviderPickerOutcome, QuestionModalKey, QuestionModalOutcome,
+    SessionPickerKey, TuiSessionState,
 };
 use crate::tui::terminal::{restore_terminal, setup_terminal};
 use crate::tui::transcript::transcript_lines_and_hits;
@@ -96,6 +96,13 @@ pub(crate) type LineAnswerHit = Option<LineClickHit>;
 #[derive(Debug)]
 pub enum TuiCmd {
     Submit(String),
+    /// Rewind the conversation to just before a past user message (picked in
+    /// the backtrack overlay). Index counts user messages from the end; text
+    /// is verified runtime-side before truncating.
+    Backtrack {
+        user_index_from_end: usize,
+        text: String,
+    },
     /// Queue a steering message while a turn is in progress (`Enter` when busy).
     QueueSteering(String),
     /// Queue a follow-up message for later (`Alt+Enter` when busy).
@@ -1892,6 +1899,15 @@ pub fn run_blocking(
                         g.session_picker_index,
                         &g.session_picker_search,
                     );
+                } else if g.backtrack_open {
+                    render_list_picker(
+                        frame,
+                        area,
+                        "backtrack — Enter edits & rewinds",
+                        &g.backtrack_labels(),
+                        g.backtrack_index,
+                        "",
+                    );
                 } else if g.info_modal_open {
                     render_info_modal(frame, area, &g);
                 } else if g.question_modal_open && g.active_question.is_some() {
@@ -1975,6 +1991,7 @@ pub fn run_blocking(
                 Event::Mouse(_) if g.theme_picker_open => continue,
                 Event::Mouse(_) if g.project_picker_open => continue,
                 Event::Mouse(_) if g.session_picker_open => continue,
+                Event::Mouse(_) if g.backtrack_open => continue,
                 Event::Mouse(_) if g.question_modal_open => continue,
                 Event::Mouse(_) if g.pins_modal_open => continue,
                 Event::Mouse(_) if g.subagent_modal_open => continue,
@@ -2868,6 +2885,27 @@ pub fn run_blocking(
                         continue;
                     }
 
+                    // Backtrack picker keyboard handling (Esc while idle).
+                    if g.backtrack_open {
+                        let mapped = match (key.code, key.modifiers) {
+                            (KeyCode::Esc, _) => Some(BacktrackKey::Cancel),
+                            (KeyCode::Up, _) => Some(BacktrackKey::Up),
+                            (KeyCode::Down, _) => Some(BacktrackKey::Down),
+                            (KeyCode::Enter, _) => Some(BacktrackKey::Accept),
+                            _ => None,
+                        };
+                        if let Some(k) = mapped
+                            && let Some(rewind) = g.apply_backtrack_key(k)
+                        {
+                            drop(g);
+                            let _ = cmd_tx.send(TuiCmd::Backtrack {
+                                user_index_from_end: rewind.user_index_from_end,
+                                text: rewind.text,
+                            });
+                        }
+                        continue;
+                    }
+
                     // Session picker keyboard handling.
                     if g.session_picker_open {
                         let mapped = match (key.code, key.modifiers) {
@@ -3093,6 +3131,11 @@ pub fn run_blocking(
                     match (key.code, key.modifiers) {
                         (KeyCode::Esc, _) if escape_cancels_active_turn(&g) => {
                             request_turn_cancel(&mut g, cancel_flag.as_ref(), &cmd_tx);
+                        }
+                        // Idle Esc with an empty composer: open the backtrack
+                        // picker (edit a past user message + rewind to it).
+                        (KeyCode::Esc, _) if !g.busy && g.input_buffer.is_empty() => {
+                            g.open_backtrack();
                         }
                         (KeyCode::Char('q'), KeyModifiers::CONTROL) => {
                             g.should_exit = true;
