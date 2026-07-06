@@ -8,12 +8,20 @@ use tokio::time::{Duration, timeout};
 /// Manages PTY sessions for sandboxed command execution.
 pub struct PtyManager {
     workspace_root: std::path::PathBuf,
+    /// Landlock-confine children (Linux): writes only beneath the workspace
+    /// and scratch dirs. Set from `[permissions] sandbox_bash`.
+    sandbox: bool,
 }
 
 impl PtyManager {
     pub fn new(workspace_root: impl AsRef<Path>) -> Self {
+        Self::with_sandbox(workspace_root, false)
+    }
+
+    pub fn with_sandbox(workspace_root: impl AsRef<Path>, sandbox: bool) -> Self {
         Self {
             workspace_root: workspace_root.as_ref().to_path_buf(),
+            sandbox,
         }
     }
 
@@ -45,6 +53,15 @@ impl PtyManager {
             // Kill the child if this future is dropped (turn cancelled) so the
             // command doesn't keep running orphaned.
             .kill_on_drop(true);
+
+        #[cfg(unix)]
+        if self.sandbox {
+            let ws = effective_root.clone();
+            // Applied between fork and exec: confines only the child.
+            unsafe {
+                cmd.pre_exec(move || crate::sandbox::apply_workspace_sandbox(&ws));
+            }
+        }
 
         let mut child = cmd
             .spawn()

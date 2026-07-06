@@ -1040,6 +1040,11 @@ pub struct PermissionConfig {
     pub ask: Vec<String>,
     #[serde(default)]
     pub startup_approve_all: bool,
+    /// Landlock-confine shell commands (Linux): write access only beneath the
+    /// workspace and scratch dirs; read/execute everywhere. Best-effort on
+    /// kernels without Landlock. Off by default.
+    #[serde(default)]
+    pub sandbox_bash: bool,
 }
 
 impl Default for PermissionConfig {
@@ -1050,6 +1055,7 @@ impl Default for PermissionConfig {
             deny: Vec::new(),
             ask: Vec::new(),
             startup_approve_all: true,
+            sandbox_bash: false,
         }
     }
 }
@@ -1070,6 +1076,9 @@ impl PermissionConfig {
         }
         if let Some(startup_approve_all) = partial.startup_approve_all {
             self.startup_approve_all = startup_approve_all;
+        }
+        if let Some(sandbox_bash) = partial.sandbox_bash {
+            self.sandbox_bash = sandbox_bash;
         }
     }
 }
@@ -1515,6 +1524,7 @@ struct PartialPermissionConfig {
     deny: Option<Vec<String>>,
     ask: Option<Vec<String>>,
     startup_approve_all: Option<bool>,
+    sandbox_bash: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

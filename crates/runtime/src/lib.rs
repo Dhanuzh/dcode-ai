@@ -8,6 +8,7 @@ pub mod model_limits;
 pub mod model_limits_api;
 pub mod process;
 pub mod pty;
+pub mod sandbox;
 pub mod service;
 pub mod session_store;
 pub mod supervisor;
