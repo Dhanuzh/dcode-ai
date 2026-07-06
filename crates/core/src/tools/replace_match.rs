@@ -3,14 +3,23 @@ use std::path::PathBuf;
 use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
+use super::freshness::{FileFreshness, Freshness};
 
 pub struct ReplaceMatchTool {
     workspace_root: PathBuf,
+    freshness: FileFreshness,
 }
 
 impl ReplaceMatchTool {
     pub fn new(workspace_root: PathBuf) -> Self {
-        Self { workspace_root }
+        Self::with_freshness(workspace_root, FileFreshness::new())
+    }
+
+    pub fn with_freshness(workspace_root: PathBuf, freshness: FileFreshness) -> Self {
+        Self {
+            workspace_root,
+            freshness,
+        }
     }
 }
 
@@ -149,6 +158,15 @@ impl ToolExecutor for ReplaceMatchTool {
             }
         };
 
+        if self.freshness.check(&canonical) == Freshness::StaleExternalEdit {
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(FileFreshness::stale_error(&canonical)),
+            };
+        }
+
         let mut content = match tokio::fs::read_to_string(&canonical).await {
             Ok(content) => content,
             Err(err) => {
@@ -223,28 +241,31 @@ impl ToolExecutor for ReplaceMatchTool {
         content.replace_range(absolute_start..absolute_end, new_text);
         let diff = format_diff(&original_content, &content, &canonical);
         match tokio::fs::write(&canonical, &content).await {
-            Ok(()) => ToolResult {
-                call_id: call.id.clone(),
-                success: true,
-                output: if diff.trim().is_empty() {
-                    format!(
-                        "Replaced match at {}:{}:{} ({} total occurrence(s) of old_text in file, no changes)",
-                        canonical.display(),
-                        line,
-                        column,
-                        total_occurrences
-                    )
-                } else {
-                    format!(
-                        "Replaced match at {}:{}:{} ({} total occurrence(s) of old_text in file)",
-                        canonical.display(),
-                        line,
-                        column,
-                        total_occurrences
-                    ) + &format!("\n\n{diff}")
-                },
-                error: None,
-            },
+            Ok(()) => {
+                self.freshness.note(&canonical);
+                ToolResult {
+                    call_id: call.id.clone(),
+                    success: true,
+                    output: if diff.trim().is_empty() {
+                        format!(
+                            "Replaced match at {}:{}:{} ({} total occurrence(s) of old_text in file, no changes)",
+                            canonical.display(),
+                            line,
+                            column,
+                            total_occurrences
+                        )
+                    } else {
+                        format!(
+                            "Replaced match at {}:{}:{} ({} total occurrence(s) of old_text in file)",
+                            canonical.display(),
+                            line,
+                            column,
+                            total_occurrences
+                        ) + &format!("\n\n{diff}")
+                    },
+                    error: None,
+                }
+            }
             Err(err) => ToolResult {
                 call_id: call.id.clone(),
                 success: false,

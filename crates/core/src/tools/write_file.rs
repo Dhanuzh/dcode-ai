@@ -1,6 +1,7 @@
 use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
+use super::freshness::{FileFreshness, Freshness};
 
 fn format_diff(old: &str, new: &str) -> String {
     let diff = similar::TextDiff::from_lines(old, new);
@@ -12,11 +13,19 @@ fn format_diff(old: &str, new: &str) -> String {
 
 pub struct WriteFileTool {
     workspace_root: std::path::PathBuf,
+    freshness: FileFreshness,
 }
 
 impl WriteFileTool {
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+        Self::with_freshness(workspace_root, FileFreshness::new())
+    }
+
+    pub fn with_freshness(workspace_root: std::path::PathBuf, freshness: FileFreshness) -> Self {
+        Self {
+            workspace_root,
+            freshness,
+        }
     }
 }
 
@@ -84,12 +93,22 @@ impl ToolExecutor for WriteFileTool {
             };
         }
 
+        if self.freshness.check(&full_path) == Freshness::StaleExternalEdit {
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(FileFreshness::stale_error(&full_path)),
+            };
+        }
+
         let old = tokio::fs::read_to_string(&full_path)
             .await
             .unwrap_or_default();
 
         match tokio::fs::write(&full_path, content).await {
             Ok(()) => {
+                self.freshness.note(&full_path);
                 let diff = format_diff(&old, content);
                 // Keep output machine- and human-friendly. The CLI can render this as-is.
                 let output = if diff.trim().is_empty() {

@@ -1,6 +1,7 @@
 use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
+use super::freshness::{FileFreshness, Freshness};
 
 fn format_diff(old: &str, new: &str, path: &std::path::Path) -> String {
     let label = path.display().to_string();
@@ -13,11 +14,19 @@ fn format_diff(old: &str, new: &str, path: &std::path::Path) -> String {
 
 pub struct EditFileTool {
     workspace_root: std::path::PathBuf,
+    freshness: FileFreshness,
 }
 
 impl EditFileTool {
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+        Self::with_freshness(workspace_root, FileFreshness::new())
+    }
+
+    pub fn with_freshness(workspace_root: std::path::PathBuf, freshness: FileFreshness) -> Self {
+        Self {
+            workspace_root,
+            freshness,
+        }
     }
 }
 
@@ -62,6 +71,15 @@ impl ToolExecutor for EditFileTool {
                 };
             }
         };
+
+        if self.freshness.check(&canonical) == Freshness::StaleExternalEdit {
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(FileFreshness::stale_error(&canonical)),
+            };
+        }
 
         let content = match tokio::fs::read_to_string(&canonical).await {
             Ok(content) => content,
@@ -120,26 +138,29 @@ impl ToolExecutor for EditFileTool {
 
         let diff = format_diff(&content, &updated, &canonical);
         match tokio::fs::write(&canonical, &updated).await {
-            Ok(()) => ToolResult {
-                call_id: call.id.clone(),
-                success: true,
-                output: if diff.trim().is_empty() {
-                    format!(
-                        "Edited {} (replaced {} occurrence{}, no changes)",
-                        canonical.display(),
-                        occurrence_count,
-                        if occurrence_count == 1 { "" } else { "s" }
-                    )
-                } else {
-                    format!(
-                        "Edited {} (replaced {} occurrence{})",
-                        canonical.display(),
-                        occurrence_count,
-                        if occurrence_count == 1 { "" } else { "s" }
-                    ) + &format!("\n\n{diff}")
-                },
-                error: None,
-            },
+            Ok(()) => {
+                self.freshness.note(&canonical);
+                ToolResult {
+                    call_id: call.id.clone(),
+                    success: true,
+                    output: if diff.trim().is_empty() {
+                        format!(
+                            "Edited {} (replaced {} occurrence{}, no changes)",
+                            canonical.display(),
+                            occurrence_count,
+                            if occurrence_count == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        format!(
+                            "Edited {} (replaced {} occurrence{})",
+                            canonical.display(),
+                            occurrence_count,
+                            if occurrence_count == 1 { "" } else { "s" }
+                        ) + &format!("\n\n{diff}")
+                    },
+                    error: None,
+                }
+            }
             Err(err) => ToolResult {
                 call_id: call.id.clone(),
                 success: false,
@@ -178,6 +199,38 @@ mod tests {
 
         assert!(!result.success);
         assert!(result.error.unwrap().contains("replace_match"));
+    }
+
+    #[tokio::test]
+    async fn edit_file_refuses_stale_target_after_external_edit() {
+        use super::super::freshness::FileFreshness;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.rs");
+        std::fs::write(&path, "alpha\n").unwrap();
+
+        let fresh = FileFreshness::new();
+        let canonical = path.canonicalize().unwrap();
+        fresh.note(&canonical);
+
+        // External edit with a strictly newer mtime.
+        std::fs::write(&path, "alpha // user changed this\n").unwrap();
+        let newer = std::time::SystemTime::now() + std::time::Duration::from_secs(5);
+        filetime::set_file_mtime(&path, filetime::FileTime::from_system_time(newer)).unwrap();
+
+        let tool = EditFileTool::with_freshness(dir.path().to_path_buf(), fresh);
+        let result = tool
+            .execute(&make_call(serde_json::json!({
+                "path": "main.rs",
+                "old_text": "alpha",
+                "new_text": "beta"
+            })))
+            .await;
+
+        assert!(!result.success);
+        assert!(result.error.unwrap().contains("changed on disk"));
+        // File content untouched.
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "alpha // user changed this\n");
     }
 
     #[tokio::test]

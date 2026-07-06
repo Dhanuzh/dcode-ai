@@ -1,14 +1,23 @@
 use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
+use super::freshness::FileFreshness;
 
 pub struct ReadFileTool {
     workspace_root: std::path::PathBuf,
+    freshness: FileFreshness,
 }
 
 impl ReadFileTool {
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+        Self::with_freshness(workspace_root, FileFreshness::new())
+    }
+
+    pub fn with_freshness(workspace_root: std::path::PathBuf, freshness: FileFreshness) -> Self {
+        Self {
+            workspace_root,
+            freshness,
+        }
     }
 }
 
@@ -39,12 +48,15 @@ impl ToolExecutor for ReadFileTool {
         match full_path.canonicalize() {
             Ok(canonical) if canonical.starts_with(&self.workspace_root) => {
                 match tokio::fs::read_to_string(&canonical).await {
-                    Ok(content) => ToolResult {
-                        call_id: call.id.clone(),
-                        success: true,
-                        output: content,
-                        error: None,
-                    },
+                    Ok(content) => {
+                        self.freshness.note(&canonical);
+                        ToolResult {
+                            call_id: call.id.clone(),
+                            success: true,
+                            output: content,
+                            error: None,
+                        }
+                    }
                     Err(e) => ToolResult {
                         call_id: call.id.clone(),
                         success: false,

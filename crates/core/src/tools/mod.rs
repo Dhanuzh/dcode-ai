@@ -8,6 +8,7 @@ pub mod delete_path;
 pub mod edit_file;
 pub mod fetch_url;
 pub mod filesystem;
+pub mod freshness;
 pub mod git;
 pub mod invoke_skill;
 pub mod list_directory;
@@ -48,9 +49,22 @@ impl ToolRegistry {
         workspace_root: std::path::PathBuf,
         web_config: WebConfig,
     ) -> Self {
+        Self::with_default_readonly_tools_shared(
+            workspace_root,
+            web_config,
+            freshness::FileFreshness::new(),
+        )
+    }
+
+    fn with_default_readonly_tools_shared(
+        workspace_root: std::path::PathBuf,
+        web_config: WebConfig,
+        fresh: freshness::FileFreshness,
+    ) -> Self {
         let mut registry = Self::new();
-        registry.register(Box::new(filesystem::ReadFileTool::new(
+        registry.register(Box::new(filesystem::ReadFileTool::with_freshness(
             workspace_root.clone(),
+            fresh,
         )));
         registry.register(Box::new(search::SearchCodeTool::new(
             workspace_root.clone(),
@@ -71,24 +85,35 @@ impl ToolRegistry {
         workspace_root: std::path::PathBuf,
         web_config: WebConfig,
     ) -> Self {
-        let mut registry = Self::with_default_readonly_tools(workspace_root.clone(), web_config);
+        // One shared freshness tracker: reads note mtimes, writes verify them,
+        // so external edits between a read and a write are caught.
+        let fresh = freshness::FileFreshness::new();
+        let mut registry = Self::with_default_readonly_tools_shared(
+            workspace_root.clone(),
+            web_config,
+            fresh.clone(),
+        );
         registry.register(Box::new(code_intel_tool::CodeIntelTool::new(
             crate::code_intel::WorkspaceCodeIntel::new(workspace_root.clone()),
         )));
-        registry.register(Box::new(write_file::WriteFileTool::new(
+        registry.register(Box::new(write_file::WriteFileTool::with_freshness(
             workspace_root.clone(),
+            fresh.clone(),
         )));
         registry.register(Box::new(create_directory::CreateDirectoryTool::new(
             workspace_root.clone(),
         )));
-        registry.register(Box::new(apply_patch::ApplyPatchTool::new(
+        registry.register(Box::new(apply_patch::ApplyPatchTool::with_freshness(
             workspace_root.clone(),
+            fresh.clone(),
         )));
-        registry.register(Box::new(edit_file::EditFileTool::new(
+        registry.register(Box::new(edit_file::EditFileTool::with_freshness(
             workspace_root.clone(),
+            fresh.clone(),
         )));
-        registry.register(Box::new(replace_match::ReplaceMatchTool::new(
+        registry.register(Box::new(replace_match::ReplaceMatchTool::with_freshness(
             workspace_root.clone(),
+            fresh,
         )));
         registry.register(Box::new(rename_path::RenamePathTool::new(
             workspace_root.clone(),

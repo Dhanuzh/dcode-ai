@@ -1,6 +1,7 @@
 use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 
 use super::ToolExecutor;
+use super::freshness::{FileFreshness, Freshness};
 
 fn format_diff(old: &str, new: &str, path: &std::path::Path) -> String {
     let label = path.display().to_string();
@@ -13,11 +14,19 @@ fn format_diff(old: &str, new: &str, path: &std::path::Path) -> String {
 
 pub struct ApplyPatchTool {
     workspace_root: std::path::PathBuf,
+    freshness: FileFreshness,
 }
 
 impl ApplyPatchTool {
     pub fn new(workspace_root: std::path::PathBuf) -> Self {
-        Self { workspace_root }
+        Self::with_freshness(workspace_root, FileFreshness::new())
+    }
+
+    pub fn with_freshness(workspace_root: std::path::PathBuf, freshness: FileFreshness) -> Self {
+        Self {
+            workspace_root,
+            freshness,
+        }
     }
 }
 
@@ -67,6 +76,15 @@ impl ToolExecutor for ApplyPatchTool {
                 };
             }
         };
+
+        if self.freshness.check(&canonical) == Freshness::StaleExternalEdit {
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(FileFreshness::stale_error(&canonical)),
+            };
+        }
 
         let mut content = match tokio::fs::read_to_string(&canonical).await {
             Ok(content) => content,
@@ -140,16 +158,19 @@ impl ToolExecutor for ApplyPatchTool {
 
         let diff = format_diff(&original_content, &content, &canonical);
         match tokio::fs::write(&canonical, &content).await {
-            Ok(()) => ToolResult {
-                call_id: call.id.clone(),
-                success: true,
-                output: if diff.trim().is_empty() {
-                    format!("Patched {} (no changes)", canonical.display())
-                } else {
-                    format!("Patched {}\n\n{diff}", canonical.display())
-                },
-                error: None,
-            },
+            Ok(()) => {
+                self.freshness.note(&canonical);
+                ToolResult {
+                    call_id: call.id.clone(),
+                    success: true,
+                    output: if diff.trim().is_empty() {
+                        format!("Patched {} (no changes)", canonical.display())
+                    } else {
+                        format!("Patched {}\n\n{diff}", canonical.display())
+                    },
+                    error: None,
+                }
+            }
             Err(err) => ToolResult {
                 call_id: call.id.clone(),
                 success: false,
