@@ -123,23 +123,23 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
     CatalogEntry {
         section: "Local",
         kind: ProviderKind::OpenAi,
-        title: "LM Studio",
-        subtitle: "No key; set OPENAI_BASE_URL=http://localhost:1234/v1",
-        action: ConnectAction::Submit("/provider openai"),
+        title: "Ollama",
+        subtitle: "No key — auto-detects localhost:11434 and its models",
+        action: ConnectAction::Submit("/connect ollama"),
     },
     CatalogEntry {
         section: "Local",
         kind: ProviderKind::OpenAi,
-        title: "Ollama",
-        subtitle: "No key; set OPENAI_BASE_URL=http://localhost:11434/v1",
-        action: ConnectAction::Submit("/provider openai"),
+        title: "LM Studio",
+        subtitle: "No key — auto-detects localhost:1234 and its models",
+        action: ConnectAction::Submit("/connect lmstudio"),
     },
     CatalogEntry {
         section: "Local",
         kind: ProviderKind::OpenAi,
         title: "vLLM",
-        subtitle: "No key; set OPENAI_BASE_URL=http://localhost:8000/v1",
-        action: ConnectAction::Submit("/provider openai"),
+        subtitle: "No key — auto-detects localhost:8000 and its models",
+        action: ConnectAction::Submit("/connect vllm"),
     },
 ];
 

@@ -135,6 +135,16 @@ fn oauth_login_slug_for_provider(provider: ProviderKind) -> Option<&'static str>
     }
 }
 
+/// Local OpenAI-compatible server presets for `/connect <name>`.
+fn local_preset_for(value: &str) -> Option<(&'static str, &'static str)> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "ollama" => Some(("Ollama", "http://localhost:11434/v1")),
+        "lmstudio" | "lm-studio" | "lm_studio" => Some(("LM Studio", "http://localhost:1234/v1")),
+        "vllm" => Some(("vLLM", "http://localhost:8000/v1")),
+        _ => None,
+    }
+}
+
 fn parse_oauth_provider(value: &str) -> Option<OAuthProvider> {
     match value.trim().to_ascii_lowercase().as_str() {
         "openai" | "open-ai" | "gpt" | "codex" => Some(OAuthProvider::Openai),
@@ -756,6 +766,84 @@ impl Repl {
                 }
             }
             Err(e) => out.eprintln(&format!("[provider] {e}")),
+        }
+        Ok(())
+    }
+
+    /// Connect a local OpenAI-compatible server (Ollama / LM Studio / vLLM):
+    /// probe its /models endpoint, pick a model, and persist the provider
+    /// config — no manual OPENAI_BASE_URL needed.
+    async fn connect_local_preset(
+        &mut self,
+        label: &str,
+        base_url: &str,
+        out: &ReplOutput<'_>,
+    ) -> anyhow::Result<()> {
+        out.println(&format!("[connect] Probing {label} at {base_url}…"));
+        let models_url = format!("{}/models", base_url.trim_end_matches('/'));
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()?;
+        let model_ids: Vec<String> = match client.get(&models_url).send().await {
+            Ok(resp) if resp.status().is_success() => {
+                let value: serde_json::Value = resp.json().await.unwrap_or_default();
+                value["data"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|m| m["id"].as_str().map(str::to_string))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            }
+            Ok(resp) => {
+                out.eprintln(&format!(
+                    "[connect] {label} responded {} at {models_url}",
+                    resp.status()
+                ));
+                return Ok(());
+            }
+            Err(e) => {
+                out.eprintln(&format!(
+                    "[connect] {label} not reachable at {base_url} — is it running? ({e})"
+                ));
+                return Ok(());
+            }
+        };
+
+        let mut cfg = self.runtime.config().clone();
+        cfg.set_default_provider(ProviderKind::OpenAi);
+        cfg.provider.openai.base_url = base_url.to_string();
+        // Local servers ignore auth; a sentinel key keeps the OpenAI provider
+        // from demanding a real one (or falling into the OAuth path).
+        cfg.provider.openai.api_key = Some("local".to_string());
+        let keep_current = model_ids.iter().any(|m| m == &cfg.provider.openai.model);
+        if !keep_current && let Some(first) = model_ids.first() {
+            cfg.provider.openai.model = first.clone();
+        }
+        cfg.sync_default_model_from_provider();
+
+        match self.runtime.apply_dcode_ai_config(cfg) {
+            Ok(()) => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.model = self.runtime.model().to_string();
+                }
+                match self.runtime.config().save_global() {
+                    Ok(()) => {
+                        out.println(&format!(
+                            "[connect] {label} connected — model {} ({} available; /models to list, /model to switch)",
+                            self.runtime.model(),
+                            model_ids.len()
+                        ));
+                    }
+                    Err(e) => {
+                        out.eprintln(&format!("[connect] applied but global save failed: {e}"))
+                    }
+                }
+            }
+            Err(e) => out.eprintln(&format!("[connect] {e}")),
         }
         Ok(())
     }
@@ -2172,6 +2260,10 @@ done";
                                 "OpenCode Zen login: open https://opencode.ai/auth, sign in, copy your API key, then set OPENCODE_API_KEY or provider.opencodezen.api_key in config.",
                             );
                         }
+                        return Ok(true);
+                    }
+                    if let Some((label, base_url)) = local_preset_for(provider_hint) {
+                        self.connect_local_preset(label, base_url, &out).await?;
                         return Ok(true);
                     }
                     if let Some(oauth_provider) = parse_oauth_provider(provider_hint) {
