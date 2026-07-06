@@ -3018,6 +3018,42 @@ done";
                     out.println("[init] Tip: add `.dcode-ai/` to your .gitignore (sessions + local config)");
                     out.println("[init] Tip: commit `.dcode.toml` to share project config with teammates");
                 }
+
+                // Generate AGENTS.md by scanning the repo (Codex/Claude Code
+                // `/init` parity). Skipped when one already exists.
+                let agents_md = workspace.join("AGENTS.md");
+                let workspace = workspace.to_path_buf();
+                if agents_md.exists() {
+                    out.println("[init] AGENTS.md already exists — skipped");
+                } else {
+                    out.println("[init] Generating AGENTS.md from the repository…");
+                    let prompt = "Explore this repository (key configs, build files, source \
+                        layout, tests, CI) and write an AGENTS.md file in the workspace root \
+                        for AI coding agents working here. Keep it under ~80 lines and only \
+                        include what you can verify from the repo:\n\
+                        - one-paragraph project overview\n\
+                        - build / test / lint commands (exact invocations)\n\
+                        - source layout: what lives where\n\
+                        - code conventions actually used in this codebase\n\
+                        - anything surprising an agent must know before editing\n\
+                        Write the file with write_file, then reply with a one-line summary.";
+                    match self.runtime.run_turn(prompt).await {
+                        Ok(output) => {
+                            if matches!(out, ReplOutput::Stdio) {
+                                out.println(&output);
+                            }
+                            if workspace.join("AGENTS.md").exists() {
+                                out.println("[init] Created AGENTS.md");
+                            } else {
+                                out.println(
+                                    "[init] Agent finished without writing AGENTS.md — \
+                                     re-run /init or create it manually",
+                                );
+                            }
+                        }
+                        Err(e) => out.eprintln(&format!("[init] AGENTS.md generation failed: {e}")),
+                    }
+                }
             }
             "/new" => {
                 let summary = self.runtime.compact_summary();

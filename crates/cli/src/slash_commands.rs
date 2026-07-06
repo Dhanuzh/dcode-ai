@@ -141,7 +141,7 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/permission-bypass" => "toggle bypass-permissions mode",
         "/sessions" => "browse and resume saved sessions",
         "/sessions-clean" => "delete empty saved sessions",
-        "/init" => "create .dcode.toml + instructions",
+        "/init" => "create .dcode.toml + instructions + AGENTS.md",
         "/ide" => "pull editor selection/open files into context",
         "/import" => "import Claude Code CLAUDE.md (or /import chats)",
         "/feedback" => "report a bug or request a feature",
