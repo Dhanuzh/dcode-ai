@@ -26,6 +26,9 @@ pub enum SkillContextMode {
 pub enum SkillSource {
     AgentsMd,
     FileSystem,
+    /// Flat prompt file in a `commands/` directory (`/name` runs it as a
+    /// prompt template with `$ARGUMENTS` substitution).
+    CommandFile,
 }
 
 pub struct SkillCatalog;
@@ -87,6 +90,34 @@ impl SkillCatalog {
             }
         }
 
+        // Flat prompt-command files (`commands/*.md`), lowest precedence.
+        let mut command_roots = Vec::new();
+        if let Some(home) = env::var_os("HOME") {
+            let home = PathBuf::from(home);
+            command_roots.push(home.join(".dcode-ai/commands"));
+            command_roots.push(home.join(".claude/commands"));
+        }
+        command_roots.push(workspace_root.join(".dcode-ai/commands"));
+        command_roots.push(workspace_root.join(".claude/commands"));
+        for root in command_roots {
+            let Ok(entries) = std::fs::read_dir(&root) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("md") {
+                    continue;
+                }
+                if let Ok(skill) = parse_command_file(&path)
+                    && !skills
+                        .iter()
+                        .any(|existing: &Skill| existing.command == skill.command)
+                {
+                    skills.push(skill);
+                }
+            }
+        }
+
         skills.sort_by(|left, right| left.command.cmp(&right.command));
         Ok(skills)
     }
@@ -97,6 +128,7 @@ impl Skill {
         let source_tag = match self.source {
             SkillSource::AgentsMd => " [AGENTS.md]",
             SkillSource::FileSystem => "",
+            SkillSource::CommandFile => " [command]",
         };
         match &self.description {
             Some(description) => format!("/{:<14} {}{}", self.command, description, source_tag),
@@ -105,10 +137,31 @@ impl Skill {
     }
 
     pub fn prompt_for_task(&self, task: &str) -> String {
+        let body = self.expanded_body();
+        // Prompt-template substitution: `$ARGUMENTS` is replaced by whatever
+        // the user typed after the command.
+        if body.contains("$ARGUMENTS") {
+            let substituted = body.replace("$ARGUMENTS", task.trim());
+            return match self.source {
+                SkillSource::CommandFile => substituted.trim().to_string(),
+                _ => format!(
+                    "Use the skill `{}`.\n\nSkill instructions:\n{}\n",
+                    self.command,
+                    substituted.trim()
+                ),
+            };
+        }
+        if self.source == SkillSource::CommandFile {
+            let mut prompt = body.trim().to_string();
+            if !task.trim().is_empty() {
+                prompt.push_str(&format!("\n\nTask:\n{}\n", task.trim()));
+            }
+            return prompt;
+        }
         let mut prompt = format!(
             "Use the skill `{}`.\n\nSkill instructions:\n{}\n",
             self.command,
-            self.expanded_body().trim()
+            body.trim()
         );
         if !task.trim().is_empty() {
             prompt.push_str(&format!("\nTask:\n{}\n", task.trim()));
@@ -129,6 +182,7 @@ impl Skill {
         let source_tag = match self.source {
             SkillSource::AgentsMd => " [AGENTS.md]",
             SkillSource::FileSystem => "",
+            SkillSource::CommandFile => " [command]",
         };
         format!(
             "- /{}: {}{}\n  model={model} permission_mode={permission_mode} context={:?}",
@@ -140,6 +194,7 @@ impl Skill {
         match self.source {
             SkillSource::AgentsMd => "agents-md",
             SkillSource::FileSystem => "filesystem",
+            SkillSource::CommandFile => "command-file",
         }
     }
 
@@ -220,6 +275,41 @@ fn parse_skill_file(path: &Path) -> Result<Skill, String> {
         directory,
         body: body.trim().to_string(),
         source: SkillSource::FileSystem,
+    })
+}
+
+/// Parse a flat `commands/<name>.md` prompt file. The command name is the
+/// slugified file stem; YAML frontmatter (description, model,
+/// permission_mode) is optional. The body is sent as the user prompt with
+/// `$ARGUMENTS` replaced by the text typed after the command.
+fn parse_command_file(path: &Path) -> Result<Skill, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|err| format!("failed to read {}: {err}", path.display()))?;
+    let directory = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let file_stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("command")
+        .to_string();
+
+    let (frontmatter, body) = split_frontmatter(&raw)?;
+    let command = frontmatter
+        .command
+        .clone()
+        .unwrap_or_else(|| slugify(&file_stem));
+    Ok(Skill {
+        name: frontmatter.name.unwrap_or(file_stem),
+        description: frontmatter.description,
+        command,
+        model: frontmatter.model,
+        permission_mode: frontmatter.permission_mode,
+        context: frontmatter.context.unwrap_or(SkillContextMode::Inline),
+        directory,
+        body: body.trim().to_string(),
+        source: SkillSource::CommandFile,
     })
 }
 
@@ -897,5 +987,101 @@ Component management and styling...
         let expanded = skill.expanded_body();
         let count = expanded.matches("===== helper.md =====").count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn parse_command_file_uses_stem_and_frontmatter() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("Fix Lint.md");
+        std::fs::write(
+            &path,
+            "---\ndescription: run the linter and fix findings\n---\nRun lint and fix: $ARGUMENTS",
+        )
+        .unwrap();
+
+        let skill = parse_command_file(&path).unwrap();
+        assert_eq!(skill.command, "fix-lint");
+        assert_eq!(
+            skill.description.as_deref(),
+            Some("run the linter and fix findings")
+        );
+        assert_eq!(skill.source, SkillSource::CommandFile);
+        assert_eq!(skill.body, "Run lint and fix: $ARGUMENTS");
+    }
+
+    #[test]
+    fn command_file_prompt_substitutes_arguments() {
+        let skill = Skill {
+            name: "deploy".into(),
+            description: None,
+            command: "deploy".into(),
+            model: None,
+            permission_mode: None,
+            context: SkillContextMode::Inline,
+            directory: PathBuf::from("."),
+            body: "Deploy $ARGUMENTS to staging. Confirm $ARGUMENTS builds first.".into(),
+            source: SkillSource::CommandFile,
+        };
+        let prompt = skill.prompt_for_task("the api service");
+        assert_eq!(
+            prompt,
+            "Deploy the api service to staging. Confirm the api service builds first."
+        );
+    }
+
+    #[test]
+    fn command_file_prompt_appends_task_without_placeholder() {
+        let skill = Skill {
+            name: "review".into(),
+            description: None,
+            command: "review".into(),
+            model: None,
+            permission_mode: None,
+            context: SkillContextMode::Inline,
+            directory: PathBuf::from("."),
+            body: "Review the current diff.".into(),
+            source: SkillSource::CommandFile,
+        };
+        let prompt = skill.prompt_for_task("focus on error handling");
+        assert!(prompt.starts_with("Review the current diff."));
+        assert!(prompt.contains("focus on error handling"));
+        assert!(!prompt.contains("Use the skill"));
+    }
+
+    #[test]
+    fn discover_finds_workspace_command_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let commands = dir.path().join(".dcode-ai/commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join("changelog.md"), "Write a changelog entry.").unwrap();
+        std::fs::write(commands.join("notes.txt"), "not a command").unwrap();
+
+        let skills = SkillCatalog::discover(dir.path(), &[]).unwrap();
+        let cmd = skills
+            .iter()
+            .find(|s| s.command == "changelog")
+            .expect("changelog command discovered");
+        assert_eq!(cmd.source, SkillSource::CommandFile);
+        assert!(!skills.iter().any(|s| s.command == "notes"));
+    }
+
+    #[test]
+    fn skill_dir_takes_precedence_over_command_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let skill_dir = dir.path().join(".dcode-ai/skills/lint");
+        std::fs::create_dir_all(&skill_dir).unwrap();
+        std::fs::write(
+            skill_dir.join("SKILL.md"),
+            "---\ncommand: lint\n---\nSkill body",
+        )
+        .unwrap();
+        let commands = dir.path().join(".dcode-ai/commands");
+        std::fs::create_dir_all(&commands).unwrap();
+        std::fs::write(commands.join("lint.md"), "Command body").unwrap();
+
+        let skills =
+            SkillCatalog::discover(dir.path(), &[PathBuf::from(".dcode-ai/skills")]).unwrap();
+        let lint = skills.iter().find(|s| s.command == "lint").unwrap();
+        assert_eq!(lint.source, SkillSource::FileSystem);
     }
 }

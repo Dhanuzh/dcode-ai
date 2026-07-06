@@ -66,6 +66,7 @@ impl SlashEntry {
                 let tag = match source {
                     SkillSource::AgentsMd => "AGENTS.md skill",
                     SkillSource::FileSystem => "skill",
+                    SkillSource::CommandFile => "custom command",
                 };
                 match description {
                     Some(desc) => desc.clone(),
