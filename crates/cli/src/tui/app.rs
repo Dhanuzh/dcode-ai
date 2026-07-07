@@ -2386,6 +2386,42 @@ pub fn run_blocking(
                         }
                     };
 
+                    // Emacs-style list navigation: while a list overlay is
+                    // active, Ctrl+N/Ctrl+P act as Down/Up. Exceptions keep
+                    // their stronger meanings: Ctrl+P still toggles the
+                    // command palette closed, and Ctrl+N still answers "no"
+                    // on an approval prompt.
+                    let list_nav_active = g.model_picker_open
+                        || g.session_picker_open
+                        || g.connect_modal_open
+                        || g.provider_picker_open
+                        || g.permission_picker_open
+                        || g.agent_picker_open
+                        || g.theme_picker_open
+                        || g.project_picker_open
+                        || g.branch_picker_open
+                        || g.question_modal_open
+                        || g.pins_modal_open
+                        || g.subagent_modal_open
+                        || g.backtrack_open
+                        || g.composer_history_search_open
+                        || slash_panel_visible(&g.input_buffer)
+                        || at_completion_active(&g.input_buffer, g.cursor_char_idx);
+                    let key = if (list_nav_active || g.command_palette_open)
+                        && key.modifiers == KeyModifiers::CONTROL
+                        && g.active_approval.is_none()
+                    {
+                        match key.code {
+                            KeyCode::Char('n') => KeyEvent::new(KeyCode::Down, KeyModifiers::NONE),
+                            KeyCode::Char('p') if !g.command_palette_open => {
+                                KeyEvent::new(KeyCode::Up, KeyModifiers::NONE)
+                            }
+                            _ => key,
+                        }
+                    } else {
+                        key
+                    };
+
                     // Any keystroke clears active mouse text selection.
                     if g.mouse_selection.is_some() {
                         g.mouse_selection = None;
