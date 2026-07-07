@@ -512,14 +512,30 @@ pub async fn fetch_provider_model_ids(
         // Antigravity (Cloud Code Assist) has no OpenAI `/v1/models` endpoint;
         // it exposes its live catalog via `fetchAvailableModels`. Fall back to a
         // minimal known-good list only if that fetch fails (expired token/offline).
+        // In Vertex mode ("Use a Google Cloud project") the Antigravity catalog
+        // is meaningless — projects have per-model allowlists — so probe the
+        // user's project directly and list only models that actually answer.
         ProviderKind::Antigravity => {
-            let mut ids = fetch_antigravity_model_ids(&client)
-                .await
-                .unwrap_or_default();
-            if ids.is_empty() {
-                ids = antigravity_fallback_model_ids();
+            let vertex = dcode_ai_common::auth::AuthStore::load()
+                .ok()
+                .and_then(|s| s.vertex);
+            if let Some(vertex) = vertex {
+                let mut ids = fetch_vertex_model_ids(&client, &vertex)
+                    .await
+                    .unwrap_or_default();
+                if ids.is_empty() {
+                    ids = vec!["gemini-2.5-flash".to_string()];
+                }
+                ids
+            } else {
+                let mut ids = fetch_antigravity_model_ids(&client)
+                    .await
+                    .unwrap_or_default();
+                if ids.is_empty() {
+                    ids = antigravity_fallback_model_ids();
+                }
+                ids
             }
-            ids
         }
         ProviderKind::OpenCodeZen => fetch_opencodezen_model_ids(&client, config).await?,
     };
@@ -527,6 +543,75 @@ pub async fn fetch_provider_model_ids(
 
     // Persist to disk for next cold start.
     disk_cache_write(&cache_tag, &ids);
+    Ok(ids)
+}
+
+/// Candidate Gemini publisher-model ids probed against a Vertex project.
+/// Projects expose per-model allowlists and Vertex has no caller-accessible
+/// list API, so availability is discovered by asking each model for a single
+/// token and keeping the ones that answer 200.
+const VERTEX_CANDIDATE_MODELS: &[&str] = &[
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-3-flash",
+    "gemini-3-pro-preview",
+    "gemini-3.1-pro",
+    "gemini-3.5-flash",
+];
+
+/// Probe which Gemini models the user's GCP project can actually call.
+async fn fetch_vertex_model_ids(
+    client: &reqwest::Client,
+    vertex: &dcode_ai_common::auth::VertexAuth,
+) -> Result<Vec<String>, ModelCatalogError> {
+    let token = tokio::task::spawn_blocking(dcode_ai_core::provider::antigravity::adc_access_token)
+        .await
+        .map_err(|error| ModelCatalogError::Request {
+            provider: "Vertex",
+            message: error.to_string(),
+        })?
+        .map_err(|error| ModelCatalogError::Authentication {
+            provider: "Vertex",
+            message: error.to_string(),
+        })?;
+
+    let host = if vertex.location == "global" {
+        "aiplatform.googleapis.com".to_string()
+    } else {
+        format!("{}-aiplatform.googleapis.com", vertex.location)
+    };
+    let body = serde_json::json!({
+        "contents": [{ "role": "user", "parts": [{ "text": "hi" }] }],
+        "generationConfig": { "maxOutputTokens": 1 },
+    });
+
+    let probes = VERTEX_CANDIDATE_MODELS.iter().map(|model| {
+        let url = format!(
+            "https://{host}/v1/projects/{}/locations/{}/publishers/google/models/{model}:streamGenerateContent?alt=sse",
+            vertex.project_id, vertex.location
+        );
+        let client = client.clone();
+        let token = token.clone();
+        let body = body.clone();
+        async move {
+            let ok = client
+                .post(&url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            ok.then(|| model.to_string())
+        }
+    });
+    let ids: Vec<String> = futures_util::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .collect();
     Ok(ids)
 }
 
@@ -658,6 +743,15 @@ fn disk_cache_tag(config: &DcodeAiConfig) -> String {
             .map(|k| api_key_tag(&k))
             .unwrap_or(0),
     };
+    // Vertex ("Use a Google Cloud project") serves a per-project allowlist,
+    // so its catalog must not share a cache slot with Antigravity OAuth.
+    if matches!(config.provider.default, ProviderKind::Antigravity)
+        && let Some(v) = dcode_ai_common::auth::AuthStore::load()
+            .ok()
+            .and_then(|s| s.vertex)
+    {
+        return format!("{provider}-vertex-{}-{key_hint:x}", v.project_id);
+    }
     format!("{provider}-{key_hint:x}")
 }
 

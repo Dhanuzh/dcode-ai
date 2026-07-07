@@ -1080,6 +1080,7 @@ dependencies = [
  "criterion",
  "dcode-ai-common",
  "dcode-ai-core",
+ "futures-util",
  "ignore",
  "landlock",
  "libc",

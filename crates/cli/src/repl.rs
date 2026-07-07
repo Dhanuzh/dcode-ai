@@ -900,7 +900,9 @@ impl Repl {
             .to_ascii_lowercase()
             .contains("gemini")
         {
-            cfg.provider.openai.model = "gemini-3-pro-preview".to_string();
+            // Project allowlists vary; start on the broadly-available flash
+            // and let /models probe what this project can actually call.
+            cfg.provider.openai.model = "gemini-2.5-flash".to_string();
         }
         cfg.sync_default_model_from_provider();
         match self.runtime.apply_dcode_ai_config(cfg) {
