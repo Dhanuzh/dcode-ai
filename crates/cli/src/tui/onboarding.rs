@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use dcode_ai_common::config::{DcodeAiConfig, ProviderKind};
 use ratatui::Frame;
 use ratatui::layout::Rect;
@@ -89,6 +89,11 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
         let Event::Key(key) = event::read()? else {
             continue;
         };
+        // Windows delivers both Press and Release key events; without this
+        // filter every typed character appears twice.
+        if matches!(key.kind, KeyEventKind::Release) {
+            continue;
+        }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
             restore_terminal(mouse_capture);
