@@ -4802,6 +4802,38 @@ mod approval_parse_tests {
     }
 
     #[test]
+    fn long_user_message_shows_marker_only_on_first_row() {
+        let mut st = TuiSessionState::new(
+            "test-wrap".into(),
+            "test-model".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        let long = "one paragraph pasted by the user that easily wraps across \
+                    several transcript rows at a narrow terminal width because \
+                    it just keeps going and going without a newline";
+        st.blocks.push(super::DisplayBlock::User(long.into()));
+        st.touch_transcript();
+        let (lines, _hits) = transcript_lines_and_hits(&st, 40);
+        let texts: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        let marker_rows = texts.iter().filter(|t| t.starts_with("› ")).count();
+        let continuation_rows = texts
+            .iter()
+            .filter(|t| t.starts_with("  ") && !t.trim().is_empty())
+            .count();
+        assert_eq!(marker_rows, 1, "exactly one `›` marker: {texts:#?}");
+        assert!(
+            continuation_rows >= 2,
+            "wrapped continuations indented: {texts:#?}"
+        );
+    }
+
+    #[test]
     fn snapshot_transcript_tool_done() {
         let mut st = TuiSessionState::new(
             "test-snap".into(),

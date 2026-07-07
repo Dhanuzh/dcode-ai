@@ -493,9 +493,14 @@ fn render_block(
                 .fg(theme::user())
                 .bg(theme::user_bar_bg())
                 .add_modifier(BOLD);
-            for (i, raw_line) in content.lines().enumerate() {
+            // Only the very first rendered row carries the `›` marker;
+            // wrapped continuations indent under it (Codex-style), instead
+            // of repeating the marker on every wrapped segment.
+            let mut first_row = true;
+            for raw_line in content.lines() {
                 for wl in wrap_text(raw_line, w.saturating_sub(3)) {
-                    let prefix = if i == 0 { "› " } else { "  " };
+                    let prefix = if first_row { "› " } else { "  " };
+                    first_row = false;
                     // Pad to full width so the highlight spans the whole line.
                     let mut text = format!("{prefix}{wl}");
                     let pad = w.saturating_sub(text.chars().count());
