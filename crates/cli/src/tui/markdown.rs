@@ -303,6 +303,16 @@ fn render_table_lines(
         for w in col_widths.iter_mut() {
             *w = ((*w * cell_budget) / natural_total.max(1)).max(3);
         }
+        // Rounding and the min-3 floor can leave the sum over budget; trim
+        // the widest columns one cell at a time until the row fits.
+        let mut total: usize = col_widths.iter().sum();
+        while total > cell_budget {
+            let Some(widest) = col_widths.iter_mut().filter(|w| **w > 3).max() else {
+                break;
+            };
+            *widest -= 1;
+            total -= 1;
+        }
     }
     for row in &table.header_rows {
         push_table_row(out, hits, row, true, &col_widths, &table.alignments);
@@ -475,7 +485,17 @@ pub(crate) fn render_markdown_lines_with_hits(
                     }
                     table.current_row.clear();
                 }
-                MdEvent::End(TagEnd::TableHead) => table.in_head = false,
+                MdEvent::End(TagEnd::TableHead) => {
+                    // pulldown-cmark emits header cells directly inside
+                    // TableHead without a TableRow wrapper, so the row must
+                    // be flushed here or the header is silently dropped.
+                    table.in_head = false;
+                    if !table.current_row.is_empty() {
+                        table
+                            .header_rows
+                            .push(std::mem::take(&mut table.current_row));
+                    }
+                }
                 MdEvent::End(TagEnd::Table) => {
                     if !current.is_empty() {
                         flush_md_render_line(&mut out, &mut hits, &mut current);
@@ -921,4 +941,69 @@ pub(crate) fn parse_md_line(line: &str) -> Line<'static> {
     }
 
     Line::from(parse_md_inline(line, base))
+}
+
+#[cfg(test)]
+mod table_tests {
+    use super::*;
+
+    fn text_of(lines: &[Line<'_>]) -> Vec<String> {
+        lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect()
+    }
+
+    const TABLE_MD: &str = "\
+| Feature | Status | Notes |
+| --- | :---: | ---: |
+| Streaming reasoning tokens | done | see the thinking chip |
+| Landlock sandbox for shell commands | opt-in | Linux only, best-effort on old kernels |
+| Windows support | pending | needs a Windows machine to verify |
+";
+
+    #[test]
+    fn table_lines_fit_requested_width() {
+        for width in [80usize, 48, 28] {
+            let (lines, _) = render_markdown_lines_with_hits(TABLE_MD, false, width);
+            for line in text_of(&lines) {
+                assert!(
+                    line.chars().count() <= width,
+                    "line overflows width {width}: {:?} ({} chars)",
+                    line,
+                    line.chars().count()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn table_renders_header_row_and_separator() {
+        let (lines, _) = render_markdown_lines_with_hits(TABLE_MD, false, 80);
+        let text = text_of(&lines);
+        let header = text
+            .iter()
+            .find(|l| l.contains("Feature"))
+            .expect("header row rendered");
+        assert!(header.contains("Notes"), "header cells present: {header:?}");
+        assert!(header.starts_with(" table "), "header labeled: {header:?}");
+        assert!(
+            text.iter().any(|l| l.starts_with('─')),
+            "separator rule under header"
+        );
+        assert!(
+            text.iter()
+                .any(|l| l.contains("Streaming reasoning tokens")),
+            "body rows still rendered"
+        );
+    }
+
+    #[test]
+    fn table_without_header_still_renders_body() {
+        // Degenerate table (parser can produce empty header cells).
+        let md = "| a | b |\n| --- | --- |\n| 1 | 2 |\n";
+        let (lines, _) = render_markdown_lines_with_hits(md, false, 40);
+        let text = text_of(&lines);
+        assert!(text.iter().any(|l| l.contains('1') && l.contains('2')));
+    }
 }
