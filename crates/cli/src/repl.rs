@@ -162,6 +162,7 @@ fn parse_logout_target(value: &str) -> Option<LogoutTarget> {
         "openai" | "open-ai" | "gpt" | "codex" => Some(LogoutTarget::Openai),
         "copilot" | "github" => Some(LogoutTarget::Copilot),
         "antigravity" | "ag" => Some(LogoutTarget::Antigravity),
+        "vertex" | "gcp" | "cloudproject" | "cloud-project" => Some(LogoutTarget::Vertex),
         "opencodezen" | "opencode" | "zen" => Some(LogoutTarget::Opencodezen),
         "all" | "*" => Some(LogoutTarget::All),
         _ => None,
@@ -844,6 +845,79 @@ impl Repl {
                 }
             }
             Err(e) => out.eprintln(&format!("[connect] {e}")),
+        }
+        Ok(())
+    }
+
+    /// `/login vertex <project-id> [location]` — Gemini on Vertex AI in the
+    /// user's own GCP project via gcloud Application Default Credentials.
+    async fn connect_vertex_project(
+        &mut self,
+        project: Option<String>,
+        location: String,
+        out: &ReplOutput<'_>,
+    ) -> anyhow::Result<()> {
+        let Some(project) = project.filter(|p| !p.trim().is_empty()) else {
+            out.println("usage: /login vertex <project-id> [location]");
+            out.println("Uses your Google Cloud project on Vertex AI (billed to that project).");
+            out.println("Prerequisites:");
+            out.println("  1. gcloud CLI installed");
+            out.println("  2. gcloud auth application-default login");
+            out.println("  3. Vertex AI API enabled on the project");
+            return Ok(());
+        };
+        let project = project.trim().to_string();
+
+        out.println("[vertex] Checking gcloud Application Default Credentials…");
+        // Token minting is a blocking subprocess call; keep the TUI responsive.
+        let token =
+            tokio::task::spawn_blocking(dcode_ai_core::provider::antigravity::adc_access_token)
+                .await
+                .map_err(|e| anyhow::anyhow!("adc probe task failed: {e}"))?;
+        if let Err(e) = token {
+            out.eprintln(&format!("[vertex] {e}"));
+            return Ok(());
+        }
+
+        let mut store = dcode_ai_common::auth::AuthStore::load().unwrap_or_default();
+        store.vertex = Some(dcode_ai_common::auth::VertexAuth {
+            project_id: project.clone(),
+            location: location.clone(),
+        });
+        if let Err(e) = store.save() {
+            out.eprintln(&format!("[vertex] failed to save auth: {e}"));
+            return Ok(());
+        }
+
+        let mut cfg = self.runtime.config().clone();
+        cfg.set_default_provider(ProviderKind::Antigravity);
+        // The shared openai model slot may hold a non-Gemini id; Vertex only
+        // serves Gemini publisher models here.
+        if !cfg
+            .provider
+            .openai
+            .model
+            .to_ascii_lowercase()
+            .contains("gemini")
+        {
+            cfg.provider.openai.model = "gemini-3-pro-preview".to_string();
+        }
+        cfg.sync_default_model_from_provider();
+        match self.runtime.apply_dcode_ai_config(cfg) {
+            Ok(()) => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.model = self.runtime.model().to_string();
+                }
+                let _ = self.runtime.config().save_global();
+                out.println(&format!(
+                    "[vertex] Connected — project {project}, location {location}, model {} \
+                     (/model to switch, /logout vertex to disconnect)",
+                    self.runtime.model()
+                ));
+            }
+            Err(e) => out.eprintln(&format!("[vertex] {e}")),
         }
         Ok(())
     }
@@ -2267,6 +2341,22 @@ done";
                         self.connect_local_preset(label, base_url, &out).await?;
                         return Ok(true);
                     }
+                    // "Use a Google Cloud project" (Antigravity CLI option 2):
+                    // Gemini on Vertex AI, billed to the user's own project,
+                    // authenticated via gcloud ADC.
+                    let mut hint_tokens = provider_hint.split_whitespace();
+                    if matches!(
+                        hint_tokens.next().map(str::to_ascii_lowercase).as_deref(),
+                        Some("vertex" | "gcp" | "cloudproject" | "cloud-project")
+                    ) {
+                        let project = hint_tokens.next().map(str::to_string);
+                        let location = hint_tokens
+                            .next()
+                            .map(str::to_string)
+                            .unwrap_or_else(dcode_ai_common::auth::default_vertex_location);
+                        self.connect_vertex_project(project, location, &out).await?;
+                        return Ok(true);
+                    }
                     if let Some(oauth_provider) = parse_oauth_provider(provider_hint) {
                         if let ReplOutput::Tui(st) = &out
                             && matches!(oauth_provider, OAuthProvider::Anthropic)
@@ -2422,6 +2512,13 @@ done";
                         "logged in"
                     } else {
                         "not logged in"
+                    }
+                ));
+                out.println(&format!(
+                    "  vertex:      {}",
+                    match &store.vertex {
+                        Some(v) => format!("project {} ({})", v.project_id, v.location),
+                        None => "not connected".to_string(),
                     }
                 ));
                 out.println(&format!(

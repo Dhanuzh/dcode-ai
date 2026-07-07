@@ -1,9 +1,9 @@
 ---
 source: crates/cli/src/tui/app.rs
-assertion_line: 4837
+assertion_line: 4869
 expression: lines_to_text(&lines)
 ---
- table Name  ·  Value
-─────────────────────
- row   foo   ·  42   
- row   bar   ·  99
+Name  ·  Value
+──────────────
+foo   ·  42   
+bar   ·  99

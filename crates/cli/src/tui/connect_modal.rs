@@ -66,6 +66,13 @@ pub const CONNECT_CATALOG: &[CatalogEntry] = &[
     },
     CatalogEntry {
         section: "Recommended",
+        kind: ProviderKind::Antigravity,
+        title: "Google Cloud project (Vertex AI)",
+        subtitle: "Your own GCP project via gcloud ADC — /login vertex <project-id>",
+        action: ConnectAction::Submit("/login vertex"),
+    },
+    CatalogEntry {
+        section: "Recommended",
         kind: ProviderKind::OpenRouter,
         title: "OpenRouter",
         subtitle: "300+ models with one API key",

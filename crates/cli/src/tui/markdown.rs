@@ -285,8 +285,6 @@ fn render_table_lines(
     if col_count == 0 {
         return;
     }
-    const ROW_LABEL: &str = " row   ";
-    const COL_SEP: &str = "  ·  ";
     // Natural width = widest cell per column. Then fit columns to the
     // available transcript width: expand to content when there's room,
     // shrink proportionally (min 3) when the table would overflow.
@@ -296,7 +294,7 @@ fn render_table_lines(
             *w = (*w).max(cell.chars().count());
         }
     }
-    let chrome = ROW_LABEL.chars().count() + COL_SEP.chars().count() * col_count.saturating_sub(1);
+    let chrome = TABLE_COL_SEP.chars().count() * col_count.saturating_sub(1);
     let cell_budget = table_width.saturating_sub(chrome).max(col_count * 3);
     let natural_total: usize = col_widths.iter().sum();
     if natural_total > cell_budget {
@@ -318,10 +316,9 @@ fn render_table_lines(
         push_table_row(out, hits, row, true, &col_widths, &table.alignments);
     }
     if !table.header_rows.is_empty() {
-        // Separator spans the actual rendered table width (label + columns + seps).
-        let rule_width = ROW_LABEL.chars().count()
-            + col_widths.iter().sum::<usize>()
-            + COL_SEP.chars().count() * col_count.saturating_sub(1);
+        // Separator spans the actual rendered table width (columns + seps).
+        let rule_width = col_widths.iter().sum::<usize>()
+            + TABLE_COL_SEP.chars().count() * col_count.saturating_sub(1);
         out.push(Line::from(Span::styled(
             "─".repeat(rule_width.max(1)),
             Style::default().fg(theme::muted()),
@@ -333,12 +330,12 @@ fn render_table_lines(
     }
 }
 
-const TABLE_ROW_LABEL: &str = " row   ";
 const TABLE_COL_SEP: &str = "  ·  ";
 
 /// Render one table row, wrapping long cells across multiple lines instead of
-/// truncating. Continuation lines drop the row label and align under each
-/// column.
+/// truncating. Continuation lines align under each column. Header rows are
+/// bold accent; the separator rule under them marks the table shape (no
+/// `table`/`row` gutter labels — they were pure noise).
 fn push_table_row(
     out: &mut Vec<Line<'static>>,
     hits: &mut Vec<LineAnswerHit>,
@@ -354,13 +351,6 @@ fn push_table_row(
         .map(|(i, &w)| wrap_cell(row.get(i).map(String::as_str).unwrap_or(""), w.max(1)))
         .collect();
     let height = wrapped.iter().map(Vec::len).max().unwrap_or(1).max(1);
-    let label_style = Style::default()
-        .fg(if is_header {
-            theme::assistant()
-        } else {
-            theme::muted()
-        })
-        .add_modifier(Modifier::BOLD);
     let cell_style = if is_header {
         Style::default()
             .fg(theme::assistant())
@@ -368,19 +358,8 @@ fn push_table_row(
     } else {
         Style::default().fg(theme::text())
     };
-    let label_w = TABLE_ROW_LABEL.chars().count();
     for line_idx in 0..height {
         let mut spans = Vec::new();
-        let label = if line_idx == 0 {
-            if is_header {
-                " table ".to_string()
-            } else {
-                TABLE_ROW_LABEL.to_string()
-            }
-        } else {
-            " ".repeat(label_w)
-        };
-        spans.push(Span::styled(label, label_style));
         for (i, &cw) in col_widths.iter().enumerate() {
             let cell_line = wrapped[i].get(line_idx).map(String::as_str).unwrap_or("");
             let aligned = align_table_cell(
@@ -986,7 +965,6 @@ mod table_tests {
             .find(|l| l.contains("Feature"))
             .expect("header row rendered");
         assert!(header.contains("Notes"), "header cells present: {header:?}");
-        assert!(header.starts_with(" table "), "header labeled: {header:?}");
         assert!(
             text.iter().any(|l| l.starts_with('─')),
             "separator rule under header"
@@ -995,6 +973,13 @@ mod table_tests {
             text.iter()
                 .any(|l| l.contains("Streaming reasoning tokens")),
             "body rows still rendered"
+        );
+        // Gutter labels were removed — no `table`/`row` prefixes.
+        assert!(
+            !text
+                .iter()
+                .any(|l| l.starts_with(" table ") || l.starts_with(" row ")),
+            "no gutter labels: {text:#?}"
         );
     }
 

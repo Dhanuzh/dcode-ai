@@ -11,6 +11,12 @@ pub struct AuthStore {
     pub copilot: Option<CopilotAuth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub antigravity: Option<AntigravityAuth>,
+    /// "Use a Google Cloud project" login: Gemini on Vertex AI billed to the
+    /// user's own GCP project, authenticated via gcloud Application Default
+    /// Credentials instead of the Antigravity OAuth flow. Takes precedence
+    /// over `antigravity` OAuth when both are present.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vertex: Option<VertexAuth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opencodezen_oauth: Option<OpenCodeZenOAuth>,
     /// Last provider selected by successful login.
@@ -64,6 +70,19 @@ pub struct AntigravityAuth {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VertexAuth {
+    /// GCP project id requests are billed to.
+    pub project_id: String,
+    /// Vertex location ("global", "us-central1", …). Default "global".
+    #[serde(default = "default_vertex_location")]
+    pub location: String,
+}
+
+pub fn default_vertex_location() -> String {
+    "global".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OpenCodeZenOAuth {
     pub access_token: String,
     pub refresh_token: String,
@@ -96,6 +115,7 @@ impl AuthStore {
             || self.openai_oauth.is_some()
             || self.copilot.is_some()
             || self.antigravity.is_some()
+            || self.vertex.is_some()
             || self.opencodezen_oauth.is_some()
     }
 }

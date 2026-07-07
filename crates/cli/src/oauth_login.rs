@@ -55,6 +55,7 @@ pub enum LogoutTarget {
     Openai,
     Copilot,
     Antigravity,
+    Vertex,
     Opencodezen,
     All,
 }
@@ -153,6 +154,9 @@ where
                 store.preferred_provider = None;
             }
         }
+        LogoutTarget::Vertex => {
+            store.vertex = None;
+        }
         LogoutTarget::Opencodezen => {
             store.opencodezen_oauth = None;
             if matches!(store.preferred_provider, Some(LoggedProvider::Opencodezen)) {
@@ -164,6 +168,7 @@ where
             store.openai_oauth = None;
             store.copilot = None;
             store.antigravity = None;
+            store.vertex = None;
             store.opencodezen_oauth = None;
             store.preferred_provider = None;
         }

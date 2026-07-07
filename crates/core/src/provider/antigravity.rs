@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use base64::{Engine, engine::general_purpose::STANDARD as B64};
-use dcode_ai_common::auth::AuthStore;
+use dcode_ai_common::auth::{AuthStore, VertexAuth};
 use dcode_ai_common::config::{DcodeAiConfig, OpenAiConfig};
 use dcode_ai_common::message::{ContentPart, Message, MessageContent, Role};
 use dcode_ai_common::tool::{ToolCall, ToolDefinition};
@@ -57,6 +57,67 @@ fn antigravity_user_agent() -> String {
 
 const STREAM_CHUNK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
+/// Cached gcloud Application Default Credentials access token. gcloud tokens
+/// live ~1 hour; refresh after 50 minutes.
+static ADC_TOKEN: OnceLock<Mutex<Option<(String, std::time::Instant)>>> = OnceLock::new();
+
+/// Fetch an access token via `gcloud auth application-default
+/// print-access-token` (the "Use a Google Cloud project" login path). gcloud
+/// owns credential refresh; we only cache the short-lived token.
+pub fn adc_access_token() -> Result<String, ProviderError> {
+    let cache = ADC_TOKEN.get_or_init(|| Mutex::new(None));
+    if let Ok(guard) = cache.lock()
+        && let Some((token, fetched_at)) = guard.as_ref()
+        && fetched_at.elapsed() < std::time::Duration::from_secs(50 * 60)
+    {
+        return Ok(token.clone());
+    }
+
+    let out = std::process::Command::new("gcloud")
+        .args(["auth", "application-default", "print-access-token"])
+        .output()
+        .map_err(|e| {
+            ProviderError::Configuration(format!(
+                "gcloud not found ({e}); install the Google Cloud SDK and run \
+                 `gcloud auth application-default login`"
+            ))
+        })?;
+    if !out.status.success() {
+        let err = String::from_utf8_lossy(&out.stderr);
+        return Err(ProviderError::Configuration(format!(
+            "gcloud could not mint an ADC token: {} — run \
+             `gcloud auth application-default login` first",
+            err.trim()
+        )));
+    }
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if token.is_empty() {
+        return Err(ProviderError::Configuration(
+            "gcloud returned an empty ADC token — run \
+             `gcloud auth application-default login`"
+                .to_string(),
+        ));
+    }
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some((token.clone(), std::time::Instant::now()));
+    }
+    Ok(token)
+}
+
+/// Vertex AI `streamGenerateContent` URL for a project/location/model.
+/// The `global` location uses the location-less host.
+fn vertex_endpoint(auth: &VertexAuth, model: &str) -> String {
+    let host = if auth.location == "global" {
+        "aiplatform.googleapis.com".to_string()
+    } else {
+        format!("{}-aiplatform.googleapis.com", auth.location)
+    };
+    format!(
+        "https://{host}/v1/projects/{}/locations/{}/publishers/google/models/{model}:streamGenerateContent?alt=sse",
+        auth.project_id, auth.location
+    )
+}
+
 /// Process-global monotonic counter so tool-call ids are unique across turns
 /// (they double as keys into the thought-signature cache).
 static TOOL_CALL_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -91,6 +152,10 @@ pub struct AntigravityProvider {
     config: OpenAiConfig,
     project_id: String,
     max_tokens: u32,
+    /// When set, requests go straight to Vertex AI in this project/location
+    /// (the "Use a Google Cloud project" login) instead of the Antigravity
+    /// Cloud Code Assist envelope endpoint.
+    vertex: Option<VertexAuth>,
 }
 
 impl AntigravityProvider {
@@ -99,13 +164,19 @@ impl AntigravityProvider {
         // an optional explicit API key (used for tests / advanced setups).
         let openai = config.provider.openai.clone();
 
-        let (access_token, project_id) = if let Some(key) = openai.resolve_api_key() {
-            (key, ANTIGRAVITY_DEFAULT_PROJECT.to_string())
+        let auth_store = AuthStore::load().ok().unwrap_or_default();
+        let (access_token, project_id, vertex) = if let Some(v) = auth_store.vertex.clone() {
+            // "Use a Google Cloud project": ADC token, user's own project.
+            let token = adc_access_token()?;
+            (token, v.project_id.clone(), Some(v))
+        } else if let Some(key) = openai.resolve_api_key() {
+            (key, ANTIGRAVITY_DEFAULT_PROJECT.to_string(), None)
         } else {
-            let auth_store = AuthStore::load().ok().unwrap_or_default();
             let oauth = auth_store.antigravity.ok_or_else(|| {
                 ProviderError::Configuration(
-                    "missing Antigravity login; run `dcode-ai login antigravity`".to_string(),
+                    "missing Antigravity login; run `dcode-ai login antigravity` \
+                     (or `/login vertex <project-id>` for a Google Cloud project)"
+                        .to_string(),
                 )
             })?;
             let resolved = super::openai::resolve_antigravity_auth(oauth)?;
@@ -114,7 +185,7 @@ impl AntigravityProvider {
             } else {
                 resolved.project_id.clone()
             };
-            (resolved.access_token, project)
+            (resolved.access_token, project, None)
         };
 
         let mut headers = HeaderMap::new();
@@ -154,16 +225,20 @@ impl AntigravityProvider {
             config: openai,
             project_id,
             max_tokens: config.model.max_tokens,
+            vertex,
         })
     }
 
-    fn request_envelope(
+    /// Build the inner Gemini `generateContent` request plus the base model
+    /// id. The caller wraps it in the Antigravity envelope or posts it
+    /// directly to Vertex AI, depending on the login mode.
+    fn request_parts(
         &self,
         messages: &[Message],
         tools: &[ToolDefinition],
         model: &str,
         workspace_root: &Path,
-    ) -> Result<Value, ProviderError> {
+    ) -> Result<(Value, String), ProviderError> {
         let contents = build_gemini_contents(messages, workspace_root)?;
 
         // Antigravity exposes reasoning effort via a model-name suffix
@@ -193,14 +268,7 @@ impl AntigravityProvider {
             request["tools"] = tools;
         }
 
-        Ok(json!({
-            "project": self.project_id,
-            "model": base_model,
-            "request": request,
-            "requestType": "agent",
-            "userAgent": "antigravity",
-            "requestId": format!("agent-{}", chrono::Utc::now().timestamp_millis()),
-        }))
+        Ok((request, base_model))
     }
 }
 
@@ -227,12 +295,29 @@ impl Provider for AntigravityProvider {
             model.to_string()
         };
 
-        let body = self.request_envelope(messages, tools, &model, workspace_root)?;
+        let (request, base_model) = self.request_parts(messages, tools, &model, workspace_root)?;
+        let (url, body) = if let Some(vertex) = &self.vertex {
+            // Direct Vertex AI call: plain generateContent body, project and
+            // model addressed in the URL, billed to the user's GCP project.
+            (vertex_endpoint(vertex, &base_model), request)
+        } else {
+            (
+                ANTIGRAVITY_ENDPOINT.to_string(),
+                json!({
+                    "project": self.project_id,
+                    "model": base_model,
+                    "request": request,
+                    "requestType": "agent",
+                    "userAgent": "antigravity",
+                    "requestId": format!("agent-{}", chrono::Utc::now().timestamp_millis()),
+                }),
+            )
+        };
 
         let response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
             let resp = self
                 .client
-                .post(ANTIGRAVITY_ENDPOINT)
+                .post(&url)
                 .header(ACCEPT, "text/event-stream")
                 .json(&body)
                 .send()
@@ -648,6 +733,30 @@ mod tests {
     use super::*;
     use crate::provider::test_support::{collect_chunks, spawn_sse_server};
     use dcode_ai_common::message::MessageToolCall;
+
+    #[test]
+    fn vertex_endpoint_global_uses_locationless_host() {
+        let auth = VertexAuth {
+            project_id: "my-proj".into(),
+            location: "global".into(),
+        };
+        assert_eq!(
+            vertex_endpoint(&auth, "gemini-3-pro-preview"),
+            "https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global/publishers/google/models/gemini-3-pro-preview:streamGenerateContent?alt=sse"
+        );
+    }
+
+    #[test]
+    fn vertex_endpoint_regional_prefixes_host() {
+        let auth = VertexAuth {
+            project_id: "p1".into(),
+            location: "us-central1".into(),
+        };
+        assert_eq!(
+            vertex_endpoint(&auth, "gemini-2.5-pro"),
+            "https://us-central1-aiplatform.googleapis.com/v1/projects/p1/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+        );
+    }
 
     #[test]
     fn contents_hoist_system_and_map_tool_results() {
