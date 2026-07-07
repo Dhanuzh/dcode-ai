@@ -9,10 +9,13 @@ use tokio::time::{Duration, timeout};
 pub struct PtyManager {
     workspace_root: std::path::PathBuf,
     /// Landlock-confine children (Linux): writes only beneath the workspace
-    /// and scratch dirs. Set from `[permissions] sandbox_bash`.
+    /// and scratch dirs. Set from `[permissions] sandbox_bash`. Only the
+    /// unix `pre_exec` path reads these; other platforms carry them unused.
+    #[cfg_attr(not(unix), allow(dead_code))]
     sandbox: bool,
     /// Extra writable roots inside the sandbox (already tilde-expanded),
     /// from `[permissions] sandbox_writable_roots`.
+    #[cfg_attr(not(unix), allow(dead_code))]
     sandbox_writable_roots: Vec<std::path::PathBuf>,
 }
 

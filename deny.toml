@@ -22,6 +22,9 @@ allow = [
     "MPL-2.0",
     "OpenSSL",
     "BSL-1.0",
+    # Data-only license used by webpki-root-certs / webpki-roots (Mozilla CA
+    # bundle); permissive, MIT-compatible.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.8
 
@@ -29,6 +32,8 @@ confidence-threshold = 0.8
 # Duplicate versions bloat the binary; warn so they surface without blocking.
 multiple-versions = "warn"
 wildcards = "deny"
+# Workspace-internal `{ path = "…" }` deps carry no version; that's fine.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
