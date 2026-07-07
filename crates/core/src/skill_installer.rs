@@ -29,7 +29,9 @@ pub fn parse_source(source: &str) -> Result<SkillSource, String> {
         || trimmed.starts_with("..")
     {
         let path = if trimmed.starts_with("~/") {
-            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            let home = dcode_ai_common::config::home_dir()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| "/tmp".into());
             PathBuf::from(home).join(trimmed.strip_prefix("~/").unwrap())
         } else {
             PathBuf::from(trimmed)
@@ -138,7 +140,9 @@ impl SkillLock {
 /// Get the lock file path for the given scope.
 pub fn lock_file_path(global: bool, workspace_root: &Path) -> PathBuf {
     if global {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let home = dcode_ai_common::config::home_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "/tmp".into());
         PathBuf::from(home).join(".dcode-ai/skills.lock")
     } else {
         workspace_root.join(".dcode-ai/skills.lock")
@@ -148,7 +152,9 @@ pub fn lock_file_path(global: bool, workspace_root: &Path) -> PathBuf {
 /// Get the skills directory for the given scope.
 pub fn skills_dir(global: bool, workspace_root: &Path) -> PathBuf {
     if global {
-        let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+        let home = dcode_ai_common::config::home_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "/tmp".into());
         PathBuf::from(home).join(".dcode-ai/skills")
     } else {
         workspace_root.join(".dcode-ai/skills")

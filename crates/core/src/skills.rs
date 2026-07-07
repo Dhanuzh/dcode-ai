@@ -1,6 +1,5 @@
 use dcode_ai_common::config::PermissionMode;
 use serde::Deserialize;
-use std::env;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone)]
@@ -39,8 +38,7 @@ impl SkillCatalog {
         skill_directories: &[PathBuf],
     ) -> Result<Vec<Skill>, String> {
         let mut roots = Vec::new();
-        if let Some(home) = env::var_os("HOME") {
-            let home = PathBuf::from(home);
+        if let Some(home) = dcode_ai_common::config::home_dir() {
             roots.push(home.join(".dcode-ai/skills"));
             roots.push(home.join(".claude/skills"));
         }
@@ -92,8 +90,7 @@ impl SkillCatalog {
 
         // Flat prompt-command files (`commands/*.md`), lowest precedence.
         let mut command_roots = Vec::new();
-        if let Some(home) = env::var_os("HOME") {
-            let home = PathBuf::from(home);
+        if let Some(home) = dcode_ai_common::config::home_dir() {
             command_roots.push(home.join(".dcode-ai/commands"));
             command_roots.push(home.join(".claude/commands"));
         }

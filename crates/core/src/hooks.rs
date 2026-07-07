@@ -93,10 +93,8 @@ fn hook_matches(matcher: Option<&str>, value: Option<&str>) -> bool {
 }
 
 async fn run_hook_command(hook: &HookCommand, payload: &Value) -> Result<(), String> {
-    let mut command = tokio::process::Command::new("sh");
+    let mut command = dcode_ai_common::provider_runtime::system_shell_command(&hook.command);
     command
-        .arg("-c")
-        .arg(&hook.command)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());

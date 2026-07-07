@@ -28,3 +28,9 @@
 - [ ] Integrate `cargo udeps` into CI.
 - [ ] Add `cargo-audit` for dependency vulnerability scanning.
 - [ ] Audit `autoresearch` crate: integrate or archive.
+
+## 6. Deployment & Packaging
+- [ ] Create a Homebrew tap for macOS installation (`brew install dcode-ai/tap/dcode-ai`).
+- [ ] Automate release builds and artifact creation with GitHub Actions.
+- [ ] Generate DEB/RPM packages for Linux distributions.
+- [ ] Investigate publishing to crates.io.

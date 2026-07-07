@@ -73,7 +73,8 @@ pub fn adc_access_token() -> Result<String, ProviderError> {
         return Ok(token.clone());
     }
 
-    let out = std::process::Command::new("gcloud")
+    // `gcloud` is a .cmd shim on Windows; route through the compat helper.
+    let out = dcode_ai_common::provider_runtime::windows_compat_command("gcloud")
         .args(["auth", "application-default", "print-access-token"])
         .output()
         .map_err(|e| {

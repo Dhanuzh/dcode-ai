@@ -45,9 +45,23 @@ Built for developers who want a fast, local-first AI coding assistant that stays
 
 ### Quick install (latest release)
 
+**Linux / macOS:**
+
 ```bash
 curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | bash
 ```
+
+**Windows (PowerShell):**
+
+```powershell
+irm https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.ps1 | iex
+```
+
+Installs to `%LOCALAPPDATA%\Programs\dcode-ai` and adds it to your user PATH.
+Pin a version with `$env:DCODE_AI_VERSION = "vX.Y.Z"` first; override the
+directory with `$env:DCODE_AI_INSTALL_DIR`. The `search_code` tool uses
+ripgrep — install it with `winget install BurntSushi.ripgrep.MSVC` if you
+don't have it.
 
 ### Pin a specific version
 

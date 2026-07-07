@@ -121,8 +121,7 @@ impl AuthStore {
 }
 
 pub fn auth_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
+    crate::config::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".dcode-ai")
         .join("auth.json")

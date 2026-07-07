@@ -57,10 +57,8 @@ impl ToolExecutor for RunValidationTool {
             }
         };
 
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-lc")
-            .arg(command)
-            .current_dir(&canonical_cwd)
+        let mut cmd = dcode_ai_common::provider_runtime::system_shell_command(command);
+        cmd.current_dir(&canonical_cwd)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 

@@ -64,7 +64,7 @@ pub fn apply_workspace_sandbox(
 
 /// Expand a leading `~` to `$HOME` in configured writable roots.
 pub fn expand_writable_roots(roots: &[String]) -> Vec<std::path::PathBuf> {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    let home = dcode_ai_common::config::home_dir();
     roots
         .iter()
         .filter_map(|raw| {

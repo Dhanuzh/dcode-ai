@@ -529,10 +529,7 @@ fn load_dotenv() {
 
 /// Path for the rolling tracing log used while the TUI owns the terminal.
 fn tracing_log_path() -> std::path::PathBuf {
-    let base = std::env::var_os("HOME")
-        .map(std::path::PathBuf::from)
-        .map(|h| h.join(".dcode-ai"))
-        .unwrap_or_else(std::env::temp_dir);
+    let base = dcode_ai_common::config::dcode_ai_home_dir().unwrap_or_else(std::env::temp_dir);
     let _ = std::fs::create_dir_all(&base);
     base.join("dcode-ai.log")
 }

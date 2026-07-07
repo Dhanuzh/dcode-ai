@@ -41,6 +41,27 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # Windows: clippy + tests on the real target so Unix-isms can't regress.
+  check-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install ripgrep (search tool dependency)
+        run: choco install ripgrep -y
+
+      - name: Clippy
+        run: cargo clippy --workspace -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
   supply-chain:
     runs-on: ubuntu-latest
     steps:

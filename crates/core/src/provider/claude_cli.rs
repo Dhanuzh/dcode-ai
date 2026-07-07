@@ -4,7 +4,6 @@ use dcode_ai_common::config::{AnthropicConfig, DcodeAiConfig};
 use dcode_ai_common::message::{Message, Role};
 use dcode_ai_common::provider_runtime::has_claude_cli;
 use dcode_ai_common::tool::ToolDefinition;
-use tokio::process::Command;
 
 use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk};
 
@@ -93,7 +92,8 @@ async fn run_claude_once(
     workspace_root: &Path,
     model: Option<&str>,
 ) -> Result<(String, u64, u64), ProviderError> {
-    let mut cmd = Command::new("claude");
+    // `claude` is an npm .cmd shim on Windows; route through the compat helper.
+    let mut cmd = dcode_ai_common::provider_runtime::windows_compat_command_tokio("claude");
     cmd.arg("-p")
         .arg("--output-format")
         .arg("json")

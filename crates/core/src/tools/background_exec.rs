@@ -109,9 +109,7 @@ For commands you need the result of right now, use the normal blocking shell too
                     // progress live (like Codex's background terminals) instead
                     // of only appearing once the process exits. `kill_on_drop`
                     // ensures `stop` (which aborts this task) also kills the child.
-                    let spawned = tokio::process::Command::new("sh")
-                        .arg("-c")
-                        .arg(&cmd_str)
+                    let spawned = dcode_ai_common::provider_runtime::system_shell_command(&cmd_str)
                         .current_dir(&ws)
                         .stdout(Stdio::piped())
                         .stderr(Stdio::piped())

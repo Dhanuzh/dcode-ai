@@ -437,13 +437,23 @@ impl UiConfig {
     }
 }
 
-pub fn global_config_path() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".dcode-ai/config.toml"))
+/// The user's home directory: `$HOME`, falling back to `%USERPROFILE%` —
+/// Windows shells don't set `HOME`, which used to break every `~/.dcode-ai`
+/// path there.
+pub fn home_dir() -> Option<PathBuf> {
+    env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .or_else(|| env::var_os("USERPROFILE").filter(|v| !v.is_empty()))
+        .map(PathBuf::from)
 }
 
-/// `$HOME/.dcode-ai` when `HOME` is set.
+pub fn global_config_path() -> Option<PathBuf> {
+    home_dir().map(|home| home.join(".dcode-ai/config.toml"))
+}
+
+/// `~/.dcode-ai` when the home directory is known.
 pub fn dcode_ai_home_dir() -> Option<PathBuf> {
-    env::var_os("HOME").map(|home| PathBuf::from(home).join(".dcode-ai"))
+    home_dir().map(|home| home.join(".dcode-ai"))
 }
 
 /// Stable per-workspace id: `{slug}-{hex}` derived from the canonical workspace path.

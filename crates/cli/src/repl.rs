@@ -451,9 +451,7 @@ impl Repl {
         let handle = tokio::spawn(async move {
             // Stream stdout/stderr live so `/ps` reflects progress instead of
             // staying empty until the process exits.
-            let spawned = tokio::process::Command::new("sh")
-                .arg("-c")
-                .arg(&cmd_str)
+            let spawned = dcode_ai_common::provider_runtime::system_shell_command(&cmd_str)
                 .current_dir(&ws)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -667,9 +665,7 @@ impl Repl {
 
         eprintln!("[bash] {cmd}");
 
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(cmd)
+        let output = dcode_ai_common::provider_runtime::system_shell_command(cmd)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -705,9 +701,11 @@ impl Repl {
         let temp_path = std::env::temp_dir().join(&temp_file);
         std::fs::write(&temp_path, seed.unwrap_or("")).ok()?;
 
-        let output = Command::new("sh")
-            .arg("-c")
-            .arg(format!("{} '{}'", editor_cmd, temp_path.display()))
+        #[cfg(windows)]
+        let editor_line = format!("{} \"{}\"", editor_cmd, temp_path.display());
+        #[cfg(not(windows))]
+        let editor_line = format!("{} '{}'", editor_cmd, temp_path.display());
+        let output = dcode_ai_common::provider_runtime::system_shell_command(&editor_line)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output()
@@ -1560,9 +1558,7 @@ for f in $(git ls-files --others --exclude-standard 2>/dev/null); do \
   echo \"diff --git a/$f b/$f\"; echo \"new file\"; echo \"--- /dev/null\"; echo \"+++ b/$f\"; \
   sed 's/^/+/' \"$f\" 2>/dev/null; \
 done";
-                let output = Command::new("sh")
-                    .arg("-c")
-                    .arg(script)
+                let output = dcode_ai_common::provider_runtime::system_shell_command(script)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output()
