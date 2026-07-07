@@ -2830,7 +2830,26 @@ done";
                                     );
                                 }
                             } else {
-                                out.println("usage: /apikey <provider> <secret>");
+                                out.println("usage: /apikey <provider> <secret|remove>");
+                            }
+                        } else if matches!(key, "remove" | "clear" | "unset") {
+                            // Clear both the credentials store and any inline
+                            // plaintext key left in config.
+                            let mut cfg = self.runtime.config().clone();
+                            let env_name = cfg.provider.api_key_env_for(p).to_string();
+                            match dcode_ai_common::credentials::remove(&env_name) {
+                                Ok(removed) => {
+                                    cfg.set_provider_api_key(p, "");
+                                    let _ = cfg.save_global();
+                                    let _ = self.runtime.apply_dcode_ai_config(cfg);
+                                    out.println(&format!(
+                                        "[apikey] {} for {} (env var {} still applies if set)",
+                                        if removed { "removed" } else { "nothing stored" },
+                                        p.display_name(),
+                                        env_name
+                                    ));
+                                }
+                                Err(e) => out.eprintln(&format!("[apikey] remove failed: {e}")),
                             }
                         } else {
                             self.save_provider_api_key(p, key, out).await?;

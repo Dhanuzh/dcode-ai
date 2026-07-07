@@ -194,6 +194,7 @@ impl Supervisor {
         let pty = Arc::new(PtyManager::with_sandbox(
             &workspace_root,
             config.permissions.sandbox_bash,
+            crate::sandbox::expand_writable_roots(&config.permissions.sandbox_writable_roots),
         ));
         // RuntimeBashTool is registered after event_tx is created (below)
         // so it can stream ToolOutputDelta events.

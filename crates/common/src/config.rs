@@ -1045,6 +1045,10 @@ pub struct PermissionConfig {
     /// kernels without Landlock. Off by default.
     #[serde(default)]
     pub sandbox_bash: bool,
+    /// Extra directories writable inside the bash sandbox (e.g. "~/.cargo"
+    /// so `cargo build` can use its registry cache). `~` expands to $HOME.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandbox_writable_roots: Vec<String>,
 }
 
 impl Default for PermissionConfig {
@@ -1056,6 +1060,7 @@ impl Default for PermissionConfig {
             ask: Vec::new(),
             startup_approve_all: true,
             sandbox_bash: false,
+            sandbox_writable_roots: Vec::new(),
         }
     }
 }
@@ -1079,6 +1084,9 @@ impl PermissionConfig {
         }
         if let Some(sandbox_bash) = partial.sandbox_bash {
             self.sandbox_bash = sandbox_bash;
+        }
+        if let Some(sandbox_writable_roots) = partial.sandbox_writable_roots {
+            self.sandbox_writable_roots = sandbox_writable_roots;
         }
     }
 }
@@ -1525,6 +1533,7 @@ struct PartialPermissionConfig {
     ask: Option<Vec<String>>,
     startup_approve_all: Option<bool>,
     sandbox_bash: Option<bool>,
+    sandbox_writable_roots: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

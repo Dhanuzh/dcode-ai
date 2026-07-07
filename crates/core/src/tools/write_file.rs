@@ -93,12 +93,20 @@ impl ToolExecutor for WriteFileTool {
             };
         }
 
-        if self.freshness.check(&full_path) == Freshness::StaleExternalEdit {
+        // Freshness is keyed by canonical path (read_file notes it that way);
+        // resolve through the canonical parent so `./`/symlinked spellings of
+        // the same file can't dodge the stale check.
+        let canonical_target = full_path
+            .file_name()
+            .map(|name| canonical_parent.join(name))
+            .unwrap_or_else(|| full_path.clone());
+
+        if self.freshness.check(&canonical_target) == Freshness::StaleExternalEdit {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,
                 output: String::new(),
-                error: Some(FileFreshness::stale_error(&full_path)),
+                error: Some(FileFreshness::stale_error(&canonical_target)),
             };
         }
 
@@ -108,7 +116,7 @@ impl ToolExecutor for WriteFileTool {
 
         match tokio::fs::write(&full_path, content).await {
             Ok(()) => {
-                self.freshness.note(&full_path);
+                self.freshness.note(&canonical_target);
                 let diff = format_diff(&old, content);
                 // Keep output machine- and human-friendly. The CLI can render this as-is.
                 let output = if diff.trim().is_empty() {

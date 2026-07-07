@@ -10,7 +10,10 @@
 //! ships its Linux sandbox.
 
 #[cfg(target_os = "linux")]
-pub fn apply_workspace_sandbox(workspace_root: &std::path::Path) -> std::io::Result<()> {
+pub fn apply_workspace_sandbox(
+    workspace_root: &std::path::Path,
+    extra_writable: &[std::path::PathBuf],
+) -> std::io::Result<()> {
     use landlock::{
         ABI, Access, AccessFs, CompatLevel, Compatible, Ruleset, RulesetAttr, RulesetCreatedAttr,
         path_beneath_rules,
@@ -30,6 +33,7 @@ pub fn apply_workspace_sandbox(workspace_root: &std::path::Path) -> std::io::Res
         std::path::PathBuf::from("/proc/self"),
     ]
     .into_iter()
+    .chain(extra_writable.iter().cloned())
     .filter(|p| p.exists())
     .collect();
 
@@ -49,10 +53,34 @@ pub fn apply_workspace_sandbox(workspace_root: &std::path::Path) -> std::io::Res
 }
 
 #[cfg(not(target_os = "linux"))]
-pub fn apply_workspace_sandbox(_workspace_root: &std::path::Path) -> std::io::Result<()> {
+pub fn apply_workspace_sandbox(
+    _workspace_root: &std::path::Path,
+    _extra_writable: &[std::path::PathBuf],
+) -> std::io::Result<()> {
     // No kernel sandbox on this platform yet (macOS seatbelt / Windows
     // AppContainer are future work). The config flag is Linux-only.
     Ok(())
+}
+
+/// Expand a leading `~` to `$HOME` in configured writable roots.
+pub fn expand_writable_roots(roots: &[String]) -> Vec<std::path::PathBuf> {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+    roots
+        .iter()
+        .filter_map(|raw| {
+            let raw = raw.trim();
+            if raw.is_empty() {
+                return None;
+            }
+            if let Some(rest) = raw.strip_prefix("~/") {
+                return home.as_ref().map(|h| h.join(rest));
+            }
+            if raw == "~" {
+                return home.clone();
+            }
+            Some(std::path::PathBuf::from(raw))
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -92,7 +120,7 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(script);
         unsafe {
-            cmd.pre_exec(move || super::apply_workspace_sandbox(&ws));
+            cmd.pre_exec(move || super::apply_workspace_sandbox(&ws, &[]));
         }
         let status = cmd.status().expect("spawn sandboxed child");
 

@@ -11,17 +11,25 @@ pub struct PtyManager {
     /// Landlock-confine children (Linux): writes only beneath the workspace
     /// and scratch dirs. Set from `[permissions] sandbox_bash`.
     sandbox: bool,
+    /// Extra writable roots inside the sandbox (already tilde-expanded),
+    /// from `[permissions] sandbox_writable_roots`.
+    sandbox_writable_roots: Vec<std::path::PathBuf>,
 }
 
 impl PtyManager {
     pub fn new(workspace_root: impl AsRef<Path>) -> Self {
-        Self::with_sandbox(workspace_root, false)
+        Self::with_sandbox(workspace_root, false, Vec::new())
     }
 
-    pub fn with_sandbox(workspace_root: impl AsRef<Path>, sandbox: bool) -> Self {
+    pub fn with_sandbox(
+        workspace_root: impl AsRef<Path>,
+        sandbox: bool,
+        sandbox_writable_roots: Vec<std::path::PathBuf>,
+    ) -> Self {
         Self {
             workspace_root: workspace_root.as_ref().to_path_buf(),
             sandbox,
+            sandbox_writable_roots,
         }
     }
 
@@ -57,9 +65,10 @@ impl PtyManager {
         #[cfg(unix)]
         if self.sandbox {
             let ws = effective_root.clone();
+            let extra = self.sandbox_writable_roots.clone();
             // Applied between fork and exec: confines only the child.
             unsafe {
-                cmd.pre_exec(move || crate::sandbox::apply_workspace_sandbox(&ws));
+                cmd.pre_exec(move || crate::sandbox::apply_workspace_sandbox(&ws, &extra));
             }
         }
 
