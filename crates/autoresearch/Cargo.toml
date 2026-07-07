@@ -3,6 +3,7 @@ name = "dcode-ai-autoresearch"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Autonomous research loop for dcode-ai — AI agents running experiments iteratively"
 
 [dependencies]

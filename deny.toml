@@ -4,7 +4,14 @@
 [advisories]
 # RustSec advisory DB: fail the build on known-vulnerable or yanked crates.
 yanked = "deny"
-ignore = []
+ignore = [
+    # bincode 1.x is unmaintained; pulled only by syntect's binary asset
+    # loading (syntax-highlighting themes). No untrusted input flows there.
+    "RUSTSEC-2025-0141",
+    # fxhash is unmaintained; pulled by scraper -> selectors for CSS matching
+    # on fetched HTML. Hashing only; replace when scraper drops it.
+    "RUSTSEC-2025-0057",
+]
 
 [licenses]
 # Allow only OSI-approved/permissive licenses compatible with this MIT crate.

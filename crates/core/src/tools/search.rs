@@ -97,6 +97,13 @@ fn trimmed_line_text(value: &Value) -> String {
 }
 
 fn normalize_result_path(path: String) -> String {
+    // Normalize Windows separators so results look the same on every
+    // platform (and match the workspace-relative paths tools expect).
+    let path = if cfg!(windows) {
+        path.replace('\\', "/")
+    } else {
+        path
+    };
     if path == "." {
         path
     } else {

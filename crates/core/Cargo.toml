@@ -3,6 +3,7 @@ name = "dcode-ai-core"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Agent loop, provider abstraction, tool protocol, and approval policy"
 
 [dependencies]

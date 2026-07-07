@@ -3,6 +3,7 @@ name = "dcode-ai-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Interactive TUI shell and CLI entrypoint for dcode-ai"
 
 [[bin]]

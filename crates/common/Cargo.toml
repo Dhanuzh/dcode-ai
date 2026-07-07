@@ -3,6 +3,7 @@ name = "dcode-ai-common"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "Shared types, config schema, and event definitions for dcode-ai"
 
 [dependencies]

@@ -3,6 +3,7 @@ name = "dcode-ai-runtime"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 description = "PTY management, sandboxed process execution, IPC server, and session persistence"
 
 [dependencies]
