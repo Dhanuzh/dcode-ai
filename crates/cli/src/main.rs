@@ -38,6 +38,7 @@ use stream::{StreamMode, spawn_stream_task};
 #[derive(Parser, Debug)]
 #[command(
     name = "dcode-ai",
+    version,
     about = "Native CLI AI - a Rust-powered coding assistant"
 )]
 struct Cli {
