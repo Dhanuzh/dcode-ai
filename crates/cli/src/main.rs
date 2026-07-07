@@ -2409,7 +2409,7 @@ fn default_provider_ready(config: &DcodeAiConfig) -> bool {
                     && store.copilot.is_some())
         }
         ProviderKind::Anthropic => store.anthropic.is_some() || has_claude_cli(),
-        ProviderKind::Antigravity => store.antigravity.is_some(),
+        ProviderKind::Antigravity => store.antigravity.is_some() || store.vertex.is_some(),
         ProviderKind::OpenRouter => false,
         ProviderKind::OpenCodeZen => store.opencodezen_oauth.is_some(),
     }
@@ -2433,7 +2433,9 @@ fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
     let store = AuthStore::load().unwrap_or_default();
     if let Some(pref) = store.preferred_provider {
         match pref {
-            LoggedProvider::Antigravity if store.antigravity.is_some() => {
+            LoggedProvider::Antigravity
+                if store.antigravity.is_some() || store.vertex.is_some() =>
+            {
                 config.set_default_provider(ProviderKind::Antigravity);
                 if is_copilot_base_url(&config.provider.openai.base_url) {
                     config.provider.openai.base_url = "https://api.openai.com".to_string();
@@ -2487,7 +2489,9 @@ fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
 fn runtime_provider_from_auth(store: &AuthStore) -> Option<ProviderKind> {
     if let Some(pref) = store.preferred_provider {
         match pref {
-            LoggedProvider::Antigravity if store.antigravity.is_some() => {
+            LoggedProvider::Antigravity
+                if store.antigravity.is_some() || store.vertex.is_some() =>
+            {
                 return Some(ProviderKind::Antigravity);
             }
             LoggedProvider::Opencodezen if store.opencodezen_oauth.is_some() => {
@@ -2506,7 +2510,9 @@ fn runtime_provider_from_auth(store: &AuthStore) -> Option<ProviderKind> {
         }
     }
 
-    if store.openai_oauth.is_some() {
+    if store.vertex.is_some() {
+        Some(ProviderKind::Antigravity)
+    } else if store.openai_oauth.is_some() {
         Some(ProviderKind::OpenAi)
     } else if store.antigravity.is_some() {
         Some(ProviderKind::Antigravity)

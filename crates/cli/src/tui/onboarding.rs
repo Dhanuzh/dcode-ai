@@ -135,6 +135,8 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
                                 project_id: project,
                                 location: dcode_ai_common::auth::default_vertex_location(),
                             });
+                            store.preferred_provider =
+                                Some(dcode_ai_common::auth::LoggedProvider::Antigravity);
                             if let Err(e) = store.save() {
                                 status = Some(format!("Failed to save auth: {e}"));
                                 continue;
@@ -149,6 +151,7 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
                             {
                                 config.provider.openai.model = "gemini-2.5-flash".to_string();
                             }
+                            config.sync_default_model_from_provider();
                             config.ui.onboarding_completed = true;
                             if let Err(e) = config.save_global() {
                                 status = Some(format!("Connected, but saving config failed: {e}"));

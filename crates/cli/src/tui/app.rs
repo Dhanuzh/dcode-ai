@@ -3309,9 +3309,13 @@ pub fn run_blocking(
                         (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
                             g.leader_pending = true;
                         }
+                        // Alt+V is the reliable image-paste binding on Windows,
+                        // where the terminal itself owns Ctrl+V (and sends no
+                        // event at all when the clipboard holds only an image).
                         (KeyCode::Char('v'), mods)
-                            if mods.contains(KeyModifiers::CONTROL)
-                                && !mods.contains(KeyModifiers::ALT) =>
+                            if (mods.contains(KeyModifiers::CONTROL)
+                                && !mods.contains(KeyModifiers::ALT))
+                                || mods == KeyModifiers::ALT =>
                         {
                             if g.active_approval.is_some() || g.active_question.is_some() {
                                 continue;

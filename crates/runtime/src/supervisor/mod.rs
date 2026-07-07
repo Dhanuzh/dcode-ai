@@ -138,10 +138,10 @@ impl Supervisor {
     /// Create a new supervised session. This sets up the agent loop, IPC server,
     /// and event channels.
     pub async fn create(cfg: SupervisorConfig) -> Result<Self, ProviderError> {
-        let workspace_root = cfg
-            .workspace_root
-            .canonicalize()
-            .map_err(|e| ProviderError::Configuration(format!("invalid workspace root: {e}")))?;
+        let workspace_root =
+            dcode_ai_common::config::simplify_path(cfg.workspace_root.canonicalize().map_err(
+                |e| ProviderError::Configuration(format!("invalid workspace root: {e}")),
+            )?);
 
         let mut config = cfg.config;
         if cfg.safe_mode {

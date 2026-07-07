@@ -81,10 +81,59 @@ pub fn paste_clipboard_image(
         Err(native_err) => {
             if is_wsl() {
                 paste_clipboard_image_wsl(workspace, session_id)
+            } else if cfg!(windows) {
+                // Some clipboard formats (DIB screenshots) trip arboard on
+                // Windows; System.Windows.Forms handles them all.
+                paste_clipboard_image_powershell(workspace, session_id)
+                    .map_err(|ps_err| format!("{native_err}; {ps_err}"))
             } else {
                 Err(native_err)
             }
         }
+    }
+}
+
+/// Native-Windows fallback: save the clipboard image via PowerShell
+/// (GetImage needs an STA apartment).
+fn paste_clipboard_image_powershell(
+    workspace: &Path,
+    session_id: &str,
+) -> Result<ImageAttachment, String> {
+    let filename = nanos_name("paste", "png");
+    let dir = session_attachments_dir(workspace, session_id);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create attachments dir: {e}"))?;
+    let dest = dir.join(&filename);
+
+    let script = format!(
+        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
+         $img=[System.Windows.Forms.Clipboard]::GetImage(); \
+         if($img -eq $null){{exit 2}}; \
+         $img.Save('{}',[System.Drawing.Imaging.ImageFormat]::Png); exit 0",
+        dest.display().to_string().replace('\'', "''")
+    );
+    let out = std::process::Command::new("powershell")
+        .args(["-NoProfile", "-STA", "-Command", &script])
+        .output()
+        .map_err(|e| format!("powershell unavailable: {e}"))?;
+
+    if dest.is_file()
+        && std::fs::metadata(&dest)
+            .map(|m| m.len() > 0)
+            .unwrap_or(false)
+    {
+        return Ok(ImageAttachment {
+            media_type: "image/png".into(),
+            path: relative_attachment_path(session_id, &filename),
+        });
+    }
+    let _ = std::fs::remove_file(&dest);
+    if out.status.code() == Some(2) {
+        Err("clipboard has no image — copy an image first, or use /image <path>".into())
+    } else {
+        Err(format!(
+            "powershell clipboard read failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ))
     }
 }
 

@@ -53,6 +53,28 @@ Response style:
 "#;
 
 /// Build the layered system prompt from built-in + AGENTS.md + project + local instructions.
+/// Platform facts the model must know before writing shell commands: on
+/// Windows `execute_bash` runs through `cmd /C`, so Unix-isms (`ls`, pipes to
+/// `grep`, `$VARS`) fail there.
+fn environment_section(workspace_root: &Path) -> String {
+    let (os, shell, hint) = if cfg!(windows) {
+        (
+            "Windows",
+            "cmd.exe (`cmd /C`)",
+            "\n- Use Windows commands: `dir` not `ls`, `type` not `cat`, `findstr` not `grep`, \
+             `%VAR%` not `$VAR`. PowerShell is available via `powershell -Command \"...\"`.",
+        )
+    } else if cfg!(target_os = "macos") {
+        ("macOS", "sh", "")
+    } else {
+        ("Linux", "sh", "")
+    };
+    format!(
+        "Environment:\n- OS: {os}\n- Shell for execute_bash: {shell}{hint}\n- Workspace: {}",
+        workspace_root.display()
+    )
+}
+
 pub fn build_system_prompt(
     config: &DcodeAiConfig,
     workspace_root: &Path,
@@ -62,6 +84,7 @@ pub fn build_system_prompt(
 
     if config.harness.built_in_enabled {
         sections.push(BUILT_IN_SYSTEM_PROMPT.trim().to_string());
+        sections.push(environment_section(workspace_root));
         if let Some(mode_section) = permission_mode_section(config.permissions.mode) {
             sections.push(mode_section);
         }

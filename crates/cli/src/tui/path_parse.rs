@@ -98,8 +98,15 @@ pub(crate) fn parse_candidate_image_path(raw_line: &str) -> Option<PathBuf> {
         return None;
     }
 
+    // `D:\...` is already a usable absolute path on native Windows; the
+    // /mnt/<drive> mapping only applies under WSL.
+    let wsl_mapped = if cfg!(windows) {
+        None
+    } else {
+        windows_drive_path_to_wsl(raw)
+    };
     let mut candidate = normalize_file_url_path(raw)
-        .or_else(|| windows_drive_path_to_wsl(raw))
+        .or(wsl_mapped)
         .unwrap_or_else(|| PathBuf::from(unescape_shell_path(raw)));
     if !looks_like_image_path(&candidate) {
         return None;

@@ -882,6 +882,7 @@ impl Repl {
             project_id: project.clone(),
             location: location.clone(),
         });
+        store.preferred_provider = Some(dcode_ai_common::auth::LoggedProvider::Antigravity);
         if let Err(e) = store.save() {
             out.eprintln(&format!("[vertex] failed to save auth: {e}"));
             return Ok(());

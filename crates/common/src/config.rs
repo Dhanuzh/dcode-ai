@@ -437,6 +437,20 @@ impl UiConfig {
     }
 }
 
+/// Strip Windows' verbatim prefix (`\\?\C:\…` → `C:\…`) that
+/// `Path::canonicalize` adds there. Verbatim paths confuse users in the UI
+/// and some child processes; plain drive paths are equivalent for our use.
+pub fn simplify_path(path: PathBuf) -> PathBuf {
+    let s = path.as_os_str().to_string_lossy();
+    if let Some(rest) = s.strip_prefix(r"\\?\") {
+        if let Some(unc) = rest.strip_prefix(r"UNC\") {
+            return PathBuf::from(format!(r"\\{unc}"));
+        }
+        return PathBuf::from(rest.to_string());
+    }
+    path
+}
+
 /// The user's home directory: `$HOME`, falling back to `%USERPROFILE%` —
 /// Windows shells don't set `HOME`, which used to break every `~/.dcode-ai`
 /// path there.
