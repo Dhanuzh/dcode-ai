@@ -69,10 +69,23 @@ if (-not $installDir) {
     $installDir = Join-Path $env:LOCALAPPDATA "Programs\dcode-ai"
 }
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+
+# A running dcode-ai locks its exe; Windows still allows renaming it, so
+# move the old binary aside instead of failing the upgrade.
+$exe = Join-Path $installDir "$Binary.exe"
+$old = "$exe.old"
+if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
+if (Test-Path $exe) {
+    try {
+        Move-Item $exe $old -Force
+    } catch {
+        Fail "cannot replace $exe — close running dcode-ai instances and retry"
+    }
+}
+
 Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
 Remove-Item -Recurse -Force $tmp
-
-$exe = Join-Path $installDir "$Binary.exe"
+Remove-Item $old -Force -ErrorAction SilentlyContinue
 if (-not (Test-Path $exe)) {
     Fail "archive did not contain $Binary.exe"
 }
