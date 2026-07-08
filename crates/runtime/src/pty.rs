@@ -198,9 +198,9 @@ impl PtyManager {
 
 #[cfg(windows)]
 fn shell_command(command: &str) -> tokio::process::Command {
-    let mut cmd = tokio::process::Command::new("cmd");
-    cmd.arg("/C").arg(command);
-    cmd
+    // Git Bash → PowerShell → cmd, matching what the system prompt tells the
+    // model (see dcode_ai_common::shell).
+    dcode_ai_common::shell::shell_command(command)
 }
 
 #[cfg(not(windows))]

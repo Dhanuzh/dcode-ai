@@ -1115,8 +1115,25 @@ pub(crate) fn run_transcript_overlay(state: &Arc<Mutex<TuiSessionState>>) -> any
                 );
             })?;
 
-            if poll(Duration::from_millis(200))?
-                && let Event::Key(key) = read()?
+            if !poll(Duration::from_millis(200))? {
+                continue;
+            }
+            let ev = read()?;
+            if let Event::Mouse(m) = &ev {
+                let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+                match m.kind {
+                    MouseEventKind::ScrollUp => {
+                        g.transcript_overlay_scroll = g.transcript_overlay_scroll.saturating_sub(3);
+                    }
+                    MouseEventKind::ScrollDown => {
+                        g.transcript_overlay_scroll =
+                            (g.transcript_overlay_scroll + 3).min(max_scroll);
+                    }
+                    _ => {}
+                }
+                continue;
+            }
+            if let Event::Key(key) = ev
                 && !matches!(key.kind, KeyEventKind::Release)
             {
                 let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;

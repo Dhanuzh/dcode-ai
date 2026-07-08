@@ -25,7 +25,6 @@ reqwest = { workspace = true }
 cli-prompts = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
-ratatui = { version = "0.30", default-features = false, features = ["crossterm", "scrolling-regions"] }
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
 reedline = "0.38"
@@ -48,6 +47,20 @@ rand = "0.8"
 urlencoding = "2"
 url = "2"
 notify-rust = { version = "4", optional = true }
+
+# `scrolling-regions` makes `Terminal::insert_before` flush history via
+# DECSTBM partial-screen scrolls (flicker-free). Windows conhost and Windows
+# Terminal *discard* lines scrolled out of a margin region instead of pushing
+# them into scrollback, so scrolled-up history appeared blank on Windows. The
+# portable fallback (real newlines at the bottom row) reaches the scrollback
+# buffer on every terminal, so Windows builds omit the feature. Requires
+# resolver = "2" (set in the workspace) so the feature isn't unified across
+# targets.
+[target.'cfg(windows)'.dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+
+[target.'cfg(not(windows))'.dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "scrolling-regions"] }
 
 [features]
 desktop-notify = ["notify-rust"]

@@ -30,37 +30,18 @@ pub fn windows_compat_command_tokio(program: &str) -> tokio::process::Command {
     tokio::process::Command::new(program)
 }
 
-/// The platform shell for running a one-liner: `sh -c` on Unix, `cmd /C` on
-/// Windows. Used by hooks, validation, background exec, and inline `!cmd`.
+/// The platform shell for running a one-liner: `sh -c` on Unix; on Windows
+/// the best available shell (Git Bash → PowerShell → cmd, see
+/// [`crate::shell`]). Used by hooks, validation, background exec, and inline
+/// `!cmd`, so every command the agent or user runs goes through the same
+/// shell the system prompt describes.
 pub fn system_shell_command(command_line: &str) -> tokio::process::Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = tokio::process::Command::new("cmd");
-        cmd.arg("/C").arg(command_line);
-        cmd
-    }
-    #[cfg(not(windows))]
-    {
-        let mut cmd = tokio::process::Command::new("sh");
-        cmd.arg("-c").arg(command_line);
-        cmd
-    }
+    crate::shell::shell_command(command_line)
 }
 
 /// Blocking flavor of [`system_shell_command`].
 pub fn system_shell_command_blocking(command_line: &str) -> std::process::Command {
-    #[cfg(windows)]
-    {
-        let mut cmd = std::process::Command::new("cmd");
-        cmd.arg("/C").arg(command_line);
-        cmd
-    }
-    #[cfg(not(windows))]
-    {
-        let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c").arg(command_line);
-        cmd
-    }
+    crate::shell::shell_command_blocking(command_line)
 }
 
 /// Whether local `claude` CLI is available in PATH.

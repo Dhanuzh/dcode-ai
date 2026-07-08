@@ -52,26 +52,27 @@ Response style:
 - State important constraints, risks, and verification results plainly.
 "#;
 
-/// Build the layered system prompt from built-in + AGENTS.md + project + local instructions.
-/// Platform facts the model must know before writing shell commands: on
-/// Windows `execute_bash` runs through `cmd /C`, so Unix-isms (`ls`, pipes to
-/// `grep`, `$VARS`) fail there.
+/// Platform facts the model must know before writing shell commands. The
+/// shell is detected at runtime (on Windows: Git Bash → PowerShell → cmd, see
+/// `dcode_ai_common::shell`) so this section always describes what
+/// `execute_bash` actually runs.
 fn environment_section(workspace_root: &Path) -> String {
-    let (os, shell, hint) = if cfg!(windows) {
-        (
-            "Windows",
-            "cmd.exe (`cmd /C`)",
-            "\n- Use Windows commands: `dir` not `ls`, `type` not `cat`, `findstr` not `grep`, \
-             `%VAR%` not `$VAR`. PowerShell is available via `powershell -Command \"...\"`.",
-        )
+    let os = if cfg!(windows) {
+        "Windows"
     } else if cfg!(target_os = "macos") {
-        ("macOS", "sh", "")
+        "macOS"
     } else {
-        ("Linux", "sh", "")
+        "Linux"
     };
+    let shell = dcode_ai_common::shell::workspace_shell();
     format!(
-        "Environment:\n- OS: {os}\n- Shell for execute_bash: {shell}{hint}\n- Workspace: {}",
-        workspace_root.display()
+        "Environment:\n- OS: {os}\n- Shell for execute_bash: {shell_name}{hint}\n\
+         - Never create or edit files through the shell (`echo … > file`, `echo … >> file`, \
+         heredocs, `sed -i`). Always use the write_file / edit_file / apply_patch tools — they \
+         are atomic and encoding-safe; shell redirection is not.\n- Workspace: {ws}",
+        shell_name = shell.display_name(),
+        hint = shell.prompt_hint(),
+        ws = workspace_root.display()
     )
 }
 

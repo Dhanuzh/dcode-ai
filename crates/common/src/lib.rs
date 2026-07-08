@@ -9,4 +9,5 @@ pub mod model_caps;
 pub mod provider_runtime;
 pub mod secrets;
 pub mod session;
+pub mod shell;
 pub mod tool;

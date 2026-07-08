@@ -148,15 +148,25 @@ fn recall_thought_signature(id: &str) -> Option<String> {
     signature_cache().lock().ok()?.get(id).cloned()
 }
 
+/// How this provider authenticates. Chosen at construction from config and
+/// the auth store; the actual token is minted lazily per request so a stale
+/// gcloud ADC or expired OAuth login fails that request with a clear message
+/// instead of crashing startup.
+enum AntigravityAuthMode {
+    /// Explicit API key (tests / advanced setups).
+    InlineKey(String),
+    /// "Use a Google Cloud project": gcloud ADC token, user's own project,
+    /// requests go straight to Vertex AI.
+    Vertex(VertexAuth),
+    /// Antigravity OAuth login (Cloud Code Assist envelope endpoint).
+    OAuth,
+}
+
 pub struct AntigravityProvider {
     client: reqwest::Client,
     config: OpenAiConfig,
-    project_id: String,
     max_tokens: u32,
-    /// When set, requests go straight to Vertex AI in this project/location
-    /// (the "Use a Google Cloud project" login) instead of the Antigravity
-    /// Cloud Code Assist envelope endpoint.
-    vertex: Option<VertexAuth>,
+    auth: AntigravityAuthMode,
 }
 
 impl AntigravityProvider {
@@ -168,40 +178,24 @@ impl AntigravityProvider {
         let auth_store = AuthStore::load().ok().unwrap_or_default();
         // Precedence: an explicit API key (tests / advanced setups; the
         // "local" sentinel from local-model presets doesn't count) beats the
-        // Vertex project login, which beats Antigravity OAuth.
+        // Vertex project login, which beats Antigravity OAuth. No token is
+        // minted here — see `access()`.
         let inline_key = openai.resolve_api_key().filter(|k| k != "local");
-        let (access_token, project_id, vertex) = if let Some(key) = inline_key {
-            (key, ANTIGRAVITY_DEFAULT_PROJECT.to_string(), None)
+        let auth = if let Some(key) = inline_key {
+            AntigravityAuthMode::InlineKey(key)
         } else if let Some(v) = auth_store.vertex.clone() {
-            // "Use a Google Cloud project": ADC token, user's own project.
-            let token = adc_access_token()?;
-            (token, v.project_id.clone(), Some(v))
+            AntigravityAuthMode::Vertex(v)
+        } else if auth_store.antigravity.is_some() {
+            AntigravityAuthMode::OAuth
         } else {
-            let oauth = auth_store.antigravity.ok_or_else(|| {
-                ProviderError::Configuration(
-                    "missing Antigravity login; run `dcode-ai login antigravity` \
-                     (or `/login vertex <project-id>` for a Google Cloud project)"
-                        .to_string(),
-                )
-            })?;
-            let resolved = super::openai::resolve_antigravity_auth(oauth)?;
-            let project = if resolved.project_id.trim().is_empty() {
-                ANTIGRAVITY_DEFAULT_PROJECT.to_string()
-            } else {
-                resolved.project_id.clone()
-            };
-            (resolved.access_token, project, None)
+            return Err(ProviderError::Configuration(
+                "missing Antigravity login; run `dcode-ai login antigravity` \
+                 (or `/login vertex <project-id>` for a Google Cloud project)"
+                    .to_string(),
+            ));
         };
 
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|err| {
-                ProviderError::Configuration(format!(
-                    "failed to build Antigravity authorization header: {err}"
-                ))
-            })?,
-        );
         headers.insert(
             "User-Agent",
             HeaderValue::from_str(&antigravity_user_agent()).map_err(|err| {
@@ -228,10 +222,50 @@ impl AntigravityProvider {
         Ok(Self {
             client,
             config: openai,
-            project_id,
             max_tokens: config.model.max_tokens,
-            vertex,
+            auth,
         })
+    }
+
+    /// Resolve the bearer token, project id, and Vertex target for a request.
+    /// Runs the blocking credential helpers (gcloud subprocess / OAuth refresh)
+    /// off the async runtime. Tokens are cached by the helpers themselves.
+    async fn access(&self) -> Result<(String, String, Option<VertexAuth>), ProviderError> {
+        match &self.auth {
+            AntigravityAuthMode::InlineKey(key) => {
+                Ok((key.clone(), ANTIGRAVITY_DEFAULT_PROJECT.to_string(), None))
+            }
+            AntigravityAuthMode::Vertex(vertex) => {
+                let token = tokio::task::spawn_blocking(adc_access_token)
+                    .await
+                    .map_err(|e| {
+                        ProviderError::RequestFailed(format!("ADC token task failed: {e}"))
+                    })??;
+                Ok((token, vertex.project_id.clone(), Some(vertex.clone())))
+            }
+            AntigravityAuthMode::OAuth => {
+                let resolved = tokio::task::spawn_blocking(|| {
+                    let store = AuthStore::load().ok().unwrap_or_default();
+                    let oauth = store.antigravity.ok_or_else(|| {
+                        ProviderError::Configuration(
+                            "missing Antigravity login; run `dcode-ai login antigravity`"
+                                .to_string(),
+                        )
+                    })?;
+                    super::openai::resolve_antigravity_auth(oauth)
+                })
+                .await
+                .map_err(|e| {
+                    ProviderError::RequestFailed(format!("OAuth refresh task failed: {e}"))
+                })??;
+                let project = if resolved.project_id.trim().is_empty() {
+                    ANTIGRAVITY_DEFAULT_PROJECT.to_string()
+                } else {
+                    resolved.project_id.clone()
+                };
+                Ok((resolved.access_token, project, None))
+            }
+        }
     }
 
     /// Build the inner Gemini `generateContent` request plus the base model
@@ -300,8 +334,18 @@ impl Provider for AntigravityProvider {
             model.to_string()
         };
 
+        // Credentials are resolved per request (cached by the helpers) so a
+        // stale gcloud/OAuth login surfaces here as a request error the user
+        // can fix in-session, not a startup crash.
+        let (access_token, project_id, vertex) = self.access().await?;
+        let bearer = HeaderValue::from_str(&format!("Bearer {access_token}")).map_err(|err| {
+            ProviderError::Configuration(format!(
+                "failed to build Antigravity authorization header: {err}"
+            ))
+        })?;
+
         let (request, base_model) = self.request_parts(messages, tools, &model, workspace_root)?;
-        let (url, body) = if let Some(vertex) = &self.vertex {
+        let (url, body) = if let Some(vertex) = &vertex {
             // Direct Vertex AI call: plain generateContent body, project and
             // model addressed in the URL, billed to the user's GCP project.
             (vertex_endpoint(vertex, &base_model), request)
@@ -309,7 +353,7 @@ impl Provider for AntigravityProvider {
             (
                 ANTIGRAVITY_ENDPOINT.to_string(),
                 json!({
-                    "project": self.project_id,
+                    "project": project_id,
                     "model": base_model,
                     "request": request,
                     "requestType": "agent",
@@ -323,6 +367,7 @@ impl Provider for AntigravityProvider {
             let resp = self
                 .client
                 .post(&url)
+                .header(AUTHORIZATION, bearer.clone())
                 .header(ACCEPT, "text/event-stream")
                 .json(&body)
                 .send()

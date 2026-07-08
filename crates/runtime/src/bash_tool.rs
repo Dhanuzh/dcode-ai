@@ -34,19 +34,23 @@ impl RuntimeBashTool {
 #[async_trait::async_trait]
 impl ToolExecutor for RuntimeBashTool {
     fn definition(&self) -> ToolDefinition {
+        let shell = dcode_ai_common::shell::workspace_shell();
         ToolDefinition {
             name: "execute_bash".into(),
-            description: "Execute a NON-INTERACTIVE shell command in the workspace. Stdin is \
+            description: format!(
+                "Execute a NON-INTERACTIVE command in the workspace via {shell_name}. Stdin is \
 detached, so any command that prompts for input — a `sudo` password, a `[y/N]` confirmation, an \
 installer wizard, a REPL — will fail or time out here. For those, use the `interactive_exec` \
-tool instead (it runs in a real PTY and lets the user answer prompts)."
-                .into(),
+tool instead (it runs in a real PTY and lets the user answer prompts). Do NOT create or modify \
+files with this tool (no `echo … >> file` or heredocs) — use write_file / edit_file instead.",
+                shell_name = shell.display_name()
+            ),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "Shell command to execute"
+                        "description": format!("Command to execute ({} syntax)", shell.display_name())
                     },
                     "timeout_secs": {
                         "type": "integer",
@@ -102,6 +106,15 @@ password or confirmation). Re-run it with the `interactive_exec` tool, which run
 terminal and lets you answer prompts.",
                     );
                 }
+                // Steer models away from building files line-by-line with echo
+                // redirection (slow, encoding-hostile, and easy to corrupt).
+                if writes_file_via_redirection(command) {
+                    output.push_str(
+                        "\n\n[hint] Do not write file contents through shell redirection. Use \
+the `write_file` tool to create the whole file in one call (or `edit_file` to change part of \
+it).",
+                    );
+                }
                 ToolResult {
                     call_id: call.id.clone(),
                     success,
@@ -117,6 +130,26 @@ terminal and lets you answer prompts.",
             },
         }
     }
+}
+
+/// Heuristic: is this an `echo`/`printf`/`type`/`Add-Content`-style command
+/// that writes file contents via redirection? Those should go through the
+/// write_file/edit_file tools instead.
+fn writes_file_via_redirection(command: &str) -> bool {
+    let trimmed = command.trim_start();
+    let lower = trimmed.to_ascii_lowercase();
+    let starts_with_writer = [
+        "echo ",
+        "echo.",
+        "printf ",
+        "cat ",
+        "type ",
+        "add-content ",
+        "set-content ",
+    ]
+    .iter()
+    .any(|p| lower.starts_with(p));
+    starts_with_writer && (trimmed.contains(">>") || trimmed.contains('>'))
 }
 
 /// Heuristic: does this command output indicate it failed because it needed an

@@ -930,17 +930,16 @@ async fn try_main() -> anyhow::Result<()> {
                     } else {
                         Some(InteractiveIpcApprovalHandler::new())
                     };
-                    let mut runtime = build_session_runtime(
-                        config.clone(),
+                    let mut runtime = build_interactive_runtime_or_pick_provider(
+                        &mut config,
                         &workspace_root,
                         cli.safe,
-                        true,
                         cli.session_id,
                         approval_handler,
                         orchestration_context.clone(),
+                        use_tui,
                     )
-                    .await
-                    .map_err(anyhow::Error::msg)?;
+                    .await?;
                     if !use_tui && let Some(rx) = runtime.take_event_rx() {
                         let ipc_handle = runtime.take_ipc_handle();
                         let approval_pending = runtime.take_ipc_approval_pending();
@@ -978,17 +977,16 @@ async fn try_main() -> anyhow::Result<()> {
                     } else {
                         Some(InteractiveIpcApprovalHandler::new())
                     };
-                    let mut runtime = build_session_runtime(
-                        config.clone(),
+                    let mut runtime = build_interactive_runtime_or_pick_provider(
+                        &mut config,
                         &workspace_root,
                         cli.safe,
-                        true,
                         cli.session_id,
                         approval_handler,
                         orchestration_context.clone(),
+                        use_tui,
                     )
-                    .await
-                    .map_err(anyhow::Error::msg)?;
+                    .await?;
                     if !use_tui && let Some(rx) = runtime.take_event_rx() {
                         let ipc_handle = runtime.take_ipc_handle();
                         let approval_pending = runtime.take_ipc_approval_pending();
@@ -1014,6 +1012,54 @@ async fn try_main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+/// Build the interactive session runtime. When the configured provider can't
+/// be constructed (missing or stale credentials — e.g. an expired gcloud ADC
+/// login), fall back to the provider picker instead of exiting so the user can
+/// choose any provider, then retry once with the updated config.
+#[allow(clippy::too_many_arguments)]
+async fn build_interactive_runtime_or_pick_provider(
+    config: &mut DcodeAiConfig,
+    workspace_root: &Path,
+    safe: bool,
+    session_id: Option<String>,
+    approval_handler: Option<std::sync::Arc<dyn dcode_ai_core::approval::ApprovalHandler>>,
+    orchestration_context: Option<OrchestrationContext>,
+    onboarding_ui: bool,
+) -> anyhow::Result<runner::SessionRuntime> {
+    use dcode_ai_core::provider::ProviderError;
+
+    let first = build_session_runtime(
+        config.clone(),
+        workspace_root,
+        safe,
+        true,
+        session_id.clone(),
+        approval_handler.clone(),
+        orchestration_context.clone(),
+    )
+    .await;
+    match first {
+        Ok(runtime) => Ok(runtime),
+        Err(err @ ProviderError::Configuration(_)) if onboarding_ui => {
+            eprintln!("{err}");
+            eprintln!("The configured provider is not ready — pick a provider to continue.");
+            *config = crate::tui::onboarding::run_onboarding(config.clone()).await?;
+            build_session_runtime(
+                config.clone(),
+                workspace_root,
+                safe,
+                true,
+                session_id,
+                approval_handler,
+                orchestration_context,
+            )
+            .await
+            .map_err(anyhow::Error::msg)
+        }
+        Err(err) => Err(anyhow::Error::msg(err)),
+    }
 }
 
 struct OneShotOptions {
