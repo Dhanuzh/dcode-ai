@@ -35,7 +35,7 @@ impl ToolExecutor for CopyPathTool {
         let from_path = self.workspace_root.join(from);
         let to_path = self.workspace_root.join(to);
 
-        let canonical_from = match from_path.canonicalize() {
+        let canonical_from = match dcode_ai_common::config::canonicalize_simplified(&from_path) {
             Ok(path) if path.starts_with(&self.workspace_root) => path,
             _ => {
                 return ToolResult {
@@ -56,7 +56,7 @@ impl ToolExecutor for CopyPathTool {
                     error: Some(format!("Failed to create destination directory: {err}")),
                 };
             }
-            match parent.canonicalize() {
+            match dcode_ai_common::config::canonicalize_simplified(parent) {
                 Ok(path) if path.starts_with(&self.workspace_root) => {}
                 _ => {
                     return ToolResult {

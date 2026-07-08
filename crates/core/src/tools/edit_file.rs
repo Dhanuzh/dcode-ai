@@ -55,12 +55,10 @@ impl ToolExecutor for EditFileTool {
         let new_text = call.input["new_text"].as_str().unwrap_or("");
         let replace_all = call.input["replace_all"].as_bool().unwrap_or(false);
 
-        let workspace_root = self
-            .workspace_root
-            .canonicalize()
+        let workspace_root = dcode_ai_common::config::canonicalize_simplified(&self.workspace_root)
             .unwrap_or_else(|_| self.workspace_root.clone());
         let full_path = self.workspace_root.join(path);
-        let canonical = match full_path.canonicalize() {
+        let canonical = match dcode_ai_common::config::canonicalize_simplified(&full_path) {
             Ok(canonical) if canonical.starts_with(&workspace_root) => canonical,
             _ => {
                 return ToolResult {
@@ -209,7 +207,7 @@ mod tests {
         std::fs::write(&path, "alpha\n").unwrap();
 
         let fresh = FileFreshness::new();
-        let canonical = path.canonicalize().unwrap();
+        let canonical = dcode_ai_common::config::canonicalize_simplified(&path).unwrap();
         fresh.note(&canonical);
 
         // External edit with a strictly newer mtime.

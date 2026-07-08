@@ -58,12 +58,10 @@ fn relative_search_root(workspace_root: &Path, scope: Option<&str>) -> Result<St
         return Ok(".".into());
     };
 
-    let canonical_root = workspace_root
-        .canonicalize()
+    let canonical_root = dcode_ai_common::config::canonicalize_simplified(workspace_root)
         .unwrap_or_else(|_| workspace_root.to_path_buf());
     let candidate = workspace_root.join(scope);
-    let canonical = candidate
-        .canonicalize()
+    let canonical = dcode_ai_common::config::canonicalize_simplified(&candidate)
         .map_err(|err| format!("Failed to resolve search path '{scope}': {err}"))?;
     if !canonical.starts_with(&canonical_root) {
         return Err("Search path is outside the workspace".into());

@@ -219,6 +219,16 @@ mod tests {
     }
 
     #[test]
+    fn drive_paths_stay_native_on_windows_and_map_under_wsl() {
+        let parsed =
+            parse_candidate_image_path(r"D:\shots\a.png").expect("drive path should parse");
+        #[cfg(windows)]
+        assert_eq!(parsed.to_string_lossy(), r"D:\shots\a.png");
+        #[cfg(not(windows))]
+        assert_eq!(parsed.to_string_lossy(), "/mnt/d/shots/a.png");
+    }
+
+    #[test]
     fn parse_candidate_image_path_ignores_non_image_text() {
         assert!(parse_candidate_image_path("just some notes").is_none());
         assert!(parse_candidate_image_path("README.md").is_none());

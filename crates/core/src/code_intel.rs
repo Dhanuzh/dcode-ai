@@ -77,8 +77,7 @@ impl FastLocalCodeIntel {
     }
 
     fn canonical_workspace(&self) -> PathBuf {
-        self.workspace_root
-            .canonicalize()
+        dcode_ai_common::config::canonicalize_simplified(&self.workspace_root)
             .unwrap_or_else(|_| self.workspace_root.clone())
     }
 
@@ -541,8 +540,7 @@ impl LspSession {
             stdin,
             stdout: BufReader::new(stdout),
             next_id: 1,
-            workspace_root: workspace_root
-                .canonicalize()
+            workspace_root: dcode_ai_common::config::canonicalize_simplified(workspace_root)
                 .unwrap_or_else(|_| workspace_root.to_path_buf()),
         };
         session.initialize().await?;
@@ -872,8 +870,7 @@ fn collect_diagnostic_files(
 ) -> Result<Vec<PathBuf>, CodeIntelError> {
     let mut files = Vec::new();
     collect_rust_files(
-        &workspace_root
-            .canonicalize()
+        &dcode_ai_common::config::canonicalize_simplified(workspace_root)
             .unwrap_or_else(|_| workspace_root.to_path_buf()),
         glob,
         limit,

@@ -27,12 +27,10 @@ fn canonicalize_workspace_path(
     workspace_root: &std::path::Path,
     path: &str,
 ) -> Result<PathBuf, String> {
-    let canonical_root = workspace_root
-        .canonicalize()
+    let canonical_root = dcode_ai_common::config::canonicalize_simplified(workspace_root)
         .unwrap_or_else(|_| workspace_root.to_path_buf());
     let full_path = workspace_root.join(path);
-    let canonical = full_path
-        .canonicalize()
+    let canonical = dcode_ai_common::config::canonicalize_simplified(&full_path)
         .map_err(|err| format!("Failed to resolve path '{path}': {err}"))?;
     if canonical.starts_with(&canonical_root) {
         Ok(canonical)

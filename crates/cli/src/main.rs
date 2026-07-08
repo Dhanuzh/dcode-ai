@@ -1281,8 +1281,7 @@ fn collect_worktree_entries(workspace_root: &Path) -> anyhow::Result<Vec<Worktre
     if !manager.is_git_repo() {
         anyhow::bail!(
             "not a git repository: {}",
-            workspace_root
-                .canonicalize()
+            dcode_ai_common::config::canonicalize_simplified(workspace_root)
                 .unwrap_or_else(|_| workspace_root.to_path_buf())
                 .display()
         );
@@ -1330,8 +1329,7 @@ fn prune_worktrees(workspace_root: &Path, json: bool) -> anyhow::Result<()> {
     if !manager.is_git_repo() {
         anyhow::bail!(
             "not a git repository: {}",
-            workspace_root
-                .canonicalize()
+            dcode_ai_common::config::canonicalize_simplified(workspace_root)
                 .unwrap_or_else(|_| workspace_root.to_path_buf())
                 .display()
         );
@@ -1369,8 +1367,7 @@ fn merge_worktree(
     if !manager.is_git_repo() {
         anyhow::bail!(
             "not a git repository: {}",
-            workspace_root
-                .canonicalize()
+            dcode_ai_common::config::canonicalize_simplified(workspace_root)
                 .unwrap_or_else(|_| workspace_root.to_path_buf())
                 .display()
         );

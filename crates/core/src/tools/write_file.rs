@@ -72,7 +72,7 @@ impl ToolExecutor for WriteFileTool {
             };
         }
 
-        let canonical_parent = match parent.canonicalize() {
+        let canonical_parent = match dcode_ai_common::config::canonicalize_simplified(parent) {
             Ok(path) => path,
             Err(err) => {
                 return ToolResult {

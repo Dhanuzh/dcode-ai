@@ -138,10 +138,11 @@ impl Supervisor {
     /// Create a new supervised session. This sets up the agent loop, IPC server,
     /// and event channels.
     pub async fn create(cfg: SupervisorConfig) -> Result<Self, ProviderError> {
-        let workspace_root =
-            dcode_ai_common::config::simplify_path(cfg.workspace_root.canonicalize().map_err(
-                |e| ProviderError::Configuration(format!("invalid workspace root: {e}")),
-            )?);
+        let workspace_root = dcode_ai_common::config::simplify_path(
+            dcode_ai_common::config::canonicalize_simplified(&cfg.workspace_root).map_err(|e| {
+                ProviderError::Configuration(format!("invalid workspace root: {e}"))
+            })?,
+        );
 
         let mut config = cfg.config;
         if cfg.safe_mode {
@@ -245,12 +246,21 @@ impl Supervisor {
         let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
         let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
 
+        // IPC is best-effort: a bind failure (port exhaustion, stale
+        // endpoint, permissions) should not prevent the session itself from
+        // running — only detached attach/logs/ipc control is lost.
         let ipc_server = IpcServer::new(&session_id);
-        let socket_path = ipc_server.socket_path();
-        let ipc_handle = ipc_server
-            .start()
-            .await
-            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        let ipc_handle = match ipc_server.start().await {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                tracing::warn!("IPC unavailable for {session_id}: {e}");
+                None
+            }
+        };
+        let socket_path = ipc_handle
+            .as_ref()
+            .map(|h| h.socket_path().clone())
+            .unwrap_or_else(|| ipc_server.socket_path());
 
         let _ = event_tx.try_send(AgentEvent::SessionStarted {
             session_id: session_id.clone(),
@@ -306,7 +316,7 @@ impl Supervisor {
             socket_path: Some(socket_path),
             agent,
             session_store,
-            ipc_handle: Some(ipc_handle),
+            ipc_handle,
             event_rx: Some(event_rx),
             approval_pending,
             question_pending: Some(question_pending),

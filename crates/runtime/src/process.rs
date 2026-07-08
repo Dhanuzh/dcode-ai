@@ -14,8 +14,7 @@ impl SandboxedProcess {
 
     /// Validate that a path is inside the workspace.
     pub fn validate_path(&self, path: &Path) -> Result<PathBuf, SandboxError> {
-        let canonical = path
-            .canonicalize()
+        let canonical = dcode_ai_common::config::canonicalize_simplified(path)
             .map_err(|e| SandboxError::PathResolution(e.to_string()))?;
 
         if canonical.starts_with(&self.workspace_root) {

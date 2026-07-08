@@ -451,6 +451,13 @@ pub fn simplify_path(path: PathBuf) -> PathBuf {
     path
 }
 
+/// `Path::canonicalize` that strips Windows' verbatim prefix from the
+/// result, so canonical paths compare cleanly against non-verbatim ones
+/// (workspace guards) and remain readable in the UI.
+pub fn canonicalize_simplified(path: &Path) -> std::io::Result<PathBuf> {
+    Ok(simplify_path(path.canonicalize()?))
+}
+
 /// The user's home directory: `$HOME`, falling back to `%USERPROFILE%` —
 /// Windows shells don't set `HOME`, which used to break every `~/.dcode-ai`
 /// path there.
@@ -472,13 +479,12 @@ pub fn dcode_ai_home_dir() -> Option<PathBuf> {
 
 /// Stable per-workspace id: `{slug}-{hex}` derived from the canonical workspace path.
 pub fn workspace_cache_id(workspace_root: &Path) -> Result<(String, PathBuf), WorkspaceCacheError> {
-    let canonical =
-        workspace_root
-            .canonicalize()
-            .map_err(|source| WorkspaceCacheError::Canonicalize {
-                path: workspace_root.to_path_buf(),
-                source,
-            })?;
+    let canonical = canonicalize_simplified(workspace_root).map_err(|source| {
+        WorkspaceCacheError::Canonicalize {
+            path: workspace_root.to_path_buf(),
+            source,
+        }
+    })?;
     let path_str = canonical.to_string_lossy();
     let suffix = workspace_path_hash_suffix(path_str.as_ref());
     let slug = workspace_dir_slug(&canonical);

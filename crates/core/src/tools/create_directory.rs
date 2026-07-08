@@ -33,7 +33,7 @@ impl ToolExecutor for CreateDirectoryTool {
         let full_path = self.workspace_root.join(path);
 
         let parent = full_path.parent().unwrap_or(&self.workspace_root);
-        let canonical_parent = match parent.canonicalize() {
+        let canonical_parent = match dcode_ai_common::config::canonicalize_simplified(parent) {
             Ok(path) => path,
             Err(_) => self.workspace_root.clone(),
         };

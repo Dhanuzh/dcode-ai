@@ -44,7 +44,7 @@ pub(super) async fn rename_impl(
     let from_path = workspace_root.join(from);
     let to_path = workspace_root.join(to);
 
-    let canonical_from = match from_path.canonicalize() {
+    let canonical_from = match dcode_ai_common::config::canonicalize_simplified(&from_path) {
         Ok(path) if path.starts_with(workspace_root) => path,
         _ => {
             return ToolResult {
@@ -65,7 +65,7 @@ pub(super) async fn rename_impl(
                 error: Some(format!("Failed to create destination directory: {err}")),
             };
         }
-        let canonical_parent = match parent.canonicalize() {
+        let canonical_parent = match dcode_ai_common::config::canonicalize_simplified(parent) {
             Ok(path) if path.starts_with(workspace_root) => path,
             _ => {
                 return ToolResult {

@@ -60,12 +60,10 @@ impl ToolExecutor for ApplyPatchTool {
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
         let path = call.input["path"].as_str().unwrap_or("");
-        let workspace_root = self
-            .workspace_root
-            .canonicalize()
+        let workspace_root = dcode_ai_common::config::canonicalize_simplified(&self.workspace_root)
             .unwrap_or_else(|_| self.workspace_root.clone());
         let full_path = self.workspace_root.join(path);
-        let canonical = match full_path.canonicalize() {
+        let canonical = match dcode_ai_common::config::canonicalize_simplified(&full_path) {
             Ok(canonical) if canonical.starts_with(&workspace_root) => canonical,
             _ => {
                 return ToolResult {

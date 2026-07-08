@@ -199,8 +199,16 @@ use the normal execute_bash tool."
                     Err(e) => return Self::err(call, format!("openpty failed: {e}")),
                 };
 
-                let mut builder = CommandBuilder::new("sh");
-                builder.arg("-lc");
+                // ConPTY on Windows has no `sh`; run through cmd.
+                let mut builder = if cfg!(windows) {
+                    let mut b = CommandBuilder::new("cmd");
+                    b.arg("/C");
+                    b
+                } else {
+                    let mut b = CommandBuilder::new("sh");
+                    b.arg("-lc");
+                    b
+                };
                 builder.arg(command);
                 builder.cwd(self.workspace_root.as_os_str());
 

@@ -34,7 +34,7 @@ impl ToolExecutor for DeletePathTool {
         let recursive = call.input["recursive"].as_bool().unwrap_or(false);
         let full_path = self.workspace_root.join(path);
 
-        let canonical = match full_path.canonicalize() {
+        let canonical = match dcode_ai_common::config::canonicalize_simplified(&full_path) {
             Ok(path) if path.starts_with(&self.workspace_root) => path,
             _ => {
                 return ToolResult {

@@ -1552,22 +1552,48 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
             }
             "/diff" => {
                 // Working-tree diff incl. untracked files (Codex-style), rendered
-                // as a colored ```diff block.
-                let script = "\
-git --no-pager diff --no-color HEAD 2>/dev/null; \
-for f in $(git ls-files --others --exclude-standard 2>/dev/null); do \
-  echo \"diff --git a/$f b/$f\"; echo \"new file\"; echo \"--- /dev/null\"; echo \"+++ b/$f\"; \
-  sed 's/^/+/' \"$f\" 2>/dev/null; \
-done";
-                let output = dcode_ai_common::provider_runtime::system_shell_command(script)
+                // as a colored ```diff block. Pure git + Rust so it works the
+                // same on Windows (the previous POSIX one-liner did not).
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let tracked = tokio::process::Command::new("git")
+                    .args(["--no-pager", "diff", "--no-color", "HEAD"])
+                    .current_dir(&ws)
                     .stdout(Stdio::piped())
                     .stderr(Stdio::piped())
                     .output()
                     .await;
-                match output {
+                match tracked {
                     Ok(cmd_out) => {
-                        let diff = String::from_utf8_lossy(&cmd_out.stdout);
-                        let diff = diff.trim();
+                        let mut diff_buf =
+                            String::from_utf8_lossy(&cmd_out.stdout).into_owned();
+                        // Untracked files render as synthetic new-file hunks.
+                        if let Ok(untracked) = tokio::process::Command::new("git")
+                            .args(["ls-files", "--others", "--exclude-standard"])
+                            .current_dir(&ws)
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .output()
+                            .await
+                        {
+                            for f in String::from_utf8_lossy(&untracked.stdout).lines() {
+                                let f = f.trim();
+                                if f.is_empty() {
+                                    continue;
+                                }
+                                let Ok(content) = std::fs::read_to_string(ws.join(f)) else {
+                                    continue;
+                                };
+                                diff_buf.push_str(&format!(
+                                    "diff --git a/{f} b/{f}\nnew file\n--- /dev/null\n+++ b/{f}\n"
+                                ));
+                                for line in content.lines() {
+                                    diff_buf.push('+');
+                                    diff_buf.push_str(line);
+                                    diff_buf.push('\n');
+                                }
+                            }
+                        }
+                        let diff = diff_buf.trim();
                         if diff.is_empty() {
                             out.println("[diff] No changes in the working tree.");
                         } else {
@@ -3606,7 +3632,7 @@ done";
                 } else {
                     self.runtime.workspace_root().join(target)
                 };
-                match new_root.canonicalize() {
+                match dcode_ai_common::config::canonicalize_simplified(&new_root) {
                     Ok(canonical) if canonical.is_dir() => {
                         std::env::set_current_dir(&canonical)
                             .map_err(|e| anyhow::anyhow!("chdir: {e}"))?;
@@ -3654,7 +3680,7 @@ then switch).",
                     } else {
                         self.runtime.workspace_root().join(path)
                     };
-                    match abs.canonicalize() {
+                    match dcode_ai_common::config::canonicalize_simplified(&abs) {
                         Ok(canonical) if canonical.is_dir() => {
                             let name = canonical
                                 .file_name()
@@ -3849,9 +3875,18 @@ then switch).",
                 cfg.model.thinking_budget = budget;
                 cfg.model.max_tokens = max_tok;
                 match self.runtime.apply_dcode_ai_config(cfg) {
-                    Ok(()) => out.println(&format!(
-                        "[effort] set to {level} (thinking={thinking}, budget={budget}, max_tokens={max_tok})"
-                    )),
+                    Ok(()) => {
+                        // Keep the status-bar effort chip in sync.
+                        if let ReplOutput::Tui(st) = &out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.thinking_enabled = thinking;
+                            g.thinking_budget = budget;
+                        }
+                        out.println(&format!(
+                            "[effort] set to {level} (thinking={thinking}, budget={budget}, max_tokens={max_tok})"
+                        ));
+                    }
                     Err(e) => out.eprintln(&format!("[effort] {e}")),
                 }
             }
@@ -4823,7 +4858,7 @@ then switch).",
                     }
                 }
                 TuiCmd::AddProject(path) => {
-                    if let Ok(canonical) = path.canonicalize() {
+                    if let Ok(canonical) = dcode_ai_common::config::canonicalize_simplified(&path) {
                         let name = canonical
                             .file_name()
                             .and_then(|n| n.to_str())

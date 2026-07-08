@@ -393,6 +393,11 @@ impl TuiSessionState {
                 if q.allow_custom {
                     // Fall back to inline text input; keep the question active.
                     self.close_question_modal();
+                    self.push_block(DisplayBlock::System(
+                        "Question still waiting — type your answer in the composer and press \
+                         Enter (or Esc did not cancel it; the agent is blocked until you reply)."
+                            .into(),
+                    ));
                     QuestionModalOutcome::CloseKeepActive
                 } else {
                     QuestionModalOutcome::Stay

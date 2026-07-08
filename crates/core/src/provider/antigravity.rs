@@ -166,12 +166,16 @@ impl AntigravityProvider {
         let openai = config.provider.openai.clone();
 
         let auth_store = AuthStore::load().ok().unwrap_or_default();
-        let (access_token, project_id, vertex) = if let Some(v) = auth_store.vertex.clone() {
+        // Precedence: an explicit API key (tests / advanced setups; the
+        // "local" sentinel from local-model presets doesn't count) beats the
+        // Vertex project login, which beats Antigravity OAuth.
+        let inline_key = openai.resolve_api_key().filter(|k| k != "local");
+        let (access_token, project_id, vertex) = if let Some(key) = inline_key {
+            (key, ANTIGRAVITY_DEFAULT_PROJECT.to_string(), None)
+        } else if let Some(v) = auth_store.vertex.clone() {
             // "Use a Google Cloud project": ADC token, user's own project.
             let token = adc_access_token()?;
             (token, v.project_id.clone(), Some(v))
-        } else if let Some(key) = openai.resolve_api_key() {
-            (key, ANTIGRAVITY_DEFAULT_PROJECT.to_string(), None)
         } else {
             let oauth = auth_store.antigravity.ok_or_else(|| {
                 ProviderError::Configuration(
