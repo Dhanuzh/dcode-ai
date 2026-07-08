@@ -73,9 +73,13 @@ New-Item -ItemType Directory -Force -Path $installDir | Out-Null
 # A running dcode-ai locks its exe; Windows still allows renaming it, so
 # move the old binary aside instead of failing the upgrade.
 $exe = Join-Path $installDir "$Binary.exe"
-$old = "$exe.old"
-if (Test-Path $old) { Remove-Item $old -Force -ErrorAction SilentlyContinue }
+# Sweep stale renamed binaries from earlier upgrades (ignore still-locked ones).
+Get-ChildItem -Path $installDir -Filter "$Binary.exe.old-*" -ErrorAction SilentlyContinue |
+    ForEach-Object { Remove-Item $_.FullName -Force -ErrorAction SilentlyContinue }
 if (Test-Path $exe) {
+    # Unique name per upgrade: an .old from a previous upgrade may itself
+    # still be locked by a running instance.
+    $old = "$exe.old-$([System.Diagnostics.Process]::GetCurrentProcess().Id)-$(Get-Random)"
     try {
         Move-Item $exe $old -Force
     } catch {
@@ -85,7 +89,6 @@ if (Test-Path $exe) {
 
 Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
 Remove-Item -Recurse -Force $tmp
-Remove-Item $old -Force -ErrorAction SilentlyContinue
 if (-not (Test-Path $exe)) {
     Fail "archive did not contain $Binary.exe"
 }
