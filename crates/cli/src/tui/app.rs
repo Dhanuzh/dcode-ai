@@ -419,13 +419,17 @@ fn stage_pasted_image_paths(state: &mut TuiSessionState, pasted: &str) -> Result
 }
 
 fn insert_pasted_text(state: &mut TuiSessionState, slash_entries: &[SlashEntry], pasted: &str) {
+    // Normalize Windows CRLF → LF before anything else. On Windows, clipboard
+    // text uses \r\n; without this, \r ends up in the buffer (renders as garbage)
+    // and in the paste store (sent to the AI with embedded carriage returns).
+    let normalized = pasted.replace("\r\n", "\n").replace('\r', "\n");
     state.paste_counter += 1;
-    let token = pasted_lines_token(pasted, state.paste_counter);
-    let insert_text = if let Some(ref tok) = token {
-        state.paste_store.insert(tok.clone(), pasted.to_string());
-        tok.clone()
-    } else {
-        pasted.to_string()
+    let insert_text = match pasted_lines_token(&normalized, state.paste_counter) {
+        Some(tok) => {
+            state.paste_store.insert(tok.clone(), normalized);
+            tok
+        }
+        None => normalized,
     };
     if insert_text.is_empty() {
         return;
