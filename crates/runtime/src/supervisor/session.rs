@@ -155,7 +155,18 @@ fn is_pid_alive(pid: u32) -> bool {
     {
         unsafe { libc::kill(pid as i32, 0) == 0 }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        // No liveness syscall without extra deps; `tasklist` filtered by PID
+        // prints a CSV row containing the quoted pid only when the process
+        // exists (mirrors the `taskkill` usage in pty.rs).
+        std::process::Command::new("tasklist")
+            .args(["/FI", &format!("PID eq {pid}"), "/NH", "/FO", "CSV"])
+            .output()
+            .map(|out| String::from_utf8_lossy(&out.stdout).contains(&format!("\"{pid}\"")))
+            .unwrap_or(false)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = pid;
         false

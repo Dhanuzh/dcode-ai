@@ -153,7 +153,7 @@ pub(crate) fn build_model_picker_entries(
             label: fallback.to_string(),
             detail: String::new(),
             action: ModelPickerAction::ApplyModel(String::new()),
-            is_header: true,
+            is_header: false,
         });
     } else {
         for model_id in provider_models {

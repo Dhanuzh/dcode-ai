@@ -1300,6 +1300,15 @@ pub struct WebConfig {
     pub max_fetch_chars: usize,
     pub default_search_limit: usize,
     pub user_agent: String,
+    #[serde(default)]
+    pub webhooks: Vec<WebhookConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq, Eq)]
+pub struct WebhookConfig {
+    pub url: String,
+    pub enabled_events: Vec<String>,
+    pub secret_header: Option<String>,
 }
 
 impl Default for WebConfig {
@@ -1309,6 +1318,7 @@ impl Default for WebConfig {
             max_fetch_chars: 25_000,
             default_search_limit: 5,
             user_agent: "dcode-ai/0.5 (+https://github.com/user/dcode-ai)".into(),
+            webhooks: Vec::new(),
         }
     }
 }
@@ -1326,6 +1336,9 @@ impl WebConfig {
         }
         if let Some(user_agent) = partial.user_agent {
             self.user_agent = user_agent;
+        }
+        if let Some(webhooks) = partial.webhooks {
+            self.webhooks = webhooks;
         }
     }
 }
@@ -1628,6 +1641,7 @@ struct PartialWebConfig {
     max_fetch_chars: Option<usize>,
     default_search_limit: Option<usize>,
     user_agent: Option<String>,
+    webhooks: Option<Vec<WebhookConfig>>,
 }
 
 fn default_true() -> bool {

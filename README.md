@@ -261,7 +261,21 @@ dcode-ai status                 # list sessions
 dcode-ai logs <id>              # stream event log
 dcode-ai resume <id>            # resume finished session
 dcode-ai cancel <id>            # cancel running session
+dcode-ai web                    # local web chat (browser UI) for a live session
 ```
+
+### Web chat
+
+```
+dcode-ai web [--port 8642] [--prompt "..."] [--model ...] [--safe]
+```
+
+Starts a normal agent session plus a loopback-only HTTP server and prints a
+tokenized URL (`http://127.0.0.1:<port>/?t=<secret>`). The embedded page
+streams tokens, thinking, tool calls, cost, and renders approval prompts and
+interactive questions — the same event stream the TUI uses, over SSE. The
+server binds `127.0.0.1` only and rejects requests without the printed token.
+A thin VS Code extension that embeds this page lives in `editors/vscode/`.
 
 ### Output modes
 

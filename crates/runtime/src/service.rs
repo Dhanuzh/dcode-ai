@@ -4,6 +4,7 @@ use crate::supervisor::{
 };
 use dcode_ai_common::config::DcodeAiConfig;
 use dcode_ai_common::event::{AgentEvent, EndReason, EventEnvelope};
+use dcode_ai_common::message::ImageAttachment;
 use dcode_ai_common::session::OrchestrationContext;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -43,6 +44,12 @@ pub struct ServiceSessionHandle {
 impl ServiceSessionHandle {
     pub fn info(&self) -> &ServiceSessionInfo {
         &self.info
+    }
+
+    /// Take the underlying thread join handle so the caller can wait for
+    /// the session to fully terminate (e.g. before starting a replacement).
+    pub fn take_join_handle(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        self.join_handle.take()
     }
 }
 
@@ -142,8 +149,12 @@ async fn run_service_session_with_startup(
         command_rx = Some(crx);
     }
 
-    let fanout_task =
-        spawn_service_event_fanout(event_rx, info.event_log_path.clone(), event_tx_ipc);
+    let fanout_task = spawn_service_event_fanout(
+        event_rx,
+        info.event_log_path.clone(),
+        event_tx_ipc,
+        request.config.clone(),
+    );
 
     let subagent_task = if let Some(spawn_rx) = handle.take_spawn_rx() {
         Some(spawn_subagent_consumer(
@@ -205,7 +216,8 @@ async fn run_service_session_with_startup(
         };
 
         let event_tx = supervisor.event_tx();
-        let run_fut = supervisor.run_turn(&prompt);
+        let (prompt, attachments) = split_prompt_attachments(prompt);
+        let run_fut = supervisor.run_turn_with_images(&prompt, &attachments);
         tokio::pin!(run_fut);
 
         let result = tokio::select! {
@@ -261,10 +273,42 @@ async fn run_service_session_with_startup(
     Ok(())
 }
 
+/// Prompts arriving over IPC are plain strings; image attachments ride along
+/// as header lines so no command/channel types change. Each header line is
+/// `\u{1}attach:<media_type>:<workspace-relative path>`; the first line that
+/// doesn't match ends the header block and starts the real prompt.
+/// `dcode-ai web` writes this format after uploading a pasted/dropped image.
+fn split_prompt_attachments(raw: String) -> (String, Vec<ImageAttachment>) {
+    if !raw.starts_with('\u{1}') {
+        return (raw, Vec::new());
+    }
+    let mut attachments = Vec::new();
+    let mut rest = raw.as_str();
+    while let Some(line_body) = rest.strip_prefix('\u{1}') {
+        let (line, tail) = match line_body.split_once('\n') {
+            Some((l, t)) => (l, t),
+            None => (line_body, ""),
+        };
+        match line.strip_prefix("attach:").and_then(|s| s.split_once(':')) {
+            Some((media_type, path)) if !path.trim().is_empty() => {
+                attachments.push(ImageAttachment {
+                    media_type: media_type.to_string(),
+                    path: path.trim().to_string(),
+                });
+                rest = tail;
+            }
+            // Malformed marker: stop parsing, treat the remainder as prompt.
+            _ => break,
+        }
+    }
+    (rest.to_string(), attachments)
+}
+
 fn spawn_service_event_fanout(
     mut event_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
     log_path: PathBuf,
     event_tx_ipc: Option<tokio::sync::broadcast::Sender<String>>,
+    config: DcodeAiConfig,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         use tokio::fs::OpenOptions;
@@ -277,10 +321,18 @@ fn spawn_service_event_fanout(
             .await
             .ok();
 
+        // Prepare webhooks if present
+        let webhooks = config.web.webhooks.clone();
+        let client = if !webhooks.is_empty() {
+            Some(reqwest::Client::new())
+        } else {
+            None
+        };
+
         let mut event_id: u64 = 0;
         while let Some(event) = event_rx.recv().await {
             event_id += 1;
-            let envelope = EventEnvelope::new(event_id, event);
+            let envelope = EventEnvelope::new(event_id, event.clone());
             if let Some(ref tx) = event_tx_ipc {
                 let line = serde_json::to_string(&envelope).unwrap_or_default();
                 let _ = tx.send(line);
@@ -292,6 +344,72 @@ fn spawn_service_event_fanout(
                 let _ = file.write_all(line.as_bytes()).await;
                 let _ = file.write_all(b"\n").await;
             }
+
+            // Dispatch webhooks asynchronously. The names here are the stable,
+            // user-facing event ids used in `enabled_events`; they map onto the
+            // internal AgentEvent variants.
+            if let Some(ref http_client) = client {
+                let event_name = match &event {
+                    AgentEvent::SessionEnded { .. } => "SessionCompleted",
+                    AgentEvent::ApprovalRequested { .. } => "ToolApprovalRequired",
+                    // A turn finishes when the agent returns to Idle.
+                    AgentEvent::BusyStateChanged {
+                        state: dcode_ai_common::event::BusyState::Idle,
+                    } => "TurnCompleted",
+                    AgentEvent::Error { .. } => "Error",
+                    _ => "",
+                };
+
+                if !event_name.is_empty() {
+                    for hook in &webhooks {
+                        if hook.enabled_events.iter().any(|e| e == event_name) {
+                            let http_client = http_client.clone();
+                            let hook = hook.clone();
+                            let payload = envelope.clone();
+                            tokio::spawn(async move {
+                                let mut req = http_client.post(&hook.url).json(&payload);
+                                if let Some(ref secret) = hook.secret_header {
+                                    req = req.header("X-Dcode-Signature", secret.as_str());
+                                }
+                                let _ = req.send().await;
+                            });
+                        }
+                    }
+                }
+            }
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_prompt_passes_through() {
+        let (prompt, atts) = split_prompt_attachments("hello world".to_string());
+        assert_eq!(prompt, "hello world");
+        assert!(atts.is_empty());
+    }
+
+    #[test]
+    fn attachment_headers_are_parsed_and_stripped() {
+        let raw = "\u{1}attach:image/png:.dcode-ai/sessions/s1/attachments/a.png\n\
+                   \u{1}attach:image/jpeg:.dcode-ai/sessions/s1/attachments/b.jpg\n\
+                   describe these screenshots";
+        let (prompt, atts) = split_prompt_attachments(raw.to_string());
+        assert_eq!(prompt, "describe these screenshots");
+        assert_eq!(atts.len(), 2);
+        assert_eq!(atts[0].media_type, "image/png");
+        assert_eq!(atts[0].path, ".dcode-ai/sessions/s1/attachments/a.png");
+        assert_eq!(atts[1].media_type, "image/jpeg");
+    }
+
+    #[test]
+    fn malformed_marker_becomes_prompt_text() {
+        let raw = "\u{1}attach-broken\nhi";
+        let (prompt, atts) = split_prompt_attachments(raw.to_string());
+        assert_eq!(prompt, raw);
+        assert!(atts.is_empty());
+    }
 }

@@ -954,24 +954,47 @@ fn render_list_picker(
     );
 }
 
-fn model_picker_labels(g: &TuiSessionState) -> Vec<String> {
+fn model_picker_labels_and_index(g: &TuiSessionState) -> (Vec<String>, usize) {
     let filter = g.model_picker_search.to_ascii_lowercase();
-    g.model_picker_entries
-        .iter()
-        .filter(|e| {
-            !e.is_header
-                && (filter.is_empty()
-                    || e.label.to_ascii_lowercase().contains(&filter)
-                    || e.detail.to_ascii_lowercase().contains(&filter))
-        })
-        .map(|e| {
-            if e.detail.is_empty() {
+    let mut labels = Vec::new();
+    let mut visual_index = 0; // falls back to 0 if nothing selected
+
+    // Count how many non-header items are visible before the selected one.
+    let mut non_header_before_selected = 0;
+    let mut found_selected = false;
+
+    for e in &g.model_picker_entries {
+        let visible = if e.is_header {
+            filter.is_empty() || e.label.to_ascii_lowercase().contains(&filter)
+        } else {
+            filter.is_empty()
+                || e.label.to_ascii_lowercase().contains(&filter)
+                || e.detail.to_ascii_lowercase().contains(&filter)
+        };
+        if !visible {
+            continue;
+        }
+        if e.is_header {
+            labels.push(format!("── {} ──", e.label));
+        } else {
+            if non_header_before_selected == g.model_picker_index {
+                visual_index = labels.len();
+                found_selected = true;
+            }
+            let item = if e.detail.is_empty() {
                 e.label.clone()
             } else {
                 format!("{}  ·  {}", e.label, e.detail)
-            }
-        })
-        .collect()
+            };
+            labels.push(item);
+            non_header_before_selected += 1;
+        }
+    }
+    // Clamp in case the index is out of range (shouldn't happen, but defensive).
+    if !found_selected && !labels.is_empty() {
+        visual_index = labels.len().saturating_sub(1);
+    }
+    (labels, visual_index)
 }
 
 fn agent_picker_labels() -> Vec<String> {
@@ -1876,12 +1899,13 @@ pub fn run_blocking(
                 } else if g.command_palette_open {
                     render_command_palette(frame, area, &g);
                 } else if g.model_picker_open {
+                    let (model_labels, visual_idx) = model_picker_labels_and_index(&g);
                     render_list_picker(
                         frame,
                         area,
                         "model",
-                        &model_picker_labels(&g),
-                        g.model_picker_index,
+                        &model_labels,
+                        visual_idx,
                         &g.model_picker_search,
                     );
                 } else if g.theme_picker_open {

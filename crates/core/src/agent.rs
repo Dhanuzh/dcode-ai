@@ -755,15 +755,39 @@ fn cleanup_processed_attachments(
     }
 }
 
+/// Upper bound on a single tool result's size in the conversation (~6k tokens).
+/// Huge outputs (large file reads, `git log`, verbose command output) otherwise
+/// accumulate across a long turn until the prompt balloons and every model call
+/// slows to a crawl (the "stuck for minutes" symptom). Anything larger is
+/// middle-elided, keeping the informative head and tail.
+const MAX_TOOL_OUTPUT_CHARS: usize = 24_000;
+
+fn cap_tool_output(s: &str) -> String {
+    let total = s.chars().count();
+    if total <= MAX_TOOL_OUTPUT_CHARS {
+        return s.to_string();
+    }
+    let head = MAX_TOOL_OUTPUT_CHARS * 2 / 3;
+    let tail = MAX_TOOL_OUTPUT_CHARS - head;
+    let chars: Vec<char> = s.chars().collect();
+    let head_str: String = chars[..head].iter().collect();
+    let tail_str: String = chars[chars.len() - tail..].iter().collect();
+    let omitted = total - head - tail;
+    format!(
+        "{head_str}\n\n… [{omitted} characters truncated to keep the context small — re-run with a narrower query/range if you need the omitted part] …\n\n{tail_str}"
+    )
+}
+
 fn format_tool_result(result: &dcode_ai_common::tool::ToolResult) -> String {
-    if result.success {
+    let raw = if result.success {
         result.output.clone()
     } else {
         result
             .error
             .clone()
             .unwrap_or_else(|| "tool failed".to_string())
-    }
+    };
+    cap_tool_output(&raw)
 }
 
 fn empty_completion_detail(model: &str, got_usage: bool) -> String {
@@ -790,6 +814,20 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex;
+
+    #[test]
+    fn cap_tool_output_elides_only_huge_outputs() {
+        // Small output passes through untouched.
+        let small = "hello world";
+        assert_eq!(cap_tool_output(small), small);
+
+        // Oversized output is middle-elided with a marker and kept under budget.
+        let big = "x".repeat(MAX_TOOL_OUTPUT_CHARS * 3);
+        let capped = cap_tool_output(&big);
+        assert!(capped.contains("characters truncated"));
+        assert!(capped.chars().count() < big.chars().count());
+        assert!(capped.chars().count() <= MAX_TOOL_OUTPUT_CHARS + 200);
+    }
 
     struct ChunkProvider {
         chunks: Mutex<VecDeque<Vec<StreamChunk>>>,

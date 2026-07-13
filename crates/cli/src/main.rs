@@ -14,6 +14,7 @@ mod stream;
 mod tool_ui;
 mod tui;
 mod update_check;
+mod web_server;
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;
 use clap::CommandFactory;
@@ -168,6 +169,24 @@ enum Command {
         json: bool,
         #[arg(long, value_enum)]
         permission_mode: Option<CliPermissionMode>,
+    },
+    /// Local web chat: serves a browser UI for a live agent session on 127.0.0.1
+    Web {
+        /// Port to bind (0 picks a free port)
+        #[arg(long, default_value_t = 8642)]
+        port: u16,
+        /// Optional prompt to run as the first turn
+        #[arg(long)]
+        prompt: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        safe: bool,
+        // Same default as `serve`: browser sessions are IPC-driven, approvals render in the page
+        #[arg(long, value_enum, default_value_t = CliPermissionMode::AcceptEdits)]
+        permission_mode: CliPermissionMode,
+        #[arg(long, hide = true)]
+        session_id: Option<String>,
     },
     Sessions {
         #[arg(long)]
@@ -645,6 +664,31 @@ async fn try_main() -> anyhow::Result<()> {
                 safe,
                 session_id,
                 orchestration_context.clone(),
+            )
+            .await?;
+        }
+        Some(Command::Web {
+            port,
+            prompt,
+            model,
+            safe,
+            permission_mode,
+            session_id,
+        }) => {
+            if let Some(model) = model {
+                config.apply_model_override(&model);
+            }
+            config.permissions.mode = permission_mode.into();
+            web_server::run_web_server(
+                config,
+                workspace_root.clone(),
+                web_server::WebServerOptions {
+                    port,
+                    initial_prompt: prompt,
+                    safe,
+                    session_id,
+                    orchestration_context: orchestration_context.clone(),
+                },
             )
             .await?;
         }
@@ -2467,6 +2511,15 @@ fn should_open_oauth_onboarding(config: &DcodeAiConfig) -> bool {
 }
 
 fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
+    // An explicit DCODE_AI_DEFAULT_PROVIDER is the strongest signal there is:
+    // the user typed it for this invocation. Never let a remembered OAuth
+    // login silently redirect the run to a different provider — if the chosen
+    // provider is missing credentials, its own error message says so, which
+    // beats failing inside a provider the user didn't ask for.
+    if std::env::var("DCODE_AI_DEFAULT_PROVIDER").is_ok_and(|v| !v.trim().is_empty()) {
+        return;
+    }
+
     // If the configured default provider already has an API key, respect the config.
     // OAuth login selection should not override an explicitly configured provider.
     if config.provider.api_key_present_for(config.provider.default) {
