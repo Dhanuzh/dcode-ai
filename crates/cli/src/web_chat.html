@@ -1205,7 +1205,8 @@ function editUserMessage(msgEl, uindex, originalText) {
 
 function thinkingBlock() {
   if (think) return think;
-  const box = el("div", "think live");
+  // Expanded by default so reasoning is visible as it streams; user can collapse.
+  const box = el("div", "think live open");
   const head = el("div", "thead");
   head.appendChild(el("span", "spark", "✦"));
   head.appendChild(el("span", "tlabel", "Thinking…"));
@@ -1355,7 +1356,15 @@ function onEvent(ev) {
   } else if (t === "SessionEnded") {
     // The event log keeps one of these per model-switch/resume cycle;
     // they're lifecycle noise, not conversation — never show in replay.
-    if (!replaying) row("sys").textContent = "session ended";
+    if (!replaying) {
+      row("sys").textContent = "session ended";
+      // Defensive: never leave the composer stuck in "working" if a session ends.
+      wasWorking = false;
+      busyEl.style.display = "none";
+      busyText.textContent = "working…";
+      setAgentState(false);
+      closeSegment();
+    }
   } else if (t === "ContextWarning" || t === "ContextCompaction") {
     row("sys").textContent = ev.message || t;
   } else if (t === "ChildSessionSpawned") {
@@ -1946,7 +1955,11 @@ function send() {
   sendCommand({ type: "SendMessage", content: header + content });
 }
 document.getElementById("send").onclick = send;
-document.getElementById("cancel").onclick = () => sendCommand({ type: "Cancel" });
+document.getElementById("cancel").onclick = () => {
+  // Immediate feedback; the server confirms with BusyStateChanged{idle}.
+  busyText.textContent = "cancelling…";
+  sendCommand({ type: "Cancel" });
+};
 function autoResizeInput() {
   input.style.height = "auto";
   input.style.height = Math.min(input.scrollHeight, 240) + "px";

@@ -193,16 +193,16 @@ async fn run_service_session_with_startup(
     let mut reason = EndReason::UserExit;
 
     loop {
+        // `Cancel` (Stop button) aborts only the current turn; the session stays
+        // alive for the next prompt. Only `Shutdown` ends the session.
+        let mut shutdown = false;
+
         let prompt = tokio::select! {
             control = control_rx.recv() => {
                 match control {
-                    Some(SessionControlCommand::Cancel) => {
-                        cancel_handle.store(true, Ordering::SeqCst);
-                        reason = EndReason::Cancelled;
-                        break;
-                    }
+                    // No turn running — nothing to cancel; keep waiting.
+                    Some(SessionControlCommand::Cancel) => continue,
                     Some(SessionControlCommand::Shutdown) => {
-                        cancel_handle.store(true, Ordering::SeqCst);
                         reason = EndReason::UserExit;
                         break;
                     }
@@ -226,11 +226,10 @@ async fn run_service_session_with_startup(
                 match control {
                     Some(SessionControlCommand::Cancel) => {
                         cancel_handle.store(true, Ordering::SeqCst);
-                        reason = EndReason::Cancelled;
                     }
                     Some(SessionControlCommand::Shutdown) => {
                         cancel_handle.store(true, Ordering::SeqCst);
-                        reason = EndReason::UserExit;
+                        shutdown = true;
                     }
                     None => {}
                 }
@@ -240,10 +239,21 @@ async fn run_service_session_with_startup(
 
         if let Err(error) = result {
             if error.to_string().contains("run cancelled") {
-                if matches!(reason, EndReason::Cancelled | EndReason::UserExit) {
+                // A cancelled turn leaves the UI "busy" unless we say so.
+                // `run_turn` resets its own cancel flag on the next call, so the
+                // session can safely take another prompt.
+                if let Some(tx) = &event_tx {
+                    let _ = tx
+                        .send(AgentEvent::BusyStateChanged {
+                            state: dcode_ai_common::event::BusyState::Idle,
+                        })
+                        .await;
+                }
+                if shutdown {
+                    reason = EndReason::UserExit;
                     break;
                 }
-                continue;
+                continue; // keep the session alive after a Stop
             }
             if let Some(tx) = event_tx {
                 let _ = tx
@@ -367,7 +377,7 @@ fn spawn_service_event_fanout(
                             let hook = hook.clone();
                             let payload = envelope.clone();
                             tokio::spawn(async move {
-                                let mut req = http_client.post(&hook.url).json(&payload);
+                                let mut req = http_client.post(hook.url.as_str()).json(&payload);
                                 if let Some(ref secret) = hook.secret_header {
                                     req = req.header("X-Dcode-Signature", secret.as_str());
                                 }

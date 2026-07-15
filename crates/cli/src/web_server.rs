@@ -940,9 +940,11 @@ async fn list_dir(root: &std::path::Path, rel: &str) -> serde_json::Value {
             }
         }
     }
-    let key = |v: &serde_json::Value| v["name"].as_str().unwrap_or("").to_lowercase();
-    dirs.sort_by_key(&key);
-    files.sort_by_key(&key);
+    fn name_key(v: &serde_json::Value) -> String {
+        v["name"].as_str().unwrap_or("").to_lowercase()
+    }
+    dirs.sort_by_key(name_key);
+    files.sort_by_key(name_key);
     dirs.extend(files);
     serde_json::json!({ "entries": dirs })
 }
@@ -1082,7 +1084,7 @@ async fn handle_http(stream: TcpStream, state: &AppState, token: &str) -> std::i
                 "200 OK",
                 "text/html; charset=utf-8",
                 CHAT_PAGE.as_bytes(),
-                &[("Set-Cookie", &set_cookie)],
+                &[("Set-Cookie", set_cookie.as_str())],
             )
             .await
         }
@@ -1557,7 +1559,7 @@ async fn handle_http(stream: TcpStream, state: &AppState, token: &str) -> std::i
                 .await;
             };
             {
-                use dcode_ai_common::config::{PermissionMode, ProviderKind};
+                use dcode_ai_common::config::PermissionMode;
                 let mut cfg = state.config.write().await;
                 if let Some(mode) = body.permission_mode.as_deref() {
                     let parsed = match mode {
