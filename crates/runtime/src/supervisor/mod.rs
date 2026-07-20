@@ -155,6 +155,12 @@ impl Supervisor {
         } else {
             ToolRegistry::with_default_full_tools(workspace_root.clone(), config.web.clone())
         };
+        // Cross-session memory: the agent saves durable notes with this tool;
+        // resolve_memory_path + the system-prompt section below recall them.
+        tools.register(Box::new(crate::memory_tool::SaveMemoryTool::new(
+            resolve_memory_path(&config, &workspace_root),
+            config.memory.max_notes,
+        )));
         let (event_tx, event_rx) = mpsc::channel(256);
 
         let (mcp_event_tx, mut mcp_event_rx) = mpsc::unbounded_channel();
@@ -284,8 +290,11 @@ impl Supervisor {
             config.session.checkpoint_interval,
             hook_runner.clone(),
         );
-        let system_prompt =
+        let mut system_prompt =
             build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
+        if let Some(section) = memory_prompt_section(&config, &workspace_root) {
+            system_prompt.push_str(&section);
+        }
         agent.set_system_prompt(system_prompt);
 
         let context_manager =
@@ -1008,11 +1017,7 @@ impl Supervisor {
     }
 
     pub fn memory_store_path(&self) -> PathBuf {
-        if self.config.memory.file_path.is_absolute() {
-            self.config.memory.file_path.clone()
-        } else {
-            self.workspace_root.join(&self.config.memory.file_path)
-        }
+        resolve_memory_path(&self.config, &self.workspace_root)
     }
 
     /// Fork the current session: keep the full conversation but assign a new
@@ -1055,11 +1060,14 @@ impl Supervisor {
         self.session_id = generate_session_id();
         self.session_name = None;
         self.agent.messages.clear();
-        let system_prompt = build_system_prompt(
+        let mut system_prompt = build_system_prompt(
             &self.config,
             &self.workspace_root,
             self.orchestration.as_ref(),
         );
+        if let Some(section) = memory_prompt_section(&self.config, &self.workspace_root) {
+            system_prompt.push_str(&section);
+        }
         self.agent.set_system_prompt(system_prompt);
         self.child_session_ids.clear();
         self.parent_session_id = None;
@@ -1222,6 +1230,51 @@ fn is_context_limit_error(err: &ProviderError) -> bool {
         || msg.contains("max tokens")
         || msg.contains("token limit")
         || msg.contains("conversation too long")
+}
+
+/// Memory store location: `[memory].file_path`, workspace-relative by default.
+pub fn resolve_memory_path(config: &DcodeAiConfig, workspace_root: &Path) -> PathBuf {
+    if config.memory.file_path.is_absolute() {
+        config.memory.file_path.clone()
+    } else {
+        workspace_root.join(&config.memory.file_path)
+    }
+}
+
+/// How many of the newest memory notes are recalled into the system prompt.
+const MEMORY_RECALL_LIMIT: usize = 30;
+/// Cap per recalled note so one huge note can't blow up the prompt.
+const MEMORY_NOTE_CHARS: usize = 300;
+
+/// Render stored memory notes as a system-prompt section — the recall side of
+/// the `save_memory` tool (and `/memory` notes). Sync on purpose: it is called
+/// from sync session resets and reads one small local JSON file. Returns None
+/// when there is nothing to recall so the prompt stays untouched.
+fn memory_prompt_section(config: &DcodeAiConfig, workspace_root: &Path) -> Option<String> {
+    let path = resolve_memory_path(config, workspace_root);
+    let raw = std::fs::read_to_string(path).ok()?;
+    let state: crate::memory_store::MemoryState = serde_json::from_str(&raw).ok()?;
+    if state.notes.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "\n\n## Persistent memory (from past sessions)\n\
+         Durable notes saved earlier in this workspace (newest first). Honor \
+         them unless the user says otherwise; update them with `save_memory` \
+         when they change:\n",
+    );
+    for note in state.notes.iter().rev().take(MEMORY_RECALL_LIMIT) {
+        let mut line: String = note
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if line.chars().count() > MEMORY_NOTE_CHARS {
+            line = line.chars().take(MEMORY_NOTE_CHARS).collect::<String>() + "…";
+        }
+        out.push_str(&format!("- [{}] {}\n", note.kind, line));
+    }
+    Some(out)
 }
 
 fn parse_json_values_on_line(line: &str) -> Vec<Value> {

@@ -1,7 +1,26 @@
 # IPC and NDJSON reference
 
-`dcode-ai` uses newline-delimited JSON for event logs, `attach --json`, and
-runtime IPC streams. Unix uses Unix domain sockets; Windows uses loopback TCP.
+`dcode-ai` uses newline-delimited JSON for event logs and `attach --json`
+output. Unix uses Unix domain sockets; Windows uses loopback TCP.
+
+## Socket wire framing (v2)
+
+Runtime IPC **sockets** now use length-prefixed frames instead of raw NDJSON:
+each message is a 4-byte big-endian payload length followed by exactly that
+many bytes of JSON (the same `EventEnvelope` / `AgentCommand` documented
+below). Frames are capped at 16 MiB.
+
+Compatibility:
+
+- **Readers auto-detect per connection.** Because of the 16 MiB cap, a framed
+  stream's first byte is always `0x00`, while NDJSON always starts with `{`.
+  Both dcode-ai ends accept either format, so old NDJSON-writing peers keep
+  working.
+- **External consumers** that parse the socket as NDJSON lines can set
+  `DCODE_AI_IPC_LEGACY=1` on the runtime to keep legacy newline-delimited
+  writes.
+- Event **log files** (`<sid>.events.jsonl`) and `attach --json` stdout remain
+  NDJSON — framing applies to the socket transport only.
 
 ## Event envelope
 

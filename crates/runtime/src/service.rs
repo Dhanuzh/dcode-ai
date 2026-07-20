@@ -217,6 +217,14 @@ async fn run_service_session_with_startup(
 
         let event_tx = supervisor.event_tx();
         let (prompt, attachments) = split_prompt_attachments(prompt);
+        // Prompts arriving over IPC (web chat, `serve`, spawned runs) never
+        // pass through the TUI's @mention expansion — expand here so `@path`
+        // inlines file contents everywhere. On error, keep the raw prompt.
+        let prompt = dcode_ai_common::mentions::expand_at_file_mentions_default(
+            &prompt,
+            &info.workspace_root,
+        )
+        .unwrap_or(prompt);
         let run_fut = supervisor.run_turn_with_images(&prompt, &attachments);
         tokio::pin!(run_fut);
 
@@ -281,6 +289,34 @@ async fn run_service_session_with_startup(
         task.abort();
     }
     Ok(())
+}
+
+/// HMAC-SHA256 (RFC 2104) over `msg` with `key`, hex-encoded. Used to sign
+/// webhook payloads so receivers can verify authenticity — the standard
+/// ipad/opad construction over the workspace's existing `sha2`.
+fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut key_block = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        key_block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(key_block.map(|b| b ^ 0x36));
+    inner.update(msg);
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(key_block.map(|b| b ^ 0x5c));
+    outer.update(inner_hash);
+    let digest = outer.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 /// Prompts arriving over IPC are plain strings; image attachments ride along
@@ -377,11 +413,21 @@ fn spawn_service_event_fanout(
                             let hook = hook.clone();
                             let payload = envelope.clone();
                             tokio::spawn(async move {
-                                let mut req = http_client.post(hook.url.as_str()).json(&payload);
+                                // Serialize once so the signature covers the
+                                // exact bytes sent on the wire.
+                                let Ok(body) = serde_json::to_vec(&payload) else {
+                                    return;
+                                };
+                                let mut req = http_client
+                                    .post(hook.url.as_str())
+                                    .header("Content-Type", "application/json");
                                 if let Some(ref secret) = hook.secret_header {
-                                    req = req.header("X-Dcode-Signature", secret.as_str());
+                                    // HMAC-SHA256 over the body, GitHub-style:
+                                    // `X-Dcode-Signature: sha256=<hex>`.
+                                    let sig = hmac_sha256_hex(secret.as_bytes(), &body);
+                                    req = req.header("X-Dcode-Signature", format!("sha256={sig}"));
                                 }
-                                let _ = req.send().await;
+                                let _ = req.body(body).send().await;
                             });
                         }
                     }
@@ -394,6 +440,28 @@ fn spawn_service_event_fanout(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hmac_sha256_matches_rfc4231_vectors() {
+        // RFC 4231 test case 2: key "Jefe", data "what do ya want for nothing?"
+        assert_eq!(
+            hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // RFC 4231 test case 1: 20-byte 0x0b key, data "Hi There"
+        assert_eq!(
+            hmac_sha256_hex(&[0x0b; 20], b"Hi There"),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        // Keys longer than the block size are hashed first (RFC 4231 case 6).
+        assert_eq!(
+            hmac_sha256_hex(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
 
     #[test]
     fn plain_prompt_passes_through() {

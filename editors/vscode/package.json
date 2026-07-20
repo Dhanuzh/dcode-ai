@@ -1,0 +1,45 @@
+{
+  "name": "dcode-ai",
+  "displayName": "dcode-ai",
+  "description": "Chat with the dcode-ai coding agent inside VS Code (bridges to the dcode-ai CLI's local web chat).",
+  "version": "0.0.1",
+  "publisher": "dcode-ai",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Dhanuzh/dcode-ai"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat"
+  ],
+  "main": "./extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "commands": [
+      {
+        "command": "dcode-ai.openChat",
+        "title": "dcode-ai: Open Chat"
+      }
+    ],
+    "configuration": {
+      "title": "dcode-ai",
+      "properties": {
+        "dcode-ai.binaryPath": {
+          "type": "string",
+          "default": "dcode-ai",
+          "description": "Path to the dcode-ai executable (default: resolved from PATH)."
+        },
+        "dcode-ai.extraArgs": {
+          "type": "array",
+          "items": { "type": "string" },
+          "default": [],
+          "description": "Extra CLI arguments passed to `dcode-ai web` (e.g. [\"--model\", \"MiniMax-M2.5\"])."
+        }
+      }
+    }
+  }
+}

@@ -4,6 +4,7 @@ pub mod interactive_exec;
 pub mod ipc;
 pub mod last_session;
 pub mod memory_store;
+pub mod memory_tool;
 pub mod model_limits;
 pub mod model_limits_api;
 pub mod process;

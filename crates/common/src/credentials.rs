@@ -51,6 +51,16 @@ pub fn get(env_name: &str) -> Option<String> {
     with_cache(|map| map.get(env_name).cloned()).filter(|v| !v.trim().is_empty())
 }
 
+/// All stored secrets as (env-name, value) pairs. Used by output redaction so
+/// stored keys can never leak through tool output verbatim.
+pub fn all() -> Vec<(String, String)> {
+    with_cache(|map| {
+        map.iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    })
+}
+
 fn persist(map: &BTreeMap<String, String>) -> Result<PathBuf, String> {
     let path = credentials_path().ok_or_else(|| "cannot resolve HOME".to_string())?;
     if let Some(parent) = path.parent() {

@@ -1,7 +1,118 @@
 use dcode_ai_common::event::{AgentCommand, EventEnvelope};
 use std::path::PathBuf;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
+
+// ── Message framing ────────────────────────────────────────────────
+//
+// Wire format (v2): each message is a 4-byte big-endian length prefix followed
+// by exactly that many bytes of JSON. This prevents desync on payloads with
+// embedded newlines/binary and bounds per-message memory.
+//
+// Backward compatibility: readers auto-detect per connection. Frames are
+// capped at 16 MiB, so a framed stream's first byte is always 0x00; legacy
+// NDJSON always starts with '{'. Writers emit frames unless
+// `DCODE_AI_IPC_LEGACY=1` is set (escape hatch for external NDJSON consumers).
+
+/// Max frame payload. Also guarantees the first length byte is 0x00, which is
+/// how readers distinguish framed streams from legacy NDJSON.
+const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+
+fn legacy_writes() -> bool {
+    static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *LEGACY.get_or_init(|| {
+        std::env::var("DCODE_AI_IPC_LEGACY")
+            .is_ok_and(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+    })
+}
+
+async fn write_message(
+    writer: &mut (impl AsyncWrite + Unpin),
+    payload: &[u8],
+) -> std::io::Result<()> {
+    if legacy_writes() {
+        writer.write_all(payload).await?;
+        writer.write_all(b"\n").await?;
+        return Ok(());
+    }
+    let len = u32::try_from(payload.len())
+        .ok()
+        .filter(|len| *len <= MAX_FRAME_BYTES)
+        .ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "IPC frame too large")
+        })?;
+    writer.write_all(&len.to_be_bytes()).await?;
+    writer.write_all(payload).await?;
+    Ok(())
+}
+
+enum WireMode {
+    Framed,
+    LegacyLines,
+}
+
+/// Reads whole JSON messages from either wire format, decided by the first
+/// byte of the stream (0x00 = framed, anything else = legacy NDJSON).
+struct MessageReader<R> {
+    inner: BufReader<R>,
+    mode: Option<WireMode>,
+}
+
+impl<R: AsyncRead + Unpin> MessageReader<R> {
+    fn new(stream: R) -> Self {
+        Self {
+            inner: BufReader::new(stream),
+            mode: None,
+        }
+    }
+
+    async fn next_message(&mut self) -> std::io::Result<Option<String>> {
+        if self.mode.is_none() {
+            let buf = self.inner.fill_buf().await?;
+            if buf.is_empty() {
+                return Ok(None); // clean EOF before any data
+            }
+            self.mode = Some(if buf[0] == 0 {
+                WireMode::Framed
+            } else {
+                WireMode::LegacyLines
+            });
+        }
+        match self.mode.as_ref().expect("mode set above") {
+            WireMode::Framed => {
+                let mut len_bytes = [0u8; 4];
+                match self.inner.read_exact(&mut len_bytes).await {
+                    Ok(_) => {}
+                    Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => {
+                        return Ok(None); // EOF between frames
+                    }
+                    Err(err) => return Err(err),
+                }
+                let len = u32::from_be_bytes(len_bytes);
+                if len > MAX_FRAME_BYTES {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "IPC frame exceeds 16 MiB cap",
+                    ));
+                }
+                let mut payload = vec![0u8; len as usize];
+                self.inner.read_exact(&mut payload).await?;
+                Ok(Some(String::from_utf8_lossy(&payload).into_owned()))
+            }
+            WireMode::LegacyLines => {
+                let mut line = String::new();
+                let n = self.inner.read_line(&mut line).await?;
+                if n == 0 {
+                    return Ok(None);
+                }
+                while line.ends_with('\n') || line.ends_with('\r') {
+                    line.pop();
+                }
+                Ok(Some(line))
+            }
+        }
+    }
+}
 
 /// IPC server that broadcasts AgentEvents and receives AgentCommands
 /// over a platform endpoint.
@@ -132,27 +243,67 @@ async fn handle_connection(
 ) {
     let (reader, mut writer) = tokio::io::split(stream);
     let read_task = tokio::spawn(async move {
-        let mut lines = BufReader::new(reader).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Ok(command) = serde_json::from_str::<AgentCommand>(&line) {
+        let mut messages = MessageReader::new(reader);
+        while let Ok(Some(message)) = messages.next_message().await {
+            if let Ok(command) = serde_json::from_str::<AgentCommand>(&message) {
                 let _ = command_tx.send(command);
             }
         }
     });
 
     let write_task = tokio::spawn(async move {
-        while let Ok(line) = event_rx.recv().await {
-            if writer.write_all(line.as_bytes()).await.is_err() {
-                break;
-            }
-            if writer.write_all(b"\n").await.is_err() {
-                break;
+        // Heartbeat: an empty frame (bare newline in legacy mode) every 15s.
+        // Readers skip empty messages; clients treat a long silence as a dead
+        // runtime (see spawn_event_reader_for_stream).
+        let mut heartbeat = tokio::time::interval(HEARTBEAT_INTERVAL);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                received = event_rx.recv() => match received {
+                    Ok(line) => {
+                        if write_message(&mut writer, line.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Backpressure: a slow consumer lagged the broadcast ring.
+                    // Tell it what it missed and keep the connection alive
+                    // instead of silently dropping it (previous behavior).
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        let notice = serde_json::json!({
+                            "schema_version": 1,
+                            "id": 0,
+                            "ts": null,
+                            "event": {
+                                "type": "Error",
+                                "message": format!(
+                                    "event stream lagged: {skipped} event(s) skipped (consumer too slow)"
+                                ),
+                            },
+                        })
+                        .to_string();
+                        if write_message(&mut writer, notice.as_bytes()).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                },
+                _ = heartbeat.tick() => {
+                    if write_message(&mut writer, b"").await.is_err() {
+                        break;
+                    }
+                }
             }
         }
     });
 
     let _ = tokio::join!(read_task, write_task);
 }
+
+/// Server → client keepalive cadence.
+const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+/// A client that hears nothing (events or heartbeats) for this long treats the
+/// runtime as gone. 4× the heartbeat so a single delayed tick can't false-fire.
+const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 pub fn runtime_ipc_dir() -> PathBuf {
     #[cfg(windows)]
@@ -304,18 +455,66 @@ async fn spawn_event_reader(
     Ok(())
 }
 
+/// Synthetic envelope injected by the client when the runtime goes away, so
+/// every consumer (attach, web SSE) renders an explicit alert instead of a
+/// silently frozen stream.
+fn disconnect_notice(reason: &str) -> EventEnvelope {
+    EventEnvelope::new(
+        0,
+        dcode_ai_common::event::AgentEvent::Error {
+            message: format!("runtime disconnected: {reason}"),
+        },
+    )
+}
+
 fn spawn_event_reader_for_stream(
     stream: impl AsyncRead + Unpin + Send + 'static,
     tx: mpsc::Sender<EventEnvelope>,
 ) {
     tokio::spawn(async move {
-        let reader = BufReader::new(stream);
-        let mut lines = reader.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            if let Ok(event) = serde_json::from_str::<EventEnvelope>(&line)
-                && tx.send(event).await.is_err()
-            {
-                break;
+        let mut messages = MessageReader::new(stream);
+        let mut session_ended = false;
+        loop {
+            let next = tokio::time::timeout(STALL_TIMEOUT, messages.next_message()).await;
+            match next {
+                // Heartbeats arrive every 15s, so a 60s silence means the
+                // runtime is hung or the transport is dead.
+                Err(_elapsed) => {
+                    let _ = tx
+                        .send(disconnect_notice("no events or heartbeats for 60s"))
+                        .await;
+                    break;
+                }
+                Ok(Ok(Some(message))) => {
+                    if message.is_empty() {
+                        continue; // heartbeat
+                    }
+                    if let Ok(event) = serde_json::from_str::<EventEnvelope>(&message) {
+                        if matches!(
+                            event.event,
+                            dcode_ai_common::event::AgentEvent::SessionEnded { .. }
+                        ) {
+                            session_ended = true;
+                        }
+                        if tx.send(event).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                // EOF without a SessionEnded first = the runtime died rather
+                // than finished; say so. A clean end stays quiet.
+                Ok(Ok(None)) => {
+                    if !session_ended {
+                        let _ = tx
+                            .send(disconnect_notice("connection closed unexpectedly"))
+                            .await;
+                    }
+                    break;
+                }
+                Ok(Err(err)) => {
+                    let _ = tx.send(disconnect_notice(&err.to_string())).await;
+                    break;
+                }
             }
         }
     });
@@ -349,12 +548,7 @@ async fn write_command(
 ) -> Result<(), IpcError> {
     let line =
         serde_json::to_string(cmd).map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
-    stream
-        .write_all(line.as_bytes())
-        .await
-        .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
-    stream
-        .write_all(b"\n")
+    write_message(&mut stream, line.as_bytes())
         .await
         .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
     Ok(())
@@ -387,6 +581,90 @@ fn deterministic_loopback_port(session_id: &str) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn framed_messages_round_trip() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (_, mut client_writer) = tokio::io::split(client);
+        let (server_reader, _) = tokio::io::split(server);
+
+        let payloads = [
+            r#"{"type":"Cancel"}"#.to_string(),
+            // Embedded newline inside a JSON string — the case NDJSON framing
+            // could never carry raw.
+            format!("{{\"note\":\"{}\"}}", "x".repeat(100)),
+        ];
+        for p in &payloads {
+            write_message(&mut client_writer, p.as_bytes())
+                .await
+                .expect("write");
+        }
+        drop(client_writer);
+
+        let mut reader = MessageReader::new(server_reader);
+        for expected in &payloads {
+            let got = reader.next_message().await.expect("read").expect("some");
+            assert_eq!(&got, expected);
+        }
+        assert!(reader.next_message().await.expect("eof").is_none());
+    }
+
+    #[tokio::test]
+    async fn legacy_ndjson_streams_still_parse() {
+        let (client, server) = tokio::io::duplex(4096);
+        let (_, mut client_writer) = tokio::io::split(client);
+        let (server_reader, _) = tokio::io::split(server);
+
+        // Simulate an old peer writing plain NDJSON.
+        client_writer
+            .write_all(b"{\"type\":\"Cancel\"}\n{\"type\":\"Shutdown\"}\n")
+            .await
+            .expect("write");
+        drop(client_writer);
+
+        let mut reader = MessageReader::new(server_reader);
+        assert_eq!(
+            reader.next_message().await.unwrap().as_deref(),
+            Some(r#"{"type":"Cancel"}"#)
+        );
+        assert_eq!(
+            reader.next_message().await.unwrap().as_deref(),
+            Some(r#"{"type":"Shutdown"}"#)
+        );
+        assert!(reader.next_message().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn writer_refuses_oversized_payloads() {
+        let (client, _server) = tokio::io::duplex(64);
+        let (_, mut client_writer) = tokio::io::split(client);
+        // The write side enforces the cap; the read side can never even see an
+        // over-cap frame because any length > 16 MiB has a nonzero first byte
+        // and is sniffed as legacy instead. (The reader's cap check stays as
+        // defense in depth.)
+        let huge = vec![b'x'; (MAX_FRAME_BYTES as usize) + 1];
+        let err = write_message(&mut client_writer, &huge)
+            .await
+            .expect_err("over-cap frame must be refused");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
+
+    #[tokio::test]
+    async fn truncated_frame_reports_eof_not_hang() {
+        let (client, server) = tokio::io::duplex(64);
+        let (_, mut client_writer) = tokio::io::split(client);
+        let (server_reader, _) = tokio::io::split(server);
+
+        // Valid framed header claiming 100 bytes, but only 3 arrive then EOF.
+        let mut partial = 100u32.to_be_bytes().to_vec();
+        partial.extend_from_slice(b"abc");
+        client_writer.write_all(&partial).await.expect("write");
+        drop(client_writer);
+
+        let mut reader = MessageReader::new(server_reader);
+        let result = reader.next_message().await;
+        assert!(result.is_err(), "truncated payload must surface an error");
+    }
 
     #[test]
     fn ipc_endpoint_uses_runtime_dir() {

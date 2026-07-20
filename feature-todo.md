@@ -2,13 +2,32 @@
 
 > Future features to add to dcode-ai, beyond what's already in `TODO.md` and `docs/improvements-roadmap.md`.
 
+## ⏱ Pending — prioritized (start here)
+
+**0. Blocker — verify the build.** A large body of web-chat + webhook work is written but not yet compiled on a Rust toolchain. Run `cargo build && cargo test -p dcode-ai-runtime`, fix any errors, before layering on more.
+
+**1. Web chat — small items still open**
+- [x] Webhook emitter: documented in `docs/configuration.md` (`[[web.webhooks]]`); `secret_header` is now the key for a real HMAC-SHA256 signature (`X-Dcode-Signature: sha256=<hex>` over the exact body, GitHub-style; RFC 4231 test vectors in `service.rs`).
+- [x] Drop `?t=` from web requests — cookie-first auth everywhere (fetch + EventSource); `?t=` only used as an automatic fallback if cookies are blocked (first 403 flips it on).
+- [x] Side-by-side (two-column) diff view in the file explorer — Split/Unified toggle; runs of −/+ lines are paired row-by-row with filler cells.
+- [~] Mermaid / LaTeX rendering — in-page rendering stays blocked (external multi-MB libs vs. the CSP-self-contained page); mermaid blocks now get a one-click "Render in mermaid.live" link generated from the code. LaTeX remains a plain code block.
+- [ ] Centralized frontend state refactor (or Preact) — prevents the state-desync bug class.
+- [~] Frontend test suite — `crates/cli/tests/web_page_smoke.rs`: static invariants over the embedded page (no raw control chars, unique element ids and function definitions, brace balance, attach-marker escape, and a page↔server cross-check that every `/api/*` route the page calls exists in `web_server.rs`). Each guards a bug class this page actually hit. A real JS-runtime suite still needs Node infra.
+
+**2. Highest-value next features (self-contained)**
+- [x] Ollama / local provider — `/connect ollama` (also `lmstudio`, `vllm`) in the TUI, and the same presets now appear in the **web provider dropdown** ("Ollama (local)" etc., no key needed): selecting one points the OpenAI-compat provider at localhost and the model list fills live from the server's `/models`.
+- [x] Provider health checks — `dcode-ai doctor --check` live-probes each configured provider (fetches its model catalog with its own credentials, 10s timeout each) and reports `ok (N models)` / `FAIL: <why>` / `skipped (no key)`. Antigravity reports login state instead of probing (its Vertex probe issues billed generate calls). Plain `doctor` stays instant and hints at the flag.
+- [~] Expand test coverage — started: `web_server.rs` gained a unit-test module (percent-decode, cookies, provider-key round-trip, rewind text matching, path-escape blocking) and `service.rs` covers attachment parsing + HMAC vectors. 84/145 files remain untested.
+
+_(Everything below is the full backlog, grouped by area.)_
+
 ## Web Interface (`dcode-ai web`)
 
 - [ ] **Bidirectional WebSocket Bridge** — Unify SSE events and HTTP POST commands into a single, low-latency bidirectional `/api/ws` channel.
 - [x] **Workspace File-Tree Explorer** — 📁 modal with lazy per-directory tree (`/api/tree`), a read-only file viewer with highlighting (`/api/workspace-file`, size-capped, traversal-safe), “＠ Mention” to insert `@path` into the composer, and a **Diff** toggle showing `git diff HEAD` for the file with diff coloring (`/api/git-diff`).
 - [ ] **WASM-based Pure Rust Frontend** — Compile the web interface with a Rust WASM framework (e.g., Leptos, Yew, or Dioxus) and embed the assets into the binary.
-- [ ] **Modern Responsive UI** — Update `web_chat.html` with a modern, responsive layout (Tailwind CSS, Alpine.js) featuring sidebars, collapsible tool execution details, and session history lists.
-- [ ] **Remote Webhook Emitter** — Trigger configurable HTTP POST webhooks for runtime events (such as `SessionCompleted` or `ToolApprovalRequired`) to notify external services.
+- [x] **Modern Responsive UI** — `web_chat.html` has a responsive dark/light layout: collapsible sidebar with session list, collapsible thinking + tool cards, live model/context/idle-working status, and a mobile breakpoint. (Vanilla CSS/JS, no Tailwind/Alpine — stays dependency-free.)
+- [~] **Remote Webhook Emitter** — POSTs runtime events (`SessionCompleted`/`ToolApprovalRequired`/`TurnCompleted`/`Error`) to configured `[[web.webhooks]]` from the service event loop. _Still open: document the config, and replace the static `secret_header` with a real HMAC signature._
 - [x] **Proper Rewind Resend Flow Integration** — Dedicated `rewindResend` sets `pendingPrompt` and re-sends on SSE `onopen` (race-free), not via generic `lifecycle`. Powers regenerate + edit-and-resend.
 - [x] **Web Settings Panel** — permission-mode + extended-thinking toggles via `/api/settings` + `ApplySettings` (preserves the session model). _(max-tokens + temperature: done in follow-up.)_
 - [x] **Shortcuts Modal & Export Chat** — `?` opens a shortcuts modal; `exportChat()` downloads the transcript as Markdown; global keydown wired.
@@ -29,7 +48,7 @@
 - [ ] **Azure OpenAI provider** — endpoint-compatible Azure deployment support
 - [ ] **Ollama/local provider** — local LLM support via Ollama API for offline/air-gapped use
 - [ ] **Google Vertex AI provider** — GCP-managed model hosting
-- [ ] **Provider health checks** — `dcode-ai doctor` subcommand that validates each provider's credentials, endpoint reachability, and model availability
+- [x] **Provider health checks** — `dcode-ai doctor --check` validates each provider's credentials, endpoint reachability, and model availability (see prioritized section above)
 - [ ] **Auto-fallback chain** — when primary provider fails (quota exhausted), try fallback providers in order
 - [ ] **Per-session provider override** — allow `--provider` flag or `/provider` slash command to switch provider mid-session
 
@@ -62,7 +81,7 @@
 
 ## Context & Memory
 
-- [ ] **Persistent memory/chronicles** — cross-session memory stored in a local vector DB (SQLite + embeddings), so the agent remembers user preferences, project conventions, and past decisions across sessions
+- [~] **Persistent memory/chronicles** — the capture/recall loop now works: a `save_memory` tool lets the agent persist durable facts (preference/convention/decision/fact) to the workspace memory store, and the newest 30 notes are injected into the system prompt at session start (`## Persistent memory` section; per-note size cap). Auto-approved (writes only the app-owned memory.json). Shares the store with `/memory` and `dcode-ai memory add`. _Still open: embeddings/vector recall for large stores, and global (cross-workspace) memory._
 - [ ] **Workspace indexing daemon** — background daemon that incrementally indexes workspace files for full-text search and code intelligence
 - [ ] **Semantic code search** — embed-based code search ("find where we handle auth tokens") using local embeddings
 - [ ] **Token budget management** — per-turn token budget with automatic context compaction when approaching limits
@@ -73,7 +92,7 @@
 
 ## IPC & Runtime
 
-- [ ] **Length-prefix message framing** — replace delimiter-based IPC with length-prefixed frames to prevent desync on binary data or embedded newlines
+- [x] **Length-prefix message framing** — IPC sockets use 4-byte big-endian length prefixes (16 MiB cap). Readers auto-detect per connection (framed streams start 0x00; NDJSON starts `{`) so old peers still parse; `DCODE_AI_IPC_LEGACY=1` keeps NDJSON writes for external consumers. Event log files stay NDJSON. Documented in `docs/ipc-ndjson.md`; round-trip/legacy/truncation tests in `ipc.rs`.
 - [ ] **mTLS or socket-auth for IPC** — authenticate CLI ↔ runtime connections to prevent unauthorized local control
 - [ ] **Runtime process supervision** — auto-restart runtime if it crashes, with session recovery
 - [ ] **Multi-user runtime** — run a single runtime daemon serving multiple users/sessions via authenticated IPC
@@ -113,7 +132,7 @@
 - [ ] **Session audit log** — append-only signed audit trail of all tool calls, approvals, and file modifications
 - [ ] **Command allow/deny lists** — more granular control over which shell commands can run without approval
 - [ ] **File system sandbox** — restrict agent file access to workspace directory with configurable exceptions
-- [ ] **Secret redaction** — automatically detect and redact API keys, tokens, passwords from tool outputs and conversation logs
+- [x] **Secret redaction** — tool outputs are scrubbed at the agent's single choke point (before model history, UI events, hooks, and session logs): exact values of secret-named env vars + the credentials store are replaced with `[redacted:<NAME>]`, and token shapes (`sk-`, `sk-ant-`, `ghp_`/`github_pat_`, `xox?-`, `AKIA`, `AIza`, `glpat-`, `npm_`) plus PEM private-key blocks are redacted heuristically (`common/src/redact.rs`, unit-tested). Best-effort defense in depth, not a hard guarantee.
 - [ ] **Approval policies by pattern** — allow/disallow specific tool+input patterns with saved policies (partially exists as `allow_pattern`)
 
 ## Performance & Engineering

@@ -180,6 +180,10 @@ impl ApprovalPolicy {
                 | "fetch_url"
                 | "ask_question"
                 | "update_plan"
+                // Writes only to the app-owned memory store
+                // (.dcode-ai/memory.json), never arbitrary files — same risk
+                // tier as update_plan's plan state.
+                | "save_memory"
         );
         let file_edit = matches!(
             tool_name,
@@ -576,5 +580,91 @@ mod tests {
             &serde_json::json!({"command": "echo hi"}).to_string(),
         );
         assert_eq!(tier, PermissionTier::Allowed);
+    }
+
+    mod props {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            /// Arbitrary unicode never panics (guards the byte-index slicing
+            /// inside the matcher).
+            #[test]
+            fn wildcard_never_panics(pattern in ".*", text in ".*") {
+                let _ = wildcard_matches(&pattern, &text);
+            }
+
+            /// `*` alone matches every input.
+            #[test]
+            fn star_matches_everything(text in ".*") {
+                prop_assert!(wildcard_matches("*", &text));
+            }
+
+            /// Star-free patterns are exactly substring containment.
+            #[test]
+            fn no_star_equals_contains(pattern in "[^*]*", text in ".*") {
+                prop_assert_eq!(
+                    wildcard_matches(&pattern, &text),
+                    text.contains(&pattern)
+                );
+            }
+
+            /// `prefix*` accepts `prefix + anything`.
+            #[test]
+            fn prefix_star_accepts_prefix(prefix in "[^*]{0,20}", rest in ".*") {
+                let pattern = format!("{prefix}*");
+                let text = format!("{prefix}{rest}");
+                prop_assert!(wildcard_matches(&pattern, &text));
+            }
+
+            /// `a*b` accepts `a + middle + b`.
+            #[test]
+            fn infix_star_accepts_sandwich(
+                a in "[^*]{0,12}",
+                middle in "[^*]{0,12}",
+                b in "[^*]{0,12}",
+            ) {
+                let pattern = format!("{a}*{b}");
+                let text = format!("{a}{middle}{b}");
+                prop_assert!(wildcard_matches(&pattern, &text));
+            }
+
+            /// A suggested allow pattern always matches the very call it was
+            /// suggested from (the whole point of the suggestion).
+            #[test]
+            fn suggested_pattern_matches_its_own_call(
+                tool in "[a-z_]{1,12}",
+                words in proptest::collection::vec("[a-z0-9/.-]{1,10}", 0..4),
+            ) {
+                let text = words.join(" ");
+                let input = serde_json::json!({ "command": text });
+                let pattern = suggest_allow_pattern(&tool, &input);
+                let readable_key = format!("{tool}:{text}");
+                prop_assert!(
+                    wildcard_matches(&pattern, &readable_key),
+                    "pattern {:?} must match {:?}", pattern, readable_key
+                );
+            }
+
+            /// The policy classifier never panics, whatever the mode, tool
+            /// name, or input payload.
+            #[test]
+            fn policy_check_never_panics(
+                mode_idx in 0usize..5,
+                tool in ".{0,24}",
+                input in ".{0,64}",
+            ) {
+                let mode = [
+                    PermissionMode::Default,
+                    PermissionMode::Plan,
+                    PermissionMode::AcceptEdits,
+                    PermissionMode::DontAsk,
+                    PermissionMode::BypassPermissions,
+                ][mode_idx];
+                let config = PermissionConfig { mode, ..Default::default() };
+                let policy = ApprovalPolicy::new(config);
+                let _ = policy.check(&tool, &input);
+            }
+        }
     }
 }

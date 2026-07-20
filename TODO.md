@@ -13,14 +13,14 @@
 
 ## 3. Reliability & Testing
 - [ ] Expand test coverage (86/145 files currently have zero tests).
-- [ ] Implement property-based testing (proptest) for `ApprovalPolicy` and `wildcard_matches`.
+- [x] Implement property-based testing (proptest) for `ApprovalPolicy` and `wildcard_matches`. (7 properties in `approval.rs`: no-panic on arbitrary unicode, `*` totality, contains-equivalence, prefix/infix acceptance, suggested-pattern self-match, `check()` no-panic across all permission modes.)
 - [ ] Build a headless integration test harness for end-to-end agent behavior.
 
 ## 4. IPC & Runtime Stability
-- [ ] Add heartbeat/ping-pong to Unix-socket IPC (CLI/Runtime).
-- [ ] Implement length-prefix framing for IPC messages to prevent desync.
-- [ ] Improve IPC backpressure handling for large tool outputs.
-- [ ] Add explicit "Runtime Disconnected" UI alerts.
+- [x] Add heartbeat/ping-pong to Unix-socket IPC (CLI/Runtime). (Server sends an empty frame every 15s; clients treat 60s of silence as a dead runtime.)
+- [x] Implement length-prefix framing for IPC messages to prevent desync. (4-byte BE prefix, 16 MiB cap, legacy NDJSON auto-detect + `DCODE_AI_IPC_LEGACY=1` escape hatch — see `docs/ipc-ndjson.md`.)
+- [x] Improve IPC backpressure handling for large tool outputs. (A lagged broadcast consumer now gets an explicit "N events skipped" notice and stays connected, instead of the connection silently dying; combined with the 24k tool-output cap + 16 MiB frames.)
+- [x] Add explicit "Runtime Disconnected" UI alerts. (Client injects a synthetic `Error` envelope on heartbeat stall or unexpected EOF-without-SessionEnded, so attach and the web UI render an explicit alert.)
 
 ## 5. Architectural Maintenance
 - [ ] Complete monolith splitting for `app.rs` and `repl.rs` (as per `MONOLITH_SPLITTING_PLAN.md`).

@@ -564,7 +564,10 @@ impl AgentLoop {
             }
 
             let mut final_results = Vec::new();
-            for result in results.into_iter().flatten() {
+            for mut result in results.into_iter().flatten() {
+                // Single choke point: everything downstream (model history,
+                // UI events, hooks, session logs) sees redacted output only.
+                dcode_ai_common::redact::redact_tool_result(&mut result);
                 final_results.push(result);
             }
             self.undo.note_results(&tool_calls, &final_results);

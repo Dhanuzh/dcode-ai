@@ -136,6 +136,30 @@ command = "echo about to run a tool"
 
 Configures the `web_search` and `fetch_url` tools (provider keys, enable flags).
 
+### `[[web.webhooks]]` — event webhooks
+
+Each entry POSTs selected runtime events as JSON (the same `EventEnvelope`
+shape as the session event log / SSE stream) to an external URL. Emitted from
+service sessions (`dcode-ai serve`, `dcode-ai web`, spawned runs).
+
+```toml
+[[web.webhooks]]
+url = "https://example.com/dcode-hook"
+# Which events to send. Available:
+#   SessionCompleted     — session ended (any reason)
+#   ToolApprovalRequired — a tool call is waiting for approval
+#   TurnCompleted        — the agent returned to idle after a turn
+#   Error                — a turn failed
+enabled_events = ["SessionCompleted", "ToolApprovalRequired"]
+# Optional shared secret. When set, each request carries
+#   X-Dcode-Signature: sha256=<hex>
+# — an HMAC-SHA256 of the exact request body, keyed with this secret
+# (GitHub-webhook style). Verify it server-side before trusting the payload.
+secret_header = "my-shared-secret"
+```
+
+Delivery is fire-and-forget: failures are ignored and never block the agent.
+
 ## `[memory]` — persistent project memory
 
 ```toml

@@ -18,6 +18,7 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 chrono = { version = "0.4", features = ["serde", "clock"] }
 libc = "0.2"
+sha2 = "0.10"
 portable-pty = "0.9"
 ignore = "0.4"
 walkdir = "2"

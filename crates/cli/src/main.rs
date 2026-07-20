@@ -266,6 +266,9 @@ enum Command {
     Doctor {
         #[arg(long)]
         json: bool,
+        /// Live-probe each configured provider (network calls; slower)
+        #[arg(long)]
+        check: bool,
     },
     Config {
         #[arg(long)]
@@ -806,8 +809,8 @@ async fn try_main() -> anyhow::Result<()> {
         Some(Command::Models { json }) => {
             show_models(&config, json).await?;
         }
-        Some(Command::Doctor { json }) => {
-            show_doctor(&config, &workspace_root, json)?;
+        Some(Command::Doctor { json, check }) => {
+            show_doctor(&config, &workspace_root, json, check).await?;
         }
         Some(Command::Config { json }) => {
             show_config(&config, &workspace_root, json)?;
@@ -2069,12 +2072,59 @@ async fn show_models(config: &DcodeAiConfig, json: bool) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn show_doctor(config: &DcodeAiConfig, workspace_root: &Path, json: bool) -> anyhow::Result<()> {
+/// Live reachability probe for one provider: fetch its model catalog with its
+/// own credentials. Antigravity is reported from login state instead of probed
+/// (its Vertex probe issues per-model generate calls, which costs money).
+async fn probe_provider_health(config: &DcodeAiConfig, kind: ProviderKind) -> String {
+    if matches!(kind, ProviderKind::Antigravity) {
+        let store = AuthStore::load().unwrap_or_default();
+        return if store.vertex.is_some() {
+            "login present (vertex project; not probed)".to_string()
+        } else if store.antigravity.is_some() {
+            "login present (oauth; not probed)".to_string()
+        } else {
+            "skipped (not logged in)".to_string()
+        };
+    }
+    if !config.provider.api_key_present_for(kind) {
+        return "skipped (no key)".to_string();
+    }
+    let mut cfg = config.clone();
+    cfg.set_default_provider(kind);
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        dcode_ai_runtime::model_limits_api::fetch_provider_model_ids(&cfg),
+    )
+    .await
+    {
+        Ok(Ok(ids)) => format!("ok ({} models)", ids.len()),
+        Ok(Err(err)) => format!("FAIL: {err}"),
+        Err(_) => "FAIL: timed out (10s)".to_string(),
+    }
+}
+
+async fn show_doctor(
+    config: &DcodeAiConfig,
+    workspace_root: &Path,
+    json: bool,
+    check: bool,
+) -> anyhow::Result<()> {
     let skills = SkillCatalog::discover(workspace_root, &config.harness.skill_directories)
         .map(|skills| skills.len())
         .unwrap_or(0);
     let binary_path = std::env::current_exe().ok();
     let runtime_socket_dir = runtime_socket_dir();
+
+    // Optional live probes (network); off by default so doctor stays instant.
+    let mut health: Vec<ProviderHealth> = Vec::new();
+    if check {
+        for kind in ProviderKind::ALL {
+            health.push(ProviderHealth {
+                provider: kind.display_name().to_string(),
+                status: probe_provider_health(config, kind).await,
+            });
+        }
+    }
     let output = DoctorOutput {
         binary_name: env!("CARGO_PKG_NAME").to_string(),
         binary_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -2095,6 +2145,7 @@ fn show_doctor(config: &DcodeAiConfig, workspace_root: &Path, json: bool) -> any
                 base_url: config.provider.base_url_for(provider).to_string(),
             })
             .collect(),
+        provider_health: health,
         mcp_server_count: config
             .mcp
             .servers
@@ -2141,6 +2192,14 @@ fn show_doctor(config: &DcodeAiConfig, workspace_root: &Path, json: bool) -> any
                 provider.model,
                 provider.base_url
             );
+        }
+        if !output.provider_health.is_empty() {
+            println!("Provider health (--check):");
+            for entry in &output.provider_health {
+                println!("  {}: {}", entry.provider, entry.status);
+            }
+        } else if !check {
+            println!("Provider health: run `dcode-ai doctor --check` for live probes");
         }
         println!("Skills discovered: {}", output.skill_count);
         println!("MCP servers enabled: {}", output.mcp_server_count);
@@ -2385,9 +2444,18 @@ struct DoctorOutput {
     provider: String,
     default_model: String,
     providers: Vec<ProviderDoctorStatus>,
+    /// Live probe results; only populated by `doctor --check`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    provider_health: Vec<ProviderHealth>,
     mcp_server_count: usize,
     skill_count: usize,
     memory_path: PathBuf,
+}
+
+#[derive(serde::Serialize)]
+struct ProviderHealth {
+    provider: String,
+    status: String,
 }
 
 #[derive(serde::Serialize)]

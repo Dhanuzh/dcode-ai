@@ -23,6 +23,7 @@
 //! - `POST /api/upload?name=` → raw file body → session attachments dir
 //! - `GET  /api/search?q=`    → full-text search across session event logs
 //! - `GET  /api/file?path=`   → serve a session attachment (image previews)
+//! - `GET  /api/files`        → flat workspace file list (`@` completion)
 //! - `GET  /api/tree?dir=`    → list a workspace directory (file explorer)
 //! - `GET  /api/workspace-file?path=` → read a workspace text file (viewer)
 //! - `GET  /api/git-diff?path=` → `git diff HEAD` for a workspace file
@@ -391,9 +392,19 @@ async fn do_set_model(
     let resolved_model = {
         let mut cfg = state.config.write().await;
         if let Some(p) = provider.as_deref() {
-            let kind =
-                ProviderKind::from_cli_name(p).ok_or_else(|| format!("unknown provider: {p}"))?;
-            cfg.set_default_provider(kind);
+            if let Some(base_url) = local_preset_base(p) {
+                // Local OpenAI-compatible server (web mirror of `/connect`):
+                // the sentinel key keeps the OpenAI provider from demanding a
+                // real one; the live model list then comes from {base}/models.
+                cfg.set_default_provider(ProviderKind::OpenAi);
+                cfg.provider.openai.base_url = base_url.to_string();
+                cfg.provider.openai.api_key = Some("local".to_string());
+                cfg.sync_default_model_from_provider();
+            } else {
+                let kind = ProviderKind::from_cli_name(p)
+                    .ok_or_else(|| format!("unknown provider: {p}"))?;
+                cfg.set_default_provider(kind);
+            }
         }
         if let Some(m) = model.as_deref().filter(|m| !m.trim().is_empty()) {
             cfg.apply_model_override(m);
@@ -774,6 +785,22 @@ async fn build_current_info(state: &AppState) -> String {
     info.to_string()
 }
 
+/// Local OpenAI-compatible server presets, mirroring the TUI's
+/// `/connect ollama|lmstudio|vllm` (see `repl.rs::local_preset_for`).
+/// (dropdown key, display name, base URL)
+const LOCAL_PRESETS: &[(&str, &str, &str)] = &[
+    ("ollama", "Ollama (local)", "http://localhost:11434/v1"),
+    ("lmstudio", "LM Studio (local)", "http://localhost:1234/v1"),
+    ("vllm", "vLLM (local)", "http://localhost:8000/v1"),
+];
+
+fn local_preset_base(key: &str) -> Option<&'static str> {
+    LOCAL_PRESETS
+        .iter()
+        .find(|(preset_key, _, _)| *preset_key == key)
+        .map(|(_, _, base)| *base)
+}
+
 /// A provider name that round-trips through [`ProviderKind::from_cli_name`].
 /// NOT `to_config_key()`: that maps Antigravity to "openai" (shared config
 /// block), which would make the dropdown switch the wrong provider.
@@ -816,10 +843,28 @@ fn fallback_models(kind: ProviderKind) -> Vec<&'static str> {
 /// `live_models` are the real ids fetched from the active provider's API; they
 /// replace the fallback list for the currently-selected provider only.
 fn build_info(config: &DcodeAiConfig, live_models: &[String]) -> serde_json::Value {
-    let providers: Vec<serde_json::Value> = ProviderKind::ALL
+    // When a local preset is connected, the default provider is OpenAi with a
+    // localhost base_url — the preset entry should show as selected, not the
+    // plain OpenAI row.
+    let active_base = config
+        .provider
+        .base_url_for(config.provider.default)
+        .trim_end_matches('/')
+        .to_string();
+    let active_preset: Option<&str> = (config.provider.default == ProviderKind::OpenAi)
+        .then(|| {
+            LOCAL_PRESETS
+                .iter()
+                .find(|(_, _, base)| base.trim_end_matches('/') == active_base)
+                .map(|(key, _, _)| *key)
+        })
+        .flatten();
+
+    let mut providers: Vec<serde_json::Value> = ProviderKind::ALL
         .into_iter()
         .map(|kind| {
-            let is_active = kind == config.provider.default;
+            let is_active = kind == config.provider.default
+                && !(kind == ProviderKind::OpenAi && active_preset.is_some());
             // Live catalog for the active provider (deduped, configured model
             // first so the current selection is always present); curated
             // fallback for the rest.
@@ -849,6 +894,29 @@ fn build_info(config: &DcodeAiConfig, live_models: &[String]) -> serde_json::Val
             })
         })
         .collect();
+
+    // Local OpenAI-compatible presets (web mirror of `/connect ollama` etc.).
+    // No key needed; the live model list arrives once the preset is selected
+    // (fetched from the local server's /models).
+    for (key, name, base) in LOCAL_PRESETS {
+        let is_active = active_preset == Some(*key);
+        let models: Vec<String> = if is_active && !live_models.is_empty() {
+            live_models.to_vec()
+        } else {
+            Vec::new()
+        };
+        providers.push(serde_json::json!({
+            "name": name,
+            "key": key,
+            "selected": is_active,
+            "model": if is_active { config.provider.openai.model.clone() } else { String::new() },
+            "models": models,
+            "models_live": is_active && !live_models.is_empty(),
+            "base_url": base,
+            "api_key_env": "",
+            "api_key_present": true,
+        }));
+    }
 
     serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
@@ -1411,6 +1479,19 @@ async fn handle_http(stream: TcpStream, state: &AppState, token: &str) -> std::i
                 }
             }
             let body = serde_json::json!({ "matches": matches });
+            write_response(
+                &mut writer,
+                "200 OK",
+                "application/json",
+                body.to_string().as_bytes(),
+            )
+            .await
+        }
+        ("GET", "/api/files") => {
+            // Flat workspace file list for `@` mention completion (bounded
+            // walk, same discovery the TUI composer uses).
+            let files = crate::file_mentions::discover_workspace_files(&state.workspace_root);
+            let body = serde_json::json!({ "files": files });
             write_response(
                 &mut writer,
                 "200 OK",
@@ -2071,4 +2152,109 @@ async fn stream_events(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn percent_decode_handles_encoded_and_plus() {
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("a+b"), "a b");
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+        // Malformed escapes pass through instead of panicking.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn cookie_value_finds_named_cookie() {
+        let header = "foo=1; dcode_ai_token=abc123; bar=2";
+        assert_eq!(cookie_value(header, "dcode_ai_token"), Some("abc123"));
+        assert_eq!(cookie_value(header, "foo"), Some("1"));
+        assert_eq!(cookie_value(header, "missing"), None);
+        assert_eq!(cookie_value("", "dcode_ai_token"), None);
+    }
+
+    #[test]
+    fn query_param_extracts_values() {
+        assert_eq!(query_param("t=abc&x=1", "t"), Some("abc"));
+        assert_eq!(query_param("t=abc&x=1", "x"), Some("1"));
+        assert_eq!(query_param("t=abc", "missing"), None);
+    }
+
+    #[test]
+    fn switch_keys_round_trip_through_from_cli_name() {
+        // The dropdown sends these back; each must resolve to the SAME kind
+        // (the Antigravity/OpenAI shared-config-block trap).
+        for kind in ProviderKind::ALL {
+            assert_eq!(
+                ProviderKind::from_cli_name(switch_key(kind)),
+                Some(kind),
+                "switch key for {kind:?} must round-trip"
+            );
+        }
+    }
+
+    #[test]
+    fn texts_match_accepts_containment_both_ways() {
+        assert!(texts_match("hello", "hello"));
+        assert!(texts_match("  hello ", "hello"));
+        // Stored form may be an expansion of the transcript form and vice versa.
+        assert!(texts_match(
+            "see @src/main.rs for details",
+            "see @src/main.rs"
+        ));
+        assert!(texts_match(
+            "see @src/main.rs",
+            "see @src/main.rs for details"
+        ));
+        assert!(!texts_match("hello", "goodbye"));
+    }
+
+    #[test]
+    fn media_types_cover_images() {
+        assert_eq!(media_type_for("png"), ("image/png", true));
+        assert_eq!(media_type_for("JPG"), ("image/jpeg", true));
+        assert_eq!(media_type_for("exe"), ("application/octet-stream", false));
+        // SVG is previewable but not a native model input.
+        assert!(!media_type_for("svg").1);
+    }
+
+    #[test]
+    fn tree_listing_hides_noise_dirs() {
+        for name in [".git", "target", "node_modules", ".dcode-ai"] {
+            assert!(is_ignored_entry(name), "{name} must be hidden");
+        }
+        assert!(!is_ignored_entry("src"));
+        assert!(!is_ignored_entry("Cargo.toml"));
+    }
+
+    #[test]
+    fn fallback_model_lists_are_never_empty() {
+        for kind in ProviderKind::ALL {
+            assert!(!fallback_models(kind).is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn resolve_in_workspace_blocks_escapes() {
+        let dir = std::env::temp_dir().join(format!("dcode-webtest-{}", std::process::id()));
+        tokio::fs::create_dir_all(dir.join("sub")).await.unwrap();
+        tokio::fs::write(dir.join("sub").join("f.txt"), b"x")
+            .await
+            .unwrap();
+
+        assert!(resolve_in_workspace(&dir, "sub/f.txt").await.is_some());
+        assert!(resolve_in_workspace(&dir, "..").await.is_none());
+        assert!(
+            resolve_in_workspace(&dir, "sub/../../etc/passwd")
+                .await
+                .is_none()
+        );
+        assert!(resolve_in_workspace(&dir, "missing.txt").await.is_none());
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 }
