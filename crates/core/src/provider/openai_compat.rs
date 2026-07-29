@@ -673,6 +673,10 @@ pub fn map_provider_error(status: reqwest::StatusCode, body_text: String) -> Pro
         429 => ProviderError::RateLimited {
             retry_after_ms: 1000,
         },
+        // 5xx ("Internal server error", 502/503/504 gateway/overload) is the
+        // provider's own infrastructure failing, not a bad request — almost
+        // always clears on retry (common with free/overloaded model tiers).
+        500..=599 => ProviderError::Transient(body_text),
         _ => ProviderError::RequestFailed(body_text),
     }
 }

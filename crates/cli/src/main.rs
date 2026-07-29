@@ -2565,6 +2565,7 @@ fn default_provider_ready(config: &DcodeAiConfig) -> bool {
         }
         ProviderKind::Anthropic => store.anthropic.is_some() || has_claude_cli(),
         ProviderKind::Antigravity => store.antigravity.is_some() || store.vertex.is_some(),
+        ProviderKind::AntigravityOAuth => store.antigravity_oauth.is_some(),
         ProviderKind::OpenRouter => false,
         ProviderKind::OpenCodeZen => store.opencodezen_oauth.is_some(),
     }

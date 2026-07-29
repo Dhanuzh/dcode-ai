@@ -4,6 +4,7 @@ use dcode_ai_common::provider_runtime::has_claude_cli;
 use super::anthropic::AnthropicProvider;
 use super::anthropic_with_claude_fallback::AnthropicWithClaudeFallbackProvider;
 use super::antigravity::AntigravityProvider;
+use super::antigravity_oauth::AntigravityOAuthProvider;
 use super::claude_cli::ClaudeCliProvider;
 use super::minimax::MiniMaxProvider;
 use super::openai::OpenAiProvider;
@@ -34,6 +35,9 @@ pub fn build_provider(config: &DcodeAiConfig) -> Result<Box<dyn Provider>, Provi
             Err(error) => Err(error),
         },
         ProviderKind::Antigravity => Ok(Box::new(AntigravityProvider::from_config(config)?)),
+        ProviderKind::AntigravityOAuth => {
+            Ok(Box::new(AntigravityOAuthProvider::from_config(config)?))
+        }
         ProviderKind::OpenAi => Ok(Box::new(OpenAiProvider::from_config(
             config,
             config.provider.default,
@@ -66,6 +70,11 @@ mod tests {
             match kind {
                 ProviderKind::OpenAi | ProviderKind::Antigravity => {
                     config.provider.openai.api_key = Some("openai-key".into());
+                }
+                ProviderKind::AntigravityOAuth => {
+                    // AntigravityOAuth requires OAuth login, not API key
+                    // Skip this test as it requires env vars for client_id/secret
+                    continue;
                 }
                 ProviderKind::Anthropic => {
                     config.provider.anthropic.api_key = Some("sk-ant-api03-test".into());

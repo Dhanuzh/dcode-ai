@@ -5,8 +5,8 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use base64::Engine;
 use dcode_ai_common::auth::{
-    AntigravityAuth, AuthStore, CopilotAuth, LoggedProvider, OpenAiOAuth, OpenCodeZenOAuth,
-    ProviderAuth,
+    AntigravityAuth, AntigravityOAuthAuth, AuthStore, CopilotAuth, LoggedProvider, OpenAiOAuth,
+    OpenCodeZenOAuth, ProviderAuth,
 };
 use sha2::{Digest, Sha256};
 
@@ -40,6 +40,7 @@ pub enum OAuthProvider {
     Openai,
     Copilot,
     Antigravity,
+    AntigravityOAuth,
     Opencodezen,
 }
 
@@ -55,6 +56,7 @@ pub enum LogoutTarget {
     Openai,
     Copilot,
     Antigravity,
+    AntigravityOAuth,
     Vertex,
     Opencodezen,
     All,
@@ -93,6 +95,14 @@ pub fn show_auth_status() -> anyhow::Result<()> {
     println!(
         "  │ antigravity  │ {} │",
         pad_status(if store.antigravity.is_some() {
+            "✓ logged in"
+        } else {
+            "✗ not logged in"
+        })
+    );
+    println!(
+        "  │ antigravity-oauth │ {} │",
+        pad_status(if store.antigravity_oauth.is_some() {
             "✓ logged in"
         } else {
             "✗ not logged in"
@@ -154,6 +164,15 @@ where
                 store.preferred_provider = None;
             }
         }
+        LogoutTarget::AntigravityOAuth => {
+            store.antigravity_oauth = None;
+            if matches!(
+                store.preferred_provider,
+                Some(LoggedProvider::AntigravityOAuth)
+            ) {
+                store.preferred_provider = None;
+            }
+        }
         LogoutTarget::Vertex => {
             store.vertex = None;
         }
@@ -192,6 +211,7 @@ where
         OAuthProvider::Openai => store.openai_oauth.is_some(),
         OAuthProvider::Copilot => store.copilot.is_some(),
         OAuthProvider::Antigravity => store.antigravity.is_some(),
+        OAuthProvider::AntigravityOAuth => store.antigravity_oauth.is_some(),
         OAuthProvider::Opencodezen => store.opencodezen_oauth.is_some(),
     };
     if already {
@@ -204,6 +224,7 @@ where
         OAuthProvider::Openai => login_openai(&mut emit).await,
         OAuthProvider::Copilot => login_copilot(&mut emit).await,
         OAuthProvider::Antigravity => login_antigravity(&mut emit).await,
+        OAuthProvider::AntigravityOAuth => login_antigravity_oauth(&mut emit).await,
         OAuthProvider::Opencodezen => login_opencodezen(&mut emit).await,
     }
 }
@@ -639,17 +660,197 @@ where
     let expires_in = v.get("expires_in").and_then(|x| x.as_i64()).unwrap_or(3600);
     let expires_at = chrono::Utc::now().timestamp() + expires_in - 300;
 
+    // Discover this account's own Cloud Code Assist project (loadCodeAssist,
+    // with onboardUser if needed) so generateContent uses it instead of the
+    // shared default — which fixes 404/permission errors on accounts the shared
+    // project doesn't cover. Falls back to the default on any failure.
+    emit("Discovering your Code Assist project…");
+    let project_id = discover_antigravity_project(access_token)
+        .await
+        .unwrap_or_else(|| ANTIGRAVITY_DEFAULT_PROJECT_ID.to_string());
+    emit(&format!("Using Code Assist project: {project_id}"));
+
     let mut store = AuthStore::load().unwrap_or_default();
     store.antigravity = Some(AntigravityAuth {
         access_token: access_token.to_string(),
         refresh_token: refresh_token.to_string(),
         expires_at: Some(expires_at),
-        project_id: ANTIGRAVITY_DEFAULT_PROJECT_ID.to_string(),
+        project_id,
         email: None,
     });
     store.preferred_provider = Some(LoggedProvider::Antigravity);
     store.save()?;
     emit("Logged in to Antigravity ✓");
+    Ok(())
+}
+
+/// Discover the account's Cloud Code Assist project via `loadCodeAssist` (and
+/// `onboardUser` when the account isn't onboarded yet). Returns `None` on any
+/// failure so the caller can fall back to the shared default project.
+async fn discover_antigravity_project(access_token: &str) -> Option<String> {
+    let client = reqwest::Client::new();
+    let ua = std::env::var("DCODE_ANTIGRAVITY_USER_AGENT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "antigravity/1.104.0 windows/amd64".to_string());
+    const API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
+    const CLIENT_METADATA: &str =
+        r#"{"ideType":"ANTIGRAVITY","platform":"WINDOWS","pluginType":"GEMINI"}"#;
+    let body_metadata = serde_json::json!({
+        "ideType": "IDE_UNSPECIFIED",
+        "platform": "PLATFORM_UNSPECIFIED",
+        "pluginType": "GEMINI"
+    });
+
+    // 1. loadCodeAssist → the account's project (if already onboarded).
+    let load = client
+        .post("https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist")
+        .bearer_auth(access_token)
+        .header("User-Agent", &ua)
+        .header("X-Goog-Api-Client", API_CLIENT)
+        .header("Client-Metadata", CLIENT_METADATA)
+        .json(&serde_json::json!({ "metadata": body_metadata }))
+        .send()
+        .await
+        .ok()?;
+    if !load.status().is_success() {
+        return None;
+    }
+    let loaded: serde_json::Value = load.json().await.ok()?;
+    if let Some(p) = loaded
+        .get("cloudaicompanionProject")
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.is_empty())
+    {
+        return Some(p.to_string());
+    }
+
+    // 2. Not onboarded — onboard against the current/allowed tier, then read the
+    // project from the (possibly long-running) operation response.
+    let tier = loaded
+        .pointer("/currentTier/id")
+        .and_then(|i| i.as_str())
+        .or_else(|| {
+            loaded
+                .get("allowedTiers")
+                .and_then(|a| a.as_array())
+                .and_then(|a| a.first())
+                .and_then(|t| t.get("id"))
+                .and_then(|i| i.as_str())
+        })
+        .unwrap_or("free-tier")
+        .to_string();
+    let onboard = client
+        .post("https://cloudcode-pa.googleapis.com/v1internal:onboardUser")
+        .bearer_auth(access_token)
+        .header("User-Agent", &ua)
+        .header("X-Goog-Api-Client", API_CLIENT)
+        .header("Client-Metadata", CLIENT_METADATA)
+        .json(&serde_json::json!({ "tierId": tier, "metadata": body_metadata }))
+        .send()
+        .await
+        .ok()?;
+    let op: serde_json::Value = onboard.json().await.ok()?;
+    op.pointer("/response/cloudaicompanionProject/id")
+        .or_else(|| op.pointer("/response/cloudaicompanionProject"))
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.is_empty())
+        .map(|s| s.to_string())
+}
+
+async fn login_antigravity_oauth<F>(emit: &mut F) -> anyhow::Result<()>
+where
+    F: FnMut(&str),
+{
+    // "Antigravity OAuth" is a second, independently-loggable identity on
+    // the SAME Cloud Code Assist backend `login_antigravity` above uses —
+    // not the plain Gemini Developer API. That's the real "sign in with
+    // Google, no API key, just chat" experience (confirmed against Google's
+    // own gemini-cli, whose OAuth login calls `loadCodeAssist` on
+    // cloudcode-pa.googleapis.com, not generativelanguage.googleapis.com —
+    // the Gemini Developer API only supports OAuth for tuning/semantic-
+    // retrieval, not general chat). Uses the same bundled, working client as
+    // `login_antigravity`; stored separately in `antigravity_oauth` so the
+    // two logins don't overwrite each other.
+    let client_id = dcode_ai_common::secrets::antigravity_client_id();
+    let client_secret = dcode_ai_common::secrets::antigravity_client_secret();
+
+    let pkce = generate_pkce();
+    let scopes = [
+        "https://www.googleapis.com/auth/cloud-platform",
+        "https://www.googleapis.com/auth/userinfo.email",
+        "https://www.googleapis.com/auth/userinfo.profile",
+        "https://www.googleapis.com/auth/cclog",
+        "https://www.googleapis.com/auth/experimentsandconfigs",
+    ]
+    .join(" ");
+
+    let auth_url = format!(
+        "{ANTIGRAVITY_AUTH_URL}?client_id={}&response_type=code&redirect_uri={}&scope={}&code_challenge={}&code_challenge_method=S256&state={}&access_type=offline&prompt=consent",
+        url_encode(&client_id),
+        url_encode(ANTIGRAVITY_REDIRECT_URI),
+        url_encode(&scopes),
+        url_encode(&pkce.challenge),
+        url_encode(&pkce.verifier)
+    );
+
+    emit("");
+    emit("Antigravity OAuth login (Cloud Code Assist)");
+    emit("");
+    if !open_browser(&auth_url) {
+        emit("Open this URL:");
+        emit(&auth_url);
+        emit("");
+    }
+    emit("Waiting for callback on http://localhost:51121/oauth-callback ...");
+
+    let (code, state) = wait_for_callback().await?;
+    if state != pkce.verifier {
+        bail!("OAuth state mismatch");
+    }
+
+    let client = reqwest::Client::new();
+    let params = [
+        ("client_id", client_id.as_str()),
+        ("client_secret", client_secret.as_str()),
+        ("code", code.as_str()),
+        ("grant_type", "authorization_code"),
+        ("redirect_uri", ANTIGRAVITY_REDIRECT_URI),
+        ("code_verifier", pkce.verifier.as_str()),
+    ];
+    let resp = client
+        .post(ANTIGRAVITY_TOKEN_URL)
+        .form(&params)
+        .send()
+        .await?;
+    if !resp.status().is_success() {
+        bail!(
+            "Antigravity OAuth token exchange failed {}: {}",
+            resp.status(),
+            resp.text().await.unwrap_or_default()
+        );
+    }
+    let v: serde_json::Value = resp.json().await?;
+    let access_token = v
+        .get("access_token")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing access_token"))?;
+    let refresh_token = v
+        .get("refresh_token")
+        .and_then(|x| x.as_str())
+        .ok_or_else(|| anyhow::anyhow!("missing refresh_token"))?;
+    let expires_in = v.get("expires_in").and_then(|x| x.as_i64()).unwrap_or(3600);
+    let expires_at = chrono::Utc::now().timestamp() + expires_in - 300;
+
+    let mut store = AuthStore::load().unwrap_or_default();
+    store.antigravity_oauth = Some(AntigravityOAuthAuth {
+        access_token: access_token.to_string(),
+        refresh_token: refresh_token.to_string(),
+        expires_at: Some(expires_at),
+    });
+    store.preferred_provider = Some(LoggedProvider::AntigravityOAuth);
+    store.save()?;
+    emit("Logged in to Antigravity OAuth ✓");
     Ok(())
 }
 

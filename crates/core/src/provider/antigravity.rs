@@ -25,30 +25,33 @@ use futures_util::StreamExt;
 use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
 use serde_json::{Value, json};
 
+use super::anthropic_compat::map_provider_error as anthropic_map_provider_error;
 use super::openai_compat::map_provider_error;
 use super::{Provider, ProviderCapabilities, ProviderError, StreamChunk, retry};
 
 /// Streaming Cloud Code Assist endpoint (prod). `alt=sse` makes the backend
-/// emit server-sent events instead of a single JSON array.
-const ANTIGRAVITY_ENDPOINT: &str =
+/// emit server-sent events instead of a single JSON array. `pub(crate)` so
+/// `antigravity_oauth.rs`'s OAuth mode (a second, independent Cloud Code
+/// Assist login) can reuse it instead of a duplicated copy.
+pub(crate) const ANTIGRAVITY_ENDPOINT: &str =
     "https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse";
 
 /// Fallback GCP project used by the reference Antigravity client when the
 /// logged-in account has not been onboarded to its own project.
-const ANTIGRAVITY_DEFAULT_PROJECT: &str = "rising-fact-p41fc";
+pub(crate) const ANTIGRAVITY_DEFAULT_PROJECT: &str = "rising-fact-p41fc";
 
 // Google gates the Cloud Code Assist backend on the client version advertised
 // in `User-Agent`; older strings (e.g. 1.11.5) are rejected with "out of date".
 // This tracks a recent Antigravity build and is overridable via
 // `DCODE_ANTIGRAVITY_USER_AGENT` so the gate can be bumped without a rebuild.
 const ANTIGRAVITY_USER_AGENT: &str = "antigravity/1.104.0 windows/amd64";
-const ANTIGRAVITY_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
-const ANTIGRAVITY_CLIENT_METADATA: &str =
+pub(crate) const ANTIGRAVITY_API_CLIENT: &str = "google-cloud-sdk vscode_cloudshelleditor/0.1";
+pub(crate) const ANTIGRAVITY_CLIENT_METADATA: &str =
     r#"{"ideType":"ANTIGRAVITY","platform":"WINDOWS","pluginType":"GEMINI"}"#;
 
 /// Resolve the Antigravity `User-Agent`, honoring a `DCODE_ANTIGRAVITY_USER_AGENT`
 /// override so a moved version gate can be fixed without recompiling.
-fn antigravity_user_agent() -> String {
+pub(crate) fn antigravity_user_agent() -> String {
     std::env::var("DCODE_ANTIGRAVITY_USER_AGENT")
         .ok()
         .filter(|s| !s.trim().is_empty())
@@ -119,6 +122,117 @@ fn vertex_endpoint(auth: &VertexAuth, model: &str) -> String {
     )
 }
 
+/// Whether `model` should route through the Claude-on-Vertex code path
+/// instead of the Gemini-shaped one. Only meaningful when logged in via a
+/// Vertex project (`VertexAuth`) — Cloud Code Assist (the plain Antigravity
+/// OAuth login) only ever serves Gemini models, Claude isn't reachable there.
+fn is_claude_model(model: &str) -> bool {
+    model.trim().to_ascii_lowercase().starts_with("claude")
+}
+
+/// Whether an Anthropic 400 error body is the "this model doesn't accept an
+/// explicit `temperature`" rejection (adaptive-thinking-only sampling on the
+/// newest Claude generations). Deliberately a text match on the actual
+/// rejection rather than a hardcoded list of affected model ids — which
+/// Claude generations this applies to has already changed release over
+/// release, so detecting the real error is more robust than guessing ahead.
+fn is_temperature_unsupported_error(body_text: &str) -> bool {
+    let m = body_text.to_ascii_lowercase();
+    m.contains("temperature")
+        && (m.contains("deprecated") || m.contains("not supported") || m.contains("not permitted"))
+}
+
+/// Vertex AI `streamRawPredict` URL for a Claude (Anthropic publisher) model.
+/// Same host-selection rule as [`vertex_endpoint`]; publisher is `anthropic`
+/// not `google`, RPC is `streamRawPredict` not `streamGenerateContent`. See
+/// <https://platform.claude.com/docs/en/api/claude-on-vertex-ai>.
+fn claude_vertex_endpoint(auth: &VertexAuth, model: &str) -> String {
+    let host = if auth.location == "global" {
+        "aiplatform.googleapis.com".to_string()
+    } else {
+        format!("{}-aiplatform.googleapis.com", auth.location)
+    };
+    format!(
+        "https://{host}/v1/projects/{}/locations/{}/publishers/anthropic/models/{model}:streamRawPredict?alt=sse",
+        auth.project_id, auth.location
+    )
+}
+
+/// Build the Claude Messages-API body for Vertex's `streamRawPredict`.
+/// Reuses [`super::anthropic_compat::anthropic_request_body`] (same
+/// message/tool/cache-control shaping as the direct Anthropic provider) then
+/// adapts it to Vertex's two documented differences from api.anthropic.com:
+/// the model id lives in the URL (so `"model"` must not be in the body), and
+/// `anthropic_version` is a body field here rather than an HTTP header.
+fn claude_vertex_request_body(
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    model: &str,
+    max_tokens: u32,
+    temperature: f32,
+    workspace_root: &Path,
+) -> Result<Value, ProviderError> {
+    // Claude's (adaptive) thinking counts thinking tokens against max_tokens,
+    // and these newer models think by default at "high" effort. Anthropic's
+    // own guidance: "always set a high max output token limit, at least
+    // 16k" — dcode-ai's configured default (8,192) can be entirely consumed
+    // by thinking before any visible answer is produced, hitting the
+    // ceiling mid-reasoning with no graceful degradation (the "empty
+    // completion" failure). Raise the floor without lowering anything a
+    // user explicitly configured higher.
+    let max_tokens = max_tokens.max(16_000);
+    let mut body = super::anthropic_compat::anthropic_request_body(
+        messages,
+        tools,
+        model,
+        max_tokens,
+        temperature,
+        workspace_root,
+    )?;
+    if let Some(obj) = body.as_object_mut() {
+        obj.remove("model");
+        obj.insert("anthropic_version".to_string(), json!("vertex-2023-10-16"));
+    }
+    Ok(body)
+}
+
+/// POST `body` to `url` with retry-on-429/5xx, shared by the Gemini and
+/// Claude-on-Vertex code paths (which differ only in how `body`/`url` were
+/// built and which status/body shape `map_err` needs to understand).
+async fn post_with_retry(
+    client: &reqwest::Client,
+    url: &str,
+    bearer: &HeaderValue,
+    body: &Value,
+    map_err: fn(reqwest::StatusCode, String) -> ProviderError,
+) -> Result<reqwest::Response, ProviderError> {
+    let response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
+        let resp = client
+            .post(url)
+            .header(AUTHORIZATION, bearer.clone())
+            .header(ACCEPT, "text/event-stream")
+            .json(body)
+            .send()
+            .await
+            .map_err(ProviderError::from_reqwest_send)?;
+        let status = resp.status();
+        if status.as_u16() == 429 || status.is_server_error() {
+            let text = resp.text().await.unwrap_or_default();
+            return Err(map_err(status, text));
+        }
+        Ok(resp)
+    })
+    .await?;
+
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(map_err(status, text));
+    }
+
+    Ok(response)
+}
+
 /// Process-global monotonic counter so tool-call ids are unique across turns
 /// (they double as keys into the thought-signature cache).
 static TOOL_CALL_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -176,17 +290,23 @@ impl AntigravityProvider {
         let openai = config.provider.openai.clone();
 
         let auth_store = AuthStore::load().ok().unwrap_or_default();
-        // Precedence: an explicit API key (tests / advanced setups; the
-        // "local" sentinel from local-model presets doesn't count) beats the
-        // Vertex project login, which beats Antigravity OAuth. No token is
-        // minted here — see `access()`.
+        // Precedence: an explicit, deliberate dcode-ai login (Vertex project,
+        // then Cloud Code Assist OAuth) beats a bare inline API key, which is
+        // only a "tests / advanced setups" fallback for when neither login
+        // exists. This matters because `provider.openai.api_key` is a SHARED
+        // slot — OpenAI, the Copilot preset, and Antigravity OAuth can all
+        // leave a key sitting there — so treating its mere presence as
+        // authoritative would silently override a login you just ran (e.g.
+        // `/login vertex <project-id>` right after testing an Antigravity
+        // OAuth API key would otherwise get ignored). No token is minted
+        // here — see `access()`.
         let inline_key = openai.resolve_api_key().filter(|k| k != "local");
-        let auth = if let Some(key) = inline_key {
-            AntigravityAuthMode::InlineKey(key)
-        } else if let Some(v) = auth_store.vertex.clone() {
+        let auth = if let Some(v) = auth_store.vertex.clone() {
             AntigravityAuthMode::Vertex(v)
         } else if auth_store.antigravity.is_some() {
             AntigravityAuthMode::OAuth
+        } else if let Some(key) = inline_key {
+            AntigravityAuthMode::InlineKey(key)
         } else {
             return Err(ProviderError::Configuration(
                 "missing Antigravity login; run `dcode-ai login antigravity` \
@@ -291,9 +411,16 @@ impl AntigravityProvider {
             "temperature": self.config.temperature,
             "maxOutputTokens": self.max_tokens,
         });
-        if let Some(tier) = tier {
-            generation_config["thinkingConfig"] = thinking_config(&base_model, tier);
-        }
+        // Gemini 2.5+/3.x models think by default even with NO thinkingConfig
+        // sent at all, and thinking tokens are deducted from maxOutputTokens.
+        // Google's own default thinking budget (up to 8,192 tokens when
+        // unset) happens to equal dcode-ai's default max_tokens (8,192) — so
+        // an untiered model (no `-low`/`-high` suffix picked) can spend its
+        // *entire* output budget thinking and return zero visible text, the
+        // exact "empty completion" failure this retries and then gives up
+        // on. Always send a bounded config; default to "low" when the user
+        // didn't pick an explicit effort tier.
+        generation_config["thinkingConfig"] = thinking_config(&base_model, tier.unwrap_or("low"));
 
         let mut request = json!({
             "contents": contents,
@@ -344,6 +471,64 @@ impl Provider for AntigravityProvider {
             ))
         })?;
 
+        if is_claude_model(&model) {
+            // Claude on Vertex lives under a different publisher namespace
+            // with an Anthropic Messages-API shape (not Gemini's) — only
+            // reachable via a Vertex project login, not the plain Cloud Code
+            // Assist / Antigravity OAuth login, which only ever serves Gemini.
+            let vertex = vertex.ok_or_else(|| {
+                ProviderError::Configuration(format!(
+                    "model '{model}' is a Claude model — Claude on Antigravity requires \
+                     a Google Cloud project login (`/login vertex <project-id>`); the \
+                     plain Antigravity OAuth login only serves Gemini models"
+                ))
+            })?;
+            let mut body = claude_vertex_request_body(
+                messages,
+                tools,
+                &model,
+                self.max_tokens,
+                self.config.temperature,
+                workspace_root,
+            )?;
+            let url = claude_vertex_endpoint(&vertex, &model);
+            let result = post_with_retry(
+                &self.client,
+                &url,
+                &bearer,
+                &body,
+                anthropic_map_provider_error,
+            )
+            .await;
+            let response = match result {
+                // Newer Claude generations (adaptive-thinking-only sampling)
+                // reject an explicit `temperature` outright — rather than
+                // hardcoding which model families this applies to (a moving
+                // target release over release), detect the actual rejection
+                // and retry once with it omitted.
+                Err(ProviderError::RequestFailed(ref msg))
+                    if is_temperature_unsupported_error(msg) =>
+                {
+                    if let Some(obj) = body.as_object_mut() {
+                        obj.remove("temperature");
+                    }
+                    post_with_retry(
+                        &self.client,
+                        &url,
+                        &bearer,
+                        &body,
+                        anthropic_map_provider_error,
+                    )
+                    .await?
+                }
+                other => other?,
+            };
+            return Ok(super::anthropic_compat::spawn_anthropic_stream(
+                response,
+                "antigravity",
+            ));
+        }
+
         let (request, base_model) = self.request_parts(messages, tools, &model, workspace_root)?;
         let (url, body) = if let Some(vertex) = &vertex {
             // Direct Vertex AI call: plain generateContent body, project and
@@ -363,33 +548,8 @@ impl Provider for AntigravityProvider {
             )
         };
 
-        let response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
-            let resp = self
-                .client
-                .post(&url)
-                .header(AUTHORIZATION, bearer.clone())
-                .header(ACCEPT, "text/event-stream")
-                .json(&body)
-                .send()
-                .await
-                .map_err(ProviderError::from_reqwest_send)?;
-            if resp.status().as_u16() == 429 {
-                let text = resp.text().await.unwrap_or_default();
-                return Err(map_provider_error(
-                    reqwest::StatusCode::TOO_MANY_REQUESTS,
-                    text,
-                ));
-            }
-            Ok(resp)
-        })
-        .await?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            return Err(map_provider_error(status, text));
-        }
-
+        let response =
+            post_with_retry(&self.client, &url, &bearer, &body, map_provider_error).await?;
         Ok(spawn_gemini_stream(response, "antigravity"))
     }
 }
@@ -417,7 +577,7 @@ fn split_model_tier(model: &str) -> (String, Option<&'static str>) {
 /// Build the Gemini `thinkingConfig` for a base model + effort tier. Gemini 3
 /// uses `thinkingLevel` strings; Gemini 2.5 and Claude (via Antigravity) use a
 /// numeric `thinkingBudget`.
-fn thinking_config(base_model: &str, tier: &str) -> Value {
+pub(crate) fn thinking_config(base_model: &str, tier: &str) -> Value {
     let m = base_model.to_ascii_lowercase();
     if m.contains("gemini-3") {
         json!({
@@ -640,8 +800,10 @@ fn sanitize_schema(value: &Value) -> Value {
 
 /// Spawn a task that parses the Antigravity SSE stream (Gemini
 /// `generateContent` chunks wrapped in a `response` envelope) into
-/// [`StreamChunk`]s.
-fn spawn_gemini_stream(
+/// [`StreamChunk`]s. Also handles the unwrapped shape (falls back to the
+/// root object when there's no `response` key), so this is directly reusable
+/// for `antigravity_oauth.rs`'s Cloud Code Assist OAuth mode too.
+pub(crate) fn spawn_gemini_stream(
     response: reqwest::Response,
     provider_name: &'static str,
 ) -> tokio::sync::mpsc::Receiver<StreamChunk> {
@@ -806,6 +968,109 @@ mod tests {
             vertex_endpoint(&auth, "gemini-2.5-pro"),
             "https://us-central1-aiplatform.googleapis.com/v1/projects/p1/locations/us-central1/publishers/google/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
         );
+    }
+
+    #[test]
+    fn is_claude_model_detects_prefix_case_insensitively() {
+        assert!(is_claude_model("claude-opus-4-8"));
+        assert!(is_claude_model("Claude-Sonnet-4-6"));
+        assert!(is_claude_model("  claude-sonnet-4-5@20250929  "));
+        assert!(!is_claude_model("gemini-3.5-flash"));
+        assert!(!is_claude_model(""));
+    }
+
+    #[test]
+    fn detects_temperature_unsupported_error_by_message_not_model_name() {
+        // The real error text seen from Claude Sonnet 5 on Vertex.
+        assert!(is_temperature_unsupported_error(
+            r#"{"type":"error","error":{"type":"invalid_request_error","message":"`temperature` is deprecated for this model."}}"#
+        ));
+        assert!(is_temperature_unsupported_error(
+            "temperature: Extra inputs are not permitted"
+        ));
+        // Deliberately not keyed on model name — any model whose error text
+        // matches is treated the same way, so a future model with this quirk
+        // doesn't need a code change.
+        assert!(!is_temperature_unsupported_error(
+            "500 internal server error"
+        ));
+        assert!(!is_temperature_unsupported_error(
+            r#"{"error":{"message":"model not found"}}"#
+        ));
+    }
+
+    #[test]
+    fn claude_vertex_endpoint_uses_anthropic_publisher_and_stream_raw_predict() {
+        let auth = VertexAuth {
+            project_id: "my-proj".into(),
+            location: "global".into(),
+        };
+        assert_eq!(
+            claude_vertex_endpoint(&auth, "claude-opus-4-8"),
+            "https://aiplatform.googleapis.com/v1/projects/my-proj/locations/global/publishers/anthropic/models/claude-opus-4-8:streamRawPredict?alt=sse"
+        );
+    }
+
+    #[test]
+    fn claude_vertex_endpoint_regional_prefixes_host() {
+        let auth = VertexAuth {
+            project_id: "p1".into(),
+            location: "us-east5".into(),
+        };
+        assert_eq!(
+            claude_vertex_endpoint(&auth, "claude-sonnet-4-6"),
+            "https://us-east5-aiplatform.googleapis.com/v1/projects/p1/locations/us-east5/publishers/anthropic/models/claude-sonnet-4-6:streamRawPredict?alt=sse"
+        );
+    }
+
+    #[test]
+    fn claude_vertex_request_body_omits_model_and_adds_anthropic_version() {
+        let messages = vec![Message::user("hi")];
+        let body = claude_vertex_request_body(
+            &messages,
+            &[],
+            "claude-opus-4-8",
+            1024,
+            0.7,
+            Path::new("."),
+        )
+        .expect("body");
+        assert!(
+            body.get("model").is_none(),
+            "model must not be in the body — it's in the URL"
+        );
+        assert_eq!(body["anthropic_version"], "vertex-2023-10-16");
+        assert_eq!(body["messages"][0]["role"], "user");
+    }
+
+    #[test]
+    fn claude_vertex_request_body_raises_low_max_tokens_to_the_16k_floor() {
+        let messages = vec![Message::user("hi")];
+        let body = claude_vertex_request_body(
+            &messages,
+            &[],
+            "claude-sonnet-4-6",
+            1024, // dcode-ai's default (8,192 in practice) is well under this too
+            0.7,
+            Path::new("."),
+        )
+        .expect("body");
+        assert_eq!(body["max_tokens"], 16_000);
+    }
+
+    #[test]
+    fn claude_vertex_request_body_keeps_a_higher_configured_max_tokens() {
+        let messages = vec![Message::user("hi")];
+        let body = claude_vertex_request_body(
+            &messages,
+            &[],
+            "claude-sonnet-4-6",
+            32_000,
+            0.7,
+            Path::new("."),
+        )
+        .expect("body");
+        assert_eq!(body["max_tokens"], 32_000);
     }
 
     #[test]

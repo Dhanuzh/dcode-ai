@@ -1322,6 +1322,7 @@ impl TuiSessionState {
     }
 
     pub fn set_busy_state(&mut self, new_state: BusyState) {
+        self.busy = new_state != BusyState::Idle;
         if self.current_busy_state != new_state {
             use std::time::{SystemTime, UNIX_EPOCH};
             let now_ms = SystemTime::now()

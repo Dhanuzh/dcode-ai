@@ -48,14 +48,14 @@ fn theme_is_light() -> bool {
 /// Codex-style diff background tints: subtle green/red fills that stay distinct
 /// from syntax colors. Dark terminals get muted tints; light terminals get
 /// GitHub-style pastels (matching Codex's palette).
-fn diff_add_bg() -> Color {
+pub(crate) fn diff_add_bg() -> Color {
     if theme_is_light() {
         Color::Rgb(218, 251, 225)
     } else {
         Color::Rgb(33, 58, 43)
     }
 }
-fn diff_del_bg() -> Color {
+pub(crate) fn diff_del_bg() -> Color {
     if theme_is_light() {
         Color::Rgb(255, 235, 233)
     } else {

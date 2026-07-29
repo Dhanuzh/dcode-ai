@@ -263,7 +263,13 @@ async fn run_service_session_with_startup(
                 }
                 continue; // keep the session alive after a Stop
             }
-            if let Some(tx) = event_tx {
+            // A failed turn (provider 500, network blip, rate limit, context
+            // error, ...) doesn't corrupt session state — `run_turn_with_images`
+            // leaves `self.agent.messages` as it was before the attempt. The TUI
+            // REPL just prints "error: ..." and keeps prompting (repl.rs); the
+            // web/service loop should do the same instead of tearing down the
+            // whole long-lived session over one retryable failure.
+            if let Some(tx) = &event_tx {
                 let _ = tx
                     .send(AgentEvent::Error {
                         message: error.to_string(),
@@ -275,8 +281,11 @@ async fn run_service_session_with_startup(
                     })
                     .await;
             }
-            reason = EndReason::Error;
-            break;
+            if shutdown {
+                reason = EndReason::UserExit;
+                break;
+            }
+            continue;
         }
     }
 

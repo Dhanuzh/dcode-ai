@@ -149,6 +149,11 @@ fn render_code_block_lines(
             highlighter.highlight_line(raw, ps).unwrap_or_default()
         };
         let mut spans: Vec<Span<'static>> = Vec::new();
+        // Left border gutter so the code block reads as a framed region.
+        spans.push(Span::styled(
+            "▏ ",
+            Style::default().fg(theme::border()).bg(code_bg),
+        ));
         if code_line_numbers {
             spans.push(Span::styled(
                 format!("{:>width$} │ ", idx + 1, width = line_num_width),

@@ -11,6 +11,7 @@ pub(crate) fn oauth_login_provider_slug(kind: ProviderKind) -> Option<&'static s
         ProviderKind::OpenAi => Some("openai"),
         ProviderKind::Anthropic => Some("anthropic"),
         ProviderKind::Antigravity => Some("antigravity"),
+        ProviderKind::AntigravityOAuth => Some("antigravity-oauth"),
         // Copilot uses the OpenAI provider surface at runtime, but auth is a distinct login flow.
         ProviderKind::OpenCodeZen | ProviderKind::OpenRouter => None,
     }
@@ -22,6 +23,7 @@ pub(crate) fn oauth_logged_in_for_slug(store: &AuthStore, slug: &str) -> bool {
         "anthropic" => store.anthropic.is_some() || has_claude_cli(),
         "copilot" => store.copilot.is_some(),
         "antigravity" => store.antigravity.is_some(),
+        "antigravity-oauth" => store.antigravity_oauth.is_some(),
         "opencodezen" => store.opencodezen_oauth.is_some(),
         _ => false,
     }
@@ -33,6 +35,7 @@ pub(crate) fn oauth_switch_command_for_slug(slug: &str) -> Option<&'static str> 
         "copilot" => Some("/provider copilot"),
         "anthropic" => Some("/provider anthropic"),
         "antigravity" => Some("/provider antigravity"),
+        "antigravity-oauth" => Some("/provider antigravity-oauth"),
         "opencodezen" => Some("/provider opencodezen"),
         _ => None,
     }

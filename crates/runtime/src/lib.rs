@@ -7,6 +7,7 @@ pub mod memory_store;
 pub mod memory_tool;
 pub mod model_limits;
 pub mod model_limits_api;
+pub mod preview_tool;
 pub mod process;
 pub mod pty;
 pub mod sandbox;

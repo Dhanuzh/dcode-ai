@@ -175,7 +175,7 @@ pub async fn resolve_model_limits(config: &DcodeAiConfig, model: &str) -> ModelL
             let base = config.provider.anthropic.base_url.trim_end_matches('/');
             fetch_anthropic_context(&client, base, &key, model).await
         }
-        ProviderKind::OpenAi | ProviderKind::Antigravity => {
+        ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
             let key = match config.provider.openai.resolve_api_key() {
                 Some(k) => k,
                 None => {
@@ -537,6 +537,30 @@ pub async fn fetch_provider_model_ids(
                 ids
             }
         }
+        // Antigravity OAuth prefers a real Cloud Code Assist login (see
+        // antigravity_oauth.rs) — when one exists, list its catalog the same
+        // way "Antigravity" does (falling back to the static list only if
+        // that live call fails, matching the Antigravity branch above).
+        // Otherwise fall back to the plain Gemini API's real ListModels
+        // endpoint, matching the "no silent static fallback" policy the
+        // other real-catalog providers (OpenAI/Anthropic/OpenRouter/
+        // OpenCodeZen) already follow in this function.
+        ProviderKind::AntigravityOAuth => {
+            let has_oauth = dcode_ai_common::auth::AuthStore::load()
+                .ok()
+                .is_some_and(|s| s.antigravity_oauth.is_some());
+            if has_oauth {
+                let mut ids = fetch_antigravity_oauth_model_ids(&client)
+                    .await
+                    .unwrap_or_default();
+                if ids.is_empty() {
+                    ids = antigravity_fallback_model_ids();
+                }
+                ids
+            } else {
+                fetch_gemini_api_model_ids(&client, config).await?
+            }
+        }
         ProviderKind::OpenCodeZen => fetch_opencodezen_model_ids(&client, config).await?,
     };
     let ids = finish_catalog(provider.display_name(), ids)?;
@@ -607,11 +631,179 @@ async fn fetch_vertex_model_ids(
             ok.then(|| model.to_string())
         }
     });
-    let ids: Vec<String> = futures_util::future::join_all(probes)
+    let mut ids: Vec<String> = futures_util::future::join_all(probes)
         .await
         .into_iter()
         .flatten()
         .collect();
+
+    ids.extend(fetch_vertex_claude_model_ids(client, vertex, &token).await);
+    Ok(ids)
+}
+
+/// Candidate Claude (Anthropic publisher) model ids probed against a Vertex
+/// project, mirroring [`VERTEX_CANDIDATE_MODELS`]'s probe-and-keep-what-
+/// answers-200 approach. Ids verified against Anthropic's own "Claude on
+/// Vertex AI" docs; a stale/renamed id here just fails its probe silently
+/// and doesn't appear in the catalog, so this list doesn't need to be kept
+/// perfectly current. Lower-priority (deprecated/retired) ids are listed
+/// last — they may still work depending on the project's allowlist.
+const VERTEX_CLAUDE_CANDIDATE_MODELS: &[&str] = &[
+    "claude-fable-5",
+    "claude-opus-5",
+    "claude-sonnet-5",
+    "claude-opus-4-8",
+    "claude-opus-4-7",
+    "claude-opus-4-6",
+    "claude-sonnet-4-6",
+    "claude-sonnet-4-5@20250929",
+    "claude-opus-4-5@20251101",
+    "claude-haiku-4-5@20251001",
+    "claude-sonnet-4@20250514",
+    "claude-3-7-sonnet@20250219",
+    "claude-opus-4-1@20250805",
+    "claude-opus-4@20250514",
+    "claude-3-5-haiku@20241022",
+];
+
+/// Probe which Claude models the user's GCP project can actually call, via
+/// `publishers/anthropic/models/{model}:streamRawPredict`. Same ADC token
+/// and project as the Gemini probes in [`fetch_vertex_model_ids`] — Vertex
+/// authorizes both publishers identically, only the URL/body shape differs.
+async fn fetch_vertex_claude_model_ids(
+    client: &reqwest::Client,
+    vertex: &dcode_ai_common::auth::VertexAuth,
+    token: &str,
+) -> Vec<String> {
+    let host = if vertex.location == "global" {
+        "aiplatform.googleapis.com".to_string()
+    } else {
+        format!("{}-aiplatform.googleapis.com", vertex.location)
+    };
+    // Minimal valid Claude Messages body: no "model" key (it's in the URL),
+    // anthropic_version in-body per Vertex's contract, max_tokens small
+    // since a probe only cares about 200 vs error.
+    let body = serde_json::json!({
+        "anthropic_version": "vertex-2023-10-16",
+        "messages": [{ "role": "user", "content": "hi" }],
+        "max_tokens": 1,
+        "stream": true,
+    });
+
+    let probes = VERTEX_CLAUDE_CANDIDATE_MODELS.iter().map(|model| {
+        let url = format!(
+            "https://{host}/v1/projects/{}/locations/{}/publishers/anthropic/models/{model}:streamRawPredict?alt=sse",
+            vertex.project_id, vertex.location
+        );
+        let client = client.clone();
+        let token = token.to_string();
+        let body = body.clone();
+        async move {
+            let ok = client
+                .post(&url)
+                .bearer_auth(&token)
+                .json(&body)
+                .send()
+                .await
+                .map(|r| r.status().is_success())
+                .unwrap_or(false);
+            ok.then(|| model.to_string())
+        }
+    });
+    futures_util::future::join_all(probes)
+        .await
+        .into_iter()
+        .flatten()
+        .collect()
+}
+
+/// Fetch the live Gemini API model catalog via Google's `ListModels`
+/// endpoint (real per-account listing, not a guess) — authenticated the
+/// same way [`dcode_ai_core::provider::antigravity_oauth::AntigravityOAuthProvider`]
+/// itself authenticates: prefer a configured API key
+/// (aistudio.google.com/apikey), fall back to the stored OAuth access token.
+/// Only chat-capable models (`generateContent`/`streamGenerateContent`
+/// support) are kept — the raw listing also includes embedding/other
+/// non-chat models.
+async fn fetch_gemini_api_model_ids(
+    client: &reqwest::Client,
+    config: &DcodeAiConfig,
+) -> Result<Vec<String>, ModelCatalogError> {
+    let api_key = config.provider.openai.resolve_api_key();
+    let oauth_token = if api_key.is_none() {
+        dcode_ai_common::auth::AuthStore::load()
+            .ok()
+            .and_then(|store| store.antigravity_oauth)
+            .map(|oauth| oauth.access_token)
+    } else {
+        None
+    };
+    if api_key.is_none() && oauth_token.is_none() {
+        return Err(ModelCatalogError::Authentication {
+            provider: "Antigravity OAuth",
+            message: "set an API key (aistudio.google.com/apikey) or run \
+                      `dcode-ai login antigravity-oauth`"
+                .into(),
+        });
+    }
+
+    let mut url = reqwest::Url::parse("https://generativelanguage.googleapis.com/v1beta/models")
+        .expect("static URL is valid");
+    url.query_pairs_mut().append_pair("pageSize", "200");
+    if let Some(key) = &api_key {
+        url.query_pairs_mut().append_pair("key", key);
+    }
+
+    let mut req = client.get(url);
+    if let Some(token) = &oauth_token {
+        req = req.bearer_auth(token);
+    }
+
+    let resp = req
+        .send()
+        .await
+        .map_err(|error| ModelCatalogError::Request {
+            provider: "Antigravity OAuth",
+            message: error.to_string(),
+        })?;
+    let status = resp.status();
+    if !status.is_success() {
+        let text = resp.text().await.unwrap_or_default();
+        return Err(ModelCatalogError::Request {
+            provider: "Antigravity OAuth",
+            message: format!("{status}: {text}"),
+        });
+    }
+    let v: serde_json::Value =
+        resp.json()
+            .await
+            .map_err(|error| ModelCatalogError::InvalidResponse {
+                provider: "Antigravity OAuth",
+                message: error.to_string(),
+            })?;
+
+    let ids: Vec<String> = v
+        .get("models")
+        .and_then(|m| m.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter(|m| {
+                    m.get("supportedGenerationMethods")
+                        .and_then(|g| g.as_array())
+                        .is_some_and(|methods| {
+                            methods.iter().any(|method| {
+                                matches!(
+                                    method.as_str(),
+                                    Some("generateContent") | Some("streamGenerateContent")
+                                )
+                            })
+                        })
+                })
+                .filter_map(|m| m.get("name").and_then(|n| n.as_str()))
+                .map(|name| name.trim_start_matches("models/").to_string())
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(ids)
 }
 
@@ -684,6 +876,75 @@ async fn fetch_antigravity_model_ids(
     Ok(ids)
 }
 
+/// Fetch the live Antigravity OAuth model catalog via the SAME Cloud Code
+/// Assist `fetchAvailableModels` call [`fetch_antigravity_model_ids`] uses,
+/// just reading the separate `antigravity_oauth` credential slot. That
+/// struct has no stored project id (unlike `antigravity`), so this uses the
+/// same shared fallback project both providers rely on for unonboarded
+/// accounts.
+async fn fetch_antigravity_oauth_model_ids(
+    client: &reqwest::Client,
+) -> Result<Vec<String>, ModelCatalogError> {
+    let auth = dcode_ai_common::auth::AuthStore::load().map_err(|error| {
+        ModelCatalogError::Authentication {
+            provider: "Antigravity OAuth",
+            message: error.to_string(),
+        }
+    })?;
+    let oauth = auth
+        .antigravity_oauth
+        .ok_or(ModelCatalogError::Authentication {
+            provider: "Antigravity OAuth",
+            message: "run `dcode-ai login antigravity-oauth`".into(),
+        })?;
+    let user_agent = std::env::var("DCODE_ANTIGRAVITY_USER_AGENT")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "antigravity/1.104.0 windows/amd64".to_string());
+
+    let resp = client
+        .post("https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels")
+        .bearer_auth(&oauth.access_token)
+        .header("User-Agent", user_agent)
+        .header(
+            "X-Goog-Api-Client",
+            "google-cloud-sdk vscode_cloudshelleditor/0.1",
+        )
+        .header(
+            "Client-Metadata",
+            r#"{"ideType":"ANTIGRAVITY","platform":"WINDOWS","pluginType":"GEMINI"}"#,
+        )
+        .json(&serde_json::json!({ "project": "rising-fact-p41fc" }))
+        .send()
+        .await
+        .map_err(|error| ModelCatalogError::Request {
+            provider: "Antigravity OAuth",
+            message: error.to_string(),
+        })?;
+    let value = response_json("Antigravity OAuth", resp).await?;
+
+    let ids: Vec<String> = match value.get("models") {
+        Some(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
+        Some(serde_json::Value::Array(arr)) => arr
+            .iter()
+            .filter_map(|m| {
+                m.get("name")
+                    .or_else(|| m.get("modelId"))
+                    .or_else(|| m.get("id"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.trim_start_matches("models/").to_string())
+            })
+            .collect(),
+        _ => {
+            return Err(ModelCatalogError::InvalidResponse {
+                provider: "Antigravity OAuth",
+                message: "missing `models` field".into(),
+            });
+        }
+    };
+    Ok(ids)
+}
+
 /// Minimal known-good catalog used only when the live fetch fails (expired
 /// token / offline). `gemini-2.5-flash` is confirmed available.
 fn antigravity_fallback_model_ids() -> Vec<String> {
@@ -730,7 +991,7 @@ fn disk_cache_tag(config: &DcodeAiConfig) -> String {
             .resolve_api_key()
             .map(|k| api_key_tag(&k))
             .unwrap_or(0),
-        ProviderKind::OpenAi | ProviderKind::Antigravity => config
+        ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => config
             .provider
             .openai
             .resolve_api_key()

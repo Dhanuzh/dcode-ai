@@ -17,6 +17,10 @@ pub struct AuthStore {
     /// over `antigravity` OAuth when both are present.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vertex: Option<VertexAuth>,
+    /// Antigravity OAuth for the Gemini API (AI Studio / generativelanguage).
+    /// Separate from the Antigravity Cloud Code Assist flow.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub antigravity_oauth: Option<AntigravityOAuthAuth>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub opencodezen_oauth: Option<OpenCodeZenOAuth>,
     /// Last provider selected by successful login.
@@ -31,6 +35,7 @@ pub enum LoggedProvider {
     Openai,
     Copilot,
     Antigravity,
+    AntigravityOAuth,
     Opencodezen,
 }
 
@@ -90,6 +95,14 @@ pub struct OpenCodeZenOAuth {
     pub expires_at: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AntigravityOAuthAuth {
+    pub access_token: String,
+    pub refresh_token: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<i64>,
+}
+
 impl AuthStore {
     pub fn load() -> anyhow::Result<Self> {
         let path = auth_path();
@@ -115,6 +128,7 @@ impl AuthStore {
             || self.openai_oauth.is_some()
             || self.copilot.is_some()
             || self.antigravity.is_some()
+            || self.antigravity_oauth.is_some()
             || self.vertex.is_some()
             || self.opencodezen_oauth.is_some()
     }

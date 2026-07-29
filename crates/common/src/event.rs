@@ -191,6 +191,26 @@ pub enum AgentEvent {
     BusyStateChanged {
         state: BusyState,
     },
+    /// A `run_preview` job (dev server / static preview) was started.
+    PreviewStarted {
+        job_id: u32,
+        command: String,
+    },
+    /// A line of output from a running preview job.
+    PreviewLog {
+        job_id: u32,
+        delta: String,
+    },
+    /// The preview job's listening URL was detected from its output.
+    PreviewUrlDetected {
+        job_id: u32,
+        url: String,
+    },
+    /// A preview job exited or was stopped.
+    PreviewStopped {
+        job_id: u32,
+        reason: String,
+    },
 }
 
 /// One selectable row shown for an interactive question.

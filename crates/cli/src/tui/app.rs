@@ -1756,7 +1756,15 @@ pub fn run_blocking(
                 if status_r.height > 0 {
                     let busy = g.busy || g.current_busy_state.is_active();
                     let state_icon = if busy { busy_spinner(g.started) } else { "●" };
-                    let state_label = if busy { "working" } else { "idle" };
+                    // Show elapsed time in the current busy state so a long
+                    // model wait (big prompt → slow first token) reads as alive,
+                    // not frozen.
+                    let state_label = if busy {
+                        let secs = g.busy_state_since.elapsed().as_secs();
+                        format!("working {}:{:02}", secs / 60, secs % 60)
+                    } else {
+                        "idle".to_string()
+                    };
                     let state_color = if busy {
                         theme::warn()
                     } else {
@@ -1795,7 +1803,7 @@ pub fn run_blocking(
                     if busy {
                         let elapsed = g.busy_state_since.elapsed().as_millis();
                         left.extend(crate::tui::shimmer::shimmer_spans(
-                            state_label,
+                            &state_label,
                             elapsed,
                             theme::muted(),
                             theme::warn(),

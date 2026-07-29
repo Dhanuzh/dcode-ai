@@ -36,6 +36,9 @@ pub mod tui_types;
 pub mod tui_viewport;
 pub mod widgets;
 
+#[cfg(test)]
+mod sidebar_tests;
+
 pub use app::{TuiCmd, run_blocking};
 pub use bridge::spawn_tui_bridge;
 pub use git::{git_create_branch, git_current_branch, git_list_branches, git_switch_branch};

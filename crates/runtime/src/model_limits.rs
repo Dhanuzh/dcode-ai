@@ -25,7 +25,11 @@ pub struct ModelContextLimits {
 /// Order matters — more specific patterns must come before generics.
 /// Live API lookups override these when available.
 pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
-    // ── Anthropic Claude 4.x ──────────────────────────────────────────
+    // ── Anthropic Claude 4.x / 5.x ────────────────────────────────────
+    // NOTE: several of these get a 1M-token context window specifically on
+    // Vertex AI / Agent Platform (vs. 200k on the direct Anthropic API) —
+    // this table is provider-agnostic and doesn't currently model that
+    // distinction, so Claude-on-Vertex reports the direct-API figure here.
     ModelContextLimits {
         pattern: "claude-opus-4",
         context_window: 200_000,
@@ -40,6 +44,16 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
         pattern: "claude-haiku-4",
         context_window: 200_000,
         max_output_tokens: 8192,
+    },
+    ModelContextLimits {
+        pattern: "claude-opus-5",
+        context_window: 200_000,
+        max_output_tokens: 32_000,
+    },
+    ModelContextLimits {
+        pattern: "claude-sonnet-5",
+        context_window: 200_000,
+        max_output_tokens: 16_000,
     },
     ModelContextLimits {
         pattern: "claude-fable-5",
@@ -175,6 +189,30 @@ pub const MODEL_CONTEXT_LIMITS: &[ModelContextLimits] = &[
         pattern: "minimax-m1",
         context_window: 32_000,
         max_output_tokens: 8192,
+    },
+    // ── OpenCode Zen surface (Xiaomi MiMo, Kimi, GLM, big-pickle) ──────
+    // Best-effort windows: these fall to the 128k default otherwise, which
+    // pins the gauge at 100% and over-compacts. Erring toward the family's
+    // typical ~200k is safe — the overflow-retry handles any real shortfall.
+    ModelContextLimits {
+        pattern: "mimo",
+        context_window: 200_000,
+        max_output_tokens: 16_384,
+    },
+    ModelContextLimits {
+        pattern: "kimi",
+        context_window: 262_144,
+        max_output_tokens: 16_384,
+    },
+    ModelContextLimits {
+        pattern: "glm",
+        context_window: 200_000,
+        max_output_tokens: 16_384,
+    },
+    ModelContextLimits {
+        pattern: "big-pickle",
+        context_window: 200_000,
+        max_output_tokens: 16_384,
     },
     // ── Google Gemini ────────────────────────────────────────────────
     ModelContextLimits {
@@ -392,6 +430,11 @@ mod tests {
         assert_eq!(detect_context_window("minimax/minimax-m2.7"), 204_800);
         assert_eq!(detect_context_window("MiniMax-M2.5"), 100_000);
         assert_eq!(detect_context_window("minimax-m2"), 32_000);
+        // OpenCode Zen surface models that previously fell to the 128k default.
+        assert_eq!(detect_context_window("mimo-v2.5-free"), 200_000);
+        assert_eq!(detect_context_window("kimi-k2"), 262_144);
+        assert_eq!(detect_context_window("glm-4.6"), 200_000);
+        assert_eq!(detect_context_window("big-pickle"), 200_000);
     }
 
     #[test]

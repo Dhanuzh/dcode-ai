@@ -40,7 +40,9 @@ impl OpenAiProvider {
         provider: ProviderKind,
     ) -> Result<Self, ProviderError> {
         let mut openai = match provider {
-            ProviderKind::OpenAi | ProviderKind::Antigravity => config.provider.openai.clone(),
+            ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
+                config.provider.openai.clone()
+            }
             ProviderKind::OpenCodeZen => config.provider.opencodezen.clone(),
             _ => {
                 return Err(ProviderError::Configuration(format!(
@@ -511,7 +513,9 @@ impl Provider for OpenAiProvider {
             )?
         };
 
-        // Retry the primary request on rate limits; every other status is
+        // Retry the primary request on rate limits and transient 5xx (the
+        // provider's own infrastructure failing, e.g. "Internal server
+        // error" on an overloaded free-tier model); every other status is
         // returned to the caller so the selected live-catalog model is visible.
         let endpoint = self.endpoint();
         let response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
@@ -523,7 +527,7 @@ impl Provider for OpenAiProvider {
                 .await
                 .map_err(ProviderError::from_reqwest_send)?;
             let status = resp.status();
-            if status.as_u16() == 429 {
+            if status.as_u16() == 429 || status.is_server_error() {
                 let body_text = resp.text().await.unwrap_or_default();
                 return Err(map_provider_error(status, body_text));
             }

@@ -48,6 +48,9 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, mpsc, oneshot};
 
+use crate::oauth_login::login_with_output;
+use crate::repl::parse_oauth_provider;
+
 const CHAT_PAGE: &str = include_str!("web_chat.html");
 
 /// Cap on request body size. Large enough for pasted screenshots
@@ -123,6 +126,25 @@ struct AppState {
     workspace_root: PathBuf,
     _token: String,
     session_cmd_tx: mpsc::UnboundedSender<SessionCommand>,
+    /// Progress of the most recent `/api/oauth-login` attempt, polled via
+    /// `/api/oauth-login-status`. A cloneable inner `Arc` (not the whole
+    /// `AppState`) so the background login task can keep writing to it after
+    /// the request that started it has already returned its response.
+    oauth_login: Arc<std::sync::Mutex<OAuthLoginState>>,
+}
+
+/// Progress of an in-flight (or just-finished) OAuth login started from the
+/// web UI. `generation` lets a new login attempt invalidate a stale one
+/// still running in the background (its late writes are simply dropped)
+/// without needing to cancel the earlier task.
+#[derive(Default)]
+struct OAuthLoginState {
+    generation: u64,
+    provider_slug: String,
+    messages: Vec<String>,
+    done: bool,
+    ok: bool,
+    error: Option<String>,
 }
 
 fn start_session_thread(
@@ -191,6 +213,7 @@ pub async fn run_web_server(
         workspace_root: workspace_root.clone(),
         _token: token.clone(),
         session_cmd_tx,
+        oauth_login: Arc::new(std::sync::Mutex::new(OAuthLoginState::default())),
     });
 
     // ── print startup banner ───────────────────────────────────────
@@ -810,6 +833,7 @@ fn switch_key(kind: ProviderKind) -> &'static str {
         ProviderKind::Anthropic => "anthropic",
         ProviderKind::OpenRouter => "openrouter",
         ProviderKind::Antigravity => "antigravity",
+        ProviderKind::AntigravityOAuth => "antigravity-oauth",
         ProviderKind::OpenCodeZen => "opencodezen",
     }
 }
@@ -835,6 +859,7 @@ fn fallback_models(kind: ProviderKind) -> Vec<&'static str> {
             ]
         }
         ProviderKind::Antigravity => vec!["gemini-2.5-pro", "gemini-2.5-flash"],
+        ProviderKind::AntigravityOAuth => vec!["gemini-2.5-pro", "gemini-2.5-flash"],
     }
 }
 
@@ -920,6 +945,9 @@ fn build_info(config: &DcodeAiConfig, live_models: &[String]) -> serde_json::Val
 
     serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
+        "os_user": std::env::var("USER")
+            .or_else(|_| std::env::var("USERNAME"))
+            .unwrap_or_default(),
         "default_provider": config.provider.default.display_name(),
         "default_model": config.model.default_model,
         "permission_mode": format!("{:?}", config.permissions.mode),
@@ -935,7 +963,9 @@ fn build_info(config: &DcodeAiConfig, live_models: &[String]) -> serde_json::Val
 /// OpenAI config block).
 fn active_provider_temperature(config: &DcodeAiConfig) -> f32 {
     match config.provider.default {
-        ProviderKind::OpenAi | ProviderKind::Antigravity => config.provider.openai.temperature,
+        ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
+            config.provider.openai.temperature
+        }
         ProviderKind::Anthropic => config.provider.anthropic.temperature,
         ProviderKind::OpenRouter => config.provider.openrouter.temperature,
         ProviderKind::OpenCodeZen => config.provider.opencodezen.temperature,
@@ -1069,7 +1099,9 @@ async fn git_diff(
         .output()
         .await
         .map_err(|_| ("500 Internal Server Error", "git not found"))?;
-    if !out.status.success() {
+    let diff_text = if out.status.success() {
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    } else {
         // Non-zero usually means "not a git repo" or "no such commit (HEAD)".
         let err = String::from_utf8_lossy(&out.stderr);
         if err.contains("not a git repository") {
@@ -1084,9 +1116,37 @@ async fn git_diff(
             .output()
             .await
             .map_err(|_| ("500 Internal Server Error", "git failed"))?;
-        return Ok(String::from_utf8_lossy(&out2.stdout).into_owned());
+        String::from_utf8_lossy(&out2.stdout).into_owned()
+    };
+    if !diff_text.is_empty() {
+        return Ok(diff_text);
     }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    // `git diff [HEAD]` never lists untracked files — a brand-new file the
+    // agent just wrote comes back with an empty diff (not "no changes"). Tell
+    // the two apart via `ls-files`, and for a genuinely untracked file, diff
+    // against an empty blob so callers (the "This turn" panel's +N/-M counts)
+    // see the file's real content as additions instead of nothing at all.
+    let tracked = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(&path)
+        .output()
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(true);
+    if tracked {
+        return Ok(diff_text);
+    }
+    let out3 = tokio::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["diff", "--no-color", "--no-index", "--", "/dev/null"])
+        .arg(&path)
+        .output()
+        .await
+        .map_err(|_| ("500 Internal Server Error", "git failed"))?;
+    Ok(String::from_utf8_lossy(&out3.stdout).into_owned())
 }
 
 async fn build_sessions_json(state: &AppState) -> serde_json::Value {
@@ -1622,6 +1682,100 @@ async fn handle_http(stream: TcpStream, state: &AppState, token: &str) -> std::i
                 }
             }
         }
+        ("POST", "/api/oauth-login") => {
+            #[derive(serde::Deserialize)]
+            struct OAuthLoginBody {
+                provider: String,
+            }
+            let Ok(body) = serde_json::from_slice::<OAuthLoginBody>(&request.body) else {
+                return write_response(
+                    &mut writer,
+                    "400 Bad Request",
+                    "application/json",
+                    br#"{"ok":false,"error":"missing provider"}"#,
+                )
+                .await;
+            };
+            let Some(oauth_provider) = parse_oauth_provider(&body.provider) else {
+                return write_response(
+                    &mut writer,
+                    "400 Bad Request",
+                    "application/json",
+                    br#"{"ok":false,"error":"unknown OAuth provider"}"#,
+                )
+                .await;
+            };
+            // Compute the outcome with the (non-`Send`) guard fully dropped
+            // before any `.await` — holding a `std::sync::MutexGuard` across
+            // an await point wouldn't compile.
+            let generation: Option<u64> = {
+                let mut st = state.oauth_login.lock().unwrap();
+                // generation 0 = never started; only refuse a second start
+                // while an earlier attempt is genuinely still in flight.
+                if !st.done && st.generation != 0 {
+                    None
+                } else {
+                    st.generation += 1;
+                    st.provider_slug = body.provider.clone();
+                    st.messages.clear();
+                    st.done = false;
+                    st.ok = false;
+                    st.error = None;
+                    Some(st.generation)
+                }
+            };
+            let Some(generation) = generation else {
+                return write_response(
+                    &mut writer,
+                    "409 Conflict",
+                    "application/json",
+                    br#"{"ok":false,"error":"a login is already in progress"}"#,
+                )
+                .await;
+            };
+            // Runs in the background past this request's lifetime — opens the
+            // provider's consent URL (falling back to emitting it as text the
+            // client can render as a link, since `xdg-open`-style browser
+            // launch rarely works from a headless/WSL host) and blocks on the
+            // local OAuth callback listener. `generation` guards against a
+            // stale attempt's late writes clobbering a newer one.
+            let emit_state = state.oauth_login.clone();
+            let final_state = state.oauth_login.clone();
+            tokio::spawn(async move {
+                let emit = move |msg: &str| {
+                    if let Ok(mut st) = emit_state.lock()
+                        && st.generation == generation
+                    {
+                        st.messages.push(msg.to_string());
+                    }
+                };
+                let result = login_with_output(oauth_provider, emit).await;
+                if let Ok(mut st) = final_state.lock()
+                    && st.generation == generation
+                {
+                    st.done = true;
+                    match result {
+                        Ok(()) => st.ok = true,
+                        Err(e) => st.error = Some(e.to_string()),
+                    }
+                }
+            });
+            write_response(&mut writer, "200 OK", "application/json", br#"{"ok":true}"#).await
+        }
+        ("GET", "/api/oauth-login-status") => {
+            let body = {
+                let st = state.oauth_login.lock().unwrap();
+                serde_json::json!({
+                    "provider": st.provider_slug,
+                    "messages": st.messages,
+                    "done": st.done,
+                    "ok": st.ok,
+                    "error": st.error,
+                })
+                .to_string()
+            };
+            write_response(&mut writer, "200 OK", "application/json", body.as_bytes()).await
+        }
         ("POST", "/api/settings") => {
             #[derive(serde::Deserialize)]
             struct SettingsBody {
@@ -1673,9 +1827,9 @@ async fn handle_http(stream: TcpStream, state: &AppState, token: &str) -> std::i
                 if let Some(temp) = body.temperature {
                     let t = temp.clamp(0.0, 2.0);
                     match cfg.provider.default {
-                        ProviderKind::OpenAi | ProviderKind::Antigravity => {
-                            cfg.provider.openai.temperature = t
-                        }
+                        ProviderKind::OpenAi
+                        | ProviderKind::Antigravity
+                        | ProviderKind::AntigravityOAuth => cfg.provider.openai.temperature = t,
                         ProviderKind::Anthropic => cfg.provider.anthropic.temperature = t,
                         ProviderKind::OpenRouter => cfg.provider.openrouter.temperature = t,
                         ProviderKind::OpenCodeZen => cfg.provider.opencodezen.temperature = t,

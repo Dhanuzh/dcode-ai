@@ -75,6 +75,7 @@ pub struct Supervisor {
     context_manager: ContextManager,
     last_summary_at_tokens: usize,
     interactive_handle: crate::interactive_exec::InteractiveExecHandle,
+    preview_handle: crate::preview_tool::PreviewHandle,
     mcp_manager: Arc<McpConnectionManager>,
 }
 
@@ -240,6 +241,11 @@ impl Supervisor {
             crate::interactive_exec::InteractiveExecTool::new(workspace_root.clone());
         let interactive_handle = interactive_tool.handle();
         tools.register(Box::new(interactive_tool));
+        // Agent-driven dev-server preview (`run_preview`, streams to the web chat UI).
+        let preview_tool =
+            crate::preview_tool::PreviewTool::new(workspace_root.clone(), event_tx.clone());
+        let preview_handle = preview_tool.handle();
+        tools.register(Box::new(preview_tool));
         let question_pending = Arc::new(Mutex::new(HashMap::new()));
         tools.register(Box::new(AskQuestionTool::new(
             event_tx.clone(),
@@ -299,6 +305,10 @@ impl Supervisor {
 
         let context_manager =
             Self::make_context_manager(&config, &config.model.default_model).await;
+        // Give the agent the same input budget compaction uses, so a long
+        // tool-heavy turn trims older tool outputs mid-turn instead of
+        // ballooning the prompt (which slows every model call to a crawl).
+        agent.set_context_token_limit(context_manager.config().context_window_target);
 
         // Refresh the accurate context window from the provider API in the
         // background and persist it for the next launch — never on the startup
@@ -344,6 +354,7 @@ impl Supervisor {
             context_manager,
             last_summary_at_tokens: 0,
             interactive_handle,
+            preview_handle,
             mcp_manager,
         };
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
@@ -429,6 +440,8 @@ impl Supervisor {
         sup.session_summary = loaded.meta.session_summary;
         sup.orchestration = loaded.meta.orchestration;
         sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
+        sup.agent
+            .set_context_token_limit(sup.context_manager.config().context_window_target);
 
         // Best-effort cleanup of the bootstrap snapshot created by `create()`.
         // Ignore failures here because it is non-critical.
@@ -886,6 +899,9 @@ impl Supervisor {
         )
         .await;
 
+        // Stop any dev-server preview job so it doesn't linger past the session.
+        self.preview_handle.stop();
+
         // Shutdown MCP servers
         self.mcp_manager.shutdown_all().await;
 
@@ -1155,6 +1171,8 @@ impl Supervisor {
             max_message_chars_for_summary: 10000,
         };
         self.context_manager = ContextManager::new(context_config, self.model.clone());
+        self.agent
+            .set_context_token_limit(self.context_manager.config().context_window_target);
     }
 
     pub fn request_cancel(&self) {

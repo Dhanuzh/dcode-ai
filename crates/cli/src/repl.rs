@@ -122,7 +122,10 @@ fn fmt_count(n: u64) -> String {
 fn oauth_only_provider(provider: ProviderKind) -> bool {
     matches!(
         provider,
-        ProviderKind::OpenAi | ProviderKind::Anthropic | ProviderKind::Antigravity
+        ProviderKind::OpenAi
+            | ProviderKind::Anthropic
+            | ProviderKind::Antigravity
+            | ProviderKind::AntigravityOAuth
     )
 }
 
@@ -131,6 +134,7 @@ fn oauth_login_slug_for_provider(provider: ProviderKind) -> Option<&'static str>
         ProviderKind::OpenAi => Some("openai"),
         ProviderKind::Anthropic => Some("anthropic"),
         ProviderKind::Antigravity => Some("antigravity"),
+        ProviderKind::AntigravityOAuth => Some("antigravity-oauth"),
         ProviderKind::OpenRouter | ProviderKind::OpenCodeZen => None,
     }
 }
@@ -145,12 +149,15 @@ fn local_preset_for(value: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-fn parse_oauth_provider(value: &str) -> Option<OAuthProvider> {
+pub(crate) fn parse_oauth_provider(value: &str) -> Option<OAuthProvider> {
     match value.trim().to_ascii_lowercase().as_str() {
         "openai" | "open-ai" | "gpt" | "codex" => Some(OAuthProvider::Openai),
         "anthropic" | "claude" => Some(OAuthProvider::Anthropic),
         "copilot" | "github" => Some(OAuthProvider::Copilot),
         "antigravity" | "ag" => Some(OAuthProvider::Antigravity),
+        "antigravity-oauth" | "antigravity_oauth" | "ag-oauth" => {
+            Some(OAuthProvider::AntigravityOAuth)
+        }
         "opencodezen" | "opencode" | "zen" => Some(OAuthProvider::Opencodezen),
         _ => None,
     }
@@ -162,6 +169,9 @@ fn parse_logout_target(value: &str) -> Option<LogoutTarget> {
         "openai" | "open-ai" | "gpt" | "codex" => Some(LogoutTarget::Openai),
         "copilot" | "github" => Some(LogoutTarget::Copilot),
         "antigravity" | "ag" => Some(LogoutTarget::Antigravity),
+        "antigravity-oauth" | "antigravity_oauth" | "ag-oauth" => {
+            Some(LogoutTarget::AntigravityOAuth)
+        }
         "vertex" | "gcp" | "cloudproject" | "cloud-project" => Some(LogoutTarget::Vertex),
         "opencodezen" | "opencode" | "zen" => Some(LogoutTarget::Opencodezen),
         "all" | "*" => Some(LogoutTarget::All),
@@ -967,6 +977,23 @@ impl Repl {
                     cfg.provider.openai.model = "gemini-3-pro".to_string();
                 }
                 ProviderKind::Antigravity
+            }
+            OAuthProvider::AntigravityOAuth => {
+                cfg.set_default_provider(ProviderKind::AntigravityOAuth);
+                // Also shares the `openai` model slot (same trap as the
+                // Antigravity/Vertex arm above) — a leftover non-Gemini model
+                // id is rejected by the Gemini API, so default unless one is
+                // already selected.
+                if !cfg
+                    .provider
+                    .openai
+                    .model
+                    .to_ascii_lowercase()
+                    .contains("gemini")
+                {
+                    cfg.provider.openai.model = "gemini-2.5-flash".to_string();
+                }
+                ProviderKind::AntigravityOAuth
             }
             OAuthProvider::Opencodezen => {
                 cfg.set_default_provider(ProviderKind::OpenCodeZen);

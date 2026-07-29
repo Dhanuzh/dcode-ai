@@ -555,22 +555,29 @@ pub(crate) fn render_approval_popup(
             ]));
             let max_hunk_lines = if is_focused { 6 } else { 2 };
             for (sigil, text) in hunk.lines.iter().take(max_hunk_lines) {
-                let color = match sigil {
-                    '+' => theme::success(),
-                    '-' => theme::error(),
-                    _ => theme::muted(),
+                let (color, bg) = match sigil {
+                    '+' => (
+                        theme::success(),
+                        Some(crate::tui::transcript::diff_add_bg()),
+                    ),
+                    '-' => (theme::error(), Some(crate::tui::transcript::diff_del_bg())),
+                    _ => (theme::muted(), None),
                 };
-                let dimmed = if !accepted && *sigil != ' ' {
-                    Style::default().fg(color).add_modifier(Modifier::DIM)
-                } else {
-                    Style::default().fg(color)
-                };
+                // Green/red background tints (matching the transcript diff) make
+                // added/removed lines read at a glance.
+                let mut style = Style::default().fg(color);
+                if let Some(bg) = bg {
+                    style = style.bg(bg);
+                }
+                if !accepted && *sigil != ' ' {
+                    style = style.add_modifier(Modifier::DIM);
+                }
                 lines.push(Line::from(Span::styled(
                     format!(
                         "  {sigil}{}",
                         truncate_chars(text, inner_w.saturating_sub(4))
                     ),
-                    dimmed,
+                    style,
                 )));
             }
             if hunk.lines.len() > max_hunk_lines {

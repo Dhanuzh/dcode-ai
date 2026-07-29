@@ -13,7 +13,11 @@ pub fn model_accepts_native_images(kind: ProviderKind, model: &str) -> bool {
                 || m.contains("claude-opus-4")
                 || m.contains("claude-sonnet-4")
         }
-        ProviderKind::OpenAi | ProviderKind::Antigravity => {
+        ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
+            // Antigravity can now serve Claude models via Vertex AI (in
+            // addition to Gemini) — same substring checks as the dedicated
+            // `Anthropic` arm above, plus the newest 4.x/5.x families that
+            // don't contain the bare "claude-4"/"claude-5" substring.
             m.contains("gpt-4o")
                 || m.contains("gpt-4-turbo")
                 || m.contains("gpt-5")
@@ -21,6 +25,12 @@ pub fn model_accepts_native_images(kind: ProviderKind, model: &str) -> bool {
                 || m.contains("o3")
                 || m.contains("claude-3")
                 || m.contains("claude-4")
+                || m.contains("claude-opus-4")
+                || m.contains("claude-sonnet-4")
+                || m.contains("claude-haiku-4")
+                || m.contains("claude-opus-5")
+                || m.contains("claude-sonnet-5")
+                || m.contains("claude-fable-5")
                 || m.contains("gemini")
                 || m.contains("qwen-vl")
                 || m.contains("vision")

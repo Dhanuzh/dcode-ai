@@ -1,6 +1,8 @@
 use dcode_ai_common::config::PermissionMode;
 use dcode_ai_common::event::{AgentEvent, BusyState};
-use dcode_ai_common::message::{ContentPart, ImageAttachment, Message, MessageToolCall, Role};
+use dcode_ai_common::message::{
+    ContentPart, ImageAttachment, Message, MessageContent, MessageToolCall, Role,
+};
 use dcode_ai_common::tool::{PermissionTier, ToolCall, ToolDefinition, ToolResult};
 use futures_util::StreamExt;
 use futures_util::stream::FuturesUnordered;
@@ -33,6 +35,8 @@ pub struct AgentLoop {
     cancel_flag: Arc<AtomicBool>,
     hooks: Option<HookRunner>,
     undo: UndoManager,
+    /// Effective input-token budget for mid-turn trimming. 0 disables it.
+    context_token_limit: usize,
 }
 
 impl AgentLoop {
@@ -62,7 +66,15 @@ impl AgentLoop {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             hooks,
             undo: UndoManager::default(),
+            context_token_limit: 0,
         }
+    }
+
+    /// Set the mid-turn input-token budget. When a turn's accumulated context
+    /// exceeds this, older tool outputs are shrunk before the next model call so
+    /// a long tool-heavy turn can't balloon the prompt (which slows every call).
+    pub fn set_context_token_limit(&mut self, limit: usize) {
+        self.context_token_limit = limit;
     }
 
     /// Add a system prompt once at startup.
@@ -177,6 +189,8 @@ impl AgentLoop {
                 turn,
             })
             .await;
+            // Keep the prompt from ballooning during a long tool-heavy turn.
+            self.maybe_trim_context().await;
             self.provider
                 .prepare_messages_for_request(&mut self.messages, workspace_root)
                 .await?;
@@ -684,6 +698,66 @@ impl AgentLoop {
             .map(|message| message.content.approx_chars())
             .sum::<usize>()
             / 4) as u64
+    }
+
+    /// Number of leading `System` messages (the system prompt prefix).
+    fn leading_system_len(&self) -> usize {
+        self.messages
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count()
+    }
+
+    /// Mid-turn context guard. A long, tool-heavy turn accumulates tool outputs
+    /// until the prompt balloons and every model call slows to a crawl (the
+    /// "stuck for minutes" symptom) — and compaction only runs between turns.
+    /// Before a model call, if we're over budget, shrink the *older* tool-result
+    /// outputs in place (the bulk, least relevant now), preserving message
+    /// structure and tool_use/tool_result pairing, until back under budget.
+    async fn maybe_trim_context(&mut self) {
+        if self.context_token_limit == 0
+            || (self.estimated_context_tokens() as usize) <= self.context_token_limit
+        {
+            return;
+        }
+        let prefix = self.leading_system_len();
+        // Keep the most recent messages untouched — they carry active context.
+        let cutoff = self.messages.len().saturating_sub(8).max(prefix);
+        let target = self.context_token_limit * 8 / 10;
+        let mut trimmed = 0u32;
+        for i in prefix..cutoff {
+            if (self.estimated_context_tokens() as usize) <= target {
+                break;
+            }
+            if self.messages[i].role != Role::Tool {
+                continue;
+            }
+            // Compute the truncated head as an owned string so the borrow of the
+            // message content is released before we reassign it.
+            let head = match &self.messages[i].content {
+                MessageContent::Text(t) if t.chars().count() > 300 => {
+                    Some(t.chars().take(200).collect::<String>())
+                }
+                _ => None,
+            };
+            if let Some(head) = head {
+                self.messages[i].content = MessageContent::Text(format!(
+                    "{head}\n… [older tool output trimmed to keep the context small] …"
+                ));
+                trimmed += 1;
+            }
+        }
+        if trimmed > 0 {
+            let context_tokens = self.estimated_context_tokens();
+            self.emit(AgentEvent::ContextCompaction {
+                phase: "completed".into(),
+                message: format!(
+                    "Trimmed {trimmed} older tool output(s) mid-turn to keep the context small"
+                ),
+                context_tokens,
+            })
+            .await;
+        }
     }
 
     pub fn undo_last_turn(&mut self) -> Result<Option<String>, String> {

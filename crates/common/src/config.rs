@@ -276,6 +276,7 @@ impl DcodeAiConfig {
             ProviderKind::Anthropic => self.provider.anthropic.api_key = Some(key),
             ProviderKind::OpenRouter => self.provider.openrouter.api_key = Some(key),
             ProviderKind::Antigravity => self.provider.openai.api_key = Some(key),
+            ProviderKind::AntigravityOAuth => self.provider.openai.api_key = Some(key),
             ProviderKind::OpenCodeZen => self.provider.opencodezen.api_key = Some(key),
         }
     }
@@ -663,7 +664,9 @@ impl ProviderConfig {
         match self.default {
             ProviderKind::OpenRouter => &self.openrouter.model,
             ProviderKind::Anthropic => &self.anthropic.model,
-            ProviderKind::OpenAi | ProviderKind::Antigravity => &self.openai.model,
+            ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
+                &self.openai.model
+            }
             ProviderKind::OpenCodeZen => &self.opencodezen.model,
         }
     }
@@ -677,7 +680,9 @@ impl ProviderConfig {
         match provider {
             ProviderKind::OpenRouter => self.openrouter.model = model,
             ProviderKind::Anthropic => self.anthropic.model = model,
-            ProviderKind::OpenAi | ProviderKind::Antigravity => self.openai.model = model,
+            ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
+                self.openai.model = model
+            }
             ProviderKind::OpenCodeZen => self.opencodezen.model = model,
         }
     }
@@ -686,7 +691,9 @@ impl ProviderConfig {
         match provider {
             ProviderKind::OpenRouter => &self.openrouter.model,
             ProviderKind::Anthropic => &self.anthropic.model,
-            ProviderKind::OpenAi | ProviderKind::Antigravity => &self.openai.model,
+            ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
+                &self.openai.model
+            }
             ProviderKind::OpenCodeZen => &self.opencodezen.model,
         }
     }
@@ -695,7 +702,9 @@ impl ProviderConfig {
         match provider {
             ProviderKind::OpenRouter => &self.openrouter.base_url,
             ProviderKind::Anthropic => &self.anthropic.base_url,
-            ProviderKind::OpenAi | ProviderKind::Antigravity => &self.openai.base_url,
+            ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
+                &self.openai.base_url
+            }
             ProviderKind::OpenCodeZen => &self.opencodezen.base_url,
         }
     }
@@ -704,7 +713,9 @@ impl ProviderConfig {
         match provider {
             ProviderKind::OpenRouter => &self.openrouter.api_key_env,
             ProviderKind::Anthropic => &self.anthropic.api_key_env,
-            ProviderKind::OpenAi | ProviderKind::Antigravity => &self.openai.api_key_env,
+            ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
+                &self.openai.api_key_env
+            }
             ProviderKind::OpenCodeZen => &self.opencodezen.api_key_env,
         }
     }
@@ -713,7 +724,7 @@ impl ProviderConfig {
         match provider {
             ProviderKind::OpenRouter => self.openrouter.resolve_api_key().is_some(),
             ProviderKind::Anthropic => self.anthropic.resolve_api_key().is_some(),
-            ProviderKind::OpenAi | ProviderKind::Antigravity => {
+            ProviderKind::OpenAi | ProviderKind::Antigravity | ProviderKind::AntigravityOAuth => {
                 self.openai.resolve_api_key().is_some()
             }
             ProviderKind::OpenCodeZen => self.opencodezen.resolve_api_key().is_some(),
@@ -736,16 +747,18 @@ pub enum ProviderKind {
     Anthropic,
     OpenAi,
     Antigravity,
+    AntigravityOAuth,
     OpenCodeZen,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 5] = [
+    pub const ALL: [ProviderKind; 6] = [
         ProviderKind::OpenCodeZen,
         ProviderKind::OpenAi,
         ProviderKind::Anthropic,
         ProviderKind::OpenRouter,
         ProviderKind::Antigravity,
+        ProviderKind::AntigravityOAuth,
     ];
 
     /// Parse user/CLI input (slash commands, TUI pickers).
@@ -755,6 +768,7 @@ impl ProviderKind {
             "anthropic" | "claude" => Some(Self::Anthropic),
             "openrouter" | "open-router" => Some(Self::OpenRouter),
             "antigravity" | "ag" => Some(Self::Antigravity),
+            "antigravity-oauth" | "ag-oauth" | "gemini" => Some(Self::AntigravityOAuth),
             "opencode" | "opencodezen" | "zen" | "minimax" => Some(Self::OpenCodeZen),
             _ => None,
         }
@@ -766,6 +780,7 @@ impl ProviderKind {
             "anthropic" => Self::Anthropic,
             "openai" => Self::OpenAi,
             "antigravity" => Self::Antigravity,
+            "antigravity-oauth" | "ag-oauth" | "gemini" => Self::AntigravityOAuth,
             "opencodezen" | "opencode" | "zen" | "minimax" => Self::OpenCodeZen,
             _ => Self::OpenAi,
         }
@@ -777,6 +792,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "Anthropic",
             ProviderKind::OpenAi => "OpenAI",
             ProviderKind::Antigravity => "Antigravity",
+            ProviderKind::AntigravityOAuth => "Antigravity OAuth",
             ProviderKind::OpenCodeZen => "MiniMax (OpenCode Zen)",
         }
     }
@@ -787,6 +803,7 @@ impl ProviderKind {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::OpenAi => "openai",
             ProviderKind::Antigravity => "openai",
+            ProviderKind::AntigravityOAuth => "openai",
             ProviderKind::OpenCodeZen => "opencodezen",
         }
     }

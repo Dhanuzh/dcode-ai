@@ -56,6 +56,12 @@ pub(crate) fn active_provider_connected(
                 .api_key_present_for(ProviderKind::Antigravity)
                 || auth.antigravity.is_some()
         }
+        ProviderKind::AntigravityOAuth => {
+            config
+                .provider
+                .api_key_present_for(ProviderKind::AntigravityOAuth)
+                || auth.antigravity_oauth.is_some()
+        }
         ProviderKind::OpenCodeZen => {
             config
                 .provider
@@ -94,6 +100,7 @@ pub(crate) fn build_model_picker_entries(
         } else if (p == ProviderKind::OpenAi && auth.openai_oauth.is_some())
             || (p == ProviderKind::Anthropic && auth.anthropic.is_some())
             || (p == ProviderKind::Antigravity && auth.antigravity.is_some())
+            || (p == ProviderKind::AntigravityOAuth && auth.antigravity_oauth.is_some())
             || (p == ProviderKind::OpenCodeZen && auth.opencodezen_oauth.is_some())
         {
             "oauth ✓"

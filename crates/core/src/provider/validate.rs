@@ -23,6 +23,12 @@ pub async fn validate_api_key(
     api_key: &str,
     base_url: &str,
 ) -> ValidationResult {
+    if provider == ProviderKind::AntigravityOAuth {
+        // OAuth-based — there's no API key to validate here; onboarding for
+        // this provider goes through `dcode-ai login antigravity-oauth`.
+        return ValidationResult::Valid;
+    }
+
     let client = match reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -56,6 +62,13 @@ pub async fn validate_api_key(
                 .body(r#"{"max_tokens":1,"messages":[]}"#)
                 .send()
                 .await
+        }
+        // Unreachable: OAuth-based, handled by the early return above — kept
+        // as its own arm (rather than folded into the wildcard-free match
+        // above) so this stays a compile error if the early return is ever
+        // removed without a replacement.
+        ProviderKind::AntigravityOAuth => {
+            unreachable!("AntigravityOAuth has no API key to validate; handled before this match")
         }
     };
 
