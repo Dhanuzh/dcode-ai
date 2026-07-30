@@ -164,9 +164,19 @@ pub(crate) fn build_model_picker_entries(
         });
     } else {
         for model_id in provider_models {
+            // Advisory-only: Antigravity's live catalog reports per-model quota
+            // exhaustion, so flag it before the user picks a model that will
+            // 503 MODEL_CAPACITY_EXHAUSTED mid-turn. Can go stale between
+            // catalog refreshes; picking an exhausted model still works, it's
+            // just likely to fail right now.
+            let detail = if dcode_ai_runtime::model_limits_api::is_model_exhausted(model_id) {
+                "⚠ no capacity right now".to_string()
+            } else {
+                String::new()
+            };
             entries.push(ModelPickerEntry {
                 label: model_id.clone(),
-                detail: String::new(),
+                detail,
                 action: ModelPickerAction::ApplyModel(model_id.clone()),
                 is_header: false,
             });

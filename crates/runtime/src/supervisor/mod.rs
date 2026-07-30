@@ -614,6 +614,45 @@ impl Supervisor {
                     .await;
             }
         }
+
+        // Antigravity-only: if the active model has no capacity right now,
+        // fall back to a known-good Gemini model and retry, rather than
+        // failing the turn outright. Always visibly announced (never a silent
+        // switch) and the switch persists for the rest of the session so we
+        // don't keep re-hitting the exhausted model every turn.
+        if matches!(
+            self.config.provider.default,
+            dcode_ai_common::config::ProviderKind::Antigravity
+        ) {
+            let mut guard3 = 0u32;
+            while guard3 < ANTIGRAVITY_FALLBACK_MODELS.len() as u32
+                && matches!(&output, Err(e) if is_capacity_exhausted_error(e))
+            {
+                guard3 += 1;
+                let previous_model = self.model.clone();
+                let fallback = ANTIGRAVITY_FALLBACK_MODELS.iter().copied().find(|&m| {
+                    m != previous_model.as_str() && !model_limits_api::is_model_exhausted(m)
+                });
+                let Some(fallback) = fallback else {
+                    break;
+                };
+                if let Some(tx) = self.agent.event_sender() {
+                    let _ = tx
+                        .send(AgentEvent::ContextWarning {
+                            message: format!(
+                                "{previous_model} has no capacity right now — falling back to {fallback} for this session."
+                            ),
+                        })
+                        .await;
+                }
+                self.model = fallback.to_string();
+                self.agent.model = fallback.to_string();
+                output = self
+                    .agent
+                    .run_turn(prompt, self.workspace_root.as_path(), attachments)
+                    .await;
+            }
+        }
         let output = output?;
 
         // Check context after turn
@@ -1250,6 +1289,27 @@ fn is_context_limit_error(err: &ProviderError) -> bool {
         || msg.contains("conversation too long")
 }
 
+/// True for a provider-side "this specific model has no capacity right now"
+/// failure (observed from Antigravity as HTTP 503 `MODEL_CAPACITY_EXHAUSTED` /
+/// "No capacity available for model X"). Distinct from a generic transient
+/// error: retrying the SAME model won't help, but a different model usually
+/// works immediately — this is what drives the fallback below.
+fn is_capacity_exhausted_error(err: &ProviderError) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("model_capacity_exhausted")
+        || msg.contains("resource_exhausted")
+        || msg.contains("no capacity available")
+}
+
+/// Known-good Gemini models to fall back to when the active Antigravity model
+/// has no capacity. Ordered by preference; the first one that isn't the
+/// current model and isn't itself flagged exhausted is tried.
+const ANTIGRAVITY_FALLBACK_MODELS: &[&str] = &[
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3-pro-preview",
+];
+
 /// Memory store location: `[memory].file_path`, workspace-relative by default.
 pub fn resolve_memory_path(config: &DcodeAiConfig, workspace_root: &Path) -> PathBuf {
     if config.memory.file_path.is_absolute() {
@@ -1586,6 +1646,22 @@ impl ApprovalHandler for AutoDenyHandler {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn detects_capacity_exhausted_error_variants() {
+        let a = ProviderError::Transient(
+            "{\"reason\":\"MODEL_CAPACITY_EXHAUSTED\",\"message\":\"No capacity available for model gemini-2.5-pro\"}".into(),
+        );
+        assert!(is_capacity_exhausted_error(&a));
+        let b = ProviderError::Transient("503 RESOURCE_EXHAUSTED".into());
+        assert!(is_capacity_exhausted_error(&b));
+        let c = ProviderError::RequestFailed("bad request: missing field".into());
+        assert!(!is_capacity_exhausted_error(&c));
+        // A plain overflow error must NOT be treated as capacity-exhausted —
+        // they trigger different recovery paths (context trim vs. model swap).
+        let d = ProviderError::Other("prompt is too long".into());
+        assert!(!is_capacity_exhausted_error(&d));
+    }
     use dcode_ai_common::event::AgentCommand;
     use dcode_ai_common::message::Message;
     use dcode_ai_common::session::{SessionMeta, SessionState, SessionStatus};

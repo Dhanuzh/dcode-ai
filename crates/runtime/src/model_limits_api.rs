@@ -21,6 +21,47 @@ use std::time::{Duration, Instant};
 
 const HTTP_TIMEOUT_SECS: u64 = 12;
 
+/// Models the last successful Antigravity `fetchAvailableModels` call reported
+/// as quota-exhausted (`quotaInfo.isExhausted`). Populated best-effort so the
+/// model picker can grey these out before you pick one and hit a 503
+/// `MODEL_CAPACITY_EXHAUSTED` mid-turn; never blocks selection, purely advisory
+/// and can go stale between refreshes.
+static EXHAUSTED_MODELS: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+
+fn exhausted_models_cell() -> &'static Mutex<std::collections::HashSet<String>> {
+    EXHAUSTED_MODELS.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+/// Whether `model` was last reported as quota-exhausted by Antigravity's
+/// `fetchAvailableModels`. Advisory only (see [`EXHAUSTED_MODELS`]).
+pub fn is_model_exhausted(model: &str) -> bool {
+    exhausted_models_cell()
+        .lock()
+        .map(|set| set.contains(model))
+        .unwrap_or(false)
+}
+
+/// Record which models a `fetchAvailableModels` response marked exhausted,
+/// replacing the previous snapshot (each call reflects current-moment quota).
+fn record_exhausted_models(value: &serde_json::Value) {
+    let Some(models) = value.get("models").and_then(|m| m.as_object()) else {
+        return;
+    };
+    let mut exhausted = std::collections::HashSet::new();
+    for (id, info) in models {
+        let is_exhausted = info
+            .pointer("/quotaInfo/isExhausted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        if is_exhausted {
+            exhausted.insert(id.clone());
+        }
+    }
+    if let Ok(mut set) = exhausted_models_cell().lock() {
+        *set = exhausted;
+    }
+}
+
 fn catalog_cache_ttl() -> Duration {
     std::env::var("DCODE_AI_CONTEXT_API_CACHE_TTL_SECS")
         .ok()
@@ -853,6 +894,7 @@ async fn fetch_antigravity_model_ids(
             message: error.to_string(),
         })?;
     let value = response_json("Antigravity", resp).await?;
+    record_exhausted_models(&value);
 
     let ids: Vec<String> = match value.get("models") {
         Some(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
@@ -922,6 +964,7 @@ async fn fetch_antigravity_oauth_model_ids(
             message: error.to_string(),
         })?;
     let value = response_json("Antigravity OAuth", resp).await?;
+    record_exhausted_models(&value);
 
     let ids: Vec<String> = match value.get("models") {
         Some(serde_json::Value::Object(map)) => map.keys().cloned().collect(),
