@@ -1,0 +1,121 @@
+@import 'tailwindcss';
+
+/*
+ * Design tokens mirror the dcode-ai TUI's default theme so the site and the
+ * terminal read as one product: teal accent (`theme::accent`), violet for
+ * assistant output, near-black surfaces.
+ */
+@theme {
+  --color-ink: #07080c;
+  --color-surface: #0e1017;
+  --color-raised: #141823;
+  --color-line: #222634;
+  --color-line-soft: #1a1e2a;
+  --color-fg: #e9edf6;
+  --color-muted: #838ca1;
+  --color-accent: #48d1cc;
+  --color-accent-dim: #2ba39f;
+  --color-violet: #b4a0ff;
+  --color-amber: #fac850;
+  --color-green: #50dc8c;
+  --color-red: #f56e78;
+
+  --font-sans:
+    'Inter var', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono:
+    'JetBrains Mono', ui-monospace, SFMono-Regular, 'SF Mono', Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    background-color: var(--color-ink);
+    color: var(--color-fg);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  ::selection {
+    background-color: color-mix(in srgb, var(--color-accent) 30%, transparent);
+    color: #fff;
+  }
+}
+
+@layer utilities {
+  /* Ambient glow used behind the hero and section headings. */
+  .glow-accent {
+    background-image: radial-gradient(
+      60% 60% at 50% 0%,
+      color-mix(in srgb, var(--color-accent) 18%, transparent) 0%,
+      transparent 70%
+    );
+  }
+
+  .grid-bg {
+    background-image:
+      linear-gradient(to right, var(--color-line-soft) 1px, transparent 1px),
+      linear-gradient(to bottom, var(--color-line-soft) 1px, transparent 1px);
+    background-size: 56px 56px;
+    mask-image: radial-gradient(70% 55% at 50% 0%, #000 0%, transparent 100%);
+  }
+
+  .text-gradient {
+    background-image: linear-gradient(
+      100deg,
+      var(--color-fg) 10%,
+      var(--color-accent) 55%,
+      var(--color-violet) 95%
+    );
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+}
+
+/* Blinking terminal caret for the animated demo. */
+@keyframes caret {
+  0%,
+  49% {
+    opacity: 1;
+  }
+  50%,
+  100% {
+    opacity: 0;
+  }
+}
+
+.caret::after {
+  content: '▋';
+  margin-left: 1px;
+  color: var(--color-accent);
+  animation: caret 1s steps(1) infinite;
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.rise {
+  animation: rise 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rise,
+  .caret::after {
+    animation: none;
+  }
+  html {
+    scroll-behavior: auto;
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "dcode-site",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["--yes", "serve", "www/dist", "-l", "5173"],
+      "port": 5173
+    }
+  ]
+}

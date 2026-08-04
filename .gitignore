@@ -31,3 +31,6 @@ for-test/
 
 # dcode-ai local data (sessions, config, memory)
 .dcode-ai/
+# website (Vite/React) build artifacts
+www/node_modules/
+www/dist/
