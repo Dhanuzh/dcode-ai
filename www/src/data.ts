@@ -1,4 +1,13 @@
 export const REPO = 'https://github.com/Dhanuzh/dcode-ai'
+export const DESKTOP_REPO = 'https://github.com/Dhanuzh/DCode'
+
+// Points at the Releases page rather than a specific asset filename — each
+// electron-builder release bakes its version into the filename
+// (DCode-<version>-win-x64.exe), so a hardcoded link would go stale on every
+// version bump. GitHub's release page lets visitors pick the right file.
+export const DESKTOP_DOWNLOADS = {
+  releases: `${DESKTOP_REPO}/releases/latest`,
+} as const
 
 export const INSTALL = {
   unix: 'curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | bash',
