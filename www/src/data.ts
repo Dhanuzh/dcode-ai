@@ -72,6 +72,35 @@ export const FEATURES: Feature[] = [
   },
 ]
 
+export type DesktopFeature = { title: string; body: string }
+
+export const DESKTOP_FEATURES: DesktopFeature[] = [
+  {
+    title: 'Conversation history & search',
+    body: 'Every chat is saved locally and searchable — pick up any past conversation exactly where you left it.',
+  },
+  {
+    title: 'Custom assistants & skills',
+    body: 'Configure named assistants with their own system prompt, tools and skills, then switch between them per task.',
+  },
+  {
+    title: 'Scheduled tasks',
+    body: 'Queue a prompt to run on a cadence — reports, checks or cleanups that fire without the app staying open.',
+  },
+  {
+    title: 'MCP servers',
+    body: 'Connect any Model Context Protocol server and use its tools directly from the chat, no extra config file.',
+  },
+  {
+    title: 'Team runtime',
+    body: 'Share assistants, skills and settings across a team workspace instead of configuring each machine by hand.',
+  },
+  {
+    title: 'Windows & Linux installers',
+    body: 'Native .exe and .deb installers — nothing to run in a browser, no separate runtime to set up first.',
+  },
+]
+
 export const PROVIDERS = [
   'Anthropic',
   'OpenAI',

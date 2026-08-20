@@ -1,13 +1,13 @@
 import { useState } from 'react'
 import { CopyCommand } from './components/CopyCommand'
 import { Terminal } from './components/Terminal'
-import { DESKTOP_DOWNLOADS, DESKTOP_REPO, FEATURES, INSTALL, PROVIDERS, REPO } from './data'
+import { DESKTOP_DOWNLOADS, DESKTOP_FEATURES, DESKTOP_REPO, FEATURES, INSTALL, PROVIDERS, REPO } from './data'
 
 const NAV = [
+  { href: '#desktop', label: 'Desktop' },
   { href: '#features', label: 'Features' },
   { href: '#providers', label: 'Providers' },
   { href: '#install', label: 'Install' },
-  { href: '#desktop', label: 'Desktop' },
 ]
 
 function Nav() {
@@ -223,55 +223,53 @@ function Desktop() {
   return (
     <section id="desktop" className="scroll-mt-20 border-y border-line bg-surface/40">
       <div className="mx-auto max-w-6xl px-6 py-20 sm:py-24">
-        <div className="grid items-center gap-12 lg:grid-cols-2">
-          <div>
-            <p className="font-mono text-sm text-accent">Desktop</p>
-            <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
-              Prefer a window? There's DCode Desktop.
-            </h2>
-            <p className="mt-4 text-pretty leading-relaxed text-muted">
-              Same agent engine, wrapped in a chat-style desktop app for Windows and Linux —
-              conversation history, assistants, scheduled tasks, and MCP servers with a UI
-              around them. dcode-ai stays the terminal-first, single-binary option; DCode
-              Desktop is for when a window suits the work better.
-            </p>
-            <div className="mt-7 flex flex-wrap items-center gap-3">
-              <a
-                href={DESKTOP_DOWNLOADS.releases}
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-ink transition hover:bg-accent-dim"
-              >
-                Download for Windows / Linux
-              </a>
-              <a
-                href={DESKTOP_REPO}
-                target="_blank"
-                rel="noreferrer"
-                className="rounded-lg border border-line px-5 py-2.5 text-sm font-medium text-fg transition hover:border-accent hover:text-accent"
-              >
-                View source
-              </a>
-            </div>
+        <div className="max-w-2xl">
+          <p className="font-mono text-sm text-accent">Desktop</p>
+          <h2 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">
+            Prefer a window? There's DCode Desktop.
+          </h2>
+          <p className="mt-4 text-pretty leading-relaxed text-muted">
+            DCode Desktop wraps the same Rust agent engine that powers dcode-ai in a
+            chat-style app for Windows and Linux. Where dcode-ai stays terminal-first and
+            single-binary, Desktop trades that for a windowed interface built around
+            longer-running, multi-conversation work — persistent history, named
+            assistants, unattended scheduled runs, and a UI for wiring up MCP servers
+            instead of hand-editing config files. Same models, same tool-calling
+            underneath; pick whichever surface fits the task.
+          </p>
+          <div className="mt-7 flex flex-wrap items-center gap-3">
+            <a
+              href={DESKTOP_DOWNLOADS.releases}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-ink transition hover:bg-accent-dim"
+            >
+              Download for Windows / Linux
+            </a>
+            <a
+              href={DESKTOP_REPO}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-lg border border-line px-5 py-2.5 text-sm font-medium text-fg transition hover:border-accent hover:text-accent"
+            >
+              View source
+            </a>
           </div>
+        </div>
 
-          <ul className="grid gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-2">
-            {[
-              'Conversation history & search',
-              'Custom assistants & skills',
-              'Scheduled tasks',
-              'MCP servers',
-              'Team runtime',
-              'Windows & Linux installers',
-            ].map((item) => (
-              <li key={item} className="flex items-center gap-2.5 bg-surface px-5 py-4 text-sm text-fg">
-                <span aria-hidden className="text-accent">
-                  ◆
-                </span>
-                {item}
-              </li>
-            ))}
-          </ul>
+        <div className="mt-12 grid gap-px overflow-hidden rounded-xl border border-line bg-line sm:grid-cols-2 lg:grid-cols-3">
+          {DESKTOP_FEATURES.map((f) => (
+            <div key={f.title} className="group bg-surface p-6 transition hover:bg-raised">
+              <span
+                aria-hidden
+                className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-line bg-raised text-accent transition group-hover:border-accent/50"
+              >
+                ◆
+              </span>
+              <h3 className="mt-4 font-semibold tracking-tight">{f.title}</h3>
+              <p className="mt-2 text-sm leading-relaxed text-muted">{f.body}</p>
+            </div>
+          ))}
         </div>
       </div>
     </section>
@@ -323,10 +321,10 @@ export default function App() {
       <Nav />
       <main>
         <Hero />
+        <Desktop />
         <Features />
         <Providers />
         <Install />
-        <Desktop />
       </main>
       <Footer />
     </>

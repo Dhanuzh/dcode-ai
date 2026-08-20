@@ -6,6 +6,12 @@
       "runtimeExecutable": "npx",
       "runtimeArgs": ["--yes", "serve", "www/dist", "-l", "5173"],
       "port": 5173
+    },
+    {
+      "name": "dcode-site-dev",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--prefix", "www", "--", "--port", "5174"],
+      "port": 5174
     }
   ]
 }
