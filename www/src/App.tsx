@@ -62,7 +62,11 @@ function Hero() {
           <p className="mx-auto mt-6 max-w-xl text-pretty text-lg leading-relaxed text-muted">
             No Electron. No browser shell. No JavaScript wrapper. Just a fast, local-first
             agent with streaming reasoning, visible tool calls and resumable sessions —
-            right where your code already is.
+            right where your code already is. Prefer a window instead? There's also{' '}
+            <a href="#desktop" className="text-accent underline underline-offset-2 hover:text-fg">
+              DCode Desktop
+            </a>
+            .
           </p>
 
           <div className="mx-auto mt-9 max-w-xl">
@@ -75,6 +79,14 @@ function Hero() {
               className="rounded-lg bg-accent px-5 py-2.5 text-sm font-semibold text-ink transition hover:bg-accent-dim"
             >
               Get started
+            </a>
+            <a
+              href={DESKTOP_DOWNLOADS.releases}
+              target="_blank"
+              rel="noreferrer"
+              className="rounded-lg border border-line px-5 py-2.5 text-sm font-medium text-fg transition hover:border-accent hover:text-accent"
+            >
+              Download Desktop app
             </a>
             <a
               href={REPO}
