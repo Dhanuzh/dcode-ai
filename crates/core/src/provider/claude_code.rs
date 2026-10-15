@@ -532,45 +532,56 @@ impl ToolCallSplitter {
         let mut work = std::mem::take(&mut self.carry);
         work.push_str(input);
         let mut out = Vec::new();
+        let mut text = String::new();
         loop {
-            if !self.in_call
-                && let Some(pos) = work.find(RESULT_OPEN)
-                && work.find(TOOL_OPEN).is_none_or(|open| pos < open)
-            {
-                if pos > 0 {
-                    out.push(Segment::Text(work[..pos].to_string()));
-                }
-                out.push(Segment::FabricatedResult);
-                self.cut = true;
-                return out;
-            }
-            let marker = if self.in_call { TOOL_CLOSE } else { TOOL_OPEN };
-            if let Some(pos) = work.find(marker) {
-                let before = &work[..pos];
-                if self.in_call {
-                    self.call.push_str(before);
+            if self.in_call {
+                if let Some(pos) = work.find(TOOL_CLOSE) {
+                    self.call.push_str(&work[..pos]);
                     out.push(Segment::ToolCall(std::mem::take(&mut self.call)));
-                } else if !before.is_empty() {
-                    out.push(Segment::Text(before.to_string()));
+                    self.in_call = false;
+                    work = work[pos + TOOL_CLOSE.len()..].to_string();
+                    continue;
                 }
-                self.in_call = !self.in_call;
-                work = work[pos + marker.len()..].to_string();
-            } else {
-                let keep = if self.in_call {
-                    partial_marker_tail_len(&work, marker)
-                } else {
-                    partial_marker_tail_len(&work, marker)
-                        .max(partial_marker_tail_len(&work, RESULT_OPEN))
-                };
-                let split = work.len() - keep;
-                if self.in_call {
-                    self.call.push_str(&work[..split]);
-                } else if split > 0 {
-                    out.push(Segment::Text(work[..split].to_string()));
-                }
+                let split = work.len() - partial_marker_tail_len(&work, TOOL_CLOSE);
+                self.call.push_str(&work[..split]);
                 self.carry = work[split..].to_string();
                 break;
             }
+            match next_marker(&work) {
+                Marker::Result(pos) => {
+                    text.push_str(&work[..pos]);
+                    if !text.is_empty() {
+                        out.push(Segment::Text(text));
+                    }
+                    out.push(Segment::FabricatedResult);
+                    self.cut = true;
+                    return out;
+                }
+                Marker::Call { start, body } => {
+                    text.push_str(&work[..start]);
+                    if !text.is_empty() {
+                        out.push(Segment::Text(std::mem::take(&mut text)));
+                    }
+                    self.in_call = true;
+                    work = work[body..].to_string();
+                }
+                Marker::Undecided(pos) => {
+                    text.push_str(&work[..pos]);
+                    self.carry = work[pos..].to_string();
+                    break;
+                }
+                Marker::None => {
+                    let keep = partial_marker_tail_len(&work, TOOL_OPEN)
+                        .max(partial_marker_tail_len(&work, RESULT_OPEN));
+                    let split = work.len() - keep;
+                    text.push_str(&work[..split]);
+                    self.carry = work[split..].to_string();
+                    break;
+                }
+            }
+        }
+        if !text.is_empty() {
+            out.push(Segment::Text(text));
         }
         out
     }
@@ -588,6 +599,62 @@ impl ToolCallSplitter {
             return Err(partial);
         }
         Ok((!carry.is_empty()).then_some(carry))
+    }
+}
+
+/// The first protocol marker in visible text.
+#[derive(Debug, PartialEq)]
+enum Marker {
+    /// No marker (a partial one may still be forming at the end).
+    None,
+    /// A real `<tool_call>` at `start`; its body begins at `body`.
+    Call { start: usize, body: usize },
+    /// A fabricated `<tool_result>` at this offset.
+    Result(usize),
+    /// A `<tool_call>` whose following text has not arrived yet.
+    Undecided(usize),
+}
+
+/// Find the first marker that is protocol, not prose. A marker written in
+/// backticks (`` `<tool_call>` ``) is a mention, and so is a `<tool_call>`
+/// not followed by its JSON body (`{` or a fenced block) — the model
+/// talking *about* the protocol must not open a call.
+fn next_marker(work: &str) -> Marker {
+    let mut from = 0;
+    loop {
+        let call = work[from..].find(TOOL_OPEN).map(|p| p + from);
+        let result = work[from..].find(RESULT_OPEN).map(|p| p + from);
+        let (pos, is_call) = match (call, result) {
+            (None, None) => return Marker::None,
+            (Some(c), Some(r)) if r < c => (r, false),
+            (Some(c), _) => (c, true),
+            (None, Some(r)) => (r, false),
+        };
+        let len = if is_call {
+            TOOL_OPEN.len()
+        } else {
+            RESULT_OPEN.len()
+        };
+        let quoted = work[..pos].ends_with('`');
+        if quoted {
+            from = pos + len;
+            continue;
+        }
+        if !is_call {
+            return Marker::Result(pos);
+        }
+        let after = &work[pos + len..];
+        let rest = after.trim_start();
+        if rest.is_empty() || (rest.starts_with('`') && rest.len() < 3) {
+            return Marker::Undecided(pos);
+        }
+        if rest.starts_with('{') || rest.starts_with("```") {
+            return Marker::Call {
+                start: pos,
+                body: pos + len,
+            };
+        }
+        from = pos + len;
     }
 }
 
@@ -822,6 +889,48 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, Segment::Text(t) if t.contains("invented")))
         );
+        assert_eq!(rest, Ok(None));
+    }
+
+    #[test]
+    fn protocol_mentions_in_prose_stay_text() {
+        // The model describing the protocol (the bug that ended a turn with
+        // "unterminated tool call").
+        let (segments, rest) = split_all(&[
+            "Uses the `<tool_call>` text protocol** (`provider/claude_code.rs`).\n",
+            "Results come back as `<tool_result>` blocks; a bare <tool_call> mention too.",
+        ]);
+        assert!(
+            segments.iter().all(|s| matches!(s, Segment::Text(_))),
+            "{segments:?}"
+        );
+        let text: String = segments
+            .iter()
+            .map(|s| match s {
+                Segment::Text(t) => t.as_str(),
+                _ => "",
+            })
+            .collect::<String>()
+            + rest.unwrap().as_deref().unwrap_or("");
+        assert!(text.contains("`<tool_call>` text protocol"), "{text}");
+        assert!(text.contains("`<tool_result>` blocks"), "{text}");
+        assert!(text.ends_with("mention too."), "{text}");
+    }
+
+    #[test]
+    fn real_call_after_a_mention_and_split_before_body() {
+        let (segments, rest) = split_all(&[
+            "See `<tool_call>`. Now:\n<tool_call>",
+            "\n```json\n{\"name\":\"git_status\"}\n```\n</tool_call>",
+        ]);
+        assert_eq!(
+            segments[0],
+            Segment::Text("See `<tool_call>`. Now:\n".into())
+        );
+        let Segment::ToolCall(raw) = &segments[1] else {
+            panic!("expected call: {segments:?}");
+        };
+        assert_eq!(parse_tool_call(raw).unwrap().0, "git_status");
         assert_eq!(rest, Ok(None));
     }
 
