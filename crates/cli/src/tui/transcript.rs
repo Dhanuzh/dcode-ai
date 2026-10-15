@@ -929,6 +929,42 @@ fn render_block(
                 }
             }
         }
+        DisplayBlock::Notice { text, ok } => {
+            push_transcript_line(lines, hits, Line::default(), None);
+            let color = if *ok {
+                theme::success()
+            } else {
+                theme::error()
+            };
+            for (i, wl) in wrap_text(text, w.saturating_sub(4)).into_iter().enumerate() {
+                let lead = if i == 0 {
+                    bullet(color)
+                } else {
+                    Span::raw("  ")
+                };
+                push_transcript_line(
+                    lines,
+                    hits,
+                    Line::from(vec![
+                        lead,
+                        Span::styled(wl, Style::default().fg(theme::text())),
+                    ]),
+                    None,
+                );
+            }
+        }
+        DisplayBlock::TurnSummary(text) => {
+            push_transcript_line(lines, hits, Line::default(), None);
+            push_transcript_line(
+                lines,
+                hits,
+                Line::from(vec![
+                    Span::styled("✻ ", dim()),
+                    Span::styled(truncate_chars(text, w.saturating_sub(4)), dim()),
+                ]),
+                None,
+            );
+        }
         DisplayBlock::Question(q) => {
             let selected_answer = state.answered_questions.get(&q.question_id);
             push_transcript_line(lines, hits, Line::default(), None);

@@ -78,13 +78,14 @@ Type `/` to see them all with descriptions. The most used:
 | `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use |
 | `/compact [--preview]` | Summarise the conversation to free context |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation |
-| `/new`, `/sessions`, `/resume`, `/fork`, `/rename` | Manage sessions |
+| `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in) |
 | `/plan`, `/review`, `/fix`, `/test` | Switch agent profile |
 | `/verify` | Read-only review of the uncommitted diff |
 | `/agents`, `/skills`, `/plugins`, `/mcp`, `/hooks`, `/reload` | Extensions |
 | `/memory`, `/init` | Memory notes; create project instructions |
 | `/image`, `/web`, `/run` | Attach an image, fetch a page, run a command into context |
 | `/diff`, `/commit` | Review and commit changes |
+| `/bashes` | Background shells the agent started (`/bashes kill <id>`) |
 | `/doctor`, `/login`, `/logout`, `/auth` | Diagnostics and sign-in |
 
 ## Command line
@@ -151,7 +152,7 @@ agents tab. Define specialised agents in `agents/*.md` — see
 | `default` | Reads run; edits and unknown commands ask |
 | `accept-edits` | Edits run; commands still ask |
 | `dont-ask` | Read-only, no prompts (headless) |
-| `bypass-permissions` | Everything runs — trusted environments only |
+| `bypass-permissions` | Everything runs without prompts (destructive commands are still refused) — trusted environments only |
 
 Shell commands are parsed (quoting, pipelines) rather than matched as text:
 read-only commands (`ls`, `cat`, `rg`, `git status`, …) run in every mode except
@@ -198,12 +199,23 @@ project's checks, and hands real problems back to the main agent.
 | --- | --- |
 | Files | `read_file`, `list_directory`, `write_file`, `edit_file`, `apply_patch`, `replace_match`, `create_directory`, `rename_path`, `move_path`, `copy_path`, `delete_path` |
 | Search | `search_code` (ripgrep), `code_intel` (language server), `query_symbols`, `repo_map` |
-| Shell | `execute_bash` (PTY, optional sandbox), `run_background`, `run_validation` |
+| Shell | `execute_bash` (PTY, optional sandbox), `run_background` (see below), `run_validation` |
 | Git | `git_status`, `git_diff` |
 | Web | `web_search`, `fetch_url` |
 | Binaries | `inspect_binary` — ELF / PE / Mach-O summary, sections, symbols, imports, strings, cargo-auditable crates, Go build info; never runs the file |
 | Agent | `spawn_subagent`, `ask_question`, `update_plan`, `invoke_skill` |
 | MCP | `mcp__<server>__<tool>` from configured servers |
+
+### Background shells
+
+The agent runs long commands (dev servers, test suites, builds) with
+`run_background` and keeps working. While they run the footer shows
+`· 1 shell`, and a turn ends with `✻ Crunched for 1m 9s · 1 shell still
+running`. When a command finishes you see
+`● Background command "cargo test" completed (exit code 0)` and the agent is
+told automatically — exit code and last output lines — so it can react
+without polling. `/bashes` lists the jobs with their latest output;
+`/bashes kill <id>` stops one.
 
 ## Automation
 

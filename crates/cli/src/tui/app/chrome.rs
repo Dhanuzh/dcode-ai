@@ -108,6 +108,15 @@ pub(super) fn mode_indicator(permission_mode: &str) -> Option<(String, Color)> {
     Some((format!("{label} (shift+tab to cycle)"), color))
 }
 
+/// `1 shell` / `3 shells` while the agent's background jobs run.
+pub(super) fn shells_badge(g: &TuiSessionState) -> Option<String> {
+    match g.background_shells.len() {
+        0 => None,
+        1 => Some("1 shell".into()),
+        n => Some(format!("{n} shells")),
+    }
+}
+
 /// `(ready, total, failed)` MCP servers when any is not ready yet.
 pub(super) fn mcp_health(g: &TuiSessionState) -> Option<(usize, usize, usize)> {
     use dcode_ai_common::event::McpStartupStatus;
@@ -151,6 +160,13 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
         left.push(Span::styled(
             "? for shortcuts",
             Style::default().fg(theme::muted()),
+        ));
+    }
+
+    if let Some(badge) = shells_badge(g) {
+        left.push(Span::styled(
+            format!(" · {badge}"),
+            Style::default().fg(theme::accent()),
         ));
     }
 

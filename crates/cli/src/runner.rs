@@ -132,6 +132,11 @@ impl SessionRuntime {
         tx.send(QuestionSelection::Suggested).is_ok()
     }
 
+    /// The agent's background shell jobs (`run_background`).
+    pub fn background_jobs(&self) -> dcode_ai_core::tools::background_exec::BackgroundJobs {
+        self.supervisor.background_jobs()
+    }
+
     pub fn session_id(&self) -> &str {
         self.supervisor.session_id()
     }

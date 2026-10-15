@@ -268,19 +268,10 @@ impl ApprovalPolicy {
         }
 
         match self.config.mode {
-            PermissionMode::BypassPermissions => {
-                // Keep bypass permissive for workspace reads/edits, but require
-                // one explicit approval for shell execution per session —
-                // except for provably read-only commands.
-                if matches!(tool_name, "execute_bash" | "run_background")
-                    && !explicitly_allowed
-                    && !readonly
-                {
-                    PermissionTier::Ask
-                } else {
-                    PermissionTier::Allowed
-                }
-            }
+            // Like Claude Code's bypass mode: no prompts. Known-destructive
+            // shell shapes were already denied above, and `ask` / `deny`
+            // rules still apply.
+            PermissionMode::BypassPermissions => PermissionTier::Allowed,
             PermissionMode::Plan => {
                 if readonly {
                     PermissionTier::Allowed
@@ -532,18 +523,24 @@ mod tests {
     }
 
     #[test]
-    fn bypass_permissions_asks_for_bash_before_session_allow() {
+    fn bypass_permissions_runs_shell_without_asking_but_denies_destructive() {
         let config = PermissionConfig {
             mode: PermissionMode::BypassPermissions,
             ..Default::default()
         };
         let policy = ApprovalPolicy::new(config);
-        // `cargo build` is not provably read-only, so the one-time gate holds.
+        for tool in ["execute_bash", "run_background"] {
+            let tier = policy.check(
+                tool,
+                &serde_json::json!({"action": "start", "command": "cargo build"}).to_string(),
+            );
+            assert_eq!(tier, PermissionTier::Allowed, "{tool}");
+        }
         let tier = policy.check(
             "execute_bash",
-            &serde_json::json!({"command": "cargo build"}).to_string(),
+            &serde_json::json!({"command": "sudo rm -rf /"}).to_string(),
         );
-        assert_eq!(tier, PermissionTier::Ask);
+        assert_eq!(tier, PermissionTier::Denied);
     }
 
     #[test]

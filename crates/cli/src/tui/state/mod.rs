@@ -16,6 +16,52 @@ use std::time::Instant;
 
 pub mod types;
 pub use self::types::*;
+/// `Background command "…" completed (exit code 0)` and whether it succeeded.
+pub(crate) fn job_end_line(
+    command: &str,
+    status: dcode_ai_common::event::BackgroundJobStatus,
+    exit_code: Option<i32>,
+) -> (String, bool) {
+    use dcode_ai_common::event::BackgroundJobStatus as S;
+    let cmd = crate::tui::render_helpers::truncate_chars(command.trim(), 80);
+    let code = exit_code
+        .map(|c| format!(" (exit code {c})"))
+        .unwrap_or_default();
+    match status {
+        S::Completed => (
+            format!("Background command \"{cmd}\" completed{code}"),
+            true,
+        ),
+        S::Failed => (format!("Background command \"{cmd}\" failed{code}"), false),
+        S::Stopped => (format!("Background command \"{cmd}\" was stopped"), false),
+        S::Running => (format!("Background command \"{cmd}\" is running"), true),
+    }
+}
+
+/// What the agent is told when a background job ends (Claude Code's
+/// `<task-notification>`).
+pub(crate) fn job_notification(
+    job_id: u32,
+    command: &str,
+    status: dcode_ai_common::event::BackgroundJobStatus,
+    exit_code: Option<i32>,
+    output_tail: &str,
+) -> String {
+    let (line, _) = job_end_line(command, status, exit_code);
+    let output = if output_tail.trim().is_empty() {
+        "(no output)".to_string()
+    } else {
+        output_tail.to_string()
+    };
+    format!(
+        "<task-notification>\n<job-id>{job_id}</job-id>\n<summary>{line}</summary>\n\
+<output-tail>\n{output}\n</output-tail>\n</task-notification>\n\
+This is an automated notification that a background job you started has finished, \
+not a message from the user. Use `run_background` action=output with id {job_id} \
+for the full output. Continue your work if this changes anything; otherwise reply briefly."
+    )
+}
+
 impl TuiSessionState {
     pub fn new(
         session_id: String,
@@ -38,6 +84,8 @@ impl TuiSessionState {
             workspace_root,
             workspace_display: String::new(),
             staged_image_attachments: Vec::new(),
+            background_shells: std::collections::BTreeMap::new(),
+            pending_job_notifications: Vec::new(),
             pending_context: Vec::new(),
             subagents: Vec::new(),
             model,
@@ -1644,6 +1692,34 @@ impl TuiSessionState {
                 self.set_busy_state(BusyState::ToolRunning);
                 transcript_dirty = true;
             }
+            AgentEvent::BackgroundJob {
+                job_id,
+                command,
+                status,
+                exit_code,
+                output_tail,
+            } => {
+                self.background_shells
+                    .insert(*job_id, (command.clone(), *status));
+                if !status.is_running() {
+                    self.background_shells.remove(job_id);
+                    let (line, ok) = job_end_line(command, *status, *exit_code);
+                    self.push_block(DisplayBlock::Notice { text: line, ok });
+                    // Stopped by the agent itself: it already knows.
+                    if !self.replaying
+                        && *status != dcode_ai_common::event::BackgroundJobStatus::Stopped
+                    {
+                        self.pending_job_notifications.push(job_notification(
+                            *job_id,
+                            command,
+                            *status,
+                            *exit_code,
+                            output_tail,
+                        ));
+                    }
+                    transcript_dirty = true;
+                }
+            }
             AgentEvent::ToolOutputDelta { call_id, delta } => {
                 // Append incremental output to the running tool block.
                 if let Some(DisplayBlock::ToolRunning { output, .. }) =
@@ -3056,5 +3132,44 @@ mod tests {
             st.blocks.last(),
             Some(DisplayBlock::ToolDone { ok: false, .. })
         ));
+    }
+
+    #[test]
+    fn background_job_end_queues_a_notification() {
+        use dcode_ai_common::event::BackgroundJobStatus as S;
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        let ev = |status, exit_code| AgentEvent::BackgroundJob {
+            job_id: 2,
+            command: "cargo test".into(),
+            status,
+            exit_code,
+            output_tail: "test result: ok".into(),
+        };
+        st.apply_event(&ev(S::Running, None));
+        assert_eq!(st.background_shells.len(), 1);
+        assert!(st.pending_job_notifications.is_empty());
+
+        st.apply_event(&ev(S::Completed, Some(0)));
+        assert!(st.background_shells.is_empty());
+        assert!(matches!(
+            st.blocks.last(),
+            Some(DisplayBlock::Notice { text, ok: true })
+                if text == "Background command \"cargo test\" completed (exit code 0)"
+        ));
+        let note = &st.pending_job_notifications[0];
+        assert!(note.starts_with("<task-notification>") && note.contains("test result: ok"));
+
+        // Replayed history shows the line but never re-notifies the agent.
+        st.pending_job_notifications.clear();
+        st.replaying = true;
+        st.apply_event(&ev(S::Failed, Some(1)));
+        assert!(st.pending_job_notifications.is_empty());
     }
 }

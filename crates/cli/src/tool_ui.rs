@@ -169,6 +169,7 @@ fn with_preview(action: &str, preview: &str) -> String {
 fn preview_keys(tool: &str) -> &'static [&'static str] {
     match tool {
         "bash" | "execute_bash" | "shell" | "run_shell" | "run_validation" => &["command", "cmd"],
+        "run_background" => &["command", "action"],
         "web_search" => &["query", "q"],
         "fetch_url" => &["url"],
         "search" | "search_code" => &["pattern", "query", "path"],

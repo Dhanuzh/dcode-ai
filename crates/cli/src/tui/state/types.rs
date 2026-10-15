@@ -46,6 +46,14 @@ pub enum DisplayBlock {
     Question(InteractiveQuestionPayload),
     System(String),
     ErrorLine(String),
+    /// `● text`: an event outside the conversation, e.g. a background
+    /// command finishing. `ok = false` draws the bullet in the error colour.
+    Notice {
+        text: String,
+        ok: bool,
+    },
+    /// `✻ Crunched for 1m 9s · 1 shell still running` after a turn.
+    TurnSummary(String),
 }
 
 #[derive(Debug, Clone)]
@@ -203,6 +211,12 @@ pub struct TuiSessionState {
     pub workspace_root: PathBuf,
     /// Workspace root (from `SessionStarted`), for sidebar context.
     pub workspace_display: String,
+    /// The agent's background shells: job id → (command, status).
+    pub background_shells:
+        std::collections::BTreeMap<u32, (String, dcode_ai_common::event::BackgroundJobStatus)>,
+    /// Finished background jobs the agent has not been told about yet;
+    /// delivered as an automatic turn when the agent is idle.
+    pub pending_job_notifications: Vec<String>,
     /// Images to send on the next user message (TUI only).
     pub staged_image_attachments: Vec<StagedImage>,
     /// Extra context blocks (from `/web` or `/run`) to prepend to the next

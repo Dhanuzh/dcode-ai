@@ -75,6 +75,38 @@ pub fn render_indicator(state: BusyState, state_since: Instant) -> String {
     }
 }
 
+/// Claude-style line after a turn: `Crunched for 1m 9s · 1 shell still
+/// running`. Quick turns without running shells get none.
+pub fn turn_summary(elapsed: std::time::Duration, shells: usize) -> Option<String> {
+    const VERBS: [&str; 8] = [
+        "Baked",
+        "Brewed",
+        "Churned",
+        "Cogitated",
+        "Cooked",
+        "Crunched",
+        "Sautéed",
+        "Worked",
+    ];
+    let secs = elapsed.as_secs();
+    if secs < 5 && shells == 0 {
+        return None;
+    }
+    let verb = VERBS[(elapsed.as_millis() as usize / 7) % VERBS.len()];
+    let took = if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
+    } else {
+        format!("{secs}s")
+    };
+    let mut line = format!("{verb} for {took}");
+    match shells {
+        0 => {}
+        1 => line.push_str(" · 1 shell still running"),
+        n => line.push_str(&format!(" · {n} shells still running")),
+    }
+    Some(line)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -124,5 +156,18 @@ mod tests {
         assert_eq!(trailing_dots(700), "..");
         assert_eq!(trailing_dots(1050), "...");
         assert_eq!(trailing_dots(1400), "");
+    }
+
+    #[test]
+    fn turn_summary_reads_like_claude() {
+        use std::time::Duration;
+        assert_eq!(super::turn_summary(Duration::from_secs(2), 0), None);
+        let line = super::turn_summary(Duration::from_secs(69), 1).unwrap();
+        assert!(
+            line.ends_with(" for 1m 9s · 1 shell still running"),
+            "{line}"
+        );
+        let line = super::turn_summary(Duration::from_secs(1), 2).unwrap();
+        assert!(line.ends_with(" for 1s · 2 shells still running"), "{line}");
     }
 }

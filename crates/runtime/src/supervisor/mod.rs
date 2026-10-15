@@ -76,6 +76,8 @@ pub struct Supervisor {
     last_summary_at_tokens: usize,
     interactive_handle: crate::interactive_exec::InteractiveExecHandle,
     preview_handle: crate::preview_tool::PreviewHandle,
+    /// The agent's `run_background` jobs (for `/bashes`; stopped on finish).
+    background_jobs: dcode_ai_core::tools::background_exec::BackgroundJobs,
     mcp_manager: Arc<McpConnectionManager>,
 }
 
@@ -259,6 +261,18 @@ impl Supervisor {
             crate::preview_tool::PreviewTool::new(workspace_root.clone(), event_tx.clone());
         let preview_handle = preview_tool.handle();
         tools.register(Box::new(preview_tool));
+        // Background shells report start/end on the event channel so the UI
+        // can show them and the agent is notified when one finishes.
+        let background_tool =
+            dcode_ai_core::tools::background_exec::BackgroundExecTool::with_events(
+                workspace_root.clone(),
+                event_tx.clone(),
+            );
+        let background_jobs = background_tool.handle();
+        if !cfg.safe_mode {
+            tools.retain_by_name(|n| n != "run_background");
+            tools.register(Box::new(background_tool));
+        }
         let question_pending = Arc::new(Mutex::new(HashMap::new()));
         tools.register(Box::new(AskQuestionTool::new(
             event_tx.clone(),
@@ -369,6 +383,7 @@ impl Supervisor {
             last_summary_at_tokens: 0,
             interactive_handle,
             preview_handle,
+            background_jobs,
             mcp_manager,
         };
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
@@ -989,6 +1004,11 @@ impl Supervisor {
         Ok(summary)
     }
 
+    /// The agent's background shell jobs.
+    pub fn background_jobs(&self) -> dcode_ai_core::tools::background_exec::BackgroundJobs {
+        self.background_jobs.clone()
+    }
+
     pub async fn finish(&mut self, reason: EndReason) {
         self.status = match reason {
             EndReason::Completed | EndReason::UserExit => SessionStatus::Completed,
@@ -1019,6 +1039,7 @@ impl Supervisor {
 
         // Stop any dev-server preview job so it doesn't linger past the session.
         self.preview_handle.stop();
+        self.background_jobs.stop_all();
 
         // Shutdown MCP servers
         self.mcp_manager.shutdown_all().await;

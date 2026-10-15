@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+### Background shells (Claude Code style)
+- `run_background` jobs show in the footer (`· 1 shell`), turns end with
+  `✻ Crunched for 1m 9s · 1 shell still running`, and a finished job prints
+  `● Background command "…" completed (exit code 0)` and wakes the agent with
+  its exit code and last output.
+- `/bashes` lists background jobs; `/bashes kill <id>` stops one.
+
+### Changes
+- `bypass-permissions` runs shell commands without asking (destructive
+  commands are still refused).
+
 ## 1.0.2 — 2026-10-15
 
 ### Fixes

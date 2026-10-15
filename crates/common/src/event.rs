@@ -74,6 +74,22 @@ fn default_event_envelope_schema_version() -> u32 {
     EVENT_ENVELOPE_SCHEMA_VERSION
 }
 
+/// Lifecycle of a background shell job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BackgroundJobStatus {
+    Running,
+    Completed,
+    Failed,
+    Stopped,
+}
+
+impl BackgroundJobStatus {
+    pub fn is_running(self) -> bool {
+        self == Self::Running
+    }
+}
+
 /// Events emitted by the agent runtime, broadcast over IPC to the CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -107,6 +123,17 @@ pub enum AgentEvent {
     ToolOutputDelta {
         call_id: String,
         delta: String,
+    },
+    /// A `run_background` job started or ended. On end, `output_tail` holds
+    /// the last lines of its output.
+    BackgroundJob {
+        job_id: u32,
+        command: String,
+        status: BackgroundJobStatus,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code: Option<i32>,
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        output_tail: String,
     },
     ApprovalRequested {
         call_id: String,

@@ -47,6 +47,17 @@ impl ToolCallSummary {
             "Bash" => ToolCallKind::Bash {
                 command: first_string(args, &["command", "cmd"]).unwrap_or_default(),
             },
+            // `start` shows its command; `output` / `stop` show the job.
+            "run_background" => match first_string(args, &["command"]) {
+                Some(command) => ToolCallKind::Bash { command },
+                None => ToolCallKind::Generic {
+                    value: match (args["action"].as_str(), args["id"].as_u64()) {
+                        (Some(action), Some(id)) => Some(format!("{action} job {id}")),
+                        (Some(action), None) => Some(action.to_string()),
+                        _ => None,
+                    },
+                },
+            },
             "Read" | "Write" | "Edit" | "Delete" => ToolCallKind::Path {
                 path: first_string(args, &["file_path", "path"]).unwrap_or_default(),
             },
@@ -92,6 +103,22 @@ fn first_string_in_object(args: &Value) -> Option<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn background_jobs_show_their_command_or_job() {
+        let start = ToolCallSummary::from_call(
+            "run_background",
+            &json!({"action": "start", "command": "cargo test"}),
+        );
+        assert!(
+            matches!(start.kind, ToolCallKind::Bash { ref command } if command == "cargo test")
+        );
+        let stop =
+            ToolCallSummary::from_call("run_background", &json!({"action": "stop", "id": 3}));
+        assert!(
+            matches!(stop.kind, ToolCallKind::Generic { value: Some(ref v) } if v == "stop job 3")
+        );
+    }
 
     #[test]
     fn bash_reads_command_key() {

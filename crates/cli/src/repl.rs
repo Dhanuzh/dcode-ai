@@ -846,6 +846,66 @@ impl Repl {
                     ));
                 }
             }
+            "/bashes" => {
+                use dcode_ai_common::event::BackgroundJobStatus as S;
+                let jobs = self.runtime.background_jobs();
+                let arg = rest.trim();
+                if let Some(id) = arg
+                    .strip_prefix("kill")
+                    .map(str::trim)
+                    .and_then(|n| n.parse::<u32>().ok())
+                {
+                    if jobs.stop(id) {
+                        if let ReplOutput::Tui(st) = &out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.background_shells.remove(&id);
+                        }
+                        out.println(&format!("[bashes] stopped job {id}"));
+                    } else {
+                        out.eprintln(&format!("[bashes] no background job {id}"));
+                    }
+                    return Ok(true);
+                }
+                let list = jobs.list();
+                if list.is_empty() {
+                    out.println("[bashes] no background shells. The agent starts them with run_background.");
+                    return Ok(true);
+                }
+                let mut lines = Vec::new();
+                for job in &list {
+                    let status = match (job.status, job.exit_code) {
+                        (S::Running, _) => "running".to_string(),
+                        (S::Completed, c) | (S::Failed, c) => match c {
+                            Some(c) => format!("exited {c}"),
+                            None => "failed".to_string(),
+                        },
+                        (S::Stopped, _) => "stopped".to_string(),
+                    };
+                    lines.push(format!("[{}] {status}  $ {}", job.id, job.command));
+                    for l in dcode_ai_core::tools::background_exec::output_tail(&job.output)
+                        .lines()
+                        .rev()
+                        .take(6)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                        .rev()
+                    {
+                        lines.push(format!("    {l}"));
+                    }
+                    lines.push(String::new());
+                }
+                lines.push("/bashes kill <id> stops a job".into());
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("Background shells", lines);
+                    }
+                } else {
+                    for l in lines {
+                        out.println(&l);
+                    }
+                }
+            }
             "/ps" => {
                 // Drop finished+empty handles; report status.
                 if self.background_jobs.is_empty() {
@@ -3986,9 +4046,35 @@ then switch).",
 
         loop {
             if pending_cmds.is_empty() && queued_steering.is_empty() && queued_followup.is_empty() {
-                let cmd = cmd_rx.recv().await;
-                let Some(cmd) = cmd else { break };
-                pending_cmds.push_back(cmd);
+                // Wake up now and then so a background job that finishes
+                // while the agent is idle is reported without user input.
+                match tokio::time::timeout(std::time::Duration::from_millis(500), cmd_rx.recv())
+                    .await
+                {
+                    Ok(Some(cmd)) => pending_cmds.push_back(cmd),
+                    Ok(None) => break,
+                    Err(_) => {}
+                }
+            }
+            // Finished background jobs: tell the agent in an automatic turn
+            // once it is idle (Claude Code's task notifications). Turns run
+            // inside this loop, so nothing is running at this point.
+            if pending_cmds.is_empty() && queued_steering.is_empty() && queued_followup.is_empty() {
+                let notes = match tui_state.lock() {
+                    Ok(mut g) if g.active_approval.is_none() && g.active_question.is_none() => {
+                        let notes = std::mem::take(&mut g.pending_job_notifications);
+                        if !notes.is_empty() {
+                            // The `●` notice line already shows it; do not
+                            // echo the raw notification as a user message.
+                            g.suppress_next_user_block = true;
+                        }
+                        notes
+                    }
+                    _ => Vec::new(),
+                };
+                if !notes.is_empty() {
+                    pending_cmds.push_back(TuiCmd::Submit(notes.join("\n\n")));
+                }
             }
 
             while let Ok(cmd) = cmd_rx.try_recv() {
@@ -4819,6 +4905,7 @@ then switch).",
                         Vec::new()
                     };
                     let before = git_change_snapshot(self.runtime.workspace_root());
+                    let turn_started = std::time::Instant::now();
                     let turn = if attachments.is_empty() {
                         self.runtime.run_turn(&expanded).await
                     } else {
@@ -4844,6 +4931,12 @@ then switch).",
                     }
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_busy(false);
+                        let shells = g.background_shells.len();
+                        if let Some(line) = crate::tui::turn_summary(turn_started.elapsed(), shells)
+                        {
+                            g.push_block(DisplayBlock::TurnSummary(line));
+                            g.touch_transcript();
+                        }
                     }
                 }
             }
