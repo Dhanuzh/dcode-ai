@@ -1,0 +1,76 @@
+name: dcode-ai
+description: Run a dcode-ai coding task in your workflow (GitHub Copilot or Claude)
+branding:
+  icon: terminal
+  color: orange
+inputs:
+  prompt:
+    description: The task for the agent
+    required: true
+  model:
+    description: Model id or alias (e.g. gpt-5-mini, claude-sonnet-5)
+    required: false
+    default: ""
+  provider:
+    description: copilot (uses copilot-token) or anthropic
+    required: false
+    default: copilot
+  copilot-token:
+    description: GitHub token with Copilot access (COPILOT_GITHUB_TOKEN)
+    required: false
+    default: ""
+  allow-writes:
+    description: Let the agent edit files
+    required: false
+    default: "false"
+  allow-shell:
+    description: Let the agent run shell commands (implies allow-writes)
+    required: false
+    default: "false"
+  max-cost:
+    description: Stop at this estimated cost in USD (empty = no limit)
+    required: false
+    default: ""
+  version:
+    description: dcode-ai release to install (empty = latest)
+    required: false
+    default: ""
+outputs:
+  status:
+    description: completed, failed or budget_exceeded
+    value: ${{ steps.run.outputs.status }}
+  result-file:
+    description: Path of the JSON result
+    value: ${{ steps.run.outputs.result-file }}
+runs:
+  using: composite
+  steps:
+    - name: Install dcode-ai
+      shell: bash
+      env:
+        DCODE_AI_VERSION: ${{ inputs.version }}
+        DCODE_AI_INSTALL_DIR: ${{ runner.temp }}/dcode-ai-bin
+      run: |
+        mkdir -p "$DCODE_AI_INSTALL_DIR"
+        curl -fsSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | bash
+        echo "$DCODE_AI_INSTALL_DIR" >> "$GITHUB_PATH"
+    - name: Run task
+      id: run
+      shell: bash
+      env:
+        DCODE_AI_DEFAULT_PROVIDER: ${{ inputs.provider }}
+        COPILOT_GITHUB_TOKEN: ${{ inputs.copilot-token }}
+        DCODE_AI_PROMPT: ${{ inputs.prompt }}
+      run: |
+        args=(ci --prompt "$DCODE_AI_PROMPT" --output "$RUNNER_TEMP/dcode-ai-result.json")
+        [ -n "${{ inputs.model }}" ] && args+=(--model "${{ inputs.model }}")
+        [ "${{ inputs.allow-writes }}" = "true" ] && args+=(--allow-writes)
+        [ "${{ inputs.allow-shell }}" = "true" ] && args+=(--allow-shell)
+        [ -n "${{ inputs.max-cost }}" ] && args+=(--max-cost "${{ inputs.max-cost }}")
+        set +e
+        dcode-ai "${args[@]}"
+        code=$?
+        set -e
+        echo "result-file=$RUNNER_TEMP/dcode-ai-result.json" >> "$GITHUB_OUTPUT"
+        echo "status=$(jq -r .status "$RUNNER_TEMP/dcode-ai-result.json" 2>/dev/null || echo failed)" >> "$GITHUB_OUTPUT"
+        exit $code

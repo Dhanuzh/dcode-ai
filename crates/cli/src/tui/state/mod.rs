@@ -1,0 +1,3006 @@
+use crate::tool_ui;
+use crate::tui::app::TuiCmd;
+use crate::tui::branch_picker::{branch_picker_enter_command, filtered_branch_indices};
+use crate::tui::connect_modal::{
+    ConnectAction, build_connect_rows, clamp_selection, provider_at_selection,
+    selectable_row_indices,
+};
+use crate::tui::palette::{
+    PaletteRow, filter_palette_rows, palette_command_for_label, palette_selectable_indices,
+};
+use dcode_ai_common::config::ProviderKind;
+use dcode_ai_common::event::{AgentEvent, BusyState, QuestionSelection};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::time::Instant;
+
+pub mod types;
+pub use self::types::*;
+impl TuiSessionState {
+    pub fn new(
+        session_id: String,
+        model: String,
+        agent_profile: String,
+        permission_mode: String,
+        workspace_root: PathBuf,
+        code_line_numbers: bool,
+    ) -> Self {
+        Self {
+            blocks: Vec::new(),
+            streaming_assistant: None,
+            streaming_thinking: None,
+            composer: crate::tui::composer::TextArea::default(),
+            input_buffer: String::new(),
+            cursor_char_idx: 0,
+            scroll_lines: 0,
+            transcript_follow_tail: true,
+            session_id,
+            workspace_root,
+            workspace_display: String::new(),
+            staged_image_attachments: Vec::new(),
+            pending_context: Vec::new(),
+            subagents: Vec::new(),
+            model,
+            agent_profile,
+            permission_mode,
+            process_title: "idle".to_string(),
+            process_detail: String::new(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cost_usd: 0.0,
+            context_tokens: 0,
+            turn_output_tokens: 0,
+            started: Instant::now(),
+            tool_started: HashMap::new(),
+            busy: false,
+            current_busy_state: BusyState::Idle,
+            busy_state_since: Instant::now(),
+            should_exit: false,
+            slash_menu_index: 0,
+            command_palette_open: false,
+            command_palette_query: String::new(),
+            active_approval: None,
+            last_approval_pattern: None,
+            approval_option_index: 0,
+            approval_hunk_selection: Vec::new(),
+            approval_hunk_cursor: 0,
+            approval_hunk_mode: false,
+            active_question: None,
+            answered_questions: HashMap::new(),
+            thinking_expanded: false,
+            current_branch: String::new(),
+            branch_picker_open: false,
+            branch_picker_query: String::new(),
+            branch_picker_index: 0,
+            branch_picker_branches: Vec::new(),
+            branch_chip_bounds: None,
+            sidebar_open: true,
+            sidebar_toggle_bounds: None,
+            provider_picker_open: false,
+            provider_picker_index: 0,
+            at_menu_index: 0,
+            connect_modal_open: false,
+            connect_search: String::new(),
+            connect_menu_index: 0,
+            connect_modal_scroll: 0,
+            connect_modal_ignore_enter_once: false,
+            anthropic_oauth_modal_open: false,
+            anthropic_oauth_url: String::new(),
+            anthropic_oauth_code_verifier: String::new(),
+            anthropic_oauth_code_input: String::new(),
+            info_modal_open: false,
+            info_modal_title: String::new(),
+            info_modal_lines: Vec::new(),
+            info_modal_scroll: 0,
+            info_modal_hscroll: 0,
+            info_modal_view_rows: 16,
+            info_modal_view_cols: 80,
+            model_picker_open: false,
+            model_picker_search: String::new(),
+            model_picker_index: 0,
+            model_picker_entries: Vec::new(),
+            model_picker_scroll: 0,
+            leader_pending: false,
+            permission_picker_open: false,
+            permission_picker_index: 0,
+            agent_picker_open: false,
+            agent_picker_index: 0,
+            question_modal_open: false,
+            question_modal_index: 0,
+            question_modal_scroll: 0,
+            palette_index: 0,
+            session_picker_open: false,
+            session_picker_search: String::new(),
+            session_picker_index: 0,
+            session_picker_entries: Vec::new(),
+            session_picker_scroll: 0,
+            onboarding_mode: false,
+            queued_steering: 0,
+            queued_followup: 0,
+            queue_preview_items: Vec::new(),
+            mcp_server_count: 0,
+            code_line_numbers,
+            quiet_startup: false,
+            transcript_rev: 0,
+            paste_store: HashMap::new(),
+            paste_counter: 0,
+            mouse_capture_on: true,
+            notifications_enabled: true,
+            backtrack_open: false,
+            backtrack_index: 0,
+            theme_picker_open: false,
+            theme_picker_index: 0,
+            theme_picker_entries: Vec::new(),
+            pinned_notes: Vec::new(),
+            pins_modal_open: false,
+            pins_modal_index: 0,
+            subagent_modal_open: false,
+            subagent_modal_index: 0,
+            transcript_search_open: false,
+            transcript_search_query: String::new(),
+            transcript_search_index: 0,
+            composer_history_search_open: false,
+            composer_history_search_query: String::new(),
+            composer_history_search_index: 0,
+            menu_content: crate::tui::tui_types::MenuContent::None,
+            tool_block_collapsed: HashMap::new(),
+            all_tools_collapsed: false,
+            statusline_hidden: Vec::new(),
+            current_plan: None,
+            key_bindings: Vec::new(),
+            mouse_selection: None,
+            history_rect: None,
+            block_timestamps: Vec::new(),
+            last_turn_latency_ms: None,
+            turn_started_at: None,
+            transcript_zoom_offset: 0,
+            context_compacted: false,
+            compaction_in_progress: false,
+            notification_count: 0,
+            suppress_next_user_block: false,
+            toast: None,
+            collapsed_assistant_blocks: std::collections::HashSet::new(),
+            thinking_enabled: false,
+            thinking_budget: 0,
+            connected_projects: Vec::new(),
+            project_picker_open: false,
+            project_picker_index: 0,
+            flushed_block_count: 0,
+            request_clear: false,
+            transcript_overlay_open: false,
+            view_mode: ViewMode::Inline,
+            rail_tab: RailTab::Context,
+            rail_focus: false,
+            diff_review: Default::default(),
+            dash_hits: Default::default(),
+            rewind_pending: None,
+            plan_exit_index: None,
+            last_esc_at: None,
+            replaying: false,
+            statusline_command: None,
+            plugin_browser: None,
+            reload_slash_entries: false,
+            theme_picker_original: None,
+            statusline_text: None,
+            transcript_overlay_scroll: 0,
+            transcript_overlay_raw: false,
+            mcp_server_statuses: HashMap::new(),
+        }
+    }
+
+    /// Push a `DisplayBlock`, recording the current wall-clock time in
+    /// `block_timestamps` so transcript headers can show `HH:MM` labels.
+    pub fn push_block(&mut self, block: DisplayBlock) {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        self.block_timestamps.push(secs);
+        self.blocks.push(block);
+    }
+
+    /// Remove blocks matching `predicate`, keeping `block_timestamps` in sync.
+    pub fn retain_blocks<F>(&mut self, mut predicate: F)
+    where
+        F: FnMut(&DisplayBlock) -> bool,
+    {
+        let mut idx = 0;
+        while idx < self.blocks.len() {
+            if predicate(&self.blocks[idx]) {
+                idx += 1;
+            } else {
+                self.blocks.remove(idx);
+                if idx < self.block_timestamps.len() {
+                    self.block_timestamps.remove(idx);
+                }
+            }
+        }
+    }
+
+    /// Returns true if the tool block should render header-only. Bulky reading
+    /// tools (file reads, grep, listings) collapse by default so their output
+    /// doesn't clutter the transcript, while edits/writes stay expanded so the
+    /// diff is visible. An explicit per-block toggle (ctrl+o) or the global
+    /// collapse always wins over the type default.
+    pub fn is_tool_block_collapsed_for(&self, call_id: &str, name: &str) -> bool {
+        if let Some(v) = self.tool_block_collapsed.get(call_id) {
+            return *v;
+        }
+        if self.all_tools_collapsed {
+            return true;
+        }
+        // Collapse only the *bulky reading* tools (file contents, matches,
+        // listings). Edits/diffs, the plan, git status/diff, and command output
+        // stay expanded so the useful content is visible.
+        matches!(
+            name,
+            "Read"
+                | "read_file"
+                | "Grep"
+                | "search"
+                | "search_code"
+                | "Glob"
+                | "List"
+                | "list_directory"
+                | "code_intel"
+                | "code_intel_tool"
+                | "MemoryRead"
+        )
+    }
+
+    pub fn sync_legacy_from_composer(&mut self) {
+        self.input_buffer = self.composer.text().to_string();
+        self.cursor_char_idx = self.composer.cursor_char_idx();
+    }
+
+    pub fn set_input_text(&mut self, text: impl Into<String>) {
+        self.composer.set_text(text.into());
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn set_input_text_with_cursor(&mut self, text: impl Into<String>, cursor_char_idx: usize) {
+        self.composer
+            .set_text_with_cursor(text.into(), cursor_char_idx);
+        self.sync_legacy_from_composer();
+    }
+
+    /// Filtered history matches for the open reverse-search overlay:
+    /// most-recent-first, substring of the current query, capped at 64.
+    pub fn history_search_matches(&self, history: &[String]) -> Vec<String> {
+        let needle = self.composer_history_search_query.to_ascii_lowercase();
+        history
+            .iter()
+            .rev()
+            .filter(|entry| needle.is_empty() || entry.to_ascii_lowercase().contains(&needle))
+            .take(64)
+            .cloned()
+            .collect()
+    }
+
+    fn close_history_search(&mut self) {
+        self.composer_history_search_open = false;
+        self.composer_history_search_query.clear();
+        self.composer_history_search_index = 0;
+    }
+
+    /// Apply one key to the open history-search overlay, returning `true` (the
+    /// key is always consumed while the overlay is open). The crossterm→key
+    /// mapping stays in the event loop; the state machine lives here so it can
+    /// be unit-tested without a terminal.
+    pub fn apply_history_search_key(&mut self, key: HistorySearchKey, history: &[String]) -> bool {
+        let matches = self.history_search_matches(history);
+        match key {
+            HistorySearchKey::Cancel => self.close_history_search(),
+            HistorySearchKey::Backspace => {
+                self.composer_history_search_query.pop();
+                self.composer_history_search_index = 0;
+            }
+            HistorySearchKey::Up => {
+                if !matches.is_empty() {
+                    self.composer_history_search_index =
+                        self.composer_history_search_index.saturating_sub(1);
+                }
+            }
+            HistorySearchKey::Down => {
+                if !matches.is_empty() {
+                    self.composer_history_search_index = (self.composer_history_search_index + 1)
+                        .min(matches.len().saturating_sub(1));
+                }
+            }
+            HistorySearchKey::Accept => {
+                if !matches.is_empty() {
+                    let pick = self
+                        .composer_history_search_index
+                        .min(matches.len().saturating_sub(1));
+                    if let Some(entry) = matches.get(pick) {
+                        self.set_input_text(entry.clone());
+                    }
+                }
+                self.close_history_search();
+            }
+            HistorySearchKey::Char(c) => {
+                self.composer_history_search_query.push(c);
+                self.composer_history_search_index = 0;
+            }
+        }
+        true
+    }
+
+    /// Apply one key to the open branch-picker overlay. Returns a [`TuiCmd`] to
+    /// dispatch (switch/create) when the selection is accepted, else `None`.
+    /// As with history search, the crossterm mapping stays in the event loop so
+    /// these transitions are unit-testable without a terminal.
+    pub fn apply_branch_picker_key(&mut self, key: BranchPickerKey) -> Option<TuiCmd> {
+        match key {
+            BranchPickerKey::Cancel => self.close_branch_picker(),
+            BranchPickerKey::Up => {
+                if !filtered_branch_indices(&self.branch_picker_branches, &self.branch_picker_query)
+                    .is_empty()
+                {
+                    self.branch_picker_index = self.branch_picker_index.saturating_sub(1);
+                }
+            }
+            BranchPickerKey::Down => {
+                let n = filtered_branch_indices(
+                    &self.branch_picker_branches,
+                    &self.branch_picker_query,
+                )
+                .len();
+                if n > 0 {
+                    self.branch_picker_index = (self.branch_picker_index + 1).min(n - 1);
+                }
+            }
+            BranchPickerKey::Accept => {
+                let cmd = branch_picker_enter_command(
+                    &self.branch_picker_branches,
+                    &self.branch_picker_query,
+                    self.branch_picker_index,
+                );
+                self.close_branch_picker();
+                return cmd;
+            }
+            BranchPickerKey::Backspace => {
+                self.branch_picker_query.pop();
+                let filtered = filtered_branch_indices(
+                    &self.branch_picker_branches,
+                    &self.branch_picker_query,
+                );
+                self.branch_picker_index = self
+                    .branch_picker_index
+                    .min(filtered.len().saturating_sub(1));
+            }
+            BranchPickerKey::Char(c) => {
+                self.branch_picker_query.push(c);
+                self.branch_picker_index = 0;
+            }
+        }
+        None
+    }
+
+    /// Apply one key to the open interactive-question modal. Navigation/cancel
+    /// mutate state in place; an accepted option is returned for the loop to
+    /// route to the right answer channel.
+    pub fn apply_question_modal_key(&mut self, key: QuestionModalKey) -> QuestionModalOutcome {
+        let Some(q) = self.active_question.clone() else {
+            return QuestionModalOutcome::Stay;
+        };
+        // Items: suggested (1, the "(recommended)" row) + the *other* options
+        // (the suggested one is excluded here so it isn't listed twice) +
+        // optional "chat about this" (allow_custom).
+        let others: Vec<_> = q
+            .options
+            .iter()
+            .filter(|o| o.id != q.suggested_answer)
+            .collect();
+        let total = 1 + others.len() + if q.allow_custom { 1 } else { 0 };
+        match key {
+            QuestionModalKey::Cancel => {
+                if q.allow_custom {
+                    // Fall back to inline text input; keep the question active.
+                    self.close_question_modal();
+                    self.push_block(DisplayBlock::System(
+                        "Question still waiting — type your answer in the composer and press \
+                         Enter (or Esc did not cancel it; the agent is blocked until you reply)."
+                            .into(),
+                    ));
+                    QuestionModalOutcome::CloseKeepActive
+                } else {
+                    QuestionModalOutcome::Stay
+                }
+            }
+            QuestionModalKey::Up => {
+                self.question_modal_index = self.question_modal_index.saturating_sub(1);
+                QuestionModalOutcome::Stay
+            }
+            QuestionModalKey::Down => {
+                self.question_modal_index = (self.question_modal_index + 1).min(total - 1);
+                QuestionModalOutcome::Stay
+            }
+            QuestionModalKey::Accept => {
+                let idx = self.question_modal_index;
+                let selection = if idx == 0 {
+                    Some(QuestionSelection::Suggested)
+                } else if idx <= others.len() {
+                    Some(QuestionSelection::Option {
+                        option_id: others[idx - 1].id.clone(),
+                    })
+                } else {
+                    None // "Chat about this" → inline text input
+                };
+                self.close_question_modal();
+                match selection {
+                    Some(selection) => QuestionModalOutcome::Answer {
+                        question_id: q.question_id.clone(),
+                        selection,
+                    },
+                    None => QuestionModalOutcome::CloseKeepActive,
+                }
+            }
+        }
+    }
+
+    fn close_command_palette(&mut self) {
+        self.command_palette_open = false;
+        self.command_palette_query.clear();
+        self.palette_index = 0;
+    }
+
+    fn clamp_palette_index(&mut self) {
+        let filtered = filter_palette_rows(&self.command_palette_query);
+        let selectable = palette_selectable_indices(&filtered);
+        self.palette_index = self.palette_index.min(selectable.len().saturating_sub(1));
+    }
+
+    /// Apply one key to the open model picker. On Accept, returns the chosen
+    /// [`ModelPickerAction`] for the loop to route; nav/search mutate in place.
+    pub fn apply_model_picker_key(&mut self, key: ModelPickerKey) -> Option<ModelPickerAction> {
+        let filter = self.model_picker_search.to_ascii_lowercase();
+        let is_match = |e: &ModelPickerEntry| {
+            !e.is_header
+                && (filter.is_empty()
+                    || e.label.to_ascii_lowercase().contains(&filter)
+                    || e.detail.to_ascii_lowercase().contains(&filter))
+        };
+        let selectable_count = self
+            .model_picker_entries
+            .iter()
+            .filter(|e| is_match(e))
+            .count();
+        match key {
+            ModelPickerKey::Cancel => self.close_model_picker(),
+            ModelPickerKey::Up => {
+                if selectable_count > 0 {
+                    self.model_picker_index = self
+                        .model_picker_index
+                        .saturating_sub(1)
+                        .min(selectable_count - 1);
+                }
+            }
+            ModelPickerKey::Down => {
+                if selectable_count > 0 {
+                    self.model_picker_index =
+                        (self.model_picker_index + 1).min(selectable_count - 1);
+                }
+            }
+            ModelPickerKey::Accept => {
+                let action = {
+                    let selectable: Vec<&ModelPickerEntry> = self
+                        .model_picker_entries
+                        .iter()
+                        .filter(|e| is_match(e))
+                        .collect();
+                    let pick = self
+                        .model_picker_index
+                        .min(selectable.len().saturating_sub(1));
+                    selectable.get(pick).map(|e| e.action.clone())
+                };
+                if let Some(action) = action {
+                    self.close_model_picker();
+                    return Some(action);
+                }
+            }
+            ModelPickerKey::Backspace => {
+                self.model_picker_search.pop();
+                self.model_picker_index = 0;
+                self.model_picker_scroll = 0;
+            }
+            ModelPickerKey::Char(c) => {
+                self.model_picker_search.push(c);
+                self.model_picker_index = 0;
+                self.model_picker_scroll = 0;
+            }
+        }
+        None
+    }
+
+    /// Apply one key to the open connect-provider modal. On Accept, returns the
+    /// selected [`ConnectAction`] for the loop to route (it needs `AuthStore`
+    /// I/O); nav/search and the "ignore the opening Enter" guard mutate in place.
+    pub fn apply_connect_modal_key(&mut self, key: ConnectModalKey) -> Option<ConnectAction> {
+        let rows = build_connect_rows(&self.connect_search);
+        let n_sel = selectable_row_indices(&rows).len();
+        match key {
+            ConnectModalKey::Cancel => {
+                if !self.onboarding_mode {
+                    self.close_connect_modal();
+                }
+            }
+            ConnectModalKey::Up => {
+                self.connect_modal_ignore_enter_once = false;
+                if n_sel > 0 {
+                    self.connect_menu_index =
+                        self.connect_menu_index.saturating_sub(1).min(n_sel - 1);
+                }
+            }
+            ConnectModalKey::Down => {
+                self.connect_modal_ignore_enter_once = false;
+                if n_sel > 0 {
+                    self.connect_menu_index = (self.connect_menu_index + 1).min(n_sel - 1);
+                }
+            }
+            ConnectModalKey::Accept => {
+                if self.connect_modal_ignore_enter_once {
+                    // Swallow the same Enter that opened the modal.
+                    self.connect_modal_ignore_enter_once = false;
+                    return None;
+                }
+                if let Some((_p, _title, action)) =
+                    provider_at_selection(&rows, self.connect_menu_index)
+                {
+                    self.close_connect_modal();
+                    return Some(action);
+                }
+            }
+            ConnectModalKey::Backspace => {
+                self.connect_modal_ignore_enter_once = false;
+                self.connect_search.pop();
+                self.connect_menu_index = 0;
+                self.connect_modal_scroll = 0;
+                let rows2 = build_connect_rows(&self.connect_search);
+                self.connect_menu_index = clamp_selection(self.connect_menu_index, &rows2);
+            }
+            ConnectModalKey::Char(c) => {
+                self.connect_modal_ignore_enter_once = false;
+                self.connect_search.push(c);
+                self.connect_menu_index = 0;
+                self.connect_modal_scroll = 0;
+                let rows2 = build_connect_rows(&self.connect_search);
+                self.connect_menu_index = clamp_selection(self.connect_menu_index, &rows2);
+            }
+        }
+        None
+    }
+
+    /// Apply one key to the open pinned-notes modal. Returns `true` if the user
+    /// requested a copy of the selected note — the loop performs the clipboard
+    /// write and status message (the only side effect this overlay needs).
+    pub fn apply_pins_modal_key(&mut self, key: PinsModalKey) -> bool {
+        match key {
+            PinsModalKey::Close => self.close_pins_modal(),
+            PinsModalKey::Up => {
+                self.pins_modal_index = self.pins_modal_index.saturating_sub(1);
+            }
+            PinsModalKey::Down => {
+                if !self.pinned_notes.is_empty() {
+                    self.pins_modal_index =
+                        (self.pins_modal_index + 1).min(self.pinned_notes.len().saturating_sub(1));
+                }
+            }
+            PinsModalKey::Delete => {
+                let idx = self.pins_modal_index;
+                if idx < self.pinned_notes.len() {
+                    self.pinned_notes.remove(idx);
+                    self.pins_modal_index = self
+                        .pins_modal_index
+                        .min(self.pinned_notes.len().saturating_sub(1));
+                }
+                if self.pinned_notes.is_empty() {
+                    self.close_pins_modal();
+                }
+            }
+            PinsModalKey::Accept => {
+                self.scroll_lines = 0;
+                self.transcript_follow_tail = false;
+                self.close_pins_modal();
+            }
+            PinsModalKey::Copy => return true,
+        }
+        false
+    }
+
+    /// Apply one key to the open default-provider picker. On Accept, returns the
+    /// chosen provider + intent for the loop to route; nav mutates in place.
+    pub fn apply_provider_picker_key(
+        &mut self,
+        key: ProviderPickerKey,
+    ) -> Option<ProviderPickerOutcome> {
+        let n = ProviderKind::ALL.len();
+        match key {
+            ProviderPickerKey::Cancel => self.close_provider_picker(),
+            ProviderPickerKey::Up => {
+                self.provider_picker_index = self.provider_picker_index.saturating_sub(1);
+            }
+            ProviderPickerKey::Down => {
+                if n > 0 {
+                    self.provider_picker_index = (self.provider_picker_index + 1) % n;
+                }
+            }
+            ProviderPickerKey::Accept => {
+                if n == 0 {
+                    self.close_provider_picker();
+                    return None;
+                }
+                let p = ProviderKind::ALL[self.provider_picker_index.min(n - 1)];
+                self.close_provider_picker();
+                return Some(ProviderPickerOutcome::Apply(p));
+            }
+        }
+        None
+    }
+
+    /// Apply one key to the open session picker. On Accept, returns the session
+    /// id to resume; nav/search mutate in place.
+    pub fn apply_session_picker_key(&mut self, key: SessionPickerKey) -> Option<String> {
+        let filter = self.session_picker_search.to_ascii_lowercase();
+        let is_match = |e: &SessionPickerEntry| {
+            filter.is_empty() || e.search_text.to_ascii_lowercase().contains(&filter)
+        };
+        let count = self
+            .session_picker_entries
+            .iter()
+            .filter(|e| is_match(e))
+            .count();
+        match key {
+            SessionPickerKey::Cancel => self.close_session_picker(),
+            SessionPickerKey::Up => {
+                self.session_picker_index = self.session_picker_index.saturating_sub(1);
+            }
+            SessionPickerKey::Down => {
+                if count > 0 {
+                    self.session_picker_index =
+                        (self.session_picker_index + 1).min(count.saturating_sub(1));
+                }
+            }
+            SessionPickerKey::Accept => {
+                let id = {
+                    let filtered: Vec<&SessionPickerEntry> = self
+                        .session_picker_entries
+                        .iter()
+                        .filter(|e| is_match(e))
+                        .collect();
+                    let pick = self
+                        .session_picker_index
+                        .min(filtered.len().saturating_sub(1));
+                    filtered.get(pick).map(|e| e.id.clone())
+                };
+                if let Some(id) = id {
+                    self.close_session_picker();
+                    return Some(id);
+                }
+            }
+            SessionPickerKey::Backspace => {
+                self.session_picker_search.pop();
+                self.session_picker_index = 0;
+                self.session_picker_scroll = 0;
+            }
+            SessionPickerKey::Char(c) => {
+                self.session_picker_search.push(c);
+                self.session_picker_index = 0;
+                self.session_picker_scroll = 0;
+            }
+        }
+        None
+    }
+
+    /// Block indices of user messages, chronological order.
+    pub fn user_block_positions(&self) -> Vec<usize> {
+        self.blocks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, b)| match b {
+                DisplayBlock::User(_) => Some(i),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Newest-first one-line labels for the backtrack picker.
+    pub fn backtrack_labels(&self) -> Vec<String> {
+        self.user_block_positions()
+            .iter()
+            .rev()
+            .map(|&i| {
+                let text = match &self.blocks[i] {
+                    DisplayBlock::User(t) => t.as_str(),
+                    _ => "",
+                };
+                let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+                let mut label: String = one_line.chars().take(72).collect();
+                if one_line.chars().count() > 72 {
+                    label.push('…');
+                }
+                label
+            })
+            .collect()
+    }
+
+    /// Open the backtrack picker (Esc while idle). No-op when a turn is
+    /// running or there is nothing to rewind to.
+    pub fn open_backtrack(&mut self) -> bool {
+        if self.busy || self.user_block_positions().is_empty() {
+            return false;
+        }
+        self.backtrack_open = true;
+        self.backtrack_index = 0;
+        true
+    }
+
+    pub fn close_backtrack(&mut self) {
+        self.backtrack_open = false;
+        self.backtrack_index = 0;
+    }
+
+    /// Apply one key to the open backtrack picker. `Accept` truncates the
+    /// visible transcript at the chosen user message, prefills the composer
+    /// with its text, and returns the rewind request for the runtime.
+    pub fn apply_backtrack_key(&mut self, key: BacktrackKey) -> Option<BacktrackRewind> {
+        let count = self.user_block_positions().len();
+        match key {
+            BacktrackKey::Cancel => {
+                self.close_backtrack();
+                None
+            }
+            BacktrackKey::Up => {
+                self.backtrack_index = self.backtrack_index.saturating_sub(1);
+                None
+            }
+            BacktrackKey::Down => {
+                if count > 0 {
+                    self.backtrack_index = (self.backtrack_index + 1).min(count - 1);
+                }
+                None
+            }
+            BacktrackKey::Accept => {
+                let positions = self.user_block_positions();
+                if positions.is_empty() {
+                    self.close_backtrack();
+                    return None;
+                }
+                let pick = self.backtrack_index.min(positions.len() - 1);
+                // Picker is newest-first; positions are chronological.
+                let block_idx = positions[positions.len() - 1 - pick];
+                let text = match &self.blocks[block_idx] {
+                    DisplayBlock::User(t) => t.clone(),
+                    _ => return None,
+                };
+                // Second step: what to restore.
+                self.close_backtrack();
+                self.rewind_pending = Some(RewindPending {
+                    user_index_from_end: pick,
+                    block_idx,
+                    text,
+                    index: 0,
+                });
+                None
+            }
+        }
+    }
+
+    /// Apply one key to the rewind scope step. `Accept` returns the request;
+    /// restoring the conversation truncates the transcript at the message
+    /// and puts its text back in the composer.
+    pub fn apply_rewind_scope_key(&mut self, key: BacktrackKey) -> Option<BacktrackRewind> {
+        let pending = self.rewind_pending.as_mut()?;
+        match key {
+            BacktrackKey::Cancel => {
+                self.rewind_pending = None;
+                None
+            }
+            BacktrackKey::Up => {
+                pending.index = pending.index.saturating_sub(1);
+                None
+            }
+            BacktrackKey::Down => {
+                pending.index = (pending.index + 1).min(RewindScope::ALL.len() - 1);
+                None
+            }
+            BacktrackKey::Accept => {
+                let pending = self.rewind_pending.take()?;
+                let scope = RewindScope::ALL[pending.index.min(RewindScope::ALL.len() - 1)];
+                if scope.conversation() {
+                    // Truncate the visible transcript at (and including) the
+                    // chosen message; force a scrollback purge + re-flush since
+                    // flushed lines can't be edited in place.
+                    self.blocks.truncate(pending.block_idx);
+                    self.flushed_block_count = 0;
+                    self.request_clear = true;
+                    self.input_buffer = pending.text.clone();
+                    self.cursor_char_idx = self.input_buffer.chars().count();
+                    self.touch_transcript();
+                }
+                Some(BacktrackRewind {
+                    user_index_from_end: pending.user_index_from_end,
+                    text: pending.text,
+                    scope,
+                })
+            }
+        }
+    }
+
+    /// Apply one key to the open read-only info modal (scroll/close only).
+    pub fn apply_info_modal_key(&mut self, key: InfoModalKey) {
+        match key {
+            InfoModalKey::Close => self.close_info_modal(),
+            InfoModalKey::ScrollUp => {
+                self.info_modal_scroll = self.info_modal_scroll.saturating_sub(1);
+            }
+            InfoModalKey::ScrollDown => {
+                let max_vis = self.info_modal_view_rows.max(1);
+                let max_scroll = self.info_modal_lines.len().saturating_sub(max_vis);
+                self.info_modal_scroll = (self.info_modal_scroll + 1).min(max_scroll);
+            }
+            InfoModalKey::ScrollLeft => {
+                self.info_modal_hscroll = self.info_modal_hscroll.saturating_sub(4);
+            }
+            InfoModalKey::ScrollRight => {
+                self.info_modal_hscroll = self.info_modal_hscroll.saturating_add(4);
+            }
+            InfoModalKey::Home => {
+                self.info_modal_scroll = 0;
+                self.info_modal_hscroll = 0;
+            }
+            InfoModalKey::End => {
+                let max_vis = self.info_modal_view_rows.max(1);
+                self.info_modal_scroll = self.info_modal_lines.len().saturating_sub(max_vis);
+                let max_line_chars = self
+                    .info_modal_lines
+                    .iter()
+                    .map(|line| line.chars().count())
+                    .max()
+                    .unwrap_or(0);
+                self.info_modal_hscroll =
+                    max_line_chars.saturating_sub(self.info_modal_view_cols.max(1));
+            }
+        }
+    }
+
+    /// Apply one key to the open command palette. On Accept, the selected
+    /// command's slash text is loaded into the composer. All effects are on
+    /// state, so this is unit-testable without a terminal.
+    pub fn apply_command_palette_key(&mut self, key: CommandPaletteKey) {
+        match key {
+            CommandPaletteKey::Cancel => self.close_command_palette(),
+            CommandPaletteKey::Up => {
+                if self.palette_index > 0 {
+                    self.palette_index -= 1;
+                }
+            }
+            CommandPaletteKey::Down => {
+                let filtered = filter_palette_rows(&self.command_palette_query);
+                let selectable = palette_selectable_indices(&filtered);
+                if !selectable.is_empty() {
+                    self.palette_index =
+                        (self.palette_index + 1).min(selectable.len().saturating_sub(1));
+                }
+            }
+            CommandPaletteKey::Accept => {
+                let filtered = filter_palette_rows(&self.command_palette_query);
+                let selectable = palette_selectable_indices(&filtered);
+                let pick = self.palette_index.min(selectable.len().saturating_sub(1));
+                if let Some(&abs_idx) = selectable.get(pick)
+                    && let PaletteRow::Entry { label, .. } = filtered[abs_idx]
+                {
+                    let cmd = palette_command_for_label(label);
+                    self.set_input_text(cmd.to_string());
+                }
+                self.close_command_palette();
+            }
+            CommandPaletteKey::Backspace => {
+                self.command_palette_query.pop();
+                self.clamp_palette_index();
+            }
+            CommandPaletteKey::Char(c) => {
+                self.command_palette_query.push(c);
+                self.clamp_palette_index();
+            }
+        }
+    }
+
+    pub fn clear_input(&mut self) {
+        self.composer.clear();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn take_input_text(&mut self) -> String {
+        let out = self.composer.take_text();
+        self.sync_legacy_from_composer();
+        out
+    }
+
+    pub fn insert_input_char(&mut self, ch: char) {
+        self.composer.insert_char(ch);
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn insert_input_str(&mut self, s: &str) {
+        self.composer.insert_str(s);
+        self.sync_legacy_from_composer();
+    }
+
+    /// Stage an image and put its `[Image #N]` placeholder at the cursor,
+    /// like Claude Code. Returns the token.
+    pub fn attach_image_inline(
+        &mut self,
+        attachment: dcode_ai_common::message::ImageAttachment,
+    ) -> String {
+        self.paste_counter += 1;
+        let token = crate::tui::paste::image_token(self.paste_counter);
+        let before = self
+            .input_buffer
+            .chars()
+            .nth(self.cursor_char_idx.wrapping_sub(1));
+        if before.is_some_and(|c| !c.is_whitespace()) {
+            self.insert_input_char(' ');
+        }
+        self.insert_input_str(&format!("{token} "));
+        self.staged_image_attachments.push(StagedImage {
+            token: Some(token.clone()),
+            attachment,
+        });
+        token
+    }
+
+    /// Images for an outgoing message: those whose placeholder is still in
+    /// `text` (or that have none). Clears the staging area.
+    pub fn take_images_for_message(
+        &mut self,
+        text: &str,
+    ) -> Vec<dcode_ai_common::message::ImageAttachment> {
+        std::mem::take(&mut self.staged_image_attachments)
+            .into_iter()
+            .filter(|s| s.token.as_deref().is_none_or(|t| text.contains(t)))
+            .map(|s| s.attachment)
+            .collect()
+    }
+
+    pub fn move_input_left(&mut self) {
+        self.composer.move_left();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_right(&mut self) {
+        self.composer.move_right();
+        self.sync_legacy_from_composer();
+    }
+
+    #[allow(dead_code)]
+    pub fn move_input_home(&mut self) {
+        self.composer.move_home();
+        self.sync_legacy_from_composer();
+    }
+
+    #[allow(dead_code)]
+    pub fn move_input_end(&mut self) {
+        self.composer.move_end();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn backspace_input(&mut self) {
+        self.composer.backspace();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn delete_input(&mut self) {
+        self.composer.delete();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_word_backward(&mut self) {
+        self.composer.move_word_backward();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_word_forward(&mut self) {
+        self.composer.move_word_forward();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn delete_input_word_backward(&mut self) {
+        self.composer.delete_word_backward();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn delete_input_word_forward(&mut self) {
+        self.composer.delete_word_forward();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn kill_input_to_end(&mut self) {
+        self.composer.kill_to_end_of_line();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn kill_input_to_start(&mut self) {
+        self.composer.kill_to_start_of_line();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn yank_input(&mut self) {
+        self.composer.yank();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn show_toast(&mut self, message: impl Into<String>, kind: ToastKind) {
+        self.toast = Some(Toast {
+            message: message.into(),
+            kind,
+            expires_at: Instant::now()
+                + match kind {
+                    ToastKind::Success => std::time::Duration::from_secs(2),
+                    ToastKind::Info => std::time::Duration::from_secs(3),
+                    ToastKind::Error => std::time::Duration::from_secs(5),
+                },
+        });
+    }
+
+    pub fn undo_input(&mut self) -> bool {
+        let ok = self.composer.undo();
+        self.sync_legacy_from_composer();
+        ok
+    }
+
+    pub fn move_input_home_line(&mut self) {
+        self.composer.move_home_line();
+        self.sync_legacy_from_composer();
+    }
+
+    pub fn move_input_end_line(&mut self) {
+        self.composer.move_end_line();
+        self.sync_legacy_from_composer();
+    }
+
+    /// Move cursor up one visual line. Returns false if already on the first line.
+    pub fn move_input_up(&mut self, visual_width: usize) -> bool {
+        let moved = self.composer.move_up_in_multiline(visual_width);
+        if moved {
+            self.sync_legacy_from_composer();
+        }
+        moved
+    }
+
+    /// Move cursor down one visual line. Returns false if already on the last line.
+    pub fn move_input_down(&mut self, visual_width: usize) -> bool {
+        let moved = self.composer.move_down_in_multiline(visual_width);
+        if moved {
+            self.sync_legacy_from_composer();
+        }
+        moved
+    }
+
+    /// Toggle the most recent tool block (ToolRunning or ToolDone) by call_id.
+    /// Returns true if a block was toggled.
+    pub fn toggle_last_tool_block(&mut self) -> bool {
+        let last = self.blocks.iter().rev().find_map(|b| match b {
+            DisplayBlock::ToolRunning { call_id, name, .. } => {
+                Some((call_id.clone(), name.clone()))
+            }
+            DisplayBlock::ToolDone { call_id, name, .. } => Some((call_id.clone(), name.clone())),
+            _ => None,
+        });
+        if let Some((id, name)) = last {
+            // Toggle relative to the *effective* default (which is type-aware),
+            // so the first ctrl+o always flips what's actually on screen.
+            let cur = self.is_tool_block_collapsed_for(&id, &name);
+            self.tool_block_collapsed.insert(id, !cur);
+            self.transcript_rev = self.transcript_rev.wrapping_add(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Toggle the global all-tools-collapsed flag and clear per-block overrides
+    /// so the global state takes effect uniformly.
+    pub fn toggle_all_tool_blocks(&mut self) {
+        self.all_tools_collapsed = !self.all_tools_collapsed;
+        self.tool_block_collapsed.clear();
+        self.transcript_rev = self.transcript_rev.wrapping_add(1);
+    }
+
+    pub fn open_theme_picker(&mut self, entries: Vec<String>, current_index: usize) {
+        self.theme_picker_open = true;
+        self.theme_picker_entries = entries;
+        self.theme_picker_index = current_index;
+        self.theme_picker_original = Some(crate::tui::theme::current().name.to_string());
+    }
+
+    pub fn close_theme_picker(&mut self) {
+        self.theme_picker_open = false;
+        self.theme_picker_index = 0;
+    }
+
+    #[allow(dead_code)]
+    pub fn open_pins_modal(&mut self) {
+        self.pins_modal_open = true;
+        self.pins_modal_index = self
+            .pins_modal_index
+            .min(self.pinned_notes.len().saturating_sub(1));
+    }
+
+    pub fn close_pins_modal(&mut self) {
+        self.pins_modal_open = false;
+        self.pins_modal_index = 0;
+    }
+
+    pub fn open_subagent_modal(&mut self) {
+        self.subagent_modal_open = true;
+        self.subagent_modal_index = self
+            .subagent_modal_index
+            .min(self.subagents.len().saturating_sub(1));
+    }
+
+    pub fn close_subagent_modal(&mut self) {
+        self.subagent_modal_open = false;
+        self.subagent_modal_index = 0;
+    }
+
+    pub fn open_transcript_search(&mut self) {
+        self.transcript_search_open = true;
+        self.transcript_search_index = 0;
+    }
+
+    pub fn close_transcript_search(&mut self) {
+        self.transcript_search_open = false;
+        self.transcript_search_index = 0;
+    }
+
+    pub fn open_connect_modal(&mut self) {
+        self.connect_modal_open = true;
+        self.connect_search.clear();
+        self.connect_menu_index = 0;
+        self.connect_modal_scroll = 0;
+        self.connect_modal_ignore_enter_once = false;
+    }
+
+    pub fn close_connect_modal(&mut self) {
+        self.connect_modal_open = false;
+        self.connect_search.clear();
+        self.connect_menu_index = 0;
+        self.connect_modal_scroll = 0;
+        self.connect_modal_ignore_enter_once = false;
+    }
+
+    pub fn open_anthropic_oauth_modal(&mut self, url: String, code_verifier: String) {
+        self.anthropic_oauth_modal_open = true;
+        self.anthropic_oauth_url = url;
+        self.anthropic_oauth_code_verifier = code_verifier;
+        self.anthropic_oauth_code_input.clear();
+    }
+
+    pub fn close_anthropic_oauth_modal(&mut self) {
+        self.anthropic_oauth_modal_open = false;
+        self.anthropic_oauth_url.clear();
+        self.anthropic_oauth_code_verifier.clear();
+        self.anthropic_oauth_code_input.clear();
+    }
+
+    pub fn open_info_modal(&mut self, title: impl Into<String>, lines: Vec<String>) {
+        self.info_modal_open = true;
+        self.info_modal_title = title.into();
+        self.info_modal_lines = lines;
+        self.info_modal_scroll = 0;
+        self.info_modal_hscroll = 0;
+        self.info_modal_view_rows = 16;
+        self.info_modal_view_cols = 80;
+    }
+
+    pub fn close_info_modal(&mut self) {
+        self.info_modal_open = false;
+        self.info_modal_title.clear();
+        self.info_modal_lines.clear();
+        self.info_modal_scroll = 0;
+        self.info_modal_hscroll = 0;
+        self.info_modal_view_rows = 16;
+        self.info_modal_view_cols = 80;
+    }
+
+    pub fn open_model_picker(&mut self, entries: Vec<ModelPickerEntry>) {
+        self.model_picker_open = true;
+        self.model_picker_search.clear();
+        self.model_picker_index = 0;
+        self.model_picker_scroll = 0;
+        self.model_picker_entries = entries;
+    }
+
+    pub fn close_model_picker(&mut self) {
+        self.model_picker_open = false;
+        self.model_picker_search.clear();
+        self.model_picker_index = 0;
+        self.model_picker_scroll = 0;
+        self.model_picker_entries.clear();
+    }
+
+    pub fn open_permission_picker(&mut self, current_index: usize) {
+        self.permission_picker_open = true;
+        self.permission_picker_index = current_index;
+    }
+
+    pub fn close_permission_picker(&mut self) {
+        self.permission_picker_open = false;
+        self.permission_picker_index = 0;
+    }
+
+    pub fn open_agent_picker(&mut self, current_index: usize) {
+        self.agent_picker_open = true;
+        self.agent_picker_index = current_index;
+    }
+
+    pub fn close_agent_picker(&mut self) {
+        self.agent_picker_open = false;
+        self.agent_picker_index = 0;
+    }
+
+    pub fn open_question_modal(&mut self) {
+        self.question_modal_open = true;
+        self.question_modal_index = 0;
+        self.question_modal_scroll = 0;
+        self.touch_transcript();
+    }
+
+    pub fn close_question_modal(&mut self) {
+        self.question_modal_open = false;
+        self.question_modal_index = 0;
+        self.question_modal_scroll = 0;
+        self.touch_transcript();
+    }
+
+    pub fn open_session_picker(&mut self, entries: Vec<SessionPickerEntry>, current: &str) {
+        self.session_picker_open = true;
+        self.session_picker_search.clear();
+        self.session_picker_index = entries.iter().position(|e| e.id == current).unwrap_or(0);
+        self.session_picker_entries = entries;
+        self.session_picker_scroll = 0;
+    }
+
+    pub fn close_session_picker(&mut self) {
+        self.session_picker_open = false;
+        self.session_picker_search.clear();
+        self.session_picker_index = 0;
+        self.session_picker_entries.clear();
+        self.session_picker_scroll = 0;
+    }
+
+    /// Switch between the inline view and the full-screen dashboard.
+    pub fn toggle_view_mode(&mut self) {
+        self.view_mode = match self.view_mode {
+            ViewMode::Inline => ViewMode::Dashboard,
+            ViewMode::Dashboard => ViewMode::Inline,
+        };
+        if self.view_mode == ViewMode::Inline {
+            self.rail_focus = false;
+        }
+        // Dashboard renders every block; inline only the unflushed tail.
+        self.touch_transcript();
+    }
+
+    /// `Ctrl+D` in the dashboard: show the changes tab and focus it, or hand
+    /// focus back to the composer when it already has it.
+    pub fn toggle_changes_focus(&mut self) {
+        if self.rail_focus {
+            self.rail_focus = false;
+        } else {
+            self.rail_tab = RailTab::Changes;
+            self.rail_focus = true;
+            self.diff_review.refresh(&self.workspace_root);
+        }
+    }
+
+    /// Next/previous right-rail tab, keeping keyboard focus on the rail.
+    pub fn cycle_rail_tab(&mut self, step: i32) {
+        const TABS: [RailTab; 3] = [RailTab::Context, RailTab::Changes, RailTab::Agents];
+        let i = TABS.iter().position(|t| *t == self.rail_tab).unwrap_or(0) as i32;
+        self.rail_tab = TABS[(i + step).rem_euclid(3) as usize];
+        if self.rail_tab == RailTab::Changes {
+            self.diff_review.refresh(&self.workspace_root);
+        }
+        self.rail_focus = true;
+    }
+
+    pub fn select_rail_tab(&mut self, tab: RailTab) {
+        self.rail_tab = tab;
+        if tab == RailTab::Changes {
+            self.diff_review.refresh(&self.workspace_root);
+        } else {
+            self.rail_focus = false;
+        }
+    }
+
+    pub fn close_provider_picker(&mut self) {
+        self.provider_picker_open = false;
+    }
+
+    pub fn open_project_picker(&mut self) {
+        self.project_picker_open = true;
+        self.project_picker_index = self
+            .connected_projects
+            .iter()
+            .position(|p| p.active)
+            .unwrap_or(0);
+    }
+
+    pub fn close_project_picker(&mut self) {
+        self.project_picker_open = false;
+        self.project_picker_index = 0;
+    }
+
+    pub fn add_project(&mut self, name: String, path: std::path::PathBuf) {
+        if !self.connected_projects.iter().any(|p| p.path == path) {
+            self.connected_projects.push(ConnectedProject {
+                name,
+                path,
+                active: false,
+            });
+        }
+    }
+
+    pub fn remove_project(&mut self, index: usize) {
+        if index < self.connected_projects.len() {
+            let is_active = self.connected_projects[index].active;
+            self.connected_projects.remove(index);
+            if is_active && !self.connected_projects.is_empty() {
+                self.connected_projects[0].active = true;
+            }
+        }
+    }
+
+    pub fn switch_project(&mut self, index: usize) {
+        for p in &mut self.connected_projects {
+            p.active = false;
+        }
+        if let Some(p) = self.connected_projects.get_mut(index) {
+            p.active = true;
+            self.workspace_root = p.path.clone();
+            self.workspace_display = p.path.display().to_string();
+        }
+    }
+
+    pub fn apply_project_picker_key(&mut self, key: ProjectPickerKey) -> Option<usize> {
+        let n = self.connected_projects.len();
+        match key {
+            ProjectPickerKey::Cancel => {
+                self.close_project_picker();
+            }
+            ProjectPickerKey::Up => {
+                if n > 0 {
+                    self.project_picker_index = self.project_picker_index.saturating_sub(1);
+                }
+            }
+            ProjectPickerKey::Down => {
+                if n > 0 {
+                    self.project_picker_index = (self.project_picker_index + 1).min(n - 1);
+                }
+            }
+            ProjectPickerKey::Accept => {
+                if n > 0 {
+                    let idx = self.project_picker_index.min(n - 1);
+                    self.close_project_picker();
+                    return Some(idx);
+                }
+            }
+            ProjectPickerKey::Add => {}
+            ProjectPickerKey::Remove => {
+                if n > 0 {
+                    let idx = self.project_picker_index.min(n - 1);
+                    self.remove_project(idx);
+                    self.project_picker_index = self
+                        .project_picker_index
+                        .min(self.connected_projects.len().saturating_sub(1));
+                }
+            }
+        }
+        None
+    }
+
+    pub fn set_busy(&mut self, busy: bool) {
+        self.busy = busy;
+    }
+
+    pub fn set_busy_state(&mut self, new_state: BusyState) {
+        self.busy = new_state != BusyState::Idle;
+        if self.current_busy_state != new_state {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            let now_ms = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64;
+            // Record when a busy turn begins (first non-idle state after idle).
+            if self.current_busy_state == BusyState::Idle {
+                self.turn_started_at = Some(now_ms);
+                // Reset the per-turn streaming counter for the new turn.
+                self.turn_output_tokens = 0;
+            }
+            // When returning to idle, compute elapsed latency and fire OS notification.
+            if new_state == BusyState::Idle {
+                self.last_turn_latency_ms = self
+                    .turn_started_at
+                    .take()
+                    .map(|started| now_ms.saturating_sub(started));
+                // Fire a desktop notification if the turn took more than 5 seconds.
+                if self.last_turn_latency_ms.unwrap_or(0) >= 5_000 {
+                    fire_desktop_notification("dcode-ai", "Task complete ✓");
+                }
+            }
+            self.current_busy_state = new_state;
+            self.busy_state_since = Instant::now();
+        }
+    }
+
+    pub fn push_error(&mut self, msg: String) {
+        self.push_block(DisplayBlock::ErrorLine(msg));
+        self.touch_transcript();
+    }
+
+    pub fn touch_transcript(&mut self) {
+        self.transcript_rev = self.transcript_rev.wrapping_add(1);
+    }
+
+    /// Approval/question prompts from replayed history are transcript only.
+    /// The live pending channels are not restored on resume, so these must not
+    /// keep the input box in approval/answer mode.
+    pub fn clear_replayed_interaction_state(&mut self) {
+        self.active_approval = None;
+        self.approval_option_index = 0;
+        self.active_question = None;
+        self.close_question_modal();
+    }
+
+    pub fn clear_active_approval_if_matches(&mut self, call_id: &str) {
+        let mut cleared = false;
+        if self
+            .active_approval
+            .as_ref()
+            .is_some_and(|req| req.call_id == call_id)
+        {
+            self.active_approval = None;
+            self.approval_option_index = 0;
+            cleared = true;
+        }
+        let before = self.blocks.len();
+        self.blocks
+            .retain(|b| !matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == call_id));
+        if cleared || self.blocks.len() != before {
+            self.touch_transcript();
+        }
+    }
+
+    pub fn set_agent_profile(&mut self, label: &str) {
+        self.agent_profile = label.to_string();
+    }
+
+    pub fn set_current_branch(&mut self, branch: &str) {
+        self.current_branch = branch.to_string();
+    }
+
+    pub fn open_branch_picker(&mut self, branches: Vec<String>, current: &str) {
+        self.branch_picker_branches = branches;
+        self.branch_picker_query.clear();
+        self.branch_picker_index = self
+            .branch_picker_branches
+            .iter()
+            .position(|b| b == current)
+            .unwrap_or(0);
+        self.branch_picker_open = true;
+    }
+
+    pub fn close_branch_picker(&mut self) {
+        self.branch_picker_open = false;
+        self.branch_picker_query.clear();
+        self.branch_picker_branches.clear();
+        self.branch_picker_index = 0;
+    }
+
+    pub fn set_permission_mode(&mut self, mode: &str) {
+        self.permission_mode = mode.to_string();
+    }
+
+    fn set_process(&mut self, title: impl Into<String>, detail: impl Into<String>) {
+        self.process_title = title.into();
+        self.process_detail = detail.into();
+    }
+
+    fn flush_stream_before_tool(&mut self) {
+        if let Some(t) = self.streaming_thinking.take()
+            && !t.trim().is_empty()
+        {
+            self.push_block(DisplayBlock::Thinking(t));
+        }
+        if let Some(s) = self.streaming_assistant.take()
+            && !s.trim().is_empty()
+        {
+            self.push_block(DisplayBlock::Assistant(s));
+        }
+    }
+
+    pub fn apply_event(&mut self, e: &AgentEvent) {
+        let mut transcript_dirty = false;
+        match e {
+            AgentEvent::SessionStarted {
+                session_id,
+                model,
+                workspace,
+            } => {
+                self.session_id = session_id.clone();
+                self.model = model.clone();
+                self.workspace_root = workspace.clone();
+                self.workspace_display = workspace.display().to_string();
+                if self.connected_projects.is_empty() {
+                    let name = workspace
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("workspace")
+                        .to_string();
+                    self.connected_projects.push(ConnectedProject {
+                        name,
+                        path: workspace.clone(),
+                        active: true,
+                    });
+                }
+                self.set_process("session ready", model.clone());
+            }
+            AgentEvent::MessageReceived { role, content } => {
+                if role == "user" {
+                    self.streaming_assistant = None;
+                    self.streaming_thinking = None;
+                    // Skip the user block if this is an auto-generated prompt
+                    // (e.g. from ! shell auto-response).
+                    if self.suppress_next_user_block {
+                        self.suppress_next_user_block = false;
+                    } else {
+                        self.push_block(DisplayBlock::User(content.clone()));
+                    }
+                    self.set_process("queued prompt", truncate(content, 96));
+                    self.set_busy_state(BusyState::Thinking);
+                    transcript_dirty = true;
+                } else if role == "assistant" {
+                    self.streaming_assistant = None;
+                    if let Some(t) = self.streaming_thinking.take()
+                        && !t.trim().is_empty()
+                    {
+                        self.push_block(DisplayBlock::Thinking(t));
+                    }
+                    self.push_block(DisplayBlock::Assistant(content.clone()));
+                    self.set_process("response ready", truncate(content, 96));
+                    self.set_busy_state(BusyState::Idle);
+                    transcript_dirty = true;
+                }
+            }
+            AgentEvent::ThinkingDelta { delta } => {
+                self.streaming_thinking
+                    .get_or_insert_with(String::new)
+                    .push_str(delta);
+                self.set_process("thinking", "analyzing and planning");
+                transcript_dirty = true;
+            }
+            AgentEvent::TokensStreamed { delta } => {
+                self.streaming_assistant
+                    .get_or_insert_with(String::new)
+                    .push_str(delta);
+                // Count output tokens this turn using a rough 4-chars-per-token estimate
+                // (updated precisely when CostUpdated arrives; this is just the live counter).
+                self.turn_output_tokens = self
+                    .turn_output_tokens
+                    .saturating_add((delta.len() as u64).saturating_add(3) / 4);
+                self.set_process("writing response", truncate(delta, 96));
+                self.set_busy_state(BusyState::Streaming);
+                transcript_dirty = true;
+            }
+            AgentEvent::ToolCallStarted {
+                call_id,
+                tool,
+                input,
+            } => {
+                self.flush_stream_before_tool();
+                self.tool_started.insert(call_id.clone(), Instant::now());
+                self.push_block(DisplayBlock::ToolRunning {
+                    name: tool.clone(),
+                    call_id: call_id.clone(),
+                    input: tool_ui::format_input_for_display(tool, input),
+                    output: String::new(),
+                });
+                let ui = tool_ui::metadata(tool);
+                let preview = tool_ui::preview_from_value(tool, input);
+                self.set_process(
+                    format!("running {}", ui.label.to_ascii_lowercase()),
+                    if preview.is_empty() {
+                        ui.family.to_string()
+                    } else {
+                        truncate(&preview, 96)
+                    },
+                );
+                self.set_busy_state(BusyState::ToolRunning);
+                transcript_dirty = true;
+            }
+            AgentEvent::ToolOutputDelta { call_id, delta } => {
+                // Append incremental output to the running tool block.
+                if let Some(DisplayBlock::ToolRunning { output, .. }) =
+                    self.blocks.iter_mut().rev().find(|b| {
+                        matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id)
+                    })
+                {
+                    if !output.ends_with('\n') && !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(delta);
+                    const MAX_PREVIEW: usize = 4_000;
+                    if output.len() > MAX_PREVIEW {
+                        // Find a valid char boundary to avoid panicking on
+                        // multi-byte UTF-8 (e.g. em-dash '—' is 3 bytes).
+                        let mut start = output.len() - MAX_PREVIEW;
+                        while start < output.len() && !output.is_char_boundary(start) {
+                            start += 1;
+                        }
+                        let truncated = output[start..].to_string();
+                        *output = format!("…{truncated}");
+                    }
+                }
+                transcript_dirty = true;
+            }
+            AgentEvent::ToolCallCompleted { call_id, output } => {
+                let ok = output.success;
+                self.tool_started.remove(call_id);
+                self.active_approval = self
+                    .active_approval
+                    .take()
+                    .filter(|req| req.call_id != *call_id);
+                self.set_busy_state(BusyState::Thinking);
+                let detail = if ok {
+                    output.output.clone()
+                } else {
+                    output.error.clone().unwrap_or_else(|| "failed".into())
+                };
+                if let Some(idx) = self.blocks.iter().rposition(
+                    |b| {
+                        matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id)
+                            || matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == *call_id)
+                    },
+                ) {
+                    let (name, input) = match &self.blocks[idx] {
+                        DisplayBlock::ToolRunning { name, input, .. } => {
+                            (name.clone(), input.clone())
+                        }
+                        DisplayBlock::ApprovalPending(req) => (req.tool.clone(), req.input.clone()),
+                        _ => ("?".into(), String::new()),
+                    };
+                    // Goal tracking: remember the latest plan so `/goals` can
+                    // recall it after it scrolls out of the transcript.
+                    if name == "update_plan" && ok {
+                        self.current_plan = Some(detail.clone());
+                    }
+                    self.blocks[idx] = DisplayBlock::ToolDone {
+                        name,
+                        call_id: call_id.clone(),
+                        input,
+                        ok,
+                        detail,
+                    };
+                } else {
+                    self.push_block(DisplayBlock::ToolDone {
+                        name: "?".into(),
+                        call_id: call_id.clone(),
+                        input: String::new(),
+                        ok,
+                        detail,
+                    });
+                }
+                self.set_process(
+                    if ok { "tool completed" } else { "tool failed" },
+                    truncate(
+                        if ok {
+                            &output.output
+                        } else {
+                            output.error.as_deref().unwrap_or("failed")
+                        },
+                        96,
+                    ),
+                );
+                transcript_dirty = true;
+            }
+            AgentEvent::ApprovalRequested {
+                call_id,
+                tool,
+                description,
+            } => {
+                // Idempotency: if we receive duplicate approval events for the same call,
+                // keep only one pending prompt row in transcript state.
+                self.retain_blocks(
+                    |b| !matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == *call_id),
+                );
+                let input = self
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find_map(|block| match block {
+                        DisplayBlock::ToolRunning {
+                            call_id: id, input, ..
+                        } if id == call_id => Some(input.clone()),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| "{}".into());
+                let req = ApprovalRequest {
+                    call_id: call_id.clone(),
+                    tool: tool.clone(),
+                    description: description.clone(),
+                    input,
+                };
+                self.last_approval_pattern = Some(req.allow_pattern());
+                self.active_approval = Some(req.clone());
+                self.approval_option_index = 0;
+                self.set_busy_state(BusyState::ApprovalPending);
+                if let Some(idx) = self.blocks.iter().rposition(
+                    |b| matches!(b, DisplayBlock::ToolRunning { call_id: id, .. } if id == call_id),
+                ) {
+                    self.blocks[idx] = DisplayBlock::ApprovalPending(req);
+                } else {
+                    self.push_block(DisplayBlock::ApprovalPending(req));
+                }
+                self.set_process("waiting approval", truncate(description, 96));
+                transcript_dirty = true;
+            }
+            AgentEvent::ConversationRewound {
+                user_messages_dropped,
+            } => {
+                // The live TUI truncated when the rewind was picked; only a
+                // replayed log needs to apply it.
+                if self.replaying {
+                    let users = self.user_block_positions();
+                    if *user_messages_dropped > 0 && *user_messages_dropped <= users.len() {
+                        self.blocks
+                            .truncate(users[users.len() - user_messages_dropped]);
+                        transcript_dirty = true;
+                    }
+                }
+            }
+            AgentEvent::ApprovalResolved { call_id, approved } => {
+                let tool = self
+                    .active_approval
+                    .as_ref()
+                    .filter(|req| req.call_id == *call_id)
+                    .map(|req| req.tool.clone())
+                    .or_else(|| {
+                        self.blocks.iter().rev().find_map(|block| match block {
+                            DisplayBlock::ApprovalPending(req) if req.call_id == *call_id => {
+                                Some(req.tool.clone())
+                            }
+                            _ => None,
+                        })
+                    })
+                    .unwrap_or_else(|| "tool".into());
+                self.active_approval = self
+                    .active_approval
+                    .take()
+                    .filter(|req| req.call_id != *call_id);
+                self.approval_option_index = 0;
+                // The call keeps its place in the transcript: back to a
+                // running tool, so its result lands on the same block.
+                if let Some(idx) = self.blocks.iter().rposition(
+                    |b| matches!(b, DisplayBlock::ApprovalPending(req) if req.call_id == *call_id),
+                ) && let DisplayBlock::ApprovalPending(req) = &self.blocks[idx]
+                {
+                    self.blocks[idx] = DisplayBlock::ToolRunning {
+                        name: req.tool.clone(),
+                        call_id: req.call_id.clone(),
+                        input: req.input.clone(),
+                        output: String::new(),
+                    };
+                }
+                if !*approved {
+                    self.push_block(DisplayBlock::ApprovalResolved {
+                        tool,
+                        approved: false,
+                    });
+                }
+                self.set_process(
+                    if *approved {
+                        "approval granted"
+                    } else {
+                        "approval denied"
+                    },
+                    "",
+                );
+                transcript_dirty = true;
+            }
+            AgentEvent::QuestionRequested { question } => {
+                self.active_question = Some(question.clone());
+                self.push_block(DisplayBlock::Question(question.clone()));
+                // Bring the prompt into view when follow-tail is on (default).
+                self.transcript_follow_tail = true;
+                self.open_question_modal();
+                self.set_process("waiting input", truncate(&question.prompt, 96));
+                transcript_dirty = true;
+            }
+            AgentEvent::QuestionResolved {
+                question_id,
+                selection,
+            } => {
+                self.answered_questions
+                    .insert(question_id.clone(), selection.clone());
+                self.active_question = None;
+                self.close_question_modal();
+                self.push_block(DisplayBlock::System(format!(
+                    "Answered question {question_id}: {selection:?}"
+                )));
+                self.set_process("input received", format!("{selection:?}"));
+                transcript_dirty = true;
+            }
+            AgentEvent::CostUpdated {
+                input_tokens,
+                output_tokens,
+                estimated_cost_usd,
+                context_tokens,
+            } => {
+                self.input_tokens = *input_tokens;
+                self.output_tokens = *output_tokens;
+                self.cost_usd = *estimated_cost_usd;
+                self.context_tokens = *context_tokens;
+            }
+            AgentEvent::SessionEnded { .. } => {
+                self.set_process("session ended", "");
+            }
+            AgentEvent::ContextWarning { message } => {
+                self.push_block(DisplayBlock::System(format!("⚠ {message}")));
+                transcript_dirty = true;
+            }
+            AgentEvent::ContextCompaction {
+                phase,
+                message,
+                context_tokens,
+            } => {
+                if phase == "completed" {
+                    self.context_compacted = true;
+                    self.compaction_in_progress = false;
+                } else {
+                    self.compaction_in_progress = true;
+                }
+                // Refresh the context gauge immediately so it reflects the
+                // post-compaction size instead of staying pinned at the old
+                // (pre-compaction) value until the next turn's CostUpdated.
+                if *context_tokens > 0 {
+                    self.context_tokens = *context_tokens;
+                }
+                self.push_block(DisplayBlock::System(format!("⟳ {message}")));
+                transcript_dirty = true;
+            }
+            AgentEvent::Error { message } => {
+                let classified = classify_error(message);
+                self.push_block(DisplayBlock::ErrorLine(classified));
+                self.set_process("error", truncate(message, 96));
+                // The turn is over on any error — clear the busy flag so the
+                // status returns to idle instead of staying stuck on "working".
+                self.set_busy(false);
+                if message.to_ascii_lowercase().contains("run cancelled") {
+                    self.set_busy_state(BusyState::Idle);
+                } else {
+                    self.set_busy_state(BusyState::Error);
+                }
+                transcript_dirty = true;
+            }
+            AgentEvent::Checkpoint { .. } => {}
+            AgentEvent::ChildSessionSpawned {
+                child_session_id,
+                task,
+                ..
+            } => {
+                let short = short_session_prefix(child_session_id);
+                let task_s = truncate(task, 200);
+                if let Some(row) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|r| r.id == *child_session_id)
+                {
+                    row.task = task_s.clone();
+                    row.running = true;
+                } else {
+                    self.subagents.push(SubagentRow {
+                        id: child_session_id.clone(),
+                        task: task_s.clone(),
+                        phase: String::new(),
+                        detail: String::new(),
+                        running: true,
+                        skill: None,
+                        log: Vec::new(),
+                    });
+                }
+                self.push_block(DisplayBlock::System(format!(
+                    "Sub-agent {short}… — {}",
+                    truncate(task, 80)
+                )));
+                transcript_dirty = true;
+            }
+            AgentEvent::ChildSessionActivity {
+                child_session_id,
+                phase,
+                detail,
+            } => {
+                let short = short_session_prefix(child_session_id);
+                let d = truncate(detail, 120);
+                if let Some(row) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|r| r.id == *child_session_id)
+                {
+                    row.phase = phase.clone();
+                    row.detail = d.clone();
+                    row.running = true;
+                    row.log.push(format!("{phase} · {d}"));
+                    let excess = row.log.len().saturating_sub(SUBAGENT_LOG_LINES);
+                    row.log.drain(..excess);
+                    if phase == "skill" || phase == "invoke_skill" {
+                        row.skill = Some(detail.clone());
+                    }
+                } else {
+                    self.subagents.push(SubagentRow {
+                        id: child_session_id.clone(),
+                        task: "(sub-agent)".into(),
+                        phase: phase.clone(),
+                        detail: d.clone(),
+                        running: true,
+                        skill: if phase == "skill" || phase == "invoke_skill" {
+                            Some(detail.clone())
+                        } else {
+                            None
+                        },
+                        log: vec![format!("{phase} · {d}")],
+                    });
+                }
+                // One live line per sub-agent that updates in place (the full
+                // log is in the dashboard's agents tab); model-turn ticks are
+                // not worth a line.
+                if phase != "provider_request" {
+                    let prefix = format!("↳ {short}…");
+                    let line = DisplayBlock::System(format!("{prefix} · {phase} · {d}"));
+                    match self.blocks.last_mut() {
+                        Some(DisplayBlock::System(last)) if last.starts_with(&prefix) => {
+                            *last = format!("{prefix} · {phase} · {d}");
+                        }
+                        _ => self.blocks.push(line),
+                    }
+                    transcript_dirty = true;
+                }
+            }
+            AgentEvent::ChildSessionCompleted {
+                child_session_id,
+                status,
+                ..
+            } => {
+                let short = short_session_prefix(child_session_id);
+                if let Some(row) = self
+                    .subagents
+                    .iter_mut()
+                    .find(|r| r.id == *child_session_id)
+                {
+                    row.running = false;
+                    row.phase = "done".into();
+                    row.detail = status.clone();
+                }
+                self.push_block(DisplayBlock::System(format!(
+                    "Sub-agent {short}… done: {status}"
+                )));
+                transcript_dirty = true;
+            }
+            AgentEvent::BusyStateChanged { state } => {
+                self.set_busy_state(*state);
+                if matches!(state, BusyState::Idle) && self.process_title == "writing response" {
+                    self.set_process("idle", "");
+                }
+            }
+            AgentEvent::McpStartupUpdate { server, status } => {
+                self.mcp_server_statuses
+                    .insert(server.clone(), status.clone());
+                let detail = match status {
+                    dcode_ai_common::event::McpStartupStatus::Starting => "starting...".to_string(),
+                    dcode_ai_common::event::McpStartupStatus::Initializing => {
+                        "initializing...".to_string()
+                    }
+                    dcode_ai_common::event::McpStartupStatus::Ready => "ready".to_string(),
+                    dcode_ai_common::event::McpStartupStatus::Failed { message } => {
+                        format!("failed: {message}")
+                    }
+                };
+                // Quiet mode hides routine startup chatter but always surfaces
+                // failures so a broken server is never silently swallowed.
+                let is_failure = matches!(
+                    status,
+                    dcode_ai_common::event::McpStartupStatus::Failed { .. }
+                );
+                if !self.quiet_startup || is_failure {
+                    self.push_block(DisplayBlock::System(format!(
+                        "MCP server `{server}` {detail}"
+                    )));
+                    transcript_dirty = true;
+                }
+            }
+            _ => {}
+        }
+        if transcript_dirty {
+            self.touch_transcript();
+            if !self.transcript_follow_tail {
+                self.notification_count = self.notification_count.saturating_add(1);
+            }
+        }
+    }
+}
+
+fn short_session_prefix(id: &str) -> &str {
+    if id.len() > 8 { &id[..8] } else { id }
+}
+
+fn truncate(s: &str, max: usize) -> String {
+    let t = s.trim();
+    if t.chars().count() <= max {
+        t.to_string()
+    } else {
+        format!(
+            "{}…",
+            t.chars().take(max.saturating_sub(1)).collect::<String>()
+        )
+    }
+}
+
+/// Fire an OS desktop notification with `title` and `body`.
+/// Only active when the `desktop-notify` Cargo feature is enabled; otherwise a
+/// no-op so the binary works everywhere without native notification libraries.
+fn fire_desktop_notification(title: &str, body: &str) {
+    #[cfg(feature = "desktop-notify")]
+    {
+        let _ = notify_rust::Notification::new()
+            .summary(title)
+            .body(body)
+            .timeout(notify_rust::Timeout::Milliseconds(4000))
+            .show();
+    }
+    // Feature not enabled — silently skip.
+    let _ = (title, body);
+}
+
+fn classify_error(raw: &str) -> String {
+    let lower = raw.to_ascii_lowercase();
+    if lower.contains("401") || lower.contains("unauthorized") || lower.contains("invalid api key")
+    {
+        format!("{raw}\n  → Check your API key with /login or /provider")
+    } else if lower.contains("429") || lower.contains("rate limit") || lower.contains("too many") {
+        format!("{raw}\n  → Rate limited — wait a moment and /retry")
+    } else if lower.contains("timeout") || lower.contains("timed out") {
+        format!("{raw}\n  → Connection timed out — check your network and /retry")
+    } else if lower.contains("dns") || lower.contains("resolve") || lower.contains("connect") {
+        format!("{raw}\n  → Network error — check internet connection")
+    } else if lower.contains("500") || lower.contains("502") || lower.contains("503") {
+        format!("{raw}\n  → Server error — the provider may be down, try again shortly")
+    } else if lower.contains("context") && lower.contains("length") {
+        format!("{raw}\n  → Context too long — use /compact to reduce")
+    } else {
+        raw.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dcode_ai_common::event::{
+        AgentEvent, InteractiveQuestionPayload, QuestionOption, QuestionSelection,
+    };
+
+    fn test_state() -> TuiSessionState {
+        TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        )
+    }
+
+    #[test]
+    fn history_search_matches_filters_recent_first() {
+        let mut st = test_state();
+        st.composer_history_search_open = true;
+        st.composer_history_search_query = "fix".into();
+        let history = vec![
+            "fix the bug".into(),
+            "add feature".into(),
+            "fix tests".into(),
+        ];
+        let matches = st.history_search_matches(&history);
+        // Most-recent (last) first, only entries containing "fix".
+        assert_eq!(matches, vec!["fix tests", "fix the bug"]);
+    }
+
+    #[test]
+    fn history_search_typing_and_backspace_update_query() {
+        let mut st = test_state();
+        st.composer_history_search_open = true;
+        st.composer_history_search_index = 3;
+        st.apply_history_search_key(HistorySearchKey::Char('a'), &[]);
+        st.apply_history_search_key(HistorySearchKey::Char('b'), &[]);
+        assert_eq!(st.composer_history_search_query, "ab");
+        assert_eq!(st.composer_history_search_index, 0); // reset on edit
+        st.apply_history_search_key(HistorySearchKey::Backspace, &[]);
+        assert_eq!(st.composer_history_search_query, "a");
+    }
+
+    #[test]
+    fn history_search_down_clamps_to_matches() {
+        let mut st = test_state();
+        st.composer_history_search_open = true;
+        let history = vec!["one".into(), "two".into()];
+        // Two matches → index clamps at 1.
+        for _ in 0..5 {
+            st.apply_history_search_key(HistorySearchKey::Down, &history);
+        }
+        assert_eq!(st.composer_history_search_index, 1);
+        st.apply_history_search_key(HistorySearchKey::Up, &history);
+        assert_eq!(st.composer_history_search_index, 0);
+    }
+
+    #[test]
+    fn history_search_accept_sets_input_and_closes() {
+        let mut st = test_state();
+        st.composer_history_search_open = true;
+        let history = vec!["cargo build".into(), "cargo test".into()];
+        // index 0 → most recent match ("cargo test").
+        st.apply_history_search_key(HistorySearchKey::Accept, &history);
+        assert_eq!(st.input_buffer, "cargo test");
+        assert!(!st.composer_history_search_open);
+        assert!(st.composer_history_search_query.is_empty());
+    }
+
+    #[test]
+    fn history_search_cancel_closes_without_setting_input() {
+        let mut st = test_state();
+        st.composer_history_search_open = true;
+        st.composer_history_search_query = "x".into();
+        st.apply_history_search_key(HistorySearchKey::Cancel, &["x cmd".into()]);
+        assert!(!st.composer_history_search_open);
+        assert!(st.input_buffer.is_empty());
+    }
+
+    fn branch_picker_state() -> TuiSessionState {
+        let mut st = test_state();
+        st.branch_picker_open = true;
+        st.branch_picker_branches = vec!["main".into(), "feature-login".into(), "release".into()];
+        st
+    }
+
+    #[test]
+    fn branch_picker_typing_filters_and_resets_index() {
+        let mut st = branch_picker_state();
+        st.branch_picker_index = 2;
+        assert!(
+            st.apply_branch_picker_key(BranchPickerKey::Char('f'))
+                .is_none()
+        );
+        assert_eq!(st.branch_picker_query, "f");
+        assert_eq!(st.branch_picker_index, 0);
+        st.apply_branch_picker_key(BranchPickerKey::Backspace);
+        assert_eq!(st.branch_picker_query, "");
+    }
+
+    #[test]
+    fn branch_picker_down_clamps_to_filtered_len() {
+        let mut st = branch_picker_state();
+        for _ in 0..10 {
+            st.apply_branch_picker_key(BranchPickerKey::Down);
+        }
+        assert_eq!(st.branch_picker_index, 2); // 3 branches → max index 2
+        st.apply_branch_picker_key(BranchPickerKey::Up);
+        assert_eq!(st.branch_picker_index, 1);
+    }
+
+    #[test]
+    fn branch_picker_accept_existing_returns_switch_and_closes() {
+        let mut st = branch_picker_state();
+        st.branch_picker_query = "feature-login".into();
+        let cmd = st.apply_branch_picker_key(BranchPickerKey::Accept);
+        assert!(matches!(cmd, Some(TuiCmd::SwitchBranch(b)) if b == "feature-login"));
+        assert!(!st.branch_picker_open);
+    }
+
+    #[test]
+    fn branch_picker_accept_slash_query_returns_create() {
+        let mut st = branch_picker_state();
+        st.branch_picker_query = "/new-branch".into();
+        let cmd = st.apply_branch_picker_key(BranchPickerKey::Accept);
+        assert!(matches!(cmd, Some(TuiCmd::CreateBranch(b)) if b == "new-branch"));
+    }
+
+    #[test]
+    fn branch_picker_cancel_closes_with_no_command() {
+        let mut st = branch_picker_state();
+        let cmd = st.apply_branch_picker_key(BranchPickerKey::Cancel);
+        assert!(cmd.is_none());
+        assert!(!st.branch_picker_open);
+    }
+
+    fn question_state(allow_custom: bool) -> TuiSessionState {
+        let mut st = test_state();
+        st.active_question = Some(InteractiveQuestionPayload {
+            question_id: "q1".into(),
+            call_id: "c1".into(),
+            prompt: "Pick one".into(),
+            options: vec![
+                QuestionOption {
+                    id: "opt-a".into(),
+                    label: "A".into(),
+                },
+                QuestionOption {
+                    id: "opt-b".into(),
+                    label: "B".into(),
+                },
+            ],
+            allow_custom,
+            suggested_answer: String::new(),
+        });
+        st.question_modal_open = true;
+        st.question_modal_index = 0;
+        st
+    }
+
+    #[test]
+    fn question_modal_accept_suggested_and_option() {
+        let mut st = question_state(false);
+        // index 0 → suggested
+        assert_eq!(
+            st.apply_question_modal_key(QuestionModalKey::Accept),
+            QuestionModalOutcome::Answer {
+                question_id: "q1".into(),
+                selection: QuestionSelection::Suggested,
+            }
+        );
+
+        let mut st = question_state(false);
+        st.question_modal_index = 1; // first option
+        assert_eq!(
+            st.apply_question_modal_key(QuestionModalKey::Accept),
+            QuestionModalOutcome::Answer {
+                question_id: "q1".into(),
+                selection: QuestionSelection::Option {
+                    option_id: "opt-a".into()
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn question_modal_down_clamps_to_total() {
+        let mut st = question_state(true); // total = 1 + 2 + 1 = 4 → max idx 3
+        for _ in 0..10 {
+            st.apply_question_modal_key(QuestionModalKey::Down);
+        }
+        assert_eq!(st.question_modal_index, 3);
+    }
+
+    #[test]
+    fn question_modal_chat_about_this_keeps_active() {
+        let mut st = question_state(true);
+        st.question_modal_index = 3; // the "chat about this" row
+        assert_eq!(
+            st.apply_question_modal_key(QuestionModalKey::Accept),
+            QuestionModalOutcome::CloseKeepActive
+        );
+        assert!(!st.question_modal_open);
+        assert!(st.active_question.is_some());
+    }
+
+    #[test]
+    fn connect_modal_ignores_opening_enter_then_accepts() {
+        let mut st = test_state();
+        st.connect_modal_open = true;
+        st.connect_modal_ignore_enter_once = true;
+        // First Enter is swallowed (the one that opened the modal).
+        assert!(
+            st.apply_connect_modal_key(ConnectModalKey::Accept)
+                .is_none()
+        );
+        assert!(!st.connect_modal_ignore_enter_once);
+        assert!(st.connect_modal_open); // still open
+        // A real Enter now selects an action (the catalog always has entries).
+        let action = st.apply_connect_modal_key(ConnectModalKey::Accept);
+        assert!(action.is_some());
+        assert!(!st.connect_modal_open);
+    }
+
+    #[test]
+    fn connect_modal_typing_updates_search() {
+        let mut st = test_state();
+        st.connect_modal_open = true;
+        st.apply_connect_modal_key(ConnectModalKey::Char('o'));
+        st.apply_connect_modal_key(ConnectModalKey::Char('p'));
+        assert_eq!(st.connect_search, "op");
+        st.apply_connect_modal_key(ConnectModalKey::Backspace);
+        assert_eq!(st.connect_search, "o");
+    }
+
+    #[test]
+    fn pins_modal_delete_removes_and_closes_when_empty() {
+        let mut st = test_state();
+        st.pins_modal_open = true;
+        st.pinned_notes = vec![PinnedNote {
+            title: "t".into(),
+            body: "b".into(),
+        }];
+        st.pins_modal_index = 0;
+        assert!(!st.apply_pins_modal_key(PinsModalKey::Delete));
+        assert!(st.pinned_notes.is_empty());
+        assert!(!st.pins_modal_open); // auto-closes when last note removed
+    }
+
+    #[test]
+    fn pins_modal_copy_requests_clipboard() {
+        let mut st = test_state();
+        st.pins_modal_open = true;
+        st.pinned_notes = vec![PinnedNote {
+            title: "t".into(),
+            body: "b".into(),
+        }];
+        assert!(st.apply_pins_modal_key(PinsModalKey::Copy)); // signals copy to the loop
+        assert!(st.pins_modal_open); // copy doesn't close
+    }
+
+    #[test]
+    fn provider_picker_accept_applies_selection() {
+        use dcode_ai_common::config::ProviderKind;
+        let mut st = test_state();
+        st.provider_picker_open = true;
+        st.provider_picker_index = 0;
+        let out = st.apply_provider_picker_key(ProviderPickerKey::Accept);
+        assert_eq!(
+            out,
+            Some(ProviderPickerOutcome::Apply(ProviderKind::ALL[0]))
+        );
+        assert!(!st.provider_picker_open);
+    }
+
+    #[test]
+    fn provider_picker_down_wraps() {
+        let mut st = test_state();
+        st.provider_picker_open = true;
+        let n = dcode_ai_common::config::ProviderKind::ALL.len();
+        st.provider_picker_index = n - 1;
+        st.apply_provider_picker_key(ProviderPickerKey::Down);
+        assert_eq!(st.provider_picker_index, 0); // wraps
+    }
+
+    fn backtrack_test_state() -> TuiSessionState {
+        let mut st = test_state();
+        st.blocks = vec![
+            DisplayBlock::User("first question".into()),
+            DisplayBlock::Assistant("first answer".into()),
+            DisplayBlock::User("second question".into()),
+            DisplayBlock::Assistant("second answer".into()),
+        ];
+        st
+    }
+
+    #[test]
+    fn backtrack_opens_only_when_idle_with_user_messages() {
+        let mut st = test_state();
+        assert!(!st.open_backtrack(), "no user messages -> no backtrack");
+        let mut st = backtrack_test_state();
+        st.busy = true;
+        assert!(!st.open_backtrack(), "busy -> no backtrack");
+        st.busy = false;
+        assert!(st.open_backtrack());
+        assert!(st.backtrack_open);
+        assert_eq!(st.backtrack_index, 0);
+    }
+
+    #[test]
+    fn backtrack_labels_are_newest_first() {
+        let st = backtrack_test_state();
+        let labels = st.backtrack_labels();
+        assert_eq!(labels, vec!["second question", "first question"]);
+    }
+
+    #[test]
+    fn backtrack_accept_truncates_blocks_and_prefills_composer() {
+        let mut st = backtrack_test_state();
+        st.open_backtrack();
+        // Index 0 = newest = "second question".
+        assert!(st.apply_backtrack_key(BacktrackKey::Accept).is_none());
+        let rewind = st.apply_rewind_scope_key(BacktrackKey::Accept).unwrap();
+        assert_eq!(rewind.scope, RewindScope::Both);
+        assert_eq!(rewind.user_index_from_end, 0);
+        assert_eq!(rewind.text, "second question");
+        assert_eq!(st.blocks.len(), 2, "blocks truncated at chosen message");
+        assert_eq!(st.input_buffer, "second question");
+        assert!(st.request_clear, "scrollback purge requested");
+        assert!(!st.backtrack_open);
+    }
+
+    #[test]
+    fn backtrack_selects_older_message_with_down() {
+        let mut st = backtrack_test_state();
+        st.open_backtrack();
+        st.apply_backtrack_key(BacktrackKey::Down);
+        st.apply_backtrack_key(BacktrackKey::Accept);
+        let rewind = st.apply_rewind_scope_key(BacktrackKey::Accept).unwrap();
+        assert_eq!(rewind.user_index_from_end, 1);
+        assert_eq!(rewind.text, "first question");
+        assert_eq!(st.blocks.len(), 0, "everything from first message dropped");
+    }
+
+    #[test]
+    fn backtrack_cancel_leaves_state_untouched() {
+        let mut st = backtrack_test_state();
+        st.open_backtrack();
+        assert!(st.apply_backtrack_key(BacktrackKey::Cancel).is_none());
+        assert!(!st.backtrack_open);
+        assert_eq!(st.blocks.len(), 4);
+        assert!(st.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn rewind_code_only_keeps_the_transcript() {
+        let mut st = backtrack_test_state();
+        st.open_backtrack();
+        st.apply_backtrack_key(BacktrackKey::Accept);
+        assert!(st.rewind_pending.is_some());
+        st.apply_rewind_scope_key(BacktrackKey::Down);
+        st.apply_rewind_scope_key(BacktrackKey::Down);
+        let rewind = st.apply_rewind_scope_key(BacktrackKey::Accept).unwrap();
+        assert_eq!(rewind.scope, RewindScope::Code);
+        assert_eq!(st.blocks.len(), 4, "transcript untouched");
+        assert!(st.input_buffer.is_empty());
+        assert!(st.rewind_pending.is_none());
+    }
+
+    #[test]
+    fn session_picker_accept_returns_filtered_id() {
+        let mut st = test_state();
+        st.session_picker_open = true;
+        st.session_picker_entries = vec![
+            SessionPickerEntry {
+                id: "sess-1".into(),
+                label: "fix auth".into(),
+                search_text: "fix auth".into(),
+                preview: String::new(),
+            },
+            SessionPickerEntry {
+                id: "sess-2".into(),
+                label: "add tests".into(),
+                search_text: "add tests".into(),
+                preview: String::new(),
+            },
+        ];
+        st.session_picker_search = "tests".into();
+        st.session_picker_index = 0; // only one match → sess-2
+        let id = st.apply_session_picker_key(SessionPickerKey::Accept);
+        assert_eq!(id.as_deref(), Some("sess-2"));
+        assert!(!st.session_picker_open);
+    }
+
+    #[test]
+    fn session_picker_cancel_closes_no_id() {
+        let mut st = test_state();
+        st.session_picker_open = true;
+        assert!(
+            st.apply_session_picker_key(SessionPickerKey::Cancel)
+                .is_none()
+        );
+        assert!(!st.session_picker_open);
+    }
+
+    #[test]
+    fn model_picker_accept_returns_action_and_skips_headers() {
+        let mut st = test_state();
+        st.model_picker_open = true;
+        st.model_picker_entries = vec![
+            ModelPickerEntry {
+                label: "Anthropic".into(),
+                detail: "".into(),
+                action: ModelPickerAction::SwitchProvider(
+                    dcode_ai_common::config::ProviderKind::Anthropic,
+                ),
+                is_header: true, // header → not selectable
+            },
+            ModelPickerEntry {
+                label: "claude-sonnet-4-6".into(),
+                detail: "anthropic".into(),
+                action: ModelPickerAction::ApplyModel("claude-sonnet-4-6".into()),
+                is_header: false,
+            },
+        ];
+        st.model_picker_index = 0; // first *selectable* = the non-header entry
+        let action = st.apply_model_picker_key(ModelPickerKey::Accept);
+        assert!(
+            matches!(action, Some(ModelPickerAction::ApplyModel(m)) if m == "claude-sonnet-4-6")
+        );
+        assert!(!st.model_picker_open);
+    }
+
+    #[test]
+    fn model_picker_search_filters_and_resets_index() {
+        let mut st = test_state();
+        st.model_picker_open = true;
+        st.model_picker_index = 5;
+        st.model_picker_entries = vec![ModelPickerEntry {
+            label: "gpt-4o".into(),
+            detail: "openai".into(),
+            action: ModelPickerAction::ApplyModel("gpt-4o".into()),
+            is_header: false,
+        }];
+        assert!(
+            st.apply_model_picker_key(ModelPickerKey::Char('x'))
+                .is_none()
+        );
+        assert_eq!(st.model_picker_search, "x");
+        assert_eq!(st.model_picker_index, 0);
+    }
+
+    #[test]
+    fn info_modal_scroll_clamps_and_home_resets() {
+        let mut st = test_state();
+        st.info_modal_open = true;
+        st.info_modal_lines = (0..10).map(|i| format!("line {i}")).collect();
+        st.info_modal_view_rows = 4; // max_scroll = 10 - 4 = 6
+        for _ in 0..50 {
+            st.apply_info_modal_key(InfoModalKey::ScrollDown);
+        }
+        assert_eq!(st.info_modal_scroll, 6);
+        st.apply_info_modal_key(InfoModalKey::ScrollUp);
+        assert_eq!(st.info_modal_scroll, 5);
+        st.apply_info_modal_key(InfoModalKey::Home);
+        assert_eq!(st.info_modal_scroll, 0);
+        assert_eq!(st.info_modal_hscroll, 0);
+    }
+
+    #[test]
+    fn info_modal_close_dismisses() {
+        let mut st = test_state();
+        st.info_modal_open = true;
+        st.apply_info_modal_key(InfoModalKey::Close);
+        assert!(!st.info_modal_open);
+    }
+
+    #[test]
+    fn command_palette_accept_loads_slash_command() {
+        let mut st = test_state();
+        st.command_palette_open = true;
+        st.command_palette_query = "switch model".into();
+        st.palette_index = 0;
+        st.apply_command_palette_key(CommandPaletteKey::Accept);
+        assert_eq!(st.input_buffer, "/models");
+        assert!(!st.command_palette_open);
+        assert!(st.command_palette_query.is_empty());
+    }
+
+    #[test]
+    fn command_palette_cancel_closes_without_input() {
+        let mut st = test_state();
+        st.command_palette_open = true;
+        st.command_palette_query = "abc".into();
+        st.palette_index = 2;
+        st.apply_command_palette_key(CommandPaletteKey::Cancel);
+        assert!(!st.command_palette_open);
+        assert!(st.command_palette_query.is_empty());
+        assert_eq!(st.palette_index, 0);
+        assert!(st.input_buffer.is_empty());
+    }
+
+    #[test]
+    fn command_palette_typing_appends_and_clamps_index() {
+        let mut st = test_state();
+        st.command_palette_open = true;
+        st.palette_index = 99;
+        st.apply_command_palette_key(CommandPaletteKey::Char('z'));
+        assert_eq!(st.command_palette_query, "z");
+        // index clamped to the (possibly empty) filtered selectable range.
+        assert!(st.palette_index < 50);
+    }
+
+    #[test]
+    fn approval_allow_pattern_falls_back_on_invalid_input() {
+        let req = ApprovalRequest {
+            call_id: "c1".into(),
+            tool: "execute_bash".into(),
+            description: "run".into(),
+            input: "not valid json".into(),
+        };
+        // Invalid JSON → empty input → bare tool wildcard (no panic).
+        assert_eq!(req.allow_pattern(), "execute_bash:*");
+    }
+
+    #[test]
+    fn question_modal_esc_depends_on_allow_custom() {
+        let mut st = question_state(false);
+        assert_eq!(
+            st.apply_question_modal_key(QuestionModalKey::Cancel),
+            QuestionModalOutcome::Stay
+        );
+        assert!(st.question_modal_open); // no-op when custom not allowed
+
+        let mut st = question_state(true);
+        assert_eq!(
+            st.apply_question_modal_key(QuestionModalKey::Cancel),
+            QuestionModalOutcome::CloseKeepActive
+        );
+        assert!(!st.question_modal_open);
+    }
+
+    #[test]
+    fn question_requested_sets_active_question() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        let q = InteractiveQuestionPayload {
+            question_id: "q-1".into(),
+            call_id: "c1".into(),
+            prompt: "Pick".into(),
+            options: vec![QuestionOption {
+                id: "a".into(),
+                label: "A".into(),
+            }],
+            allow_custom: true,
+            suggested_answer: "A".into(),
+        };
+        st.apply_event(&AgentEvent::QuestionRequested {
+            question: q.clone(),
+        });
+        assert_eq!(
+            st.active_question.as_ref().map(|x| x.question_id.as_str()),
+            Some("q-1")
+        );
+        assert!(matches!(st.blocks.last(), Some(DisplayBlock::Question(_))));
+
+        st.apply_event(&AgentEvent::QuestionResolved {
+            question_id: "q-1".into(),
+            selection: QuestionSelection::Suggested,
+        });
+        assert!(st.active_question.is_none());
+    }
+
+    #[test]
+    fn child_session_activity_updates_subagent_row() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        st.apply_event(&AgentEvent::ChildSessionSpawned {
+            parent_session_id: "session-x".into(),
+            child_session_id: "child-abc".into(),
+            task: "do the thing".into(),
+            workspace: std::path::PathBuf::from("/tmp"),
+            branch: None,
+        });
+        assert_eq!(st.subagents.len(), 1);
+        st.apply_event(&AgentEvent::ChildSessionActivity {
+            child_session_id: "child-abc".into(),
+            phase: "read_file".into(),
+            detail: "src/lib.rs".into(),
+        });
+        assert_eq!(st.subagents[0].phase, "read_file");
+        assert_eq!(st.subagents[0].detail, "src/lib.rs");
+        let lines_before = st.blocks.len();
+        st.apply_event(&AgentEvent::ChildSessionActivity {
+            child_session_id: "child-abc".into(),
+            phase: "search_code".into(),
+            detail: "fn main".into(),
+        });
+        st.apply_event(&AgentEvent::ChildSessionActivity {
+            child_session_id: "child-abc".into(),
+            phase: "provider_request".into(),
+            detail: "Starting model turn 2".into(),
+        });
+        assert_eq!(
+            st.blocks.len(),
+            lines_before,
+            "activity updates one line in place"
+        );
+        assert!(
+            matches!(st.blocks.last(), Some(DisplayBlock::System(s)) if s.contains("search_code"))
+        );
+        assert_eq!(st.subagents[0].log.len(), 3);
+    }
+
+    #[test]
+    fn tui_state_defaults_mouse_capture_on() {
+        let st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        assert!(st.mouse_capture_on);
+    }
+
+    #[test]
+    fn approval_requested_promotes_running_tool_with_input() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        st.apply_event(&AgentEvent::ToolCallStarted {
+            call_id: "call-1".into(),
+            tool: "execute_bash".into(),
+            input: serde_json::json!({"command":"ls -la"}),
+        });
+        st.apply_event(&AgentEvent::ApprovalRequested {
+            call_id: "call-1".into(),
+            tool: "execute_bash".into(),
+            description: "Tool `execute_bash` requires approval".into(),
+        });
+
+        assert!(st.active_approval.is_some());
+        let req = st
+            .blocks
+            .iter()
+            .rev()
+            .find_map(|block| match block {
+                DisplayBlock::ApprovalPending(req) if req.call_id == "call-1" => Some(req),
+                _ => None,
+            })
+            .expect("expected approval block for call-1");
+        assert_eq!(req.tool, "execute_bash");
+        assert!(req.input.contains("command"));
+        assert!(req.input.contains("ls -la"));
+    }
+
+    #[test]
+    fn replayed_rewind_drops_rewound_turns_but_live_does_not() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        for (role, text) in [
+            ("user", "one"),
+            ("assistant", "a1"),
+            ("user", "two"),
+            ("assistant", "a2"),
+        ] {
+            st.apply_event(&AgentEvent::MessageReceived {
+                role: role.into(),
+                content: text.into(),
+            });
+        }
+        let rewound = AgentEvent::ConversationRewound {
+            user_messages_dropped: 1,
+        };
+        let before = st.blocks.len();
+        st.apply_event(&rewound);
+        assert_eq!(
+            st.blocks.len(),
+            before,
+            "live view already truncated itself"
+        );
+
+        st.replaying = true;
+        st.apply_event(&rewound);
+        let users = st
+            .blocks
+            .iter()
+            .filter(|b| matches!(b, DisplayBlock::User(_)))
+            .count();
+        assert_eq!(users, 1);
+        assert!(
+            !st.blocks
+                .iter()
+                .any(|b| matches!(b, DisplayBlock::Assistant(t) if t == "a2"))
+        );
+    }
+
+    #[test]
+    fn approved_tool_keeps_its_name_and_input_when_done() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        st.apply_event(&AgentEvent::ToolCallStarted {
+            call_id: "call-1".into(),
+            tool: "edit_file".into(),
+            input: serde_json::json!({"path":"a.txt"}),
+        });
+        st.apply_event(&AgentEvent::ApprovalRequested {
+            call_id: "call-1".into(),
+            tool: "edit_file".into(),
+            description: "edit".into(),
+        });
+        st.apply_event(&AgentEvent::ApprovalResolved {
+            call_id: "call-1".into(),
+            approved: true,
+        });
+        st.apply_event(&AgentEvent::ToolCallCompleted {
+            call_id: "call-1".into(),
+            output: dcode_ai_common::tool::ToolResult {
+                call_id: "call-1".into(),
+                success: true,
+                output: "Edited a.txt".into(),
+                error: None,
+            },
+        });
+        let done: Vec<_> = st
+            .blocks
+            .iter()
+            .filter_map(|b| match b {
+                DisplayBlock::ToolDone { name, input, .. } => Some((name.clone(), input.clone())),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(done.len(), 1);
+        assert_eq!(done[0].0, "edit_file");
+        assert!(done[0].1.contains("a.txt"));
+        assert!(
+            !st.blocks
+                .iter()
+                .any(|b| matches!(b, DisplayBlock::ApprovalResolved { .. })),
+            "an approval is not narrated"
+        );
+    }
+
+    #[test]
+    fn tool_events_render_as_one_block_without_activity_lines() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp/repo"),
+            false,
+        );
+        st.apply_event(&AgentEvent::ToolCallStarted {
+            call_id: "call-1".into(),
+            tool: "web_search".into(),
+            input: serde_json::json!({"query":"tokio tutorial"}),
+        });
+        st.apply_event(&AgentEvent::ToolCallCompleted {
+            call_id: "call-1".into(),
+            output: dcode_ai_common::tool::ToolResult {
+                call_id: "call-1".into(),
+                success: true,
+                output: "- result".into(),
+                error: None,
+            },
+        });
+
+        // Claude-style: the tool block carries everything; no extra
+        // "Using web context…" narration lines.
+        assert!(
+            !st.blocks
+                .iter()
+                .any(|block| matches!(block, DisplayBlock::System(_)))
+        );
+        assert!(st.blocks.iter().any(|block| matches!(
+            block,
+            DisplayBlock::ToolDone { input, ok: true, .. } if input.contains("tokio tutorial")
+        )));
+    }
+
+    #[test]
+    fn clear_replayed_interaction_state_drops_stale_prompts() {
+        let mut st = TuiSessionState::new(
+            "session-x".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        st.active_approval = Some(ApprovalRequest {
+            call_id: "call-1".into(),
+            tool: "execute_bash".into(),
+            description: "approve".into(),
+            input: "{}".into(),
+        });
+        st.active_question = Some(InteractiveQuestionPayload {
+            question_id: "q-1".into(),
+            call_id: "call-2".into(),
+            prompt: "Pick".into(),
+            options: vec![],
+            allow_custom: true,
+            suggested_answer: String::new(),
+        });
+
+        st.clear_replayed_interaction_state();
+
+        assert!(st.active_approval.is_none());
+        assert!(st.active_question.is_none());
+    }
+
+    #[test]
+    fn open_close_question_modal() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        assert!(!st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+
+        st.open_question_modal();
+        assert!(st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+        assert_eq!(st.question_modal_scroll, 0);
+
+        st.question_modal_index = 3;
+        st.close_question_modal();
+        assert!(!st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+        assert_eq!(st.question_modal_scroll, 0);
+    }
+
+    #[test]
+    fn question_requested_opens_modal() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        let q = InteractiveQuestionPayload {
+            question_id: "q-1".into(),
+            call_id: "c1".into(),
+            prompt: "Pick".into(),
+            options: vec![QuestionOption {
+                id: "a".into(),
+                label: "A".into(),
+            }],
+            allow_custom: true,
+            suggested_answer: "A".into(),
+        };
+        st.apply_event(&AgentEvent::QuestionRequested {
+            question: q.clone(),
+        });
+        assert!(st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+        assert!(st.active_question.is_some());
+    }
+
+    #[test]
+    fn question_resolved_closes_modal() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        st.question_modal_open = true;
+        st.question_modal_index = 2;
+        st.apply_event(&AgentEvent::QuestionResolved {
+            question_id: "q-1".into(),
+            selection: QuestionSelection::Suggested,
+        });
+        assert!(st.active_question.is_none());
+        assert!(!st.question_modal_open);
+        assert_eq!(st.question_modal_index, 0);
+    }
+}

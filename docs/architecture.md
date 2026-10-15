@@ -1,0 +1,87 @@
+# Architecture
+
+dcode-ai is a Rust workspace of five crates. Data flows: **TUI → runtime supervisor → core agent loop → provider → tools → back up the stack as streamed events.**
+
+```
+crates/
+  common/       shared types: config, messages, tools, sessions, events, auth
+  core/         agent loop, providers, tool implementations, skills, approval
+  runtime/      process/PTY exec, IPC, session store, context manager, supervisor
+  cli/          TUI (ratatui), REPL, streaming render, slash commands, entrypoint
+  autoresearch/ experiment loop runner (separate feature surface)
+```
+
+## Crate responsibilities
+
+### `common`
+Provider-agnostic types shared everywhere. `config.rs` (the largest, ~1.8k LOC)
+holds the full `DcodeAiConfig` tree. `message.rs` defines `Message`,
+`MessageContent` (text or multimodal `Parts`), and roles. `tool.rs` defines
+`ToolCall`/`ToolDefinition`/`ToolResult`. No I/O, no async — pure data.
+
+### `core`
+The brain.
+- `agent.rs` — the turn loop: send messages → stream provider chunks → execute
+  tool calls → append results → repeat until the model stops requesting tools.
+- `provider/` — `claude_code.rs` (your signed-in `claude` binary used as a model,
+  with dcode-ai's tools over a `<tool_call>` text protocol), `anthropic.rs`
+  (Messages API via Console OAuth), `copilot.rs` (GitHub Copilot: Messages,
+  Responses or Chat Completions per model). `anthropic_compat.rs` and
+  `openai_compat.rs` build request bodies and parse SSE streams; `factory.rs`
+  picks the provider from config; `retry.rs` handles backoff.
+- `tools/` — each tool is a `ToolExecutor` (`definition()` + async `execute()`),
+  registered into a `ToolRegistry` (`mod.rs`) as read-only or full sets.
+- `skills.rs` / `skill_installer.rs` — discovery and install of skills from
+  `AGENTS.md` and skill directories.
+- `approval.rs` — permission modes, `policy.toml` rules, shell-command classification.
+- `agent_defs.rs` — custom sub-agents (`agents/*.md`) and the built-in verifier.
+
+### `runtime`
+The machinery around the agent.
+- `supervisor/` — owns session lifecycle, hooks, child agents, IPC wiring.
+- `context_manager.rs` — token budgeting + compaction (sliding window + summary),
+  now backed by a real BPE tokenizer (`token_count.rs`).
+- `session_store.rs` / `last_session.rs` — persistence and resume.
+- `process.rs` / `pty.rs` / `tmux.rs` — command execution surfaces.
+- `ipc.rs` — platform IPC control plane for detached sessions: Unix sockets on
+  Unix, loopback TCP on Windows.
+
+### `cli`
+- `tui/` — the interactive terminal UI: `app.rs` run loop with `app/{keys,mouse,frame,dashboard,chrome}.rs`,
+  `state/` (session state fed by `AgentEvent`s), `transcript.rs`, `markdown.rs`,
+  `render/` (prompt boxes, pickers), `theme.rs`, `plugin_browser.rs`.
+- `stream.rs` / `render/` — turn streamed events into rendered markdown/diffs/status.
+- `slash_commands.rs`, `file_mentions.rs`, `image_attach.rs` — input affordances.
+- `main.rs` — argument parsing, headless mode, dispatch into TUI or one-shot.
+- `acp_server.rs` (`dcode-ai acp`), `ci_cmd.rs` (`dcode-ai ci`), `policy_cli.rs`,
+  plugin and MCP subcommands.
+
+### `autoresearch`
+Standalone experiment loop (`loop_runner.rs`, `program.rs`, `metric_parser.rs`).
+Independent of the chat agent.
+
+## The agent turn loop (core/agent.rs)
+
+1. Assemble messages (system + memory + sliding window from `context_manager`).
+2. Call the active `Provider::chat`, receive a `Receiver<StreamChunk>`.
+3. Stream `TextDelta` / `InternalDelta` (reasoning) / `ToolUse` / `Usage` / `Done`.
+4. For each `ToolUse`: gate through `approval`, run via `ToolRegistry`, append a
+   `Role::Tool` result message.
+5. If any tool ran, loop back to step 2; otherwise finish the turn.
+
+## Token accounting
+
+Two distinct paths, do not conflate them:
+- **Authoritative** — `StreamChunk::Usage { input_tokens, output_tokens }` parsed
+  from the provider stream and accumulated in `cost.rs::CostTracker`. With
+  Anthropic prompt caching, cached-prefix tokens are folded into `input_tokens`.
+- **Estimated** — `context_manager::estimate_tokens` using the `o200k_base` BPE.
+  Used only to decide *when to compact* and to show a pre-send budget. Never used
+  for billing.
+
+## Prompt caching (Anthropic)
+
+`anthropic_compat::anthropic_request_body` marks two `ephemeral` cache
+breakpoints: the system prompt block and the last tool definition. These are the
+large static prefix repeated every turn, so the cache hit covers system + all
+tool schemas. GA under `anthropic-version: 2023-06-01` — no beta header needed.

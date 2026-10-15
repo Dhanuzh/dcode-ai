@@ -1,0 +1,15 @@
+// `#[async_trait]` puts `#[must_use]` on futures that are already must-use;
+// clippy 1.99+ reports that as `double_must_use`.
+#![allow(clippy::double_must_use)]
+pub mod activity;
+pub mod approval_prompts;
+pub mod file_mentions;
+pub mod image_attach;
+pub mod ipc_pending;
+pub mod oauth_login;
+pub mod prompt;
+pub mod slash_commands;
+pub mod stream;
+pub mod tool_ui;
+pub mod tui;
+pub mod update_check;

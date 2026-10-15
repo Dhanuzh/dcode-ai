@@ -1,0 +1,79 @@
+[package]
+name = "dcode-ai-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Interactive TUI shell and CLI entrypoint for dcode-ai"
+
+[[bin]]
+name = "dcode-ai"
+path = "src/main.rs"
+
+[dependencies]
+dcode-ai-autoresearch = { workspace = true }
+dcode-ai-common = { workspace = true }
+dcode-ai-core = { workspace = true }
+dcode-ai-runtime = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+reqwest = { workspace = true }
+cli-prompts = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+clap_complete = "4"
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures = "0.3"
+reedline = "0.38"
+syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "html", "regex-fancy"] }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
+pulldown-cmark = "0.12"
+ansi-to-tui = "8"
+textwrap = "0.16"
+unicode-segmentation = "1.13"
+unicode-width = "0.2"
+colored = "3"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["clock"] }
+similar = "2"
+arboard = "3"
+image = { version = "0.25", default-features = false, features = ["png"] }
+base64 = "0.22"
+sha2 = "0.10"
+rand = "0.8"
+urlencoding = "2"
+url = "2"
+notify-rust = { version = "4", optional = true }
+
+# `scrolling-regions` makes `Terminal::insert_before` flush history via
+# DECSTBM partial-screen scrolls (flicker-free). Windows conhost and Windows
+# Terminal *discard* lines scrolled out of a margin region instead of pushing
+# them into scrollback, so scrolled-up history appeared blank on Windows. The
+# portable fallback (real newlines at the bottom row) reaches the scrollback
+# buffer on every terminal, so Windows builds omit the feature. Requires
+# resolver = "2" (set in the workspace) so the feature isn't unified across
+# targets.
+[target.'cfg(windows)'.dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
+
+[target.'cfg(not(windows))'.dependencies]
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "scrolling-regions"] }
+
+[features]
+desktop-notify = ["notify-rust"]
+
+[dev-dependencies]
+dcode-ai-runtime = { workspace = true }
+tempfile = "3"
+assert_cmd = "2"
+insta = "1"
+predicates = "3"
+criterion = "0.5"
+cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy", "run-cargo-test"] }
+
+[[bench]]
+name = "tui_perf"
+harness = false

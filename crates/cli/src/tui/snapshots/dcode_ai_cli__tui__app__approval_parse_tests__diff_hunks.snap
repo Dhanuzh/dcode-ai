@@ -1,0 +1,12 @@
+---
+source: crates/cli/src/tui/app.rs
+expression: text
+---
+@@ -1,5 +1,6 @@
+ line1
+-line2
++modified2
+ line3
++new_line
+ line4
+ line5

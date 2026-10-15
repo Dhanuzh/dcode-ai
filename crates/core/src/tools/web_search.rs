@@ -1,0 +1,192 @@
+use dcode_ai_common::config::WebConfig;
+use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
+use scraper::{Html, Selector};
+use std::time::Duration;
+
+use super::ToolExecutor;
+
+pub struct WebSearchTool {
+    client: reqwest::Client,
+    config: WebConfig,
+    result_selector: Option<Selector>,
+    title_selector: Option<Selector>,
+    snippet_selector: Option<Selector>,
+    body_selector: Option<Selector>,
+}
+
+impl WebSearchTool {
+    pub fn new(config: WebConfig) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(config.timeout_secs))
+            .user_agent(config.user_agent.clone())
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+        Self {
+            client,
+            config,
+            // DuckDuckGo's HTML endpoint has used several class names over time;
+            // accept the historical and current variants so parsing is resilient
+            // to markup churn.
+            result_selector: Selector::parse(".result, .web-result, div.results_links").ok(),
+            title_selector: Selector::parse(".result__title a, a.result__a, .result__a, h2 a").ok(),
+            snippet_selector: Selector::parse(".result__snippet, .result__body, a.result__snippet")
+                .ok(),
+            body_selector: Selector::parse("body").ok(),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for WebSearchTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "web_search".into(),
+            description: "Search the public web and return titles, URLs, and snippets".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query."
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results to return, from 1 to 10. Defaults to the configured search limit."
+                    }
+                },
+                "required": ["query"]
+            }),
+        }
+    }
+
+    async fn execute(&self, call: &ToolCall) -> ToolResult {
+        let query = call.input["query"].as_str().unwrap_or("").trim();
+        let limit = call.input["limit"]
+            .as_u64()
+            .map(|v| v as usize)
+            .unwrap_or(self.config.default_search_limit)
+            .clamp(1, 10);
+
+        if query.is_empty() {
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some("query is required".into()),
+            };
+        }
+
+        let response = self
+            .client
+            .get("https://html.duckduckgo.com/html/")
+            .query(&[("q", query)])
+            .send()
+            .await;
+
+        let body = match response {
+            Ok(response) => match response.text().await {
+                Ok(body) => body,
+                Err(err) => {
+                    return ToolResult {
+                        call_id: call.id.clone(),
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("failed to read search response: {err}")),
+                    };
+                }
+            },
+            Err(err) => {
+                return ToolResult {
+                    call_id: call.id.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("search request failed: {err}")),
+                };
+            }
+        };
+
+        let document = Html::parse_document(&body);
+        let (Some(result_selector), Some(title_selector), Some(snippet_selector)) = (
+            self.result_selector.as_ref(),
+            self.title_selector.as_ref(),
+            self.snippet_selector.as_ref(),
+        ) else {
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some("web search parser unavailable".into()),
+            };
+        };
+
+        let mut rows = Vec::new();
+        for result in document.select(result_selector).take(limit) {
+            let title_node = result.select(title_selector).next();
+            let snippet = result
+                .select(snippet_selector)
+                .next()
+                .map(|node| clean_text(&node.text().collect::<Vec<_>>().join(" ")))
+                .unwrap_or_default();
+
+            if let Some(title_node) = title_node {
+                let title = clean_text(&title_node.text().collect::<Vec<_>>().join(" "));
+                let url = title_node
+                    .value()
+                    .attr("href")
+                    .map(clean_href)
+                    .unwrap_or_default();
+                if !title.is_empty() && !url.is_empty() {
+                    rows.push(format!("- {title}\n  URL: {url}\n  Snippet: {snippet}"));
+                }
+            }
+        }
+
+        if rows.is_empty() {
+            // Structured parsing failed (markup changed). Rather than a hard
+            // error, return the page's readable text so the agent still has
+            // something to work with.
+            let fallback = clean_text(&extract_text(&document, self.body_selector.as_ref()));
+            let body: String = fallback.chars().take(self.config.max_fetch_chars).collect();
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: !body.trim().is_empty(),
+                output: if body.trim().is_empty() {
+                    String::new()
+                } else {
+                    format!("(unstructured results for \"{query}\")\n{body}")
+                },
+                error: if body.trim().is_empty() {
+                    Some("no search results found".into())
+                } else {
+                    None
+                },
+            };
+        }
+
+        ToolResult {
+            call_id: call.id.clone(),
+            success: true,
+            output: rows.join("\n"),
+            error: None,
+        }
+    }
+}
+
+fn clean_href(href: &str) -> String {
+    if let Some(stripped) = href.strip_prefix("//") {
+        format!("https://{stripped}")
+    } else {
+        href.to_string()
+    }
+}
+
+fn extract_text(document: &Html, body_selector: Option<&Selector>) -> String {
+    body_selector
+        .and_then(|selector| document.select(selector).next())
+        .map(|node| node.text().collect::<Vec<_>>().join(" "))
+        .unwrap_or_default()
+}
+
+fn clean_text(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}

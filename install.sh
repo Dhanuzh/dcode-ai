@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO="Dhanuzh/dcode-ai"
+BINARY="dcode-ai"
+INSTALL_DIR="${DCODE_AI_INSTALL_DIR:-/usr/local/bin}"
+# Fallback when API lookup fails and no explicit version is provided.
+FALLBACK_VERSION="0.0.21"
+
+info()  { printf '\033[1;34m=>\033[0m %s\n' "$*"; }
+warn()  { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
+error() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+
+detect_platform() {
+    local os arch
+
+    os="$(uname -s)"
+    arch="$(uname -m)"
+
+    case "$os" in
+        Linux)  os="unknown-linux-gnu" ;;
+        Darwin) os="apple-darwin" ;;
+        *)      error "Unsupported OS: $os" ;;
+    esac
+
+    case "$arch" in
+        x86_64|amd64)   arch="x86_64" ;;
+        aarch64|arm64)  arch="aarch64" ;;
+        *)              error "Unsupported architecture: $arch" ;;
+    esac
+
+    echo "${arch}-${os}"
+}
+
+http_get() {
+    # Print response body to stdout.
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO- "$1"
+    else
+        error "Neither curl nor wget found. Install one and try again."
+    fi
+}
+
+http_download() {
+    # Args: <url> <dest-file>
+    if command -v curl >/dev/null 2>&1; then
+        curl -fsSL "$1" -o "$2"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -qO "$2" "$1"
+    else
+        error "Neither curl nor wget found. Install one and try again."
+    fi
+}
+
+verify_checksum() {
+    # Args: <archive-file> <checksum-file>
+    local archive checksum_file expected actual checksum_name
+    archive="$1"
+    checksum_file="$2"
+
+    expected="$(awk '{print $1; exit}' "$checksum_file")"
+    [ -n "$expected" ] || error "Checksum file is empty: $checksum_file"
+
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual="$(sha256sum "$archive" | awk '{print $1}')"
+        checksum_name="sha256sum"
+    elif command -v shasum >/dev/null 2>&1; then
+        actual="$(shasum -a 256 "$archive" | awk '{print $1}')"
+        checksum_name="shasum"
+    else
+        warn "No sha256sum or shasum found; skipping checksum verification."
+        return 0
+    fi
+
+    if [ "$actual" != "$expected" ]; then
+        error "Checksum verification failed for $(basename "$archive")"
+    fi
+
+    info "Verified checksum with ${checksum_name}"
+}
+
+latest_release_tag() {
+    # Returns tag like "v0.1.2" on stdout.
+    # No jq dependency; parse tag_name with sed.
+    local api url body
+    api="https://api.github.com/repos/${REPO}/releases/latest"
+    url="${api}"
+    body="$(http_get "$url" 2>/dev/null || true)"
+    printf '%s\n' "$body" | sed -n 's/.*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1
+}
+
+release_exists() {
+    # Args: <tag>
+    # Returns 0 if release exists, 1 otherwise.
+    local tag api body
+    tag="$1"
+    api="https://api.github.com/repos/${REPO}/releases/tags/${tag}"
+    body="$(http_get "$api" 2>/dev/null || true)"
+    [ -n "$body" ] && ! printf '%s\n' "$body" | grep -q '"message":[[:space:]]*"Not Found"'
+}
+
+resolve_version() {
+    # Input env:
+    #   DCODE_AI_VERSION: "latest" (default) or explicit like "0.2.0" / "v0.2.0"
+    # Output:
+    #   VERSION (without leading "v"), TAG (with leading "v")
+    local requested tag version
+    requested="${DCODE_AI_VERSION:-latest}"
+
+    if [ "$requested" = "latest" ] || [ -z "$requested" ]; then
+        tag="$(latest_release_tag)"
+        if [ -z "$tag" ]; then
+            info "Could not resolve latest release from GitHub API; falling back to v${FALLBACK_VERSION}"
+            version="${FALLBACK_VERSION}"
+            tag="v${version}"
+        fi
+    else
+        if [[ "$requested" == v* ]]; then
+            tag="$requested"
+            version="${requested#v}"
+        else
+            version="$requested"
+            tag="v${version}"
+        fi
+
+        # If the requested version does not have a published GitHub release yet,
+        # fall back to latest published release instead of 404-ing on download.
+        if ! release_exists "$tag"; then
+            info "Requested release ${tag} not found; falling back to latest published release."
+            tag="$(latest_release_tag)"
+            if [ -z "$tag" ]; then
+                info "Could not resolve latest release from GitHub API; falling back to v${FALLBACK_VERSION}"
+                version="${FALLBACK_VERSION}"
+                tag="v${version}"
+            else
+                version="${tag#v}"
+            fi
+        fi
+    fi
+
+    if [ -z "${version:-}" ]; then
+        version="${tag#v}"
+    fi
+
+    VERSION="$version"
+    TAG="$tag"
+}
+
+tmpdir=""
+cleanup() { [ -n "$tmpdir" ] && rm -rf "$tmpdir"; }
+trap cleanup EXIT
+
+main() {
+    local platform target_url checksum_url archive checksum_file
+
+    resolve_version
+    info "Installing ${BINARY} ${TAG}"
+
+    platform="$(detect_platform)"
+    target_url="https://github.com/${REPO}/releases/download/${TAG}/${BINARY}-${platform}.tar.gz"
+
+    info "Platform: ${platform}"
+    info "Downloading from: ${target_url}"
+
+    tmpdir="$(mktemp -d)"
+
+    archive="${tmpdir}/${BINARY}.tar.gz"
+    http_download "$target_url" "$archive"
+    checksum_url="${target_url}.sha256"
+    checksum_file="${archive}.sha256"
+    if http_download "$checksum_url" "$checksum_file" 2>/dev/null; then
+        verify_checksum "$archive" "$checksum_file"
+    else
+        warn "Checksum file not found for ${TAG}; installing without archive verification."
+    fi
+
+    tar xzf "$archive" -C "$tmpdir"
+
+    if [ -w "$INSTALL_DIR" ]; then
+        mv "${tmpdir}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
+    else
+        info "Requires sudo to install to ${INSTALL_DIR}"
+        sudo mv "${tmpdir}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
+    fi
+
+    chmod +x "${INSTALL_DIR}/${BINARY}"
+
+    info "Installed ${BINARY} ${TAG} to ${INSTALL_DIR}/${BINARY}"
+    check_provider_tools
+    info "Run 'dcode-ai' to sign in and start"
+}
+
+# dcode-ai signs in through tools you install yourself; it never installs
+# third-party binaries. Report what is missing for each provider.
+check_provider_tools() {
+    if command -v claude >/dev/null 2>&1; then
+        info "Claude: found 'claude' (Claude account backend) — run 'claude auth login' if not signed in"
+    else
+        warn "Claude account backend needs Claude Code's 'claude' CLI: https://docs.claude.com/claude-code"
+    fi
+    if command -v ant >/dev/null 2>&1; then
+        info "Claude API backend: found 'ant'"
+    else
+        info "Optional: Anthropic's 'ant' CLI enables the Console/API backend: https://github.com/anthropics/anthropic-cli/releases"
+    fi
+    info "GitHub Copilot: sign in with 'dcode-ai login copilot' (no extra tools needed)"
+}
+
+main "$@"

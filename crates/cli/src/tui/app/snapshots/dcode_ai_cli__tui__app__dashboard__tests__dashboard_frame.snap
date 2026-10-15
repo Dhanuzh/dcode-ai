@@ -1,0 +1,26 @@
+---
+source: crates/cli/src/tui/app/dashboard.rs
+expression: text
+---
+╭ session ───────────────╮                                                                      ╭ context │ changes │ agents ────╮
+│ ✻ claude-sonnet-5-5    │ > fix the expiry check                                               │ plan                           │
+│ @build · default mode  │                                                                      │ 1. read auth.rs                │
+│ session 1              │ ● Fixed the off-by-one in token expiry.                              │ 2. fix comparison              │
+│                        │                                                                      │                                │
+│ agents                 │                                                                      │ usage                          │
+│ ● main idle            │                                                                      │ in 12.4k · out 900             │
+│   no sub-agents        │                                                                      │ cost $0.0000 (est.)            │
+│                        │                                                                      │                                │
+│ Ctrl+\ inline view     │                                                                      │                                │
+│                        │                                                                      │                                │
+│                        │                                                                      │                                │
+│                        │                                                                      │                                │
+│                        │                                                                      │                                │
+│                        │                                                                      │                                │
+│                        │                                                                      │                                │
+│                        │                                                                      │                                │
+│                        │                                                                      │                                │
+│                        │──────────────────────────────────────────────────────────────────────│                                │
+│                        │ > Try "explain this codebase"                                        │                                │
+│                        │──────────────────────────────────────────────────────────────────────│                                │
+╰────────────────────────╯  ? for shortcuts                                  claude-sonnet-5-5  ╰ Alt+1/2/3 · Ctrl+D focus ──────╯

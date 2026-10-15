@@ -1,0 +1,502 @@
+use crate::supervisor::{
+    SessionControlCommand, Supervisor, SupervisorConfig, spawn_command_consumer_with_store,
+    spawn_subagent_consumer,
+};
+use dcode_ai_common::config::DcodeAiConfig;
+use dcode_ai_common::event::{AgentEvent, EndReason, EventEnvelope};
+use dcode_ai_common::message::ImageAttachment;
+use dcode_ai_common::session::OrchestrationContext;
+use std::path::PathBuf;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc as std_mpsc;
+
+#[derive(Debug, Clone)]
+pub enum ServiceSessionKind {
+    New { session_id: Option<String> },
+    Resume { session_id: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceSessionRequest {
+    pub config: DcodeAiConfig,
+    pub workspace_root: PathBuf,
+    pub safe_mode: bool,
+    pub initial_prompt: Option<String>,
+    pub orchestration_context: Option<OrchestrationContext>,
+    pub kind: ServiceSessionKind,
+}
+
+#[derive(Debug, Clone)]
+pub struct ServiceSessionInfo {
+    pub session_id: String,
+    pub workspace_root: PathBuf,
+    pub model: String,
+    pub socket_path: Option<PathBuf>,
+    pub event_log_path: PathBuf,
+}
+
+pub struct ServiceSessionHandle {
+    info: ServiceSessionInfo,
+    #[allow(dead_code)]
+    join_handle: Option<std::thread::JoinHandle<()>>,
+}
+
+impl ServiceSessionHandle {
+    pub fn info(&self) -> &ServiceSessionInfo {
+        &self.info
+    }
+
+    /// Take the underlying thread join handle so the caller can wait for
+    /// the session to fully terminate (e.g. before starting a replacement).
+    pub fn take_join_handle(&mut self) -> Option<std::thread::JoinHandle<()>> {
+        self.join_handle.take()
+    }
+}
+
+pub fn spawn_service_session(
+    request: ServiceSessionRequest,
+) -> Result<ServiceSessionHandle, String> {
+    let (startup_tx, startup_rx) = std_mpsc::channel::<Result<ServiceSessionInfo, String>>();
+    let join_handle = std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build();
+
+        match runtime {
+            Ok(rt) => {
+                if let Err(error) = rt.block_on(run_service_session_with_startup(
+                    request,
+                    Some(startup_tx.clone()),
+                )) {
+                    let _ = startup_tx.send(Err(error));
+                }
+            }
+            Err(error) => {
+                let _ = startup_tx.send(Err(format!("failed to create tokio runtime: {error}")));
+            }
+        }
+    });
+
+    let info = startup_rx
+        .recv()
+        .map_err(|_| "service session failed before startup completed".to_string())??;
+
+    Ok(ServiceSessionHandle {
+        info,
+        join_handle: Some(join_handle),
+    })
+}
+
+pub async fn run_service_session(request: ServiceSessionRequest) -> Result<(), String> {
+    run_service_session_with_startup(request, None).await
+}
+
+async fn run_service_session_with_startup(
+    request: ServiceSessionRequest,
+    startup_tx: Option<std_mpsc::Sender<Result<ServiceSessionInfo, String>>>,
+) -> Result<(), String> {
+    let mut supervisor = match &request.kind {
+        ServiceSessionKind::New { session_id } => {
+            Supervisor::create(SupervisorConfig {
+                config: request.config.clone(),
+                workspace_root: request.workspace_root.clone(),
+                safe_mode: request.safe_mode,
+                interactive_approvals: true,
+                session_id: session_id.clone(),
+                approval_handler: None,
+                orchestration_context: request.orchestration_context.clone(),
+            })
+            .await
+        }
+        ServiceSessionKind::Resume { session_id } => {
+            Supervisor::resume(
+                request.config.clone(),
+                &request.workspace_root,
+                request.safe_mode,
+                true,
+                session_id,
+                None,
+            )
+            .await
+        }
+    }
+    .map_err(|error| error.to_string())?;
+
+    let mut handle = supervisor.take_handle();
+    let info = ServiceSessionInfo {
+        session_id: handle.session_id.clone(),
+        workspace_root: handle.workspace_root.clone(),
+        model: handle.model.clone(),
+        socket_path: handle.socket_path.clone(),
+        event_log_path: handle.event_log_path.clone(),
+    };
+
+    if let Some(tx) = startup_tx {
+        let _ = tx.send(Ok(info.clone()));
+    }
+
+    let event_rx = handle
+        .take_event_rx()
+        .ok_or_else(|| "missing event receiver".to_string())?;
+    let approval_pending = handle.take_approval_pending();
+    let question_pending = handle.take_question_pending();
+
+    let mut command_rx = None;
+    let mut event_tx_ipc = None;
+    if let Some(ipc_handle) = handle.take_ipc_handle() {
+        let (etx, crx) = ipc_handle.into_parts();
+        event_tx_ipc = Some(etx);
+        command_rx = Some(crx);
+    }
+
+    let fanout_task = spawn_service_event_fanout(
+        event_rx,
+        info.event_log_path.clone(),
+        event_tx_ipc,
+        request.config.clone(),
+    );
+
+    let subagent_task = if let Some(spawn_rx) = handle.take_spawn_rx() {
+        Some(spawn_subagent_consumer(
+            spawn_rx,
+            info.session_id.clone(),
+            info.workspace_root.clone(),
+            request.config.clone(),
+            supervisor.agent().messages.clone(),
+            supervisor.event_tx(),
+        ))
+    } else {
+        None
+    };
+
+    let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let (control_tx, mut control_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SessionControlCommand>();
+
+    let command_task = command_rx.map(|crx| {
+        spawn_command_consumer_with_store(
+            crx,
+            approval_pending,
+            question_pending.clone(),
+            None,
+            supervisor.event_tx(),
+            Some(prompt_tx.clone()),
+            Some(control_tx.clone()),
+        )
+    });
+
+    if let Some(prompt) = request.initial_prompt.clone() {
+        let _ = prompt_tx.send(prompt);
+    }
+
+    let cancel_handle = supervisor.cancel_handle();
+    let mut reason = EndReason::UserExit;
+
+    loop {
+        // `Cancel` (Stop button) aborts only the current turn; the session stays
+        // alive for the next prompt. Only `Shutdown` ends the session.
+        let mut shutdown = false;
+
+        let prompt = tokio::select! {
+            control = control_rx.recv() => {
+                match control {
+                    // No turn running — nothing to cancel; keep waiting.
+                    Some(SessionControlCommand::Cancel) => continue,
+                    Some(SessionControlCommand::Shutdown) => {
+                        reason = EndReason::UserExit;
+                        break;
+                    }
+                    None => break,
+                }
+            }
+            prompt = prompt_rx.recv() => match prompt {
+                Some(prompt) => prompt,
+                None => break,
+            }
+        };
+
+        let event_tx = supervisor.event_tx();
+        let (prompt, attachments) = split_prompt_attachments(prompt);
+        // Prompts arriving over IPC (web chat, `serve`, spawned runs) never
+        // pass through the TUI's @mention expansion — expand here so `@path`
+        // inlines file contents everywhere. On error, keep the raw prompt.
+        let prompt = dcode_ai_common::mentions::expand_at_file_mentions_default(
+            &prompt,
+            &info.workspace_root,
+        )
+        .unwrap_or(prompt);
+        let run_fut = supervisor.run_turn_with_images(&prompt, &attachments);
+        tokio::pin!(run_fut);
+
+        let result = tokio::select! {
+            result = &mut run_fut => result,
+            control = control_rx.recv() => {
+                match control {
+                    Some(SessionControlCommand::Cancel) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                    }
+                    Some(SessionControlCommand::Shutdown) => {
+                        cancel_handle.store(true, Ordering::SeqCst);
+                        shutdown = true;
+                    }
+                    None => {}
+                }
+                run_fut.await
+            }
+        };
+
+        if let Err(error) = result {
+            if error.to_string().contains("run cancelled") {
+                // A cancelled turn leaves the UI "busy" unless we say so.
+                // `run_turn` resets its own cancel flag on the next call, so the
+                // session can safely take another prompt.
+                if let Some(tx) = &event_tx {
+                    let _ = tx
+                        .send(AgentEvent::BusyStateChanged {
+                            state: dcode_ai_common::event::BusyState::Idle,
+                        })
+                        .await;
+                }
+                if shutdown {
+                    reason = EndReason::UserExit;
+                    break;
+                }
+                continue; // keep the session alive after a Stop
+            }
+            // A failed turn (provider 500, network blip, rate limit, context
+            // error, ...) doesn't corrupt session state — `run_turn_with_images`
+            // leaves `self.agent.messages` as it was before the attempt. The TUI
+            // REPL just prints "error: ..." and keeps prompting (repl.rs); the
+            // web/service loop should do the same instead of tearing down the
+            // whole long-lived session over one retryable failure.
+            if let Some(tx) = &event_tx {
+                let _ = tx
+                    .send(AgentEvent::Error {
+                        message: error.to_string(),
+                    })
+                    .await;
+                let _ = tx
+                    .send(AgentEvent::BusyStateChanged {
+                        state: dcode_ai_common::event::BusyState::Idle,
+                    })
+                    .await;
+            }
+            if shutdown {
+                reason = EndReason::UserExit;
+                break;
+            }
+            continue;
+        }
+    }
+
+    supervisor.finish(reason.clone()).await;
+    fanout_task.abort();
+    if let Some(task) = command_task {
+        task.abort();
+    }
+    if let Some(task) = subagent_task {
+        task.abort();
+    }
+    Ok(())
+}
+
+/// HMAC-SHA256 (RFC 2104) over `msg` with `key`, hex-encoded. Used to sign
+/// webhook payloads so receivers can verify authenticity — the standard
+/// ipad/opad construction over the workspace's existing `sha2`.
+fn hmac_sha256_hex(key: &[u8], msg: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    const BLOCK: usize = 64;
+    let mut key_block = [0u8; BLOCK];
+    if key.len() > BLOCK {
+        key_block[..32].copy_from_slice(&Sha256::digest(key));
+    } else {
+        key_block[..key.len()].copy_from_slice(key);
+    }
+    let mut inner = Sha256::new();
+    inner.update(key_block.map(|b| b ^ 0x36));
+    inner.update(msg);
+    let inner_hash = inner.finalize();
+    let mut outer = Sha256::new();
+    outer.update(key_block.map(|b| b ^ 0x5c));
+    outer.update(inner_hash);
+    let digest = outer.finalize();
+    let mut hex = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
+}
+
+/// Prompts arriving over IPC are plain strings; image attachments ride along
+/// as header lines so no command/channel types change. Each header line is
+/// `\u{1}attach:<media_type>:<workspace-relative path>`; the first line that
+/// doesn't match ends the header block and starts the real prompt.
+/// `dcode-ai web` writes this format after uploading a pasted/dropped image.
+fn split_prompt_attachments(raw: String) -> (String, Vec<ImageAttachment>) {
+    if !raw.starts_with('\u{1}') {
+        return (raw, Vec::new());
+    }
+    let mut attachments = Vec::new();
+    let mut rest = raw.as_str();
+    while let Some(line_body) = rest.strip_prefix('\u{1}') {
+        let (line, tail) = match line_body.split_once('\n') {
+            Some((l, t)) => (l, t),
+            None => (line_body, ""),
+        };
+        match line.strip_prefix("attach:").and_then(|s| s.split_once(':')) {
+            Some((media_type, path)) if !path.trim().is_empty() => {
+                attachments.push(ImageAttachment {
+                    media_type: media_type.to_string(),
+                    path: path.trim().to_string(),
+                });
+                rest = tail;
+            }
+            // Malformed marker: stop parsing, treat the remainder as prompt.
+            _ => break,
+        }
+    }
+    (rest.to_string(), attachments)
+}
+
+fn spawn_service_event_fanout(
+    mut event_rx: tokio::sync::mpsc::Receiver<AgentEvent>,
+    log_path: PathBuf,
+    event_tx_ipc: Option<tokio::sync::broadcast::Sender<String>>,
+    config: DcodeAiConfig,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        use tokio::fs::OpenOptions;
+        use tokio::io::AsyncWriteExt;
+
+        let mut log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .await
+            .ok();
+
+        // Prepare webhooks if present
+        let webhooks = config.web.webhooks.clone();
+        let client = if !webhooks.is_empty() {
+            Some(reqwest::Client::new())
+        } else {
+            None
+        };
+
+        let mut event_id: u64 = 0;
+        while let Some(event) = event_rx.recv().await {
+            event_id += 1;
+            let envelope = EventEnvelope::new(event_id, event.clone());
+            if let Some(ref tx) = event_tx_ipc {
+                let line = serde_json::to_string(&envelope).unwrap_or_default();
+                let _ = tx.send(line);
+            }
+
+            if let Some(file) = log_file.as_mut()
+                && let Ok(line) = serde_json::to_string(&envelope)
+            {
+                let _ = file.write_all(line.as_bytes()).await;
+                let _ = file.write_all(b"\n").await;
+            }
+
+            // Dispatch webhooks asynchronously. The names here are the stable,
+            // user-facing event ids used in `enabled_events`; they map onto the
+            // internal AgentEvent variants.
+            if let Some(ref http_client) = client {
+                let event_name = match &event {
+                    AgentEvent::SessionEnded { .. } => "SessionCompleted",
+                    AgentEvent::ApprovalRequested { .. } => "ToolApprovalRequired",
+                    // A turn finishes when the agent returns to Idle.
+                    AgentEvent::BusyStateChanged {
+                        state: dcode_ai_common::event::BusyState::Idle,
+                    } => "TurnCompleted",
+                    AgentEvent::Error { .. } => "Error",
+                    _ => "",
+                };
+
+                if !event_name.is_empty() {
+                    for hook in &webhooks {
+                        if hook.enabled_events.iter().any(|e| e == event_name) {
+                            let http_client = http_client.clone();
+                            let hook = hook.clone();
+                            let payload = envelope.clone();
+                            tokio::spawn(async move {
+                                // Serialize once so the signature covers the
+                                // exact bytes sent on the wire.
+                                let Ok(body) = serde_json::to_vec(&payload) else {
+                                    return;
+                                };
+                                let mut req = http_client
+                                    .post(hook.url.as_str())
+                                    .header("Content-Type", "application/json");
+                                if let Some(ref secret) = hook.secret_header {
+                                    // HMAC-SHA256 over the body, GitHub-style:
+                                    // `X-Dcode-Signature: sha256=<hex>`.
+                                    let sig = hmac_sha256_hex(secret.as_bytes(), &body);
+                                    req = req.header("X-Dcode-Signature", format!("sha256={sig}"));
+                                }
+                                let _ = req.body(body).send().await;
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hmac_sha256_matches_rfc4231_vectors() {
+        // RFC 4231 test case 2: key "Jefe", data "what do ya want for nothing?"
+        assert_eq!(
+            hmac_sha256_hex(b"Jefe", b"what do ya want for nothing?"),
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843"
+        );
+        // RFC 4231 test case 1: 20-byte 0x0b key, data "Hi There"
+        assert_eq!(
+            hmac_sha256_hex(&[0x0b; 20], b"Hi There"),
+            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
+        );
+        // Keys longer than the block size are hashed first (RFC 4231 case 6).
+        assert_eq!(
+            hmac_sha256_hex(
+                &[0xaa; 131],
+                b"Test Using Larger Than Block-Size Key - Hash Key First"
+            ),
+            "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54"
+        );
+    }
+
+    #[test]
+    fn plain_prompt_passes_through() {
+        let (prompt, atts) = split_prompt_attachments("hello world".to_string());
+        assert_eq!(prompt, "hello world");
+        assert!(atts.is_empty());
+    }
+
+    #[test]
+    fn attachment_headers_are_parsed_and_stripped() {
+        let raw = "\u{1}attach:image/png:.dcode-ai/sessions/s1/attachments/a.png\n\
+                   \u{1}attach:image/jpeg:.dcode-ai/sessions/s1/attachments/b.jpg\n\
+                   describe these screenshots";
+        let (prompt, atts) = split_prompt_attachments(raw.to_string());
+        assert_eq!(prompt, "describe these screenshots");
+        assert_eq!(atts.len(), 2);
+        assert_eq!(atts[0].media_type, "image/png");
+        assert_eq!(atts[0].path, ".dcode-ai/sessions/s1/attachments/a.png");
+        assert_eq!(atts[1].media_type, "image/jpeg");
+    }
+
+    #[test]
+    fn malformed_marker_becomes_prompt_text() {
+        let raw = "\u{1}attach-broken\nhi";
+        let (prompt, atts) = split_prompt_attachments(raw.to_string());
+        assert_eq!(prompt, raw);
+        assert!(atts.is_empty());
+    }
+}

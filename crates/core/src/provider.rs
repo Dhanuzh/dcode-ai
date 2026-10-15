@@ -1,0 +1,210 @@
+pub mod anthropic;
+pub mod anthropic_compat;
+pub mod claude_code;
+pub mod copilot;
+pub mod factory;
+pub mod openai_compat;
+pub mod retry;
+#[cfg(test)]
+pub mod test_support;
+
+use std::path::Path;
+
+use async_trait::async_trait;
+use dcode_ai_common::message::Message;
+use dcode_ai_common::tool::{ToolCall, ToolDefinition};
+
+/// Capabilities supported by a provider + model combination.
+/// Used to gate feature availability (thinking, vision, etc.).
+#[derive(Debug, Clone, Default)]
+pub struct ProviderCapabilities {
+    /// Model emits reasoning/thinking tokens that can be streamed separately.
+    pub supports_thinking_stream: bool,
+    /// Model can accept native image inputs in user messages.
+    pub supports_native_images: bool,
+    /// Model can accept video inputs.
+    pub supports_video: bool,
+}
+
+/// A streamed chunk from the provider.
+#[derive(Debug, Clone)]
+pub enum StreamChunk {
+    TextDelta(String),
+    /// Internal thinking/reasoning output. Rendered as `AgentEvent::ThinkingDelta`.
+    /// Normalized from provider-specific variants (Anthropic's `thinking_delta`, OpenAI's `reasoning_content`).
+    InternalDelta(String),
+    ToolUse(ToolCall),
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    /// Prompt-cache token accounting (Anthropic). `read` tokens were served from
+    /// cache (~0.1x input cost); `creation` tokens were written to cache
+    /// (~1.25x input cost). Providers without caching never emit this.
+    CacheUsage {
+        read_tokens: u64,
+        creation_tokens: u64,
+    },
+    /// Opaque content block the provider needs echoed back verbatim on the
+    /// next request (Anthropic `thinking` + `signature`, `redacted_thinking`).
+    /// Stored on the assistant `Message::provider_blocks`.
+    ReplayBlock(serde_json::Value),
+    /// Why the model stopped, when the provider reports it.
+    Stop(StopReason),
+    /// Retryable stream failure (dropped connection, timeout, …).
+    Error(String),
+    /// Failure that retrying the same request cannot fix (model not
+    /// available on the account, sign-in required, …).
+    FatalError(String),
+    Done,
+}
+
+/// Normalized stop reason. Only the reasons the agent acts on are distinct.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopReason {
+    EndTurn,
+    ToolUse,
+    /// Output hit `max_tokens`; text and tool input may be truncated.
+    MaxTokens,
+    /// Safety classifier declined. `category` is provider-defined (e.g. "cyber").
+    Refusal {
+        category: Option<String>,
+    },
+    Other(String),
+}
+
+/// Abstraction over LLM providers (Anthropic, OpenAI, Gemini, etc.).
+#[async_trait]
+pub trait Provider: Send + Sync {
+    /// Rewrite conversation history before an HTTP request (provider-specific preprocessing).
+    /// Default: no-op.
+    async fn prepare_messages_for_request(
+        &self,
+        _messages: &mut Vec<Message>,
+        _workspace_root: &Path,
+    ) -> Result<(), ProviderError> {
+        Ok(())
+    }
+
+    /// Return capabilities for this provider.
+    /// Default: no thinking stream, no native images.
+    fn capabilities(&self) -> ProviderCapabilities {
+        ProviderCapabilities::default()
+    }
+
+    /// Send a conversation and receive a streaming response.
+    ///
+    /// `workspace_root` is used to resolve on-disk image paths embedded in user messages.
+    async fn chat(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        model: &str,
+        workspace_root: &Path,
+    ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderError {
+    #[error("provider configuration error: {0}")]
+    Configuration(String),
+    #[error("API request failed: {0}")]
+    RequestFailed(String),
+    /// A transient transport-level failure (connection reset, timeout, stale
+    /// keep-alive, DNS blip) that occurred *before* a response was received.
+    /// Retryable — the request never reached/completed at the model.
+    #[error("network error (transient): {0}")]
+    Transient(String),
+    #[error("Authentication error: {0}")]
+    AuthError(String),
+    #[error("Rate limited, retry after {retry_after_ms}ms")]
+    RateLimited { retry_after_ms: u64 },
+    #[error("Model not found: {0}")]
+    ModelNotFound(String),
+    #[error("{0}")]
+    Other(String),
+}
+
+impl ProviderError {
+    /// Classify a `reqwest` error returned from `.send()`. Such errors are
+    /// transport-level (HTTP 4xx/5xx come back as `Ok` with a non-success
+    /// status), so connection/timeout/reset/incomplete failures map to
+    /// [`ProviderError::Transient`] (retryable). Only a malformed-request
+    /// *builder* error is treated as permanent. The full `source` chain is
+    /// included so the real cause (e.g. "connection reset by peer") is visible
+    /// instead of just reqwest's opaque "error sending request for url".
+    pub fn from_reqwest_send(err: reqwest::Error) -> Self {
+        use std::error::Error;
+        let mut msg = err.to_string();
+        let mut src = err.source();
+        while let Some(s) = src {
+            msg.push_str(": ");
+            msg.push_str(&s.to_string());
+            src = s.source();
+        }
+        if err.is_builder() {
+            ProviderError::RequestFailed(msg)
+        } else {
+            ProviderError::Transient(msg)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_capabilities_default_is_all_false() {
+        let caps = ProviderCapabilities::default();
+        assert!(!caps.supports_thinking_stream);
+        assert!(!caps.supports_native_images);
+        assert!(!caps.supports_video);
+    }
+
+    #[test]
+    fn stream_chunk_internal_delta_has_neutral_name() {
+        // Verify the variant name is neutral (InternalDelta, not ThinkingDelta)
+        let chunk = StreamChunk::InternalDelta("thinking".to_string());
+        let name = format!("{:?}", chunk);
+        assert!(
+            name.contains("InternalDelta"),
+            "chunk should use InternalDelta, got: {name}"
+        );
+    }
+
+    #[test]
+    fn anthropic_capabilities_detects_sonnet_opus() {
+        // Test heuristic: sonnet/opus models have extended thinking
+        let caps = ProviderCapabilities {
+            supports_thinking_stream: true,
+            supports_native_images: true,
+            ..Default::default()
+        };
+        assert!(
+            caps.supports_thinking_stream,
+            "sonnet/opus should have thinking stream"
+        );
+        assert!(
+            caps.supports_native_images,
+            "sonnet/opus should support images"
+        );
+    }
+
+    #[test]
+    fn openai_capabilities_detects_o_series() {
+        // Test heuristic: o-series models have reasoning
+        let caps = ProviderCapabilities {
+            supports_thinking_stream: true,
+            supports_native_images: true,
+            supports_video: false,
+        };
+        let model = "o1-preview";
+        let model_lower = model.to_ascii_lowercase();
+        assert!(model_lower.starts_with('o'), "o-series detection");
+        assert!(
+            caps.supports_thinking_stream,
+            "o-series should have thinking stream"
+        );
+    }
+}

@@ -1,0 +1,2732 @@
+use crate::context_manager::{ContextManager, ContextManagerConfig, ContextStats};
+use crate::ipc::{IpcHandle, IpcServer};
+use crate::last_session::LastSessionStore;
+use crate::memory_store::{MemoryNote, MemoryStore};
+use crate::model_limits_api;
+use crate::pty::PtyManager;
+use crate::session_store::SessionStore;
+use chrono::Utc;
+use dcode_ai_common::config::DcodeAiConfig;
+use dcode_ai_common::event::{
+    AgentCommand, AgentEvent, EndReason, EventEnvelope, QuestionSelection,
+};
+use dcode_ai_common::message::{Message, MessageContent, Role};
+use dcode_ai_common::session::{
+    OrchestrationContext, SessionMeta, SessionSnapshot, SessionState, SessionStatus,
+};
+use dcode_ai_core::agent::AgentLoop;
+use dcode_ai_core::approval::{ApprovalHandler, ApprovalPolicy, ApprovalVerdict};
+use dcode_ai_core::harness::build_system_prompt;
+use dcode_ai_core::hooks::{HookEventKind, HookRunner};
+use dcode_ai_core::provider::ProviderError;
+use dcode_ai_core::provider::factory::build_provider;
+use dcode_ai_core::tools::AskQuestionTool;
+use dcode_ai_core::tools::InvokeSkillTool;
+use dcode_ai_core::tools::ToolRegistry;
+use dcode_ai_core::tools::mcp::{McpConnectionManager, load_mcp_tools_tolerant};
+use dcode_ai_core::tools::spawn_subagent::{SpawnRequest, SpawnSubagentTool};
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::{mpsc, oneshot};
+
+pub mod session;
+pub use self::session::*;
+pub mod subagent;
+pub use self::subagent::*;
+
+pub type ApprovalPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalVerdict>>>>;
+pub type QuestionPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<QuestionSelection>>>>;
+type EventFanoutCallback = Box<dyn Fn(&EventEnvelope) + Send>;
+
+/// Reusable runtime supervisor that owns session lifecycle, IPC, event fanout,
+/// and command handling.
+pub struct Supervisor {
+    pub session_id: String,
+    pub session_name: Option<String>,
+    pub workspace_root: PathBuf,
+    pub model: String,
+    pub created_at: chrono::DateTime<Utc>,
+    status: SessionStatus,
+    pid: Option<u32>,
+    socket_path: Option<PathBuf>,
+    agent: AgentLoop,
+    session_store: SessionStore,
+    ipc_handle: Option<IpcHandle>,
+    event_rx: Option<mpsc::Receiver<AgentEvent>>,
+    approval_pending: Option<ApprovalPendingMap>,
+    question_pending: Option<QuestionPendingMap>,
+    spawn_rx: Option<mpsc::Receiver<SpawnRequest>>,
+    worktree_path: Option<PathBuf>,
+    branch: Option<String>,
+    base_branch: Option<String>,
+    parent_session_id: Option<String>,
+    child_session_ids: Vec<String>,
+    inherited_summary: Option<String>,
+    spawn_reason: Option<String>,
+    session_summary: Option<String>,
+    orchestration: Option<OrchestrationContext>,
+    config: DcodeAiConfig,
+    hooks: Option<HookRunner>,
+    context_manager: ContextManager,
+    last_summary_at_tokens: usize,
+    interactive_handle: crate::interactive_exec::InteractiveExecHandle,
+    preview_handle: crate::preview_tool::PreviewHandle,
+    mcp_manager: Arc<McpConnectionManager>,
+}
+
+/// Configuration for creating a new supervised session.
+pub struct SupervisorConfig {
+    pub config: DcodeAiConfig,
+    pub workspace_root: PathBuf,
+    pub safe_mode: bool,
+    pub interactive_approvals: bool,
+    pub session_id: Option<String>,
+    pub approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    pub orchestration_context: Option<OrchestrationContext>,
+}
+
+/// A handle returned to callers for interacting with a running supervisor.
+/// The supervisor itself runs in a background task; this handle provides
+/// the control surface.
+pub struct SupervisorHandle {
+    pub session_id: String,
+    pub workspace_root: PathBuf,
+    pub model: String,
+    pub socket_path: Option<PathBuf>,
+    pub event_log_path: PathBuf,
+    event_rx: Option<mpsc::Receiver<AgentEvent>>,
+    ipc_handle: Option<IpcHandle>,
+    approval_pending: Option<ApprovalPendingMap>,
+    question_pending: Option<QuestionPendingMap>,
+    spawn_rx: Option<mpsc::Receiver<SpawnRequest>>,
+}
+
+impl SupervisorHandle {
+    pub fn take_event_rx(&mut self) -> Option<mpsc::Receiver<AgentEvent>> {
+        self.event_rx.take()
+    }
+
+    pub fn take_ipc_handle(&mut self) -> Option<IpcHandle> {
+        self.ipc_handle.take()
+    }
+
+    pub fn take_approval_pending(&mut self) -> Option<ApprovalPendingMap> {
+        self.approval_pending.take()
+    }
+
+    /// Returns a clone of the approval pending map (shared `Arc` reference)
+    /// without taking ownership. Used by `SessionRuntime` to persist the
+    /// reference for cancel-denial after the handle is consumed.
+    pub fn approval_pending_ref(&self) -> Option<ApprovalPendingMap> {
+        self.approval_pending.clone()
+    }
+
+    pub fn take_question_pending(&mut self) -> Option<QuestionPendingMap> {
+        self.question_pending.take()
+    }
+
+    pub fn take_spawn_rx(&mut self) -> Option<mpsc::Receiver<SpawnRequest>> {
+        self.spawn_rx.take()
+    }
+}
+
+impl Supervisor {
+    /// Create a new supervised session. This sets up the agent loop, IPC server,
+    /// and event channels.
+    pub async fn create(cfg: SupervisorConfig) -> Result<Self, ProviderError> {
+        let workspace_root = dcode_ai_common::config::simplify_path(
+            dcode_ai_common::config::canonicalize_simplified(&cfg.workspace_root).map_err(|e| {
+                ProviderError::Configuration(format!("invalid workspace root: {e}"))
+            })?,
+        );
+
+        let mut config = cfg.config;
+        if cfg.safe_mode {
+            config.permissions.deny.push("execute_bash".into());
+        }
+        ensure_private_gitignore(&workspace_root);
+
+        let provider = build_provider(&config)?;
+        let mut tools = if cfg.safe_mode {
+            ToolRegistry::with_default_readonly_tools(workspace_root.clone(), config.web.clone())
+        } else {
+            ToolRegistry::with_default_full_tools(workspace_root.clone(), config.web.clone())
+        };
+        // Cross-session memory: the agent saves durable notes with this tool;
+        // resolve_memory_path + the system-prompt section below recall them.
+        tools.register(Box::new(crate::memory_tool::SaveMemoryTool::new(
+            resolve_memory_path(&config, &workspace_root),
+            config.memory.max_notes,
+        )));
+        let (event_tx, event_rx) = mpsc::channel(256);
+
+        let (mcp_event_tx, mut mcp_event_rx) = mpsc::unbounded_channel();
+        let mcp_manager = Arc::new(McpConnectionManager::new(
+            workspace_root.clone(),
+            Some(mcp_event_tx),
+        ));
+
+        // Forward MCP events to the main event bus
+        let etx = event_tx.clone();
+        tokio::spawn(async move {
+            while let Some(event) = mcp_event_rx.recv().await {
+                let _ = etx.send(event).await;
+            }
+        });
+
+        if !config.mcp.servers.is_empty() && (!cfg.safe_mode || config.mcp.expose_in_safe_mode) {
+            let mcp_servers = config.mcp.servers.clone();
+            let manager = Arc::clone(&mcp_manager);
+            // Load MCP tools with a timeout to prevent startup hangs.
+            // One broken server must not hide the others' tools.
+            let mcp_result = tokio::time::timeout(
+                std::time::Duration::from_secs(15),
+                load_mcp_tools_tolerant(&manager, &mcp_servers),
+            )
+            .await;
+            match mcp_result {
+                Ok((mcp_tools, errors)) => {
+                    tracing::info!("loaded {} MCP tool(s)", mcp_tools.len());
+                    for (server, error) in errors {
+                        tracing::warn!("MCP server `{server}` failed: {error}");
+                    }
+                    for tool in mcp_tools {
+                        tools.register(tool);
+                    }
+                }
+                Err(_) => tracing::warn!("MCP tool load timed out after 15s — skipping"),
+            }
+        }
+
+        let pty = Arc::new(PtyManager::with_sandbox(
+            &workspace_root,
+            config.permissions.sandbox_bash,
+            crate::sandbox::expand_writable_roots(&config.permissions.sandbox_writable_roots),
+        ));
+        // RuntimeBashTool is registered after event_tx is created (below)
+        // so it can stream ToolOutputDelta events.
+
+        let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
+        if !cfg.safe_mode {
+            let agents = dcode_ai_core::agent_defs::discover(
+                &workspace_root,
+                &dcode_ai_common::plugins::enabled_plugins(),
+            )
+            .into_iter()
+            .map(|d| (d.name, d.description))
+            .collect();
+            tools.register(Box::new(
+                SpawnSubagentTool::new(spawn_tx).with_agents(agents),
+            ));
+        }
+
+        let approval_pending: Option<ApprovalPendingMap>;
+        let approval = if cfg.interactive_approvals {
+            match cfg.approval_handler {
+                Some(handler) => {
+                    approval_pending = None;
+                    ApprovalPolicy::new(config.permissions.clone()).with_handler(handler)
+                }
+                None => {
+                    let ipc_handler = IpcApprovalHandler::new();
+                    approval_pending = Some(ipc_handler.pending());
+                    ApprovalPolicy::new(config.permissions.clone())
+                        .with_handler(ipc_handler as Arc<dyn ApprovalHandler>)
+                }
+            }
+        } else {
+            approval_pending = None;
+            ApprovalPolicy::new(config.permissions.clone())
+                .fail_on_ask()
+                .with_handler(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>)
+        };
+        tools.register(Box::new(crate::bash_tool::RuntimeBashTool::with_event_tx(
+            pty,
+            event_tx.clone(),
+        )));
+        // PTY-backed interactive exec (answer prompts like sudo passwords, [y/N]).
+        let interactive_tool =
+            crate::interactive_exec::InteractiveExecTool::new(workspace_root.clone());
+        let interactive_handle = interactive_tool.handle();
+        tools.register(Box::new(interactive_tool));
+        // Agent-driven dev-server preview (`run_preview`, streams to the web chat UI).
+        let preview_tool =
+            crate::preview_tool::PreviewTool::new(workspace_root.clone(), event_tx.clone());
+        let preview_handle = preview_tool.handle();
+        tools.register(Box::new(preview_tool));
+        let question_pending = Arc::new(Mutex::new(HashMap::new()));
+        tools.register(Box::new(AskQuestionTool::new(
+            event_tx.clone(),
+            question_pending.clone(),
+        )));
+        tools.register(Box::new(InvokeSkillTool::new(
+            workspace_root.clone(),
+            config.harness.skill_directories.clone(),
+        )));
+        let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
+        let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+
+        // IPC is best-effort: a bind failure (port exhaustion, stale
+        // endpoint, permissions) should not prevent the session itself from
+        // running — only detached attach/logs/ipc control is lost.
+        let ipc_server = IpcServer::new(&session_id);
+        let ipc_handle = match ipc_server.start().await {
+            Ok(handle) => Some(handle),
+            Err(e) => {
+                tracing::warn!("IPC unavailable for {session_id}: {e}");
+                None
+            }
+        };
+        let socket_path = ipc_handle
+            .as_ref()
+            .map(|h| h.socket_path().clone())
+            .unwrap_or_else(|| ipc_server.socket_path());
+
+        let _ = event_tx.try_send(AgentEvent::SessionStarted {
+            session_id: session_id.clone(),
+            workspace: workspace_root.clone(),
+            model: config.model.default_model.clone(),
+        });
+
+        let created_at = Utc::now();
+        let hook_runner = {
+            let runner = HookRunner::new(config.hooks.clone());
+            runner.has_any().then_some(runner)
+        };
+        let mut agent = AgentLoop::new(
+            provider,
+            tools,
+            approval,
+            config.model.default_model.clone(),
+            event_tx.clone(),
+            config.session.max_turns_per_run,
+            config.session.max_tool_calls_per_turn,
+            config.session.checkpoint_interval,
+            hook_runner.clone(),
+        );
+        agent.max_cost_usd = config.session.max_cost_usd;
+        let mut system_prompt =
+            build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
+        if let Some(section) = memory_prompt_section(&config, &workspace_root) {
+            system_prompt.push_str(&section);
+        }
+        agent.set_system_prompt(system_prompt);
+
+        let context_manager =
+            Self::make_context_manager(&config, &config.model.default_model).await;
+        // Give the agent the same input budget compaction uses, so a long
+        // tool-heavy turn trims older tool outputs mid-turn instead of
+        // ballooning the prompt (which slows every model call to a crawl).
+        agent.set_context_token_limit(context_manager.config().context_window_target);
+
+        // Refresh the accurate context window from the provider API in the
+        // background and persist it for the next launch — never on the startup
+        // path (a `/models` lookup can take seconds). Only when auto-detection
+        // is enabled and the API-query opt-in is on.
+        if config.memory.context.auto_detect_context_window
+            && config.memory.context.query_provider_models_api
+        {
+            let cfg = config.clone();
+            let model = config.model.default_model.clone();
+            tokio::spawn(async move {
+                model_limits_api::refresh_and_persist(cfg, model).await;
+            });
+        }
+
+        let sup = Self {
+            session_id,
+            session_name: None,
+            workspace_root,
+            model: config.model.default_model.clone(),
+            created_at,
+            status: SessionStatus::Running,
+            pid: Some(std::process::id()),
+            socket_path: Some(socket_path),
+            agent,
+            session_store,
+            ipc_handle,
+            event_rx: Some(event_rx),
+            approval_pending,
+            question_pending: Some(question_pending),
+            spawn_rx: Some(spawn_rx),
+            worktree_path: None,
+            branch: None,
+            base_branch: None,
+            parent_session_id: None,
+            child_session_ids: Vec::new(),
+            inherited_summary: None,
+            spawn_reason: None,
+            session_summary: None,
+            orchestration: cfg.orchestration_context,
+            config,
+            hooks: hook_runner,
+            context_manager,
+            last_summary_at_tokens: 0,
+            interactive_handle,
+            preview_handle,
+            mcp_manager,
+        };
+        sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
+            .await;
+        Ok(sup)
+    }
+
+    /// Resume an existing session by loading its state and creating a fresh
+    /// IPC server + agent loop.
+    pub async fn resume(
+        config: DcodeAiConfig,
+        workspace_root: &Path,
+        safe_mode: bool,
+        interactive_approvals: bool,
+        session_id: &str,
+        approval_handler: Option<Arc<dyn ApprovalHandler>>,
+    ) -> Result<Self, ProviderError> {
+        let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let mut loaded = store
+            .load(session_id)
+            .await
+            .map_err(|e| ProviderError::Other(e.to_string()))?;
+        // Resume on the provider the session ran on (its model ids belong
+        // there), when that provider is usable.
+        let mut config = config;
+        if let Some(kind) = loaded.meta.provider
+            && kind != config.provider.default
+        {
+            let mut switched = config.clone();
+            switched.set_default_provider(kind);
+            switched.apply_model_override(&loaded.meta.model);
+            if build_provider(&switched).is_ok() {
+                config = switched;
+            } else {
+                tracing::warn!(
+                    "session ran on {kind:?}, which is not available; resuming on {:?}",
+                    config.provider.default
+                );
+            }
+        }
+        // Self-heal for sessions that were previously overwritten on resume:
+        // if the snapshot has no non-system messages, recover user/assistant
+        // turns from the persisted event log so model context is restored.
+        let non_system_messages = loaded
+            .messages
+            .iter()
+            .filter(|m| m.role != Role::System)
+            .count();
+        if non_system_messages == 0 {
+            let recovered = recover_messages_from_event_log(
+                &store
+                    .sessions_dir()
+                    .join(format!("{session_id}.events.jsonl")),
+            )
+            .await;
+            if !recovered.is_empty() {
+                let mut merged: Vec<Message> = loaded
+                    .messages
+                    .iter()
+                    .take_while(|m| m.role == Role::System)
+                    .cloned()
+                    .collect();
+                merged.extend(recovered);
+                loaded.messages = merged;
+            }
+        }
+
+        // Bootstrap runtime/IPC infrastructure with a fresh ephemeral session ID,
+        // then swap in the loaded persisted state. Never call `create()` with the
+        // target resume ID directly: `create()` saves immediately, which would
+        // overwrite the persisted session before we load it.
+        let mut sup = Self::create(SupervisorConfig {
+            config: config.clone(),
+            workspace_root: workspace_root.to_path_buf(),
+            safe_mode,
+            interactive_approvals,
+            session_id: None,
+            approval_handler,
+            orchestration_context: None,
+        })
+        .await?;
+        let bootstrap_id = sup.session_id.clone();
+
+        sup.session_id = loaded.meta.id.clone();
+        sup.session_name = loaded.meta.session_name.clone();
+        sup.workspace_root = loaded.meta.workspace.clone();
+        // Keep the session's model only when it belongs to the provider we
+        // resumed on; an old session (no recorded provider) may name a model
+        // the current provider does not serve.
+        if model_fits_provider(&loaded.meta.model, config.provider.default) {
+            sup.model = loaded.meta.model.clone();
+            sup.agent.model = loaded.meta.model.clone();
+        } else {
+            tracing::warn!(
+                "session model `{}` is not served by {:?}; keeping `{}`",
+                loaded.meta.model,
+                config.provider.default,
+                sup.model
+            );
+        }
+        sup.created_at = loaded.meta.created_at;
+        sup.status = loaded.meta.status;
+        sup.pid = Some(std::process::id());
+        sup.agent.messages = loaded.messages;
+        sup.session_store = store;
+        sup.worktree_path = loaded.meta.worktree_path;
+        sup.branch = loaded.meta.branch;
+        sup.base_branch = loaded.meta.base_branch;
+        sup.parent_session_id = loaded.meta.parent_session_id;
+        sup.child_session_ids = loaded.meta.child_session_ids;
+        sup.inherited_summary = loaded.meta.inherited_summary;
+        sup.spawn_reason = loaded.meta.spawn_reason;
+        sup.session_summary = loaded.meta.session_summary;
+        sup.orchestration = loaded.meta.orchestration;
+        sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
+        sup.agent
+            .set_context_token_limit(sup.context_manager.config().context_window_target);
+
+        // Best-effort cleanup of the bootstrap snapshot created by `create()`.
+        // Ignore failures here because it is non-critical.
+        let _ = sup.session_store.delete(&bootstrap_id).await;
+        // Keep last-session pointer consistent with the resumed session.
+        let _ = sup.update_last_session().await;
+        Ok(sup)
+    }
+
+    /// Extract a handle for the caller. The handle provides event_rx, ipc_handle,
+    /// approval_pending, and spawn_rx for wiring into stream/command tasks.
+    pub fn take_handle(&mut self) -> SupervisorHandle {
+        SupervisorHandle {
+            session_id: self.session_id.clone(),
+            workspace_root: self.workspace_root.clone(),
+            model: self.model.clone(),
+            socket_path: self.socket_path.clone(),
+            event_log_path: self.event_log_path(),
+            event_rx: self.event_rx.take(),
+            ipc_handle: self.ipc_handle.take(),
+            approval_pending: self.approval_pending.take(),
+            question_pending: self.question_pending.take(),
+            spawn_rx: self.spawn_rx.take(),
+        }
+    }
+
+    pub fn event_log_path(&self) -> PathBuf {
+        self.session_store
+            .sessions_dir()
+            .join(format!("{}.events.jsonl", self.session_id))
+    }
+
+    /// A prompt refused before it reaches the agent still shows in the
+    /// transcript (above the error), as it would have on success.
+    async fn echo_rejected_prompt(&self, prompt: &str) {
+        if let Some(tx) = self.agent.event_sender() {
+            let preview = dcode_ai_common::message::Message::user_with_parts(vec![
+                dcode_ai_common::message::ContentPart::Text {
+                    text: prompt.to_string(),
+                },
+            ])
+            .event_preview();
+            let _ = tx
+                .send(AgentEvent::MessageReceived {
+                    role: "user".into(),
+                    content: preview,
+                })
+                .await;
+        }
+    }
+
+    pub async fn run_turn(&mut self, prompt: &str) -> Result<String, ProviderError> {
+        self.run_turn_with_images(prompt, &[]).await
+    }
+
+    /// Like [`run_turn`], but attaches on-disk images (paths relative to workspace) for vision models.
+    pub async fn run_turn_with_images(
+        &mut self,
+        prompt: &str,
+        attachments: &[dcode_ai_common::message::ImageAttachment],
+    ) -> Result<String, ProviderError> {
+        if let Some(hooks) = &self.hooks
+            && let Err(reason) = hooks
+                .run(
+                    HookEventKind::UserPromptSubmit,
+                    None,
+                    &json!({ "session_id": self.session_id, "prompt": prompt }),
+                )
+                .await
+        {
+            self.echo_rejected_prompt(prompt).await;
+            return Err(ProviderError::Configuration(format!(
+                "prompt blocked by UserPromptSubmit hook: {reason}"
+            )));
+        }
+        let result = self.run_turn_inner(prompt, attachments).await;
+        let status = if result.is_ok() { "completed" } else { "error" };
+        self.run_session_hook(
+            HookEventKind::Stop,
+            json!({ "session_id": self.session_id, "status": status }),
+        )
+        .await;
+        result
+    }
+
+    async fn run_turn_inner(
+        &mut self,
+        prompt: &str,
+        attachments: &[dcode_ai_common::message::ImageAttachment],
+    ) -> Result<String, ProviderError> {
+        if self.session_name.is_none()
+            && let Some(name) = derive_session_name(prompt)
+        {
+            self.session_name = Some(name);
+        }
+
+        if !attachments.is_empty()
+            && !dcode_ai_common::model_caps::model_accepts_native_images(
+                self.config.provider.default,
+                self.model.as_str(),
+            )
+        {
+            self.echo_rejected_prompt(prompt).await;
+            return Err(ProviderError::Configuration(format!(
+                "native images are not supported for provider {} with model `{}` (pick a vision-capable model or remove image attachments)",
+                self.config.provider.default.display_name(),
+                self.model
+            )));
+        }
+
+        // Check context before running turn
+        self.maybe_compact_context().await;
+
+        let mut output = self
+            .agent
+            .run_turn(prompt, self.workspace_root.as_path(), attachments)
+            .await;
+
+        // If a turn still overflows after proactive compaction, force one compaction
+        // pass and retry once automatically so the session continues without manual
+        // "continue" prompts.
+        if let Err(ref err) = output
+            && is_context_limit_error(err)
+            && self.context_manager.config().enable_auto_summarize
+        {
+            if let Some(tx) = self.agent.event_sender() {
+                let _ = tx
+                    .send(AgentEvent::ContextCompaction {
+                        phase: "retry".to_string(),
+                        message:
+                            "Context limit hit during turn. Compacting and retrying automatically."
+                                .to_string(),
+                        context_tokens: self
+                            .context_manager
+                            .stats(&self.agent.messages)
+                            .estimated_tokens as u64,
+                    })
+                    .await;
+            }
+            if self.perform_auto_summarize().await.is_ok() {
+                output = self
+                    .agent
+                    .run_turn(prompt, self.workspace_root.as_path(), attachments)
+                    .await;
+            }
+
+            // Some backends (notably the Claude CLI bridge) reject prompts well
+            // under the model's nominal window because of system-prompt/tool
+            // overhead and token-estimate slack — a single summarize pass that
+            // still keeps ~50 recent (possibly huge) messages isn't enough. Fall
+            // back to progressively harder trimming until the turn fits or we can
+            // no longer shrink the history.
+            let mut keep = self.context_manager.config().max_retained_messages;
+            let mut guard = 0u32;
+            while guard < 4 && matches!(&output, Err(e) if is_context_limit_error(e)) {
+                guard += 1;
+                keep = (keep / 2).max(3);
+                let before = self.agent.messages.len();
+                let trimmed = self
+                    .context_manager
+                    .get_sliding_window(&self.agent.messages, Some(keep));
+                self.agent.compact_messages(trimmed);
+                if self.agent.messages.len() >= before {
+                    break; // already minimal; further retries won't help
+                }
+                if let Some(tx) = self.agent.event_sender() {
+                    let _ = tx
+                        .send(AgentEvent::ContextCompaction {
+                            phase: "retry".to_string(),
+                            message:
+                                "Prompt still too large — trimming older context and retrying."
+                                    .to_string(),
+                            context_tokens: self
+                                .context_manager
+                                .stats(&self.agent.messages)
+                                .estimated_tokens
+                                as u64,
+                        })
+                        .await;
+                }
+                output = self
+                    .agent
+                    .run_turn(prompt, self.workspace_root.as_path(), attachments)
+                    .await;
+            }
+
+            // Final safety net: if trimming message COUNT still isn't enough, a
+            // single retained message (e.g. a giant tool output) alone exceeds
+            // the budget — truncate oversized message contents until it fits.
+            // `truncate_message_contents` leaves messages under the cap untouched,
+            // so this only affects the genuinely huge ones.
+            let mut cap_chars = 16_000usize;
+            let mut guard2 = 0u32;
+            while guard2 < 4 && matches!(&output, Err(e) if is_context_limit_error(e)) {
+                guard2 += 1;
+                cap_chars = (cap_chars / 2).max(1_000);
+                let capped = self
+                    .context_manager
+                    .truncate_message_contents(&self.agent.messages, cap_chars);
+                self.agent.compact_messages(capped);
+                if let Some(tx) = self.agent.event_sender() {
+                    let _ = tx
+                        .send(AgentEvent::ContextCompaction {
+                            phase: "retry".to_string(),
+                            message:
+                                "Prompt still too large — truncating large messages and retrying."
+                                    .to_string(),
+                            context_tokens: self
+                                .context_manager
+                                .stats(&self.agent.messages)
+                                .estimated_tokens
+                                as u64,
+                        })
+                        .await;
+                }
+                output = self
+                    .agent
+                    .run_turn(prompt, self.workspace_root.as_path(), attachments)
+                    .await;
+            }
+        }
+
+        let output = output?;
+
+        // Check context after turn
+        self.check_and_summarize_context().await;
+
+        self.refresh_session_summary();
+        self.save().await.map_err(ProviderError::Other)?;
+        self.update_last_session()
+            .await
+            .map_err(ProviderError::Other)?;
+        Ok(output)
+    }
+
+    /// Get current context statistics with model info.
+    pub fn context_stats(&self) -> ContextStats {
+        self.context_manager.stats(&self.agent.messages)
+    }
+
+    async fn make_context_manager(config: &DcodeAiConfig, model: &str) -> ContextManager {
+        // Startup must not block on the network. Use the on-disk cached window
+        // (from a previous run's background refresh) if present, else the static
+        // built-in table. The accurate value is refreshed in the background (see
+        // `create`) and persisted for the next launch.
+        let raw_window = if config.memory.context.auto_detect_context_window {
+            let window = model_limits_api::cached_context_window(config, model)
+                .unwrap_or_else(|| crate::model_limits::detect_context_window(model));
+            tracing::info!("Context window for {model}: {window} tokens (cached/static)");
+            window
+        } else {
+            config.memory.context.context_window_target
+        };
+
+        // Reserve headroom so the retained *input* never fills the whole window:
+        // the request also needs room for the model's output plus the system
+        // prompt and tool definitions. Without this the input alone can reach the
+        // limit and the provider returns "prompt is too long". The Claude Code
+        // backend inlines every tool schema into its system prompt, so it
+        // reserves more.
+        let claude_cli_bridge = matches!(
+            config.provider.default,
+            dcode_ai_common::config::ProviderKind::Anthropic
+        ) && config.provider.anthropic.backend
+            == dcode_ai_common::config::AnthropicBackend::ClaudeCode;
+        let output_reserve = crate::model_limits::detect_max_output_tokens(model);
+        let overhead_reserve = if claude_cli_bridge { 40_000 } else { 16_000 };
+        let context_window = raw_window
+            .saturating_sub(output_reserve + overhead_reserve)
+            .max(raw_window / 2)
+            .max(8_000);
+
+        let context_config = ContextManagerConfig {
+            context_window_target: context_window,
+            max_retained_messages: config.memory.context.max_retained_messages,
+            auto_summarize_threshold: config.memory.context.auto_summarize_threshold,
+            enable_auto_summarize: config.memory.context.enable_auto_summarize,
+            max_message_chars_for_summary: 10000,
+        };
+        ContextManager::new(context_config, model.to_string())
+    }
+
+    /// Check context and compact proactively before running a model request.
+    /// This is called BEFORE each turn to prevent context-window errors.
+    async fn maybe_compact_context(&mut self) {
+        if !self.context_manager.config().enable_auto_summarize {
+            return;
+        }
+
+        let stats = self.context_manager.stats(&self.agent.messages);
+
+        // Emit warning at 80% threshold
+        if stats.needs_attention
+            && let Some(tx) = self.agent.event_sender()
+        {
+            let _ = tx
+                .send(AgentEvent::ContextWarning {
+                    message: format!(
+                        "Context window at {}% ({} tokens). Consider summarizing.",
+                        stats.usage_percent, stats.estimated_tokens
+                    ),
+                })
+                .await;
+        }
+
+        // Proactively compact before the turn if we should summarize
+        if stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens) {
+            if let Some(tx) = self.agent.event_sender() {
+                let _ = tx
+                    .send(AgentEvent::ContextCompaction {
+                        phase: "starting".to_string(),
+                        message: format!(
+                            "Proactive compaction before turn ({}% full, {} tokens)",
+                            stats.usage_percent, stats.estimated_tokens
+                        ),
+                        context_tokens: stats.estimated_tokens as u64,
+                    })
+                    .await;
+            }
+
+            match self.perform_auto_summarize().await {
+                Ok(()) => {
+                    tracing::debug!(
+                        "proactive compaction reduced context from {} to {} tokens",
+                        stats.estimated_tokens,
+                        self.context_manager
+                            .stats(&self.agent.messages)
+                            .estimated_tokens
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("proactive compaction failed: {e}");
+                    self.last_summary_at_tokens = 0;
+                }
+            }
+        }
+    }
+
+    /// Check if context should be summarized after a turn completes.
+    async fn check_and_summarize_context(&mut self) {
+        if !self.context_manager.config().enable_auto_summarize {
+            return;
+        }
+
+        let stats = self.context_manager.stats(&self.agent.messages);
+
+        // Only compact if we missed it before the turn (e.g., context grew during turn)
+        if stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens) {
+            if let Some(tx) = self.agent.event_sender() {
+                let _ = tx
+                    .send(AgentEvent::ContextCompaction {
+                        phase: "starting".to_string(),
+                        message: format!(
+                            "Post-turn compaction ({}% full, {} tokens)",
+                            stats.usage_percent, stats.estimated_tokens
+                        ),
+                        context_tokens: stats.estimated_tokens as u64,
+                    })
+                    .await;
+            }
+
+            if let Err(e) = self.perform_auto_summarize().await {
+                tracing::warn!("post-turn compaction failed: {e}");
+                self.last_summary_at_tokens = 0;
+            }
+        }
+    }
+
+    /// Perform auto-summarization: generate a summary and apply it to agent messages.
+    /// `pre_compact` hooks; `trigger` is `auto` or `manual`.
+    pub async fn run_pre_compact_hooks(&self, trigger: &str) {
+        self.run_session_hook(
+            HookEventKind::PreCompact,
+            json!({ "session_id": self.session_id, "trigger": trigger }),
+        )
+        .await;
+    }
+
+    async fn perform_auto_summarize(&mut self) -> Result<(), String> {
+        self.run_pre_compact_hooks("auto").await;
+        let messages_to_summarize = self
+            .context_manager
+            .get_messages_to_summarize(&self.agent.messages);
+
+        if messages_to_summarize.is_empty() {
+            // Nothing to summarize — use sliding window compaction
+            let compacted = self
+                .context_manager
+                .get_sliding_window(&self.agent.messages, None);
+            let new_count = self.agent.compact_messages(compacted);
+            let new_stats = self.context_manager.stats(&self.agent.messages);
+            self.last_summary_at_tokens = new_stats.estimated_tokens;
+
+            if let Some(tx) = self.agent.event_sender() {
+                let _ = tx
+                    .send(AgentEvent::ContextCompaction {
+                        phase: "completed".to_string(),
+                        message: format!(
+                            "Context compacted via sliding window. {} messages → {} messages",
+                            new_count + messages_to_summarize.len(),
+                            new_count
+                        ),
+                        context_tokens: new_stats.estimated_tokens as u64,
+                    })
+                    .await;
+            }
+            return Ok(());
+        };
+
+        // Generate summary prompt
+        let summary_prompt = self.context_manager.summary_prompt(&messages_to_summarize);
+        let old_count = self.agent.messages.len();
+
+        // Try AI summarization first, fall back to extractive
+        let summary_text = match self.summarize_with_ai(&summary_prompt).await {
+            Ok(s) if !s.trim().is_empty() => s,
+            Ok(_) | Err(_) => {
+                tracing::warn!("AI summarization returned empty, using extractive fallback");
+                build_compaction_fallback_summary(&messages_to_summarize)
+            }
+        };
+
+        // Apply summary through agent to keep it isolated
+        let compacted = self
+            .context_manager
+            .apply_summary(&self.agent.messages, &summary_text);
+        let new_count = self.agent.compact_messages(compacted);
+        let new_stats = self.context_manager.stats(&self.agent.messages);
+        self.last_summary_at_tokens = new_stats.estimated_tokens;
+
+        if let Some(tx) = self.agent.event_sender() {
+            let _ = tx
+                .send(AgentEvent::ContextCompaction {
+                    phase: "completed".to_string(),
+                    message: format!(
+                        "Context summarized: {} messages → {} messages (~{} tokens)",
+                        old_count, new_count, new_stats.estimated_tokens
+                    ),
+                    context_tokens: new_stats.estimated_tokens as u64,
+                })
+                .await;
+        }
+
+        Ok(())
+    }
+
+    fn summary_rearm_ready(&mut self, current_tokens: usize) -> bool {
+        if self.last_summary_at_tokens == 0 {
+            return true;
+        }
+        if current_tokens < self.last_summary_at_tokens {
+            self.last_summary_at_tokens = 0;
+            return true;
+        }
+        let rearm_delta = (self.context_manager.config().context_window_target / 10).max(1024);
+        current_tokens.saturating_sub(self.last_summary_at_tokens) >= rearm_delta
+    }
+
+    /// Use AI to generate a summary of the conversation.
+    async fn summarize_with_ai(&self, prompt: &str) -> Result<String, String> {
+        // `[model] compact_model` routes summaries to a cheaper model.
+        let summary_model = self
+            .config
+            .model
+            .compact_model
+            .as_deref()
+            .map(|m| self.config.model.resolve_alias(m))
+            .unwrap_or_else(|| self.model.clone());
+        use dcode_ai_common::message::Message;
+
+        let messages = vec![Message::user(prompt)];
+
+        let mut stream = self
+            .agent
+            .provider
+            .chat(
+                &messages,
+                &[],
+                &summary_model,
+                self.workspace_root.as_path(),
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        // Collect the response
+        let mut summary = String::new();
+        while let Some(chunk) = stream.recv().await {
+            match chunk {
+                dcode_ai_core::provider::StreamChunk::TextDelta(delta) => {
+                    summary.push_str(&delta);
+                }
+                dcode_ai_core::provider::StreamChunk::Done => break,
+                _ => {}
+            }
+        }
+
+        let summary = summary.trim().to_string();
+        if summary.is_empty() {
+            return Err("provider returned empty compaction summary".to_string());
+        }
+        Ok(summary)
+    }
+
+    pub async fn finish(&mut self, reason: EndReason) {
+        self.status = match reason {
+            EndReason::Completed | EndReason::UserExit => SessionStatus::Completed,
+            EndReason::Error => SessionStatus::Error,
+            EndReason::Cancelled => SessionStatus::Cancelled,
+        };
+        if let Some(tx) = self.agent.event_sender() {
+            let _ = tx
+                .send(AgentEvent::SessionEnded {
+                    reason: reason.clone(),
+                })
+                .await;
+        }
+        self.refresh_session_summary();
+        if self.config.memory.auto_compact_on_finish {
+            let _ = self
+                .append_memory_note("session-summary", self.session_summary.clone())
+                .await;
+        }
+        self.run_session_hook(
+            HookEventKind::SessionEnd,
+            json!({
+                "reason": format!("{reason:?}"),
+                "session": self.snapshot(),
+            }),
+        )
+        .await;
+
+        // Stop any dev-server preview job so it doesn't linger past the session.
+        self.preview_handle.stop();
+
+        // Shutdown MCP servers
+        self.mcp_manager.shutdown_all().await;
+
+        if self.should_persist_session() {
+            let _ = self.save().await;
+            let _ = self.update_last_session().await;
+        } else {
+            // Session had no meaningful interaction; remove no-op artifacts.
+            let _ = self.session_store.delete(&self.session_id).await;
+        }
+    }
+
+    pub async fn save(&self) -> Result<(), String> {
+        if !self.should_persist_session() {
+            return Ok(());
+        }
+        let session = self.current_session_state(Utc::now());
+        self.session_store
+            .save(&session)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    /// Mark this session as the last active session for the workspace.
+    /// Called after meaningful activity (resume/run_turn/finish) to keep the pointer fresh.
+    pub async fn update_last_session(&self) -> Result<(), String> {
+        let store = LastSessionStore::new(
+            self.workspace_root
+                .join(&self.config.session.last_session_file),
+        );
+        store
+            .save(&self.session_id)
+            .await
+            .map_err(|e| e.to_string())
+    }
+
+    fn current_session_state(&self, updated_at: chrono::DateTime<Utc>) -> SessionState {
+        SessionState {
+            meta: SessionMeta {
+                id: self.session_id.clone(),
+                session_name: self.session_name.clone(),
+                created_at: self.created_at,
+                updated_at,
+                workspace: self.workspace_root.clone(),
+                model: self.model.clone(),
+                provider: Some(self.config.provider.default),
+                status: self.status.clone(),
+                pid: self.pid,
+                socket_path: self.socket_path.clone(),
+                worktree_path: self.worktree_path.clone(),
+                branch: self.branch.clone(),
+                base_branch: self.base_branch.clone(),
+                parent_session_id: self.parent_session_id.clone(),
+                child_session_ids: self.child_session_ids.clone(),
+                inherited_summary: self.inherited_summary.clone(),
+                spawn_reason: self.spawn_reason.clone(),
+                session_summary: self.session_summary.clone(),
+                orchestration: self.orchestration.clone(),
+            },
+            messages: self.agent.messages.clone(),
+            total_input_tokens: self.agent.cost_tracker.input_tokens,
+            total_output_tokens: self.agent.cost_tracker.output_tokens,
+            estimated_cost_usd: self.agent.cost_tracker.estimated_cost_usd(),
+        }
+    }
+
+    fn should_persist_session(&self) -> bool {
+        // Ignore seed/system bootstrap content.
+        let has_non_system_message = self.agent.messages.iter().any(|m| {
+            !matches!(m.role, Role::System)
+                && match &m.content {
+                    MessageContent::Text(text) => !text.trim().is_empty(),
+                    MessageContent::Parts(parts) => !parts.is_empty(),
+                }
+        });
+
+        has_non_system_message
+            || self.agent.cost_tracker.input_tokens > 0
+            || self.agent.cost_tracker.output_tokens > 0
+            || self
+                .session_name
+                .as_ref()
+                .is_some_and(|name| !name.trim().is_empty())
+            || self.parent_session_id.is_some()
+            || !self.child_session_ids.is_empty()
+            || self.orchestration.is_some()
+    }
+
+    pub fn snapshot(&self) -> SessionSnapshot {
+        self.current_session_state(Utc::now()).snapshot()
+    }
+
+    pub fn compact_summary(&self) -> String {
+        build_parent_summary(&self.agent.messages)
+    }
+
+    pub fn compaction_preview(&self) -> String {
+        build_compaction_preview_summary(&self.context_manager, &self.agent.messages)
+    }
+
+    pub fn set_session_summary(&mut self, summary: Option<String>) {
+        self.session_summary = summary.filter(|summary| !summary.trim().is_empty());
+    }
+
+    pub async fn append_memory_note(
+        &self,
+        kind: &str,
+        content: Option<String>,
+    ) -> Result<(), String> {
+        let content = content
+            .map(|content| content.trim().to_string())
+            .filter(|content| !content.is_empty())
+            .ok_or_else(|| "memory note content is empty".to_string())?;
+        let store = MemoryStore::new(self.memory_store_path());
+        let note = MemoryNote {
+            id: format!("{}-{}", kind, Utc::now().timestamp_millis()),
+            created_at: Utc::now(),
+            kind: kind.to_string(),
+            title: Some(
+                self.session_name
+                    .clone()
+                    .unwrap_or_else(|| self.session_id.clone()),
+            ),
+            content,
+        };
+        store
+            .append_note(note, self.config.memory.max_notes)
+            .await
+            .map(|_| ())
+    }
+
+    pub fn memory_store_path(&self) -> PathBuf {
+        resolve_memory_path(&self.config, &self.workspace_root)
+    }
+
+    /// Fork the current session: keep the full conversation but assign a new
+    /// session ID, recording the original as the parent. The original session
+    /// file is left untouched; future saves go to the new ID.
+    pub fn fork_session(&mut self) -> String {
+        let parent = self.session_id.clone();
+        self.session_id = generate_session_id();
+        self.parent_session_id = Some(parent);
+        self.session_name = self.session_name.take().map(|n| format!("{n} (fork)"));
+        self.child_session_ids.clear();
+        self.session_id.clone()
+    }
+
+    /// Snapshot the conversation messages — used by `/side` to start an
+    /// ephemeral aside whose context is thrown away on return.
+    pub fn snapshot_messages(&self) -> Vec<Message> {
+        self.agent.messages.clone()
+    }
+
+    /// Restore messages captured by [`snapshot_messages`], discarding anything
+    /// added since (returning from a `/side` aside to the main thread).
+    pub fn restore_messages(&mut self, messages: Vec<Message>) {
+        self.agent.messages = messages;
+        self.agent.invalidate_rewind_positions();
+    }
+
+    /// Write a line to an `interactive_exec` session's stdin locally (e.g. the
+    /// user typing a password via `/input`). The text never reaches the model.
+    pub fn interactive_write(&self, id: u32, text: &str) -> Result<(), String> {
+        self.interactive_handle.write_line(id, text)
+    }
+
+    /// List active interactive sessions as `(id, running, command)`.
+    pub fn interactive_sessions(&self) -> Vec<(u32, bool, String)> {
+        self.interactive_handle.sessions()
+    }
+
+    /// Reset for a fresh session: new ID, rebuild system prompt, clear lineage and cost.
+    pub fn reset_for_new_session(&mut self) {
+        self.session_id = generate_session_id();
+        self.session_name = None;
+        self.agent.messages.clear();
+        self.agent.invalidate_rewind_positions();
+        let mut system_prompt = build_system_prompt(
+            &self.config,
+            &self.workspace_root,
+            self.orchestration.as_ref(),
+        );
+        if let Some(section) = memory_prompt_section(&self.config, &self.workspace_root) {
+            system_prompt.push_str(&section);
+        }
+        self.agent.set_system_prompt(system_prompt);
+        self.child_session_ids.clear();
+        self.parent_session_id = None;
+        self.inherited_summary = None;
+        self.spawn_reason = None;
+        self.session_summary = None;
+        self.agent.cost_tracker = Default::default();
+        self.status = SessionStatus::Running;
+        self.created_at = Utc::now();
+        self.last_summary_at_tokens = 0;
+        self.session_store =
+            SessionStore::new(self.workspace_root.join(&self.config.session.history_dir));
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn session_name(&self) -> Option<&str> {
+        self.session_name.as_deref()
+    }
+
+    pub fn set_session_name(&mut self, session_name: Option<String>) {
+        self.session_name = session_name.and_then(|name| normalize_session_name(&name));
+    }
+
+    pub fn undo_last_turn(&mut self) -> Result<Option<String>, String> {
+        self.agent.undo_last_turn()
+    }
+
+    pub fn redo_last_turn(&mut self) -> Result<Option<String>, String> {
+        self.agent.redo_last_turn()
+    }
+
+    pub fn status(&self) -> &SessionStatus {
+        &self.status
+    }
+
+    pub fn agent(&self) -> &AgentLoop {
+        &self.agent
+    }
+
+    pub fn agent_mut(&mut self) -> &mut AgentLoop {
+        &mut self.agent
+    }
+
+    /// Apply a new [`DcodeAiConfig`] and rebuild the active LLM provider (in-session provider switch).
+    pub fn apply_dcode_ai_config(&mut self, config: DcodeAiConfig) -> Result<(), ProviderError> {
+        let provider = build_provider(&config)?;
+        self.config = config;
+        self.model = self.config.provider.active_model().to_string();
+        let m = self.model.clone();
+        let agent = self.agent_mut();
+        agent.model = m;
+        agent.replace_provider(provider);
+        self.rebuild_context_manager_sync();
+        Ok(())
+    }
+
+    /// Sync `config` and rebuild the system prompt in place (used when config
+    /// changes mid-session, e.g. `/personality`). No provider rebuild.
+    pub fn refresh_system_prompt(&mut self, config: DcodeAiConfig) {
+        self.config = config;
+        let system_prompt = build_system_prompt(
+            &self.config,
+            &self.workspace_root,
+            self.orchestration.as_ref(),
+        );
+        self.agent.replace_system_prompt(system_prompt);
+    }
+
+    /// Rebuild context_manager from current config (sync, uses configured window target).
+    fn rebuild_context_manager_sync(&mut self) {
+        let ctx = &self.config.memory.context;
+        let window = if ctx.context_window_target > 0 {
+            ctx.context_window_target
+        } else {
+            128_000
+        };
+        let context_config = ContextManagerConfig {
+            context_window_target: window,
+            max_retained_messages: ctx.max_retained_messages,
+            auto_summarize_threshold: ctx.auto_summarize_threshold,
+            enable_auto_summarize: ctx.enable_auto_summarize,
+            max_message_chars_for_summary: 10000,
+        };
+        self.context_manager = ContextManager::new(context_config, self.model.clone());
+        self.agent
+            .set_context_token_limit(self.context_manager.config().context_window_target);
+    }
+
+    pub fn request_cancel(&self) {
+        self.agent.request_cancel();
+    }
+
+    pub fn cancel_handle(&self) -> Arc<AtomicBool> {
+        self.agent.cancel_handle()
+    }
+
+    pub fn set_worktree_info(
+        &mut self,
+        worktree_path: PathBuf,
+        branch: String,
+        base_branch: String,
+    ) {
+        self.worktree_path = Some(worktree_path);
+        self.branch = Some(branch);
+        self.base_branch = Some(base_branch);
+    }
+
+    pub fn set_parent(
+        &mut self,
+        parent_id: String,
+        summary: Option<String>,
+        reason: Option<String>,
+    ) {
+        self.parent_session_id = Some(parent_id);
+        self.inherited_summary = summary;
+        if self.session_name.is_none()
+            && let Some(ref task) = reason
+            && let Some(name) = derive_session_name(task)
+        {
+            self.session_name = Some(name);
+        }
+        self.spawn_reason = reason;
+    }
+
+    pub fn add_child(&mut self, child_id: String) {
+        if !self.child_session_ids.contains(&child_id) {
+            self.child_session_ids.push(child_id);
+        }
+    }
+
+    pub fn event_tx(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {
+        self.agent.event_sender()
+    }
+
+    pub fn session_store(&self) -> &SessionStore {
+        &self.session_store
+    }
+
+    fn refresh_session_summary(&mut self) {
+        self.set_session_summary(Some(self.compact_summary()));
+    }
+
+    async fn run_session_hook(&self, event: HookEventKind, payload: serde_json::Value) {
+        if let Some(hooks) = &self.hooks {
+            hooks.run_best_effort(event, None, &payload).await;
+        }
+    }
+    /// Re-read MCP servers and hooks from config files and enabled plugins
+    /// and apply the difference to this live session: connect new servers
+    /// and register their tools, drop removed ones, swap the hooks.
+    pub async fn reload_extensions(&mut self) -> Result<String, String> {
+        let fresh =
+            DcodeAiConfig::load_for_workspace(&self.workspace_root).map_err(|e| e.to_string())?;
+        let want: Vec<dcode_ai_common::config::McpServerConfig> = fresh
+            .mcp
+            .servers
+            .iter()
+            .filter(|s| s.enabled)
+            .cloned()
+            .collect();
+        let have: Vec<String> = self
+            .config
+            .mcp
+            .servers
+            .iter()
+            .filter(|s| s.enabled)
+            .map(|s| s.name.clone())
+            .collect();
+
+        let removed: Vec<String> = have
+            .iter()
+            .filter(|n| !want.iter().any(|w| &w.name == *n))
+            .cloned()
+            .collect();
+        for name in &removed {
+            let prefix = format!("mcp__{name}__");
+            self.agent
+                .tools
+                .retain_by_name(|tool| !tool.starts_with(&prefix));
+            self.mcp_manager.disconnect(name).await;
+        }
+
+        let added: Vec<dcode_ai_common::config::McpServerConfig> = want
+            .iter()
+            .filter(|w| !have.contains(&w.name))
+            .cloned()
+            .collect();
+        let mut failed = Vec::new();
+        let mut tool_count = 0;
+        if !added.is_empty() {
+            let (tools, errors) = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                load_mcp_tools_tolerant(&self.mcp_manager, &added),
+            )
+            .await
+            .unwrap_or_else(|_| {
+                (
+                    Vec::new(),
+                    added
+                        .iter()
+                        .map(|s| (s.name.clone(), "timed out".to_string()))
+                        .collect(),
+                )
+            });
+            tool_count = tools.len();
+            for tool in tools {
+                self.agent.tools.register(tool);
+            }
+            failed = errors;
+        }
+
+        self.config.mcp.servers = fresh.mcp.servers;
+        self.config.hooks = fresh.hooks;
+        let runner = HookRunner::new(self.config.hooks.clone());
+        self.hooks = runner.has_any().then_some(runner);
+        self.agent.set_hooks(self.hooks.clone());
+
+        let mut parts = Vec::new();
+        if !added.is_empty() {
+            parts.push(format!(
+                "+{} MCP server(s), {tool_count} tool(s)",
+                added.len() - failed.len()
+            ));
+        }
+        if !removed.is_empty() {
+            parts.push(format!("−{} MCP server(s)", removed.len()));
+        }
+        for (server, error) in &failed {
+            parts.push(format!("`{server}` failed: {error}"));
+        }
+        Ok(if parts.is_empty() {
+            "hooks reloaded; MCP servers unchanged".into()
+        } else {
+            format!("{}; hooks reloaded", parts.join(", "))
+        })
+    }
+
+    pub fn mcp_manager(&self) -> &Arc<McpConnectionManager> {
+        &self.mcp_manager
+    }
+}
+
+/// Keep dcode-ai's private workspace state out of git while leaving
+/// shareable files (`.dcode-ai/commands`, `agents`, `skills`) committable.
+/// Written once, only when `.dcode-ai/` has no `.gitignore` yet.
+const PRIVATE_GITIGNORE: &str = "\
+# dcode-ai private state (generated; edit freely)
+sessions/
+worktrees/
+config.local.toml
+mcp.json
+memory.json
+.last_session
+.history
+*.log
+";
+
+fn ensure_private_gitignore(workspace_root: &Path) {
+    let dir = workspace_root.join(".dcode-ai");
+    let path = dir.join(".gitignore");
+    if path.exists() {
+        return;
+    }
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let _ = std::fs::write(&path, PRIVATE_GITIGNORE);
+    }
+}
+
+/// Whether `model` plausibly belongs to `provider`: Claude API ids
+/// (`claude-opus-5-5`, aliases) are the Anthropic provider's; Copilot ids
+/// are dotted or provider-native (`claude-sonnet-5`, `gpt-5-mini`).
+fn model_fits_provider(model: &str, provider: dcode_ai_common::config::ProviderKind) -> bool {
+    use dcode_ai_common::config::ProviderKind;
+    let m = model.to_ascii_lowercase();
+    let claude_api_id = matches!(m.as_str(), "opus" | "sonnet" | "haiku" | "fable")
+        || (m.starts_with("claude-")
+            && m.rsplit('-')
+                .next()
+                .is_some_and(|last| last.chars().all(|c| c.is_ascii_digit()))
+            && m.matches('-').count() >= 3);
+    match provider {
+        ProviderKind::Anthropic => m.starts_with("claude") || claude_api_id,
+        ProviderKind::Copilot => !claude_api_id,
+    }
+}
+
+fn is_context_limit_error(err: &ProviderError) -> bool {
+    let msg = err.to_string().to_ascii_lowercase();
+    msg.contains("context window")
+        || msg.contains("context length")
+        || msg.contains("prompt is too long")
+        || msg.contains("context exceeds")
+        || msg.contains("max tokens")
+        || msg.contains("token limit")
+        || msg.contains("conversation too long")
+}
+
+/// Memory store location: `[memory].file_path`, workspace-relative by default.
+pub fn resolve_memory_path(config: &DcodeAiConfig, workspace_root: &Path) -> PathBuf {
+    if config.memory.file_path.is_absolute() {
+        config.memory.file_path.clone()
+    } else {
+        workspace_root.join(&config.memory.file_path)
+    }
+}
+
+/// How many of the newest memory notes are recalled into the system prompt.
+const MEMORY_RECALL_LIMIT: usize = 30;
+/// Cap per recalled note so one huge note can't blow up the prompt.
+const MEMORY_NOTE_CHARS: usize = 300;
+
+/// Render stored memory notes as a system-prompt section — the recall side of
+/// the `save_memory` tool (and `/memory` notes). Sync on purpose: it is called
+/// from sync session resets and reads one small local JSON file. Returns None
+/// when there is nothing to recall so the prompt stays untouched.
+fn memory_prompt_section(config: &DcodeAiConfig, workspace_root: &Path) -> Option<String> {
+    let path = resolve_memory_path(config, workspace_root);
+    let raw = std::fs::read_to_string(path).ok()?;
+    let state: crate::memory_store::MemoryState = serde_json::from_str(&raw).ok()?;
+    if state.notes.is_empty() {
+        return None;
+    }
+    let mut out = String::from(
+        "\n\n## Persistent memory (from past sessions)\n\
+         Durable notes saved earlier in this workspace (newest first). Honor \
+         them unless the user says otherwise; update them with `save_memory` \
+         when they change:\n",
+    );
+    for note in state.notes.iter().rev().take(MEMORY_RECALL_LIMIT) {
+        let mut line: String = note
+            .content
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if line.chars().count() > MEMORY_NOTE_CHARS {
+            line = line.chars().take(MEMORY_NOTE_CHARS).collect::<String>() + "…";
+        }
+        out.push_str(&format!("- [{}] {}\n", note.kind, line));
+    }
+    Some(out)
+}
+
+fn parse_json_values_on_line(line: &str) -> Vec<Value> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    let de = serde_json::Deserializer::from_str(trimmed);
+    for res in de.into_iter::<Value>() {
+        match res {
+            Ok(v) => out.push(v),
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+fn value_to_event(v: Value) -> Option<AgentEvent> {
+    if v.get("event").is_some() {
+        serde_json::from_value::<EventEnvelope>(v)
+            .ok()
+            .map(|env| env.event)
+    } else {
+        serde_json::from_value::<AgentEvent>(v).ok()
+    }
+}
+
+async fn recover_messages_from_event_log(path: &Path) -> Vec<Message> {
+    let Ok(raw) = tokio::fs::read_to_string(path).await else {
+        return Vec::new();
+    };
+
+    let mut recovered = Vec::new();
+    for line in raw.lines() {
+        for v in parse_json_values_on_line(line) {
+            let Some(event) = value_to_event(v) else {
+                continue;
+            };
+            if let AgentEvent::MessageReceived { role, content } = event {
+                match role.as_str() {
+                    "user" => recovered.push(Message::user(content)),
+                    "assistant" => recovered.push(Message::assistant(content)),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    let mut dedup = Vec::new();
+    for msg in recovered {
+        if dedup.last() != Some(&msg) {
+            dedup.push(msg);
+        }
+    }
+    dedup
+}
+
+/// Spawns the event fanout task: writes events to disk as `EventEnvelope`,
+/// broadcasts over IPC, and renders to the provided callback.
+pub fn spawn_event_fanout(
+    mut event_rx: mpsc::Receiver<AgentEvent>,
+    log_path: PathBuf,
+    ipc_handle: Option<IpcHandle>,
+    on_event: Option<EventFanoutCallback>,
+    parent_forward: Option<(String, mpsc::Sender<AgentEvent>)>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let (event_tx, _command_rx) = match ipc_handle {
+            Some(h) => {
+                let (etx, crx) = h.into_parts();
+                (Some(etx), Some(crx))
+            }
+            None => (None, None),
+        };
+
+        let mut log_file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .await
+            .ok();
+
+        let mut event_id: u64 = 0;
+        while let Some(event) = event_rx.recv().await {
+            event_id += 1;
+            if let Some((ref child_id, ref ptx)) = parent_forward
+                && let Some(fwd) = map_child_event_for_parent_broadcast(child_id, &event)
+            {
+                let _ = ptx.send(fwd).await;
+            }
+            let envelope = EventEnvelope::new(event_id, event);
+            if let Some(ref tx) = event_tx {
+                let line = serde_json::to_string(&envelope).unwrap_or_default();
+                let _ = tx.send(line);
+            }
+
+            if let Some(file) = log_file.as_mut()
+                && let Ok(line) = serde_json::to_string(&envelope)
+            {
+                let _ = file.write_all(line.as_bytes()).await;
+                let _ = file.write_all(b"\n").await;
+            }
+
+            if let Some(ref cb) = on_event {
+                cb(&envelope);
+            }
+        }
+    })
+}
+
+/// Spawns a task that consumes IPC commands and resolves approvals/cancellation.
+pub fn spawn_command_consumer(
+    command_rx: mpsc::UnboundedReceiver<AgentCommand>,
+    approval_pending: Option<ApprovalPendingMap>,
+    question_pending: Option<QuestionPendingMap>,
+    cancel_tx: Option<oneshot::Sender<()>>,
+) -> tokio::task::JoinHandle<()> {
+    spawn_command_consumer_with_store(
+        command_rx,
+        approval_pending,
+        question_pending,
+        cancel_tx,
+        None,
+        None,
+        None,
+    )
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionControlCommand {
+    Cancel,
+    Shutdown,
+}
+
+/// Extended command consumer with optional event fanout, prompt forwarding, and session control.
+pub fn spawn_command_consumer_with_store(
+    mut command_rx: mpsc::UnboundedReceiver<AgentCommand>,
+    approval_pending: Option<ApprovalPendingMap>,
+    question_pending: Option<QuestionPendingMap>,
+    cancel_tx: Option<oneshot::Sender<()>>,
+    event_tx: Option<mpsc::Sender<AgentEvent>>,
+    prompt_tx: Option<mpsc::UnboundedSender<String>>,
+    control_tx: Option<mpsc::UnboundedSender<SessionControlCommand>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut cancel = cancel_tx;
+        while let Some(cmd) = command_rx.recv().await {
+            match cmd {
+                AgentCommand::ApproveToolCall { call_id } => {
+                    if let Some(ref p) = approval_pending
+                        && let Ok(mut m) = p.lock()
+                        && let Some(tx) = m.remove(&call_id)
+                    {
+                        let _ = tx.send(ApprovalVerdict::Approved);
+                    }
+                }
+                AgentCommand::DenyToolCall { call_id } => {
+                    if let Some(ref p) = approval_pending
+                        && let Ok(mut m) = p.lock()
+                        && let Some(tx) = m.remove(&call_id)
+                    {
+                        let _ = tx.send(ApprovalVerdict::Denied);
+                    }
+                }
+                AgentCommand::Cancel => {
+                    // Deny all pending approvals so the approval handler
+                    // doesn't stay blocked for 300 seconds while cancel
+                    // was already requested.
+                    if let Some(ref p) = approval_pending
+                        && let Ok(mut m) = p.lock()
+                    {
+                        for (_, tx) in m.drain() {
+                            let _ = tx.send(ApprovalVerdict::Denied);
+                        }
+                    }
+                    if let Some(tx) = cancel.take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(ref tx) = control_tx {
+                        let _ = tx.send(SessionControlCommand::Cancel);
+                    } else if let Some(ref tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::SessionEnded {
+                                reason: EndReason::Cancelled,
+                            })
+                            .await;
+                    }
+                }
+                AgentCommand::Shutdown => {
+                    if let Some(tx) = cancel.take() {
+                        let _ = tx.send(());
+                    }
+                    if let Some(ref tx) = control_tx {
+                        let _ = tx.send(SessionControlCommand::Shutdown);
+                    } else if let Some(ref tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::SessionEnded {
+                                reason: EndReason::UserExit,
+                            })
+                            .await;
+                    }
+                    break;
+                }
+                AgentCommand::SendMessage { content } => {
+                    if let Some(ref tx) = prompt_tx {
+                        let _ = tx.send(content);
+                    } else if let Some(ref tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::MessageReceived {
+                                role: "user".into(),
+                                content,
+                            })
+                            .await;
+                    }
+                }
+                AgentCommand::AnswerQuestion {
+                    question_id,
+                    selection,
+                } => {
+                    if let Some(ref qp) = question_pending
+                        && let Ok(mut m) = qp.lock()
+                        && let Some(tx) = m.remove(&question_id)
+                    {
+                        let _ = tx.send(selection);
+                    }
+                }
+            }
+        }
+    })
+}
+
+/// IPC-based approval handler that waits for approve/deny commands from
+/// connected clients (e.g. CLI over the session socket).
+pub struct IpcApprovalHandler {
+    pending: ApprovalPendingMap,
+}
+
+impl IpcApprovalHandler {
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            pending: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
+    pub fn pending(&self) -> ApprovalPendingMap {
+        self.pending.clone()
+    }
+}
+
+#[async_trait::async_trait]
+impl ApprovalHandler for IpcApprovalHandler {
+    async fn resolve(
+        &self,
+        call: &dcode_ai_common::tool::ToolCall,
+        _description: &str,
+    ) -> ApprovalVerdict {
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut m = self.pending.lock().unwrap();
+            m.insert(call.id.clone(), tx);
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(300), rx).await {
+            Ok(Ok(verdict)) => verdict,
+            _ => {
+                let mut m = self.pending.lock().unwrap();
+                m.remove(&call.id);
+                ApprovalVerdict::Denied
+            }
+        }
+    }
+}
+
+/// Auto-deny handler for non-interactive sessions.
+struct AutoDenyHandler;
+
+#[async_trait::async_trait]
+impl ApprovalHandler for AutoDenyHandler {
+    async fn resolve(
+        &self,
+        _call: &dcode_ai_common::tool::ToolCall,
+        _description: &str,
+    ) -> ApprovalVerdict {
+        ApprovalVerdict::Denied
+    }
+}
+
+/// Spawns a background task that consumes spawn requests from the sub-agent tool
+/// and runs child sessions. Each child session inherits parent context.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::{Duration, Utc};
+
+    use dcode_ai_common::event::AgentCommand;
+    use dcode_ai_common::message::Message;
+    use dcode_ai_common::session::{SessionMeta, SessionState, SessionStatus};
+    use std::fs;
+
+    fn write_session_for_test(
+        workspace: &std::path::Path,
+        id: &str,
+        updated_at: chrono::DateTime<Utc>,
+        model: &str,
+        status: SessionStatus,
+    ) {
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+        let session = SessionState {
+            meta: SessionMeta {
+                id: id.to_string(),
+                session_name: None,
+                created_at: updated_at - Duration::minutes(1),
+                updated_at,
+                workspace: workspace.to_path_buf(),
+                model: model.to_string(),
+                provider: None,
+                status,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![Message::user("hello")],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+
+        let json = serde_json::to_string_pretty(&session).expect("serialize session");
+        fs::write(sessions_dir.join(format!("{id}.json")), json).expect("write session");
+    }
+
+    #[tokio::test]
+    async fn get_last_session_id_falls_back_to_most_recent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path();
+        let now = Utc::now();
+
+        // Write sessions WITHOUT .last_session file
+        write_session_for_test(
+            workspace,
+            "session-oldest",
+            now - Duration::minutes(10),
+            "claude-3-7-sonnet-latest",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-middle",
+            now - Duration::minutes(5),
+            "claude-3-7-sonnet-latest",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-newest",
+            now,
+            "claude-3-7-sonnet-latest",
+            SessionStatus::Running,
+        );
+
+        let config = dcode_ai_common::config::DcodeAiConfig::default();
+        let session_id = get_last_session_id(&config, workspace)
+            .await
+            .expect("get_last_session_id should succeed")
+            .expect("should find a session");
+
+        // Should find the most recent session
+        assert_eq!(session_id, "session-newest");
+
+        // The .last_session file should now be updated
+        let last_session_path = workspace.join(".dcode-ai").join(".last_session");
+        assert!(
+            last_session_path.exists(),
+            ".last_session should be created"
+        );
+        let content = std::fs::read_to_string(&last_session_path).unwrap();
+        assert_eq!(content.trim(), "session-newest");
+    }
+
+    #[tokio::test]
+    async fn empty_start_and_exit_session_is_not_persisted() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+
+        let mut config = dcode_ai_common::config::DcodeAiConfig::default();
+        config.provider.default = dcode_ai_common::config::ProviderKind::Anthropic;
+        config.provider.anthropic.backend = dcode_ai_common::config::AnthropicBackend::Api;
+        config.provider.anthropic.api_key = Some("sk-ant-test-key".into());
+        config.memory.context.auto_detect_context_window = false;
+        config.memory.context.query_provider_models_api = false;
+
+        let mut sup = Supervisor::create(SupervisorConfig {
+            config: config.clone(),
+            workspace_root: workspace.clone(),
+            safe_mode: false,
+            interactive_approvals: false,
+            session_id: Some("session-empty-exit".into()),
+            approval_handler: None,
+            orchestration_context: None,
+        })
+        .await
+        .expect("create supervisor");
+
+        sup.finish(EndReason::UserExit).await;
+
+        let store = SessionStore::new(workspace.join(&config.session.history_dir));
+        let ids = store.list().await.expect("list sessions");
+        assert!(
+            !ids.iter().any(|id| id == "session-empty-exit"),
+            "no-op session should not be persisted"
+        );
+    }
+
+    #[tokio::test]
+    async fn cleanup_empty_sessions_removes_only_empty_non_running_sessions() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+
+        let empty_completed = SessionState {
+            meta: SessionMeta {
+                id: "empty-completed".into(),
+                session_name: None,
+                created_at: now,
+                updated_at: now,
+                workspace: workspace.clone(),
+                model: "gpt-5.2".into(),
+                provider: None,
+                status: SessionStatus::Completed,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![Message::system("You are dcode-ai")],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        store.save(&empty_completed).await.expect("save empty");
+
+        let meaningful = SessionState {
+            meta: SessionMeta {
+                id: "non-empty".into(),
+                session_name: None,
+                created_at: now,
+                updated_at: now,
+                workspace: workspace.clone(),
+                model: "gpt-5.2".into(),
+                provider: None,
+                status: SessionStatus::Completed,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![Message::user("hello")],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        store.save(&meaningful).await.expect("save meaningful");
+
+        let running_empty = SessionState {
+            meta: SessionMeta {
+                id: "running-empty".into(),
+                session_name: None,
+                created_at: now,
+                updated_at: now,
+                workspace: workspace.clone(),
+                model: "gpt-5.2".into(),
+                provider: None,
+                status: SessionStatus::Running,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        store
+            .save(&running_empty)
+            .await
+            .expect("save running empty");
+
+        let deleted = cleanup_empty_sessions(&store)
+            .await
+            .expect("cleanup empty sessions");
+        assert_eq!(deleted.len(), 1);
+        assert!(deleted.iter().any(|id| id == "empty-completed"));
+
+        let remaining = store.list().await.expect("list remaining");
+        assert!(remaining.iter().any(|id| id == "non-empty"));
+        assert!(remaining.iter().any(|id| id == "running-empty"));
+    }
+
+    #[tokio::test]
+    async fn resume_preserves_existing_session_messages_instead_of_overwriting() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+        let session_id = "resume-target";
+        let now = Utc::now();
+        let session = SessionState {
+            meta: SessionMeta {
+                id: session_id.to_string(),
+                session_name: Some("resume target".into()),
+                created_at: now - Duration::minutes(5),
+                updated_at: now - Duration::minutes(1),
+                workspace: workspace.clone(),
+                model: "gpt-5.2".to_string(),
+                provider: None,
+                status: SessionStatus::Completed,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![
+                Message::system("You are dcode-ai"),
+                Message::user("hello"),
+                Message::assistant("world"),
+            ],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        std::fs::write(
+            sessions_dir.join(format!("{session_id}.json")),
+            serde_json::to_string_pretty(&session).expect("serialize session"),
+        )
+        .expect("write session");
+
+        let mut config = dcode_ai_common::config::DcodeAiConfig::default();
+        config.provider.default = dcode_ai_common::config::ProviderKind::Anthropic;
+        config.provider.anthropic.backend = dcode_ai_common::config::AnthropicBackend::Api;
+        config.provider.anthropic.api_key = Some("sk-ant-test-key".into());
+        config.memory.context.auto_detect_context_window = false;
+
+        let sup = Supervisor::resume(config, &workspace, false, false, session_id, None)
+            .await
+            .expect("resume should load existing session");
+
+        let previews: Vec<String> = sup
+            .agent
+            .messages
+            .iter()
+            .map(|m| m.content.event_preview())
+            .collect();
+        assert!(
+            previews.iter().any(|m| m == "world"),
+            "expected resumed messages to include prior assistant reply, got: {previews:?}"
+        );
+
+        let store = SessionStore::new(sessions_dir);
+        let persisted = store
+            .load(session_id)
+            .await
+            .expect("load persisted session");
+        let persisted_previews: Vec<String> = persisted
+            .messages
+            .iter()
+            .map(|m| m.content.event_preview())
+            .collect();
+        assert!(
+            persisted_previews.iter().any(|m| m == "world"),
+            "resume must not overwrite persisted session before loading"
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_recovers_context_from_event_log_when_snapshot_has_no_turns() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+
+        let session_id = "resume-recover";
+        let now = Utc::now();
+        let session = SessionState {
+            meta: SessionMeta {
+                id: session_id.to_string(),
+                session_name: Some("resume recover".into()),
+                created_at: now - Duration::minutes(5),
+                updated_at: now - Duration::minutes(1),
+                workspace: workspace.clone(),
+                model: "gpt-5.2".to_string(),
+                provider: None,
+                status: SessionStatus::Completed,
+                pid: None,
+                socket_path: None,
+                worktree_path: None,
+                branch: None,
+                base_branch: None,
+                parent_session_id: None,
+                child_session_ids: Vec::new(),
+                inherited_summary: None,
+                spawn_reason: None,
+                session_summary: None,
+                orchestration: None,
+            },
+            messages: vec![Message::system("You are dcode-ai")],
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            estimated_cost_usd: 0.0,
+        };
+        std::fs::write(
+            sessions_dir.join(format!("{session_id}.json")),
+            serde_json::to_string_pretty(&session).expect("serialize session"),
+        )
+        .expect("write session");
+
+        let log_path = sessions_dir.join(format!("{session_id}.events.jsonl"));
+        let user = EventEnvelope::new(
+            1,
+            AgentEvent::MessageReceived {
+                role: "user".into(),
+                content: "hello".into(),
+            },
+        );
+        let assistant = EventEnvelope::new(
+            2,
+            AgentEvent::MessageReceived {
+                role: "assistant".into(),
+                content: "world".into(),
+            },
+        );
+        let mut lines = String::new();
+        lines.push_str(&serde_json::to_string(&user).expect("serialize user event"));
+        lines.push('\n');
+        lines.push_str(&serde_json::to_string(&assistant).expect("serialize assistant event"));
+        lines.push('\n');
+        std::fs::write(&log_path, lines).expect("write event log");
+
+        let mut config = dcode_ai_common::config::DcodeAiConfig::default();
+        config.provider.default = dcode_ai_common::config::ProviderKind::Anthropic;
+        config.provider.anthropic.backend = dcode_ai_common::config::AnthropicBackend::Api;
+        config.provider.anthropic.api_key = Some("sk-ant-test-key".into());
+        config.memory.context.auto_detect_context_window = false;
+
+        let sup = Supervisor::resume(config, &workspace, false, false, session_id, None)
+            .await
+            .expect("resume should recover context from event log");
+
+        let previews: Vec<String> = sup
+            .agent
+            .messages
+            .iter()
+            .map(|m| m.content.event_preview())
+            .collect();
+        assert!(
+            previews.iter().any(|m| m == "hello"),
+            "expected recovered user turn, got: {previews:?}"
+        );
+        assert!(
+            previews.iter().any(|m| m == "world"),
+            "expected recovered assistant turn, got: {previews:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn send_message_forwards_prompt_to_session_queue() {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+        let (control_tx, _control_rx) = mpsc::unbounded_channel();
+
+        let task = spawn_command_consumer_with_store(
+            cmd_rx,
+            None,
+            None,
+            None,
+            None,
+            Some(prompt_tx),
+            Some(control_tx),
+        );
+
+        cmd_tx
+            .send(AgentCommand::SendMessage {
+                content: "hello from ipc".into(),
+            })
+            .unwrap();
+
+        let received = tokio::time::timeout(std::time::Duration::from_secs(1), prompt_rx.recv())
+            .await
+            .expect("prompt should be forwarded")
+            .expect("prompt channel should remain open");
+        assert_eq!(received, "hello from ipc");
+
+        let _ = cmd_tx.send(AgentCommand::Shutdown);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn answer_question_resolves_pending_channel() {
+        use dcode_ai_common::event::QuestionSelection;
+
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let pending: Arc<Mutex<HashMap<String, oneshot::Sender<QuestionSelection>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (tx, rx) = oneshot::channel();
+        pending.lock().unwrap().insert("q-1".into(), tx);
+
+        let task = spawn_command_consumer_with_store(
+            cmd_rx,
+            None,
+            Some(pending.clone()),
+            None,
+            None,
+            None,
+            None,
+        );
+
+        cmd_tx
+            .send(AgentCommand::AnswerQuestion {
+                question_id: "q-1".into(),
+                selection: QuestionSelection::Suggested,
+            })
+            .unwrap();
+
+        let got = tokio::time::timeout(std::time::Duration::from_secs(1), rx)
+            .await
+            .expect("timeout")
+            .expect("channel");
+        assert!(matches!(got, QuestionSelection::Suggested));
+
+        let _ = cmd_tx.send(AgentCommand::Shutdown);
+        task.abort();
+    }
+
+    #[test]
+    fn compaction_fallback_summary_uses_default_when_empty() {
+        let summary = build_compaction_fallback_summary(&[]);
+        assert_eq!(
+            summary,
+            "Earlier conversation context was compacted due to token limits."
+        );
+    }
+
+    #[test]
+    fn compaction_fallback_summary_prefers_message_summary() {
+        let summary = build_compaction_fallback_summary(&[
+            Message::user("Need to fix context overflow"),
+            Message::assistant("Auto-compact before the next model request."),
+        ]);
+        assert!(summary.contains("Need to fix context overflow"));
+        assert!(summary.contains("Auto-compact before the next model request."));
+    }
+
+    // ─── Session Prune Tests ───────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn prune_sessions_dry_run_returns_candidates() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path();
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+
+        // Write sessions: 2 recent (keep), 2 old (delete)
+        write_session_for_test(
+            workspace,
+            "session-recent-1",
+            now - Duration::hours(1),
+            "test",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-recent-2",
+            now - Duration::hours(2),
+            "test",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-old-1",
+            now - Duration::days(30),
+            "test",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-old-2",
+            now - Duration::days(60),
+            "test",
+            SessionStatus::Completed,
+        );
+
+        let cfg = PruneConfig {
+            keep_last: 2,
+            older_than: Duration::days(7),
+            dry_run: true,
+            ..Default::default()
+        };
+
+        let result = prune_sessions(&store, workspace, &cfg)
+            .await
+            .expect("prune_sessions");
+
+        // Dry run: nothing actually deleted
+        assert!(result.dry_run);
+        assert_eq!(
+            result.deleted.len(),
+            2,
+            "should find 2 old sessions to delete"
+        );
+        assert!(
+            result.deleted.contains(&"session-old-1".to_string()),
+            "session-old-1 should be in delete list"
+        );
+        assert!(
+            result.deleted.contains(&"session-old-2".to_string()),
+            "session-old-2 should be in delete list"
+        );
+        // Verify files still exist
+        assert!(store.load("session-old-1").await.is_ok());
+        assert!(store.load("session-old-2").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn prune_sessions_actually_deletes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path();
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+
+        write_session_for_test(
+            workspace,
+            "session-old",
+            now - Duration::days(30),
+            "test",
+            SessionStatus::Completed,
+        );
+        write_session_for_test(
+            workspace,
+            "session-recent",
+            now - Duration::hours(1),
+            "test",
+            SessionStatus::Completed,
+        );
+
+        let result = prune_sessions(
+            &store,
+            workspace,
+            &PruneConfig {
+                keep_last: 1,
+                older_than: Duration::hours(1),
+                dry_run: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("prune_sessions");
+
+        assert!(!result.dry_run);
+        assert_eq!(result.deleted.len(), 1, "should delete 1 old session");
+        assert!(result.deleted.contains(&"session-old".to_string()));
+        // Verify deletion
+        assert!(store.load("session-old").await.is_err());
+        assert!(store.load("session-recent").await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn prune_sessions_skips_running_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let workspace = dir.path();
+        let sessions_dir = workspace.join(".dcode-ai").join("sessions");
+        std::fs::create_dir_all(&sessions_dir).expect("create sessions dir");
+        let store = SessionStore::new(&sessions_dir);
+        let now = Utc::now();
+
+        write_session_for_test(
+            workspace,
+            "session-running",
+            now - Duration::days(30),
+            "test",
+            SessionStatus::Running,
+        );
+        write_session_for_test(
+            workspace,
+            "session-old",
+            now - Duration::days(30),
+            "test",
+            SessionStatus::Completed,
+        );
+
+        let result = prune_sessions(
+            &store,
+            workspace,
+            &PruneConfig {
+                keep_last: 0,
+                older_than: Duration::hours(1),
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("prune_sessions");
+
+        assert!(
+            !result.deleted.contains(&"session-running".to_string()),
+            "should not include running session"
+        );
+        assert!(
+            result.deleted.contains(&"session-old".to_string()),
+            "should include old completed session"
+        );
+    }
+
+    // ─── Context Overflow Hardening Tests ──────────────────────────────────────
+
+    /// `summary_rearm_ready` is backed by `last_summary_at_tokens`.
+    /// Test the rearm logic directly via ContextManager stats to avoid
+    /// needing a live provider in unit tests.
+    #[test]
+    fn context_manager_rearm_logic() {
+        use crate::context_manager::ContextManager;
+
+        // Context at 80% should trigger needs_attention
+        let config = ContextManagerConfig {
+            context_window_target: 10_000,
+            max_retained_messages: 50,
+            auto_summarize_threshold: 75,
+            enable_auto_summarize: true,
+            max_message_chars_for_summary: 10000,
+        };
+        let cm = ContextManager::new(config, "test-model".to_string());
+
+        // Build natural-language text of a known BPE token size. (A run of the
+        // same char can't be used: the tokenizer merges repeated chars, so it
+        // would not produce a predictable token count.)
+        let text_with_tokens = |target: usize| -> String {
+            let unit = "the quick brown fox jumps over the lazy dog. ";
+            let mut s = String::new();
+            while crate::token_count::count_tokens(&s) < target {
+                s.push_str(unit);
+            }
+            s
+        };
+
+        // ~69% of 10_000 → below both the 75% summarize and 80% attention thresholds.
+        let msgs_small = vec![Message::user(text_with_tokens(6_900).as_str())];
+        let stats_small = cm.stats(&msgs_small);
+        assert!(
+            !stats_small.needs_attention,
+            "69% should not need attention (got {}%)",
+            stats_small.usage_percent
+        );
+        assert!(
+            !stats_small.should_summarize,
+            "69% should not auto-summarize (got {}%)",
+            stats_small.usage_percent
+        );
+
+        // ~81% of 10_000 → needs_attention (>=80%) and auto-summarize (>=75%).
+        let msgs_medium = vec![Message::user(text_with_tokens(8_100).as_str())];
+        let stats_medium = cm.stats(&msgs_medium);
+        assert!(stats_medium.needs_attention, "80% should need attention");
+        assert!(
+            stats_medium.should_summarize,
+            "80% should trigger auto-summarize"
+        );
+    }
+
+    /// Empty AI summary must fall back to extractive summarization.
+    /// `build_compaction_fallback_summary` handles this.
+    #[test]
+    fn empty_summary_triggers_extractive_fallback() {
+        let msgs = vec![
+            Message::user("What files are in the project?"),
+            Message::assistant("There are 50 Rust source files across 4 crates."),
+            Message::user("Run the tests"),
+            Message::assistant("All tests passed."),
+        ];
+        let fallback = build_compaction_fallback_summary(&msgs);
+        assert!(
+            !fallback.trim().is_empty(),
+            "fallback summary must not be empty when messages are provided"
+        );
+        assert!(
+            fallback.contains("files") || fallback.contains("project"),
+            "fallback should contain content from messages"
+        );
+    }
+
+    /// `build_compaction_fallback_summary` with empty input returns a default message.
+    #[test]
+    fn empty_messages_fallback_uses_default_message() {
+        let fallback = build_compaction_fallback_summary(&[]);
+        assert_eq!(
+            fallback,
+            "Earlier conversation context was compacted due to token limits."
+        );
+    }
+
+    #[test]
+    fn artifacts_capture_files_commands_and_errors() {
+        use dcode_ai_common::message::{Message, MessageToolCall};
+
+        let messages = vec![
+            Message::assistant_with_tool_calls(
+                "edit it",
+                vec![MessageToolCall {
+                    id: "1".into(),
+                    name: "edit_file".into(),
+                    arguments: json!({"path": "src/main.rs", "old_text": "a", "new_text": "b"}),
+                }],
+            ),
+            Message::assistant_with_tool_calls(
+                "run tests",
+                vec![MessageToolCall {
+                    id: "2".into(),
+                    name: "execute_bash".into(),
+                    arguments: json!({"command": "cargo test --workspace"}),
+                }],
+            ),
+            Message::tool("2", "error[E0599]: no method named `foo`"),
+        ];
+
+        let artifacts = extract_session_artifacts(&messages);
+        assert!(artifacts.contains("src/main.rs"), "files: {artifacts}");
+        assert!(
+            artifacts.contains("cargo test --workspace"),
+            "commands: {artifacts}"
+        );
+        assert!(artifacts.contains("error[E0599]"), "errors: {artifacts}");
+
+        // And the full fallback nests these under the artifacts header.
+        let full = build_compaction_fallback_summary(&messages);
+        assert!(full.contains("## Preserved Artifacts"));
+    }
+
+    #[test]
+    fn compaction_preview_uses_preserved_artifact_summary_without_mutating() {
+        use dcode_ai_common::message::{Message, MessageToolCall, Role};
+
+        let context_manager = ContextManager::with_default_config("MiniMax-M2.5".into());
+        let messages = vec![
+            Message::user("edit src/main.rs"),
+            Message {
+                role: Role::Assistant,
+                content: dcode_ai_common::message::MessageContent::Text("running tests".into()),
+                tool_call_id: None,
+                tool_calls: Some(vec![MessageToolCall {
+                    id: "call-1".into(),
+                    name: "execute_bash".into(),
+                    arguments: json!({"command": "cargo test -p dcode-ai-runtime"}),
+                }]),
+                reasoning_content: None,
+                provider_blocks: None,
+            },
+            Message::tool("call-1", "error[E0425]: cannot find value"),
+        ];
+        let before_count = messages.len();
+
+        let preview = build_compaction_preview_summary(&context_manager, &messages);
+
+        assert_eq!(messages.len(), before_count);
+        assert!(preview.contains("## Preserved Artifacts"), "{preview}");
+        assert!(preview.contains("src/main.rs"), "{preview}");
+        assert!(
+            preview.contains("cargo test -p dcode-ai-runtime"),
+            "{preview}"
+        );
+        assert!(preview.contains("error[E0425]"), "{preview}");
+    }
+
+    #[test]
+    fn compaction_preview_empty_session_uses_default_message() {
+        let context_manager = ContextManager::with_default_config("MiniMax-M2.5".into());
+        let messages = vec![Message::system("system prompt")];
+
+        assert_eq!(
+            build_compaction_preview_summary(&context_manager, &messages),
+            "Earlier conversation context was compacted due to token limits."
+        );
+    }
+
+    #[test]
+    fn looks_like_path_filters_noise() {
+        assert!(looks_like_path("src/main.rs"));
+        assert!(looks_like_path("crates/core/src/cost.rs"));
+        assert!(!looks_like_path("https://example.com/x.html"));
+        assert!(!looks_like_path("justtext"));
+        assert!(!looks_like_path("a/b")); // no extension
+    }
+
+    #[test]
+    fn context_limit_error_detector_matches_common_strings() {
+        let e = ProviderError::Other("Prompt is too long for this model".into());
+        assert!(is_context_limit_error(&e));
+
+        let e = ProviderError::RequestFailed("context window exceeded".into());
+        assert!(is_context_limit_error(&e));
+
+        let e = ProviderError::Other("network timeout".into());
+        assert!(!is_context_limit_error(&e));
+    }
+}
+
+#[cfg(test)]
+mod private_gitignore_tests {
+    use super::*;
+
+    #[test]
+    fn writes_once_and_keeps_user_edits() {
+        let dir = tempfile::tempdir().unwrap();
+        ensure_private_gitignore(dir.path());
+        let path = dir.path().join(".dcode-ai/.gitignore");
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("sessions/") && text.contains("config.local.toml"));
+        assert!(!text.contains("commands"));
+        std::fs::write(&path, "custom\n").unwrap();
+        ensure_private_gitignore(dir.path());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "custom\n");
+    }
+}
+
+#[cfg(test)]
+mod model_fit_tests {
+    use super::model_fits_provider;
+    use dcode_ai_common::config::ProviderKind::{Anthropic, Copilot};
+
+    #[test]
+    fn resume_keeps_only_models_the_provider_serves() {
+        assert!(model_fits_provider("claude-opus-5-5", Anthropic));
+        assert!(!model_fits_provider("claude-opus-5-5", Copilot));
+        assert!(model_fits_provider("claude-sonnet-5", Copilot));
+        assert!(model_fits_provider("gpt-5-mini", Copilot));
+        assert!(!model_fits_provider("gpt-5-mini", Anthropic));
+        assert!(!model_fits_provider("sonnet", Copilot));
+    }
+}
