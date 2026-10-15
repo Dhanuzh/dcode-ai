@@ -21,6 +21,7 @@ pub mod repo_map;
 pub mod run_validation;
 pub mod search;
 pub mod spawn_subagent;
+pub mod tool_search;
 pub mod types;
 pub mod update_plan;
 pub mod web_search;
@@ -35,11 +36,40 @@ use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 /// Registry of available tools the agent can invoke.
 pub struct ToolRegistry {
     tools: Vec<Box<dyn ToolExecutor>>,
+    /// Tools left out of `definitions()` until `tool_search` activates them.
+    deferred: std::collections::HashSet<String>,
+    activated: tool_search::Activated,
 }
 
 impl ToolRegistry {
     pub fn new() -> Self {
-        Self { tools: Vec::new() }
+        Self {
+            tools: Vec::new(),
+            deferred: Default::default(),
+            activated: Default::default(),
+        }
+    }
+
+    /// Hide every tool whose name satisfies `pred` behind `tool_search`, and
+    /// register that tool. Returns how many were deferred.
+    pub fn defer_behind_search(&mut self, pred: impl Fn(&str) -> bool) -> usize {
+        let defs: Vec<ToolDefinition> = self
+            .tools
+            .iter()
+            .map(|t| t.definition())
+            .filter(|d| pred(&d.name))
+            .collect();
+        if defs.is_empty() {
+            return 0;
+        }
+        self.deferred.extend(defs.iter().map(|d| d.name.clone()));
+        let n = defs.len();
+        self.tools.retain(|t| t.definition().name != "tool_search");
+        self.register(Box::new(tool_search::ToolSearchTool::new(
+            defs,
+            self.activated.clone(),
+        )));
+        n
     }
 
     pub fn register(&mut self, tool: Box<dyn ToolExecutor>) {
@@ -149,7 +179,12 @@ impl ToolRegistry {
     }
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|t| t.definition()).collect()
+        let active = self.activated.names();
+        self.tools
+            .iter()
+            .map(|t| t.definition())
+            .filter(|d| !self.deferred.contains(&d.name) || active.contains(&d.name))
+            .collect()
     }
 
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {

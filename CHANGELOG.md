@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### New (Claude Code parity)
+- **MCP tool search**: with more than 15 MCP tools (`[mcp]
+  tool_search_threshold`), their schemas are loaded on demand through
+  `tool_search` instead of being sent with every request.
+- `/release-notes` shows what's new; `/todos` shows the agent's task list.
+
 ## 1.0.4 — 2026-10-15
 
 ### New (Claude Code parity)

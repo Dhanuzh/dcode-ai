@@ -89,6 +89,8 @@ Type `/` to see them all with descriptions. The most used:
 | `/verify` | Read-only review of the uncommitted diff |
 | `/agents`, `/skills`, `/plugins`, `/mcp`, `/hooks`, `/reload` | Extensions |
 | `/memory`, `/init` | Memory notes; create project instructions |
+| `/todos` | The agent's current task list |
+| `/release-notes` | What's new in this version |
 | `/image`, `/web`, `/run` | Attach an image, fetch a page, run a command into context |
 | `/diff`, `/commit` | Review and commit changes |
 | `/bashes` | Background shells the agent started (`/bashes kill <id>`) |
@@ -215,7 +217,7 @@ project's checks, and hands real problems back to the main agent.
 | Web | `web_search`, `fetch_url` |
 | Binaries | `inspect_binary` — ELF / PE / Mach-O summary, sections, symbols, imports, strings, cargo-auditable crates, Go build info; never runs the file |
 | Agent | `spawn_subagent`, `ask_question`, `update_plan`, `invoke_skill` |
-| MCP | `mcp__<server>__<tool>` from configured servers |
+| MCP | `mcp__<server>__<tool>` from configured servers; with many, `tool_search` loads them on demand |
 
 ### Background shells
 

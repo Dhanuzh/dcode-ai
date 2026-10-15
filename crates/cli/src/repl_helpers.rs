@@ -719,3 +719,46 @@ mod thinking_keyword_tests {
         assert!(effort_rank("max") > effort_rank("high"));
     }
 }
+
+/// The changelog shipped inside the binary, for `/release-notes`.
+pub(crate) const CHANGELOG: &str = include_str!("../../../CHANGELOG.md");
+
+/// The newest `versions` sections of a `## x.y.z` changelog, as lines.
+pub(crate) fn release_notes(changelog: &str, versions: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen = 0;
+    for line in changelog.lines() {
+        if line.starts_with("## ") {
+            seen += 1;
+            if seen > versions {
+                break;
+            }
+            if !out.is_empty() {
+                out.push(String::new());
+            }
+            out.push(line.trim_start_matches("## ").to_string());
+            continue;
+        }
+        if seen == 0 || line.trim().is_empty() {
+            continue;
+        }
+        out.push(line.trim_start_matches("### ").to_string());
+    }
+    out
+}
+
+#[cfg(test)]
+mod release_notes_tests {
+    use super::*;
+
+    #[test]
+    fn newest_versions_only() {
+        let log = "# Changelog\n\n## 1.0.2\n### Fixes\n- b\n\n## 1.0.1\n- a\n\n## 1.0.0\n- z\n";
+        assert_eq!(
+            release_notes(log, 2),
+            vec!["1.0.2", "Fixes", "- b", "", "1.0.1", "- a"]
+        );
+        let newest = &release_notes(CHANGELOG, 1)[0];
+        assert!(newest.starts_with("1.") || newest == "Unreleased", "{newest}");
+    }
+}

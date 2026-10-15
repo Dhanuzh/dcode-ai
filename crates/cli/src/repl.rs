@@ -1533,7 +1533,19 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     }
                 }
             }
-            "/goals" => {
+            "/release-notes" => {
+                let lines = release_notes(CHANGELOG, 3);
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("Release notes", lines);
+                    }
+                } else {
+                    for l in lines {
+                        out.println(&l);
+                    }
+                }
+            }
+            "/goals" | "/todos" => {
                 // Goal tracking: recall the agent's current task plan (set via
                 // the update_plan tool) even after it scrolls out of view.
                 let plan = if let ReplOutput::Tui(st) = &out {

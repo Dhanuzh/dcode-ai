@@ -146,6 +146,7 @@ enabled = true
 # Auth / extra headers. Values support ${ENV_VAR} expansion so secrets
 # stay out of the file.
 headers = { Authorization = "Bearer ${MCP_TOKEN}" }
+tool_search_threshold = 15   # more MCP tools than this → loaded on demand via tool_search (0 = never)
 ```
 
 The HTTP transport accepts both `application/json` and `text/event-stream`

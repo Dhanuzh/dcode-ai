@@ -36,6 +36,7 @@ pub fn metadata(name: &str) -> ToolUi {
         "git_status" => ("G", "Git Status", "git"),
         "git_diff" => ("G", "Git Diff", "git"),
         "inspect_binary" => ("B", "Inspect", "search"),
+        "tool_search" => ("S", "Tool Search", "search"),
         "run_validation" => ("V", "Validate", "check"),
         "code_intel" | "code_intel_tool" => ("I", "Code Intel", "code"),
         "spawn_subagent" => ("A", "Task", "agent"),

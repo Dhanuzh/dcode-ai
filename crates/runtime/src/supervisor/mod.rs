@@ -197,8 +197,16 @@ impl Supervisor {
                     for (server, error) in errors {
                         tracing::warn!("MCP server `{server}` failed: {error}");
                     }
+                    let count = mcp_tools.len();
                     for tool in mcp_tools {
                         tools.register(tool);
+                    }
+                    // Many MCP tools: load their schemas on demand
+                    // (`tool_search`) instead of sending them every request.
+                    let threshold = config.mcp.tool_search_threshold;
+                    if threshold > 0 && count > threshold {
+                        let n = tools.defer_behind_search(|name| name.starts_with("mcp__"));
+                        tracing::info!("deferred {n} MCP tool(s) behind tool_search");
                     }
                 }
                 Err(_) => tracing::warn!("MCP tool load timed out after 15s — skipping"),

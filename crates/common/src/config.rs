@@ -1306,12 +1306,31 @@ pub struct HarnessConfig {
     pub include_repo_map: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct McpConfig {
     #[serde(default)]
     pub expose_in_safe_mode: bool,
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
+    /// With more MCP tools than this, their schemas are left out of requests
+    /// and the model loads them with `tool_search` (Claude Code's deferred
+    /// tools). 0 = always send every tool.
+    #[serde(default = "default_tool_search_threshold")]
+    pub tool_search_threshold: usize,
+}
+
+impl Default for McpConfig {
+    fn default() -> Self {
+        Self {
+            expose_in_safe_mode: false,
+            servers: Vec::new(),
+            tool_search_threshold: default_tool_search_threshold(),
+        }
+    }
+}
+
+fn default_tool_search_threshold() -> usize {
+    15
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1533,6 +1552,9 @@ impl McpConfig {
         }
         if let Some(servers) = partial.servers {
             self.servers = servers;
+        }
+        if let Some(t) = partial.tool_search_threshold {
+            self.tool_search_threshold = t;
         }
     }
 }
@@ -1782,6 +1804,7 @@ struct PartialHarnessConfig {
 struct PartialMcpConfig {
     expose_in_safe_mode: Option<bool>,
     servers: Option<Vec<McpServerConfig>>,
+    tool_search_threshold: Option<usize>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

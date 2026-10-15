@@ -83,7 +83,7 @@ pub fn tool_kind(tool: &str) -> &'static str {
         | "copy_path" | "rename_path" => "edit",
         "delete_path" => "delete",
         "move_path" => "move",
-        "search_code" | "query_symbols" | "code_intel" => "search",
+        "search_code" | "query_symbols" | "code_intel" | "tool_search" => "search",
         "execute_bash" | "run_background" | "run_validation" | "interactive_exec" => "execute",
         "fetch_url" | "web_search" => "fetch",
         "update_plan" => "think",

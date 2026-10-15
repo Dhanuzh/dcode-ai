@@ -81,6 +81,12 @@ dcode-ai mcp remove docs
 In the TUI, `/mcp` lists servers and their health; `/mcp test <name>` connects
 and lists its tools.
 
+**Many tools:** when servers bring more than 15 tools
+(`[mcp] tool_search_threshold`, `0` = never), their schemas are not sent with
+every request. The model sees their names and loads the ones it needs with
+`tool_search` (keywords, or `select:<name>`), like Claude Code's deferred
+tools. This keeps big servers from filling the context.
+
 **dcode-ai as a server:** `dcode-ai mcp serve` exposes dcode-ai's read and
 search tools over stdio (`--allow-writes` adds edit tools), for example
 `claude mcp add dcode -- dcode-ai mcp serve`.
