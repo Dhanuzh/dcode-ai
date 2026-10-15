@@ -547,6 +547,26 @@ pub(crate) fn time_ago(
     }
 }
 
+/// Full session id for `query`: an exact id or a unique part of one
+/// (usually its last digits, as `dcode-ai sessions` shows them).
+pub(crate) fn pick_session_by_suffix(ids: &[String], query: &str) -> Result<String, String> {
+    let q = query.trim();
+    if let Some(id) = ids.iter().find(|id| *id == q) {
+        return Ok(id.clone());
+    }
+    let matches: Vec<&String> = ids.iter().filter(|id| id.contains(q)).collect();
+    match matches.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => Err(format!(
+            "No session matches `{q}` — /resume opens the picker"
+        )),
+        many => Err(format!(
+            "`{q}` matches {} sessions — use more digits",
+            many.len()
+        )),
+    }
+}
+
 /// Session picker row: `3h ago · <name or first prompt> · <model>`.
 pub(crate) fn session_picker_label(
     when: &str,

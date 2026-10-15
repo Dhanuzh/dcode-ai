@@ -1453,6 +1453,29 @@ impl TuiSessionState {
         self.approval_option_index = 0;
         self.active_question = None;
         self.close_question_modal();
+        // A log that ends mid-turn (closed terminal, crash) must not reopen
+        // as "Thinking…" or with tools that look like they are still running.
+        self.streaming_thinking = None;
+        self.set_busy(false);
+        self.set_busy_state(BusyState::Idle);
+        for block in &mut self.blocks {
+            if let DisplayBlock::ToolRunning {
+                name,
+                input,
+                call_id,
+                ..
+            } = block
+            {
+                *block = DisplayBlock::ToolDone {
+                    name: std::mem::take(name),
+                    call_id: std::mem::take(call_id),
+                    input: std::mem::take(input),
+                    ok: false,
+                    detail: "Interrupted".into(),
+                };
+            }
+        }
+        self.touch_transcript();
     }
 
     pub fn clear_active_approval_if_matches(&mut self, call_id: &str) {
@@ -3002,5 +3025,36 @@ mod tests {
         assert!(st.active_question.is_none());
         assert!(!st.question_modal_open);
         assert_eq!(st.question_modal_index, 0);
+    }
+
+    #[test]
+    fn replay_of_an_unfinished_turn_reopens_idle() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "default".into(),
+            PathBuf::from("/tmp"),
+            false,
+        );
+        st.replaying = true;
+        st.apply_event(&AgentEvent::MessageReceived {
+            role: "user".into(),
+            content: "fix it".into(),
+        });
+        st.blocks.push(DisplayBlock::ToolRunning {
+            name: "execute_bash".into(),
+            input: "{}".into(),
+            output: String::new(),
+            call_id: "c1".into(),
+        });
+        st.replaying = false;
+        st.clear_replayed_interaction_state();
+        assert!(!st.busy);
+        assert!(!st.current_busy_state.is_active());
+        assert!(matches!(
+            st.blocks.last(),
+            Some(DisplayBlock::ToolDone { ok: false, .. })
+        ));
     }
 }

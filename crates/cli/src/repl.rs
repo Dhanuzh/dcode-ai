@@ -673,7 +673,11 @@ impl Repl {
                 {
                     g.model = self.runtime.model().to_string();
                 }
-                match self.runtime.config().save_global() {
+                match persist_model_choice(
+                    self.runtime.workspace_root(),
+                    self.runtime.config().provider.default,
+                    self.runtime.model(),
+                ) {
                     Ok(()) => out.println(&format!(
                         "[provider] {} — model {} — saved",
                         p.display_name(),
@@ -710,7 +714,11 @@ impl Repl {
                 {
                     g.model = self.runtime.model().to_string();
                 }
-                if let Err(e) = self.runtime.config().save_global() {
+                if let Err(e) = persist_model_choice(
+                    self.runtime.workspace_root(),
+                    self.runtime.config().provider.default,
+                    self.runtime.model(),
+                ) {
                     out.eprintln(&format!(
                         "[login] logged in and switched provider, but global save failed: {e}"
                     ));
@@ -748,7 +756,11 @@ impl Repl {
                 {
                     g.model = self.runtime.model().to_string();
                 }
-                match self.runtime.config().save_global() {
+                match persist_model_choice(
+                    self.runtime.workspace_root(),
+                    self.runtime.config().provider.default,
+                    self.runtime.model(),
+                ) {
                     Ok(()) => out.println(&format!(
                         "[provider] Copilot - model {} - saved",
                         self.runtime.model()
@@ -2747,6 +2759,13 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                         let mut rows = Vec::new();
                         for id in &ids {
                             let snapshot = store.load_snapshot(id).await.ok();
+                            // Sub-agent sessions live under their parent.
+                            if snapshot
+                                .as_ref()
+                                .is_some_and(|s| s.parent_session_id.is_some())
+                            {
+                                continue;
+                            }
                             let updated = snapshot.as_ref().map(|s| s.updated_at);
                             let name = snapshot.as_ref().and_then(|s| s.session_name.clone());
                             let model = snapshot.as_ref().map(|s| s.model.clone()).unwrap_or_default();
@@ -3810,9 +3829,12 @@ then switch).",
             g.set_current_branch(&branch);
         }
 
+        // Only for a fresh conversation: a resumed one (replayed blocks)
+        // opens straight onto its history, like Claude Code.
         if self.should_offer_startup_approve_all_popup()
             && let Ok(mut g) = tui_state.lock()
             && g.active_question.is_none()
+            && !g.blocks.iter().any(|b| matches!(b, DisplayBlock::User(_)))
         {
             g.active_question = Some(InteractiveQuestionPayload {
                 question_id: STARTUP_APPROVE_ALL_QUESTION_ID.to_string(),
@@ -4216,11 +4238,11 @@ then switch).",
                     let workspace = self.runtime.workspace_root().to_path_buf();
                     match self.runtime.apply_dcode_ai_config(cfg) {
                         Ok(()) => {
-                            let save_result = self
-                                .runtime
-                                .config()
-                                .save_workspace_file(&workspace)
-                                .or_else(|_| self.runtime.config().save_global());
+                            let save_result = persist_model_choice(
+                                &workspace,
+                                self.runtime.config().provider.default,
+                                self.runtime.model(),
+                            );
                             if let Err(e) = save_result {
                                 if let Ok(mut g) = tui_state.lock() {
                                     g.push_error(format!("[model] save failed: {e}"));
@@ -4330,6 +4352,34 @@ then switch).",
                     self.handle_command("/sessions", ReplOutput::Tui(&tui_state))
                         .await?;
                 }
+                // `/resume` opens the picker; `/resume <id>` (or its last
+                // digits) switches straight to that session — Claude Code's
+                // `/resume`.
+                TuiCmd::Submit(line)
+                    if line.trim() == "/resume" || line.trim().starts_with("/resume ") =>
+                {
+                    let query = line.trim().trim_start_matches("/resume").trim();
+                    if query.is_empty() {
+                        self.handle_command("/sessions", ReplOutput::Tui(&tui_state))
+                            .await?;
+                    } else {
+                        match self.runtime.list_session_ids().await {
+                            Ok(ids) => match pick_session_by_suffix(&ids, query) {
+                                Ok(id) => pending_cmds.push_front(TuiCmd::ResumeSession(id)),
+                                Err(e) => {
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.push_error(e);
+                                    }
+                                }
+                            },
+                            Err(e) => {
+                                if let Ok(mut g) = tui_state.lock() {
+                                    g.push_error(format!("Failed to list sessions: {e}"));
+                                }
+                            }
+                        }
+                    }
+                }
                 TuiCmd::ResumeSession(session_id) => {
                     // Signal busy so the TUI status bar shows activity.
                     if let Ok(mut g) = tui_state.lock() {
@@ -4423,10 +4473,11 @@ then switch).",
                         let mut cfg = self.runtime.config().clone();
                         cfg.apply_model_override(&next_model);
                         if let Ok(()) = self.runtime.apply_dcode_ai_config(cfg) {
-                            let _ = self
-                                .runtime
-                                .config()
-                                .save_workspace_file(self.runtime.workspace_root());
+                            let _ = persist_model_choice(
+                                self.runtime.workspace_root(),
+                                self.runtime.config().provider.default,
+                                self.runtime.model(),
+                            );
                             if let Ok(mut g) = tui_state.lock() {
                                 g.model = self.runtime.model().to_string();
                                 g.blocks.push(DisplayBlock::System(format!(
@@ -5228,6 +5279,39 @@ mod inline_shell_tests {
         // Read-only commands run even when not listed.
         assert!(!out.contains("`pwd` (not run"), "{out}");
     }
+}
+
+/// Remember the provider and model across launches, like Claude Code keeps
+/// your last `/model`: the global config, the workspace-local copy (when one
+/// exists, so it cannot shadow the choice) and the sign-in preference that
+/// startup uses to pick a provider. Only these fields change.
+fn persist_model_choice(
+    workspace: &std::path::Path,
+    kind: ProviderKind,
+    model: &str,
+) -> Result<(), String> {
+    use dcode_ai_common::config::DcodeAiConfig;
+    let apply = |c: &mut DcodeAiConfig| {
+        c.set_default_provider(kind);
+        c.apply_model_override(model);
+        c.model.track_recent_model(model);
+    };
+    let mut global = DcodeAiConfig::load_global_file().map_err(|e| e.to_string())?;
+    apply(&mut global);
+    global.save_global().map_err(|e| e.to_string())?;
+    if dcode_ai_common::config::workspace_config_path(workspace).exists() {
+        let mut local = DcodeAiConfig::load_workspace_file(workspace).map_err(|e| e.to_string())?;
+        apply(&mut local);
+        local
+            .save_workspace_file(workspace)
+            .map_err(|e| e.to_string())?;
+    }
+    let mut auth = dcode_ai_common::auth::AuthStore::load().unwrap_or_default();
+    auth.preferred_provider = Some(match kind {
+        ProviderKind::Anthropic => dcode_ai_common::auth::LoggedProvider::Anthropic,
+        ProviderKind::Copilot => dcode_ai_common::auth::LoggedProvider::Copilot,
+    });
+    auth.save().map_err(|e| e.to_string())
 }
 
 /// Save the theme in the user's global config (like Claude Code, the theme

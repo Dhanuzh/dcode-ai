@@ -1609,17 +1609,21 @@ async fn latest_session_id(
     let ids = store.list().await.map_err(anyhow::Error::msg)?;
     let mut latest = None;
 
+    // Same view as `dcode-ai sessions`: snapshots (cheap, and readable
+    // while a live session is writing), top-level sessions only.
     for id in ids {
-        let Ok(session) = store.load(&id).await else {
+        let Ok(session) = store.load_snapshot(&id).await else {
             continue;
         };
-
+        if session.parent_session_id.is_some() {
+            continue;
+        }
         let should_replace = latest
             .as_ref()
-            .map(|(_, updated_at)| session.meta.updated_at > *updated_at)
+            .map(|(_, updated_at)| session.updated_at > *updated_at)
             .unwrap_or(true);
         if should_replace {
-            latest = Some((session.meta.id, session.meta.updated_at));
+            latest = Some((session.id, session.updated_at));
         }
     }
 
@@ -1913,7 +1917,7 @@ fn print_human_session(session: &SessionSnapshot) {
     println!(
         "{short:<8}  {:>8}  {:<9}  {:<20}  {title}{children}",
         repl_helpers::time_ago(session.updated_at, chrono::Utc::now()),
-        format!("{:?}", session.status).to_ascii_lowercase(),
+        session.status_label(),
         crate::tui::render_helpers::truncate_chars(&session.model, 20),
     );
 }
@@ -2704,6 +2708,12 @@ fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
 
     // A credential configured for the default provider wins over login history.
     if config.provider.api_key_present_for(config.provider.default) {
+        return;
+    }
+    // The saved provider is the user's last choice (`/model`, `/provider`
+    // save it); keep it whenever it can run. Login history only picks a
+    // provider when the saved one is not usable.
+    if default_provider_ready(config) {
         return;
     }
 

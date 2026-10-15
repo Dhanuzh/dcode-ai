@@ -200,6 +200,30 @@ pub enum SessionStatus {
     Cancelled,
 }
 
+/// Whether process `pid` still exists. Only Linux can tell cheaply
+/// (`/proc`); elsewhere a recorded process is assumed alive.
+pub fn process_alive(pid: u32) -> bool {
+    if cfg!(target_os = "linux") {
+        std::path::Path::new(&format!("/proc/{pid}")).exists()
+    } else {
+        true
+    }
+}
+
+impl SessionSnapshot {
+    /// Status for people: a session still marked running whose process has
+    /// exited (closed terminal, crash) reads as `ended`.
+    pub fn status_label(&self) -> &'static str {
+        match self.status {
+            SessionStatus::Running if self.pid.is_some_and(|p| !process_alive(p)) => "ended",
+            SessionStatus::Running => "running",
+            SessionStatus::Completed => "completed",
+            SessionStatus::Error => "error",
+            SessionStatus::Cancelled => "cancelled",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::OrchestrationContext;
@@ -238,6 +262,23 @@ mod tests {
 
         for (key, _) in vars {
             unsafe { env::remove_var(key) };
+        }
+    }
+
+    #[test]
+    fn dead_running_session_reads_as_ended() {
+        let json = serde_json::json!({
+            "id": "s", "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "workspace": "/w", "model": "m", "status": "running", "pid": null, "socket_path": null,
+            "total_input_tokens": 0, "total_output_tokens": 0, "estimated_cost_usd": 0.0
+        });
+        let mut snap: super::SessionSnapshot = serde_json::from_value(json).unwrap();
+        assert_eq!(snap.status_label(), "running");
+        snap.pid = Some(std::process::id());
+        assert_eq!(snap.status_label(), "running");
+        if cfg!(target_os = "linux") {
+            snap.pid = Some(u32::MAX - 7);
+            assert_eq!(snap.status_label(), "ended");
         }
     }
 }

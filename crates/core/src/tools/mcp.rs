@@ -63,8 +63,15 @@ impl McpConnectionManager {
 
     pub async fn shutdown_all(&self) {
         let mut clients = self.clients.lock().await;
-        for (_, client) in clients.drain() {
-            client.shutdown().await;
+        for (name, client) in clients.drain() {
+            // A server that never finished starting, or a request still
+            // holding the transport, must not block session switch or exit.
+            if tokio::time::timeout(std::time::Duration::from_secs(3), client.shutdown())
+                .await
+                .is_err()
+            {
+                tracing::warn!("MCP server `{name}` did not shut down in 3s; dropping it");
+            }
         }
     }
 }
@@ -404,7 +411,9 @@ impl StdioMcpClient {
             .args(&server.args)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null());
+            .stderr(std::process::Stdio::null())
+            // Never leave a server running after its client is gone.
+            .kill_on_drop(true);
 
         let working_directory = server
             .cwd
@@ -491,11 +500,18 @@ impl McpTransport for StdioMcpClient {
         self.stdin.flush().await.map_err(|err| err.to_string())
     }
 
+    /// MCP stdio shutdown: close the server's stdin, give it a moment to
+    /// exit, then kill it. (MCP has no `shutdown` request; servers that
+    /// ignore unknown methods would never answer one.)
     async fn shutdown(&mut self) {
-        let _ = self.request("shutdown", Value::Null).await;
-        let _ = self.notify("exit", Value::Null).await;
-        let _ = self.child.kill().await;
-        let _ = self.child.wait().await;
+        let _ = self.stdin.shutdown().await;
+        let exited = tokio::time::timeout(std::time::Duration::from_millis(500), self.child.wait())
+            .await
+            .is_ok();
+        if !exited {
+            let _ = self.child.kill().await;
+            let _ = self.child.wait().await;
+        }
     }
 }
 
@@ -609,10 +625,9 @@ impl McpTransport for HttpMcpClient {
         self.post(&payload).await.map(|_| ())
     }
 
-    async fn shutdown(&mut self) {
-        let _ = self.request("shutdown", Value::Null).await;
-        let _ = self.notify("exit", Value::Null).await;
-    }
+    /// Nothing to tear down for streamable HTTP: the server owns its
+    /// lifetime, and MCP defines no `shutdown` request.
+    async fn shutdown(&mut self) {}
 }
 
 impl HttpMcpClient {
