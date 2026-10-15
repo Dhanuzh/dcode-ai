@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.2 — 2026-10-15
+
+### Fixes
+- Claude: writing about the `<tool_call>` protocol (in backticks, or a bare
+  tag followed by prose) no longer fails the turn with "unterminated tool
+  call"; a quoted `<tool_result>` no longer cuts the reply short.
+
 ## 1.0.1 — 2026-10-15
 
 ### Sessions
