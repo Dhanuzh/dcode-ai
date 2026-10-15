@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.3 — 2026-10-15
 
 ### Background shells (Claude Code style)
 - `run_background` jobs show in the footer (`· 1 shell`), turns end with
