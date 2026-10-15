@@ -9,6 +9,7 @@ pub mod mcp_json;
 pub mod mentions;
 pub mod message;
 pub mod model_caps;
+pub mod output_styles;
 pub mod plugins;
 pub mod provider_runtime;
 pub mod redact;

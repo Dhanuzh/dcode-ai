@@ -104,6 +104,13 @@ pub fn build_system_prompt(
         sections.push(section);
     }
 
+    if let Some(section) = dcode_ai_common::output_styles::prompt_section(
+        workspace_root,
+        config.ui.output_style.as_deref(),
+    ) {
+        sections.push(section);
+    }
+
     if let Some(text) = read_if_exists(&workspace_root.join("AGENTS.md"))
         && !text.trim().is_empty()
     {
@@ -182,7 +189,7 @@ fn permission_mode_section(mode: PermissionMode) -> Option<String> {
                 .into(),
         ),
         PermissionMode::BypassPermissions => Some(
-            "Permission Mode: bypass-permissions\n- Read/edit tools are broadly available.\n- Shell execution asks once, then is allowed for the rest of the session."
+            "Permission Mode: bypass-permissions\n- Tools run without approval prompts.\n- Known-destructive shell commands are still refused; be careful with irreversible actions."
                 .into(),
         ),
         PermissionMode::Default => None,

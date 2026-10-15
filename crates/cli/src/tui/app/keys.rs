@@ -1010,7 +1010,20 @@ pub(super) fn handle_key_event(
             g.composer_history_search_index = 0;
         }
         (KeyCode::Char('b'), KeyModifiers::CONTROL) => {
-            let _ = cmd_tx.send(TuiCmd::OpenStatus);
+            // Claude Code: Ctrl+B moves a running shell command to the
+            // background; otherwise it opens the status view.
+            let shell_running = g.blocks.iter().rev().take(64).any(
+                |b| matches!(b, DisplayBlock::ToolRunning { name, .. } if name == "execute_bash"),
+            );
+            if shell_running {
+                dcode_ai_runtime::bash_tool::background_signal().notify_waiters();
+                g.show_toast(
+                    "Moving the command to the background…",
+                    crate::tui::state::ToastKind::Info,
+                );
+            } else {
+                let _ = cmd_tx.send(TuiCmd::OpenStatus);
+            }
         }
         (KeyCode::Char('x'), KeyModifiers::CONTROL) => {
             g.leader_pending = true;

@@ -663,3 +663,59 @@ mod session_label_tests {
         );
     }
 }
+
+/// Effort a thinking keyword in `text` asks for (Claude Code's
+/// `think hard` < `think harder` < `ultrathink`), for that turn only.
+pub(crate) fn thinking_keyword_effort(text: &str) -> Option<&'static str> {
+    let t = text.to_ascii_lowercase();
+    let has_word = |w: &str| {
+        t.match_indices(w).any(|(i, _)| {
+            let before = t[..i].chars().next_back();
+            let after = t[i + w.len()..].chars().next();
+            !before.is_some_and(|c| c.is_alphanumeric())
+                && !after.is_some_and(|c| c.is_alphanumeric())
+        })
+    };
+    if has_word("ultrathink") {
+        Some("max")
+    } else if has_word("think harder")
+        || has_word("think very hard")
+        || has_word("think super hard")
+        || has_word("megathink")
+    {
+        Some("xhigh")
+    } else if has_word("think hard") || has_word("think deeply") {
+        Some("high")
+    } else {
+        None
+    }
+}
+
+/// Order of effort levels, for "only ever raise".
+pub(crate) fn effort_rank(level: &str) -> usize {
+    ["low", "medium", "high", "xhigh", "max"]
+        .iter()
+        .position(|l| *l == level)
+        .unwrap_or(2)
+}
+
+#[cfg(test)]
+mod thinking_keyword_tests {
+    use super::*;
+
+    #[test]
+    fn keywords_map_to_effort() {
+        assert_eq!(
+            thinking_keyword_effort("please ultrathink about this"),
+            Some("max")
+        );
+        assert_eq!(thinking_keyword_effort("Think harder: why?"), Some("xhigh"));
+        assert_eq!(
+            thinking_keyword_effort("think hard about the bug"),
+            Some("high")
+        );
+        assert_eq!(thinking_keyword_effort("I think this is fine"), None);
+        assert_eq!(thinking_keyword_effort("rethink hardware"), None);
+        assert!(effort_rank("max") > effort_rank("high"));
+    }
+}

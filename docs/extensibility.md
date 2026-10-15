@@ -9,6 +9,7 @@ configs, skills, commands, agents and hooks work without changes.
 - [Custom commands](#custom-commands)
 - [Custom agents](#custom-agents)
 - [Hooks](#hooks)
+- [Output styles](#output-styles)
 - [Status line](#status-line)
 - [Language servers](#language-servers)
 - [Model routing](#model-routing)
@@ -154,6 +155,23 @@ Events: `session_start`, `session_end`, `user_prompt_submit`, `pre_tool_use`,
 `post_tool_use`, `post_tool_failure`, `approval_requested`, `pre_compact`,
 `subagent_start`, `subagent_stop`, `stop`. Plugin `hooks/hooks.json` files map
 onto these.
+
+## Output styles
+
+`/output-style` switches how replies are written: **Default**, **Explanatory**
+(adds `★ Insight` notes about choices and patterns) or **Learning** (hands
+small pieces of code to you with `TODO(human)`). Custom styles are Markdown
+files in `output-styles/` under `.dcode-ai/` or `.claude/` (project or home):
+
+```markdown
+---
+name: Reviewer
+description: Findings first, one line each
+---
+Answer like a senior code reviewer …
+```
+
+The choice is saved in `[ui] output_style`.
 
 ## Status line
 

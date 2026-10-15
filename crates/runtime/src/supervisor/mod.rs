@@ -247,20 +247,6 @@ impl Supervisor {
                 .fail_on_ask()
                 .with_handler(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>)
         };
-        tools.register(Box::new(crate::bash_tool::RuntimeBashTool::with_event_tx(
-            pty,
-            event_tx.clone(),
-        )));
-        // PTY-backed interactive exec (answer prompts like sudo passwords, [y/N]).
-        let interactive_tool =
-            crate::interactive_exec::InteractiveExecTool::new(workspace_root.clone());
-        let interactive_handle = interactive_tool.handle();
-        tools.register(Box::new(interactive_tool));
-        // Agent-driven dev-server preview (`run_preview`, streams to the web chat UI).
-        let preview_tool =
-            crate::preview_tool::PreviewTool::new(workspace_root.clone(), event_tx.clone());
-        let preview_handle = preview_tool.handle();
-        tools.register(Box::new(preview_tool));
         // Background shells report start/end on the event channel so the UI
         // can show them and the agent is notified when one finishes.
         let background_tool =
@@ -273,6 +259,24 @@ impl Supervisor {
             tools.retain_by_name(|n| n != "run_background");
             tools.register(Box::new(background_tool));
         }
+        let mut bash_tool = crate::bash_tool::RuntimeBashTool::with_event_tx(pty, event_tx.clone());
+        // Ctrl+B in the interactive session moves a running command to the
+        // background; sub-agents keep plain foreground commands.
+        if cfg.interactive_approvals && !cfg.safe_mode {
+            bash_tool = bash_tool.with_background_jobs(background_jobs.clone());
+        }
+        tools.register(Box::new(bash_tool));
+        // PTY-backed interactive exec (answer prompts like sudo passwords, [y/N]).
+        let interactive_tool =
+            crate::interactive_exec::InteractiveExecTool::new(workspace_root.clone());
+        let interactive_handle = interactive_tool.handle();
+        tools.register(Box::new(interactive_tool));
+        // Agent-driven dev-server preview (`run_preview`, streams to the web chat UI).
+        let preview_tool =
+            crate::preview_tool::PreviewTool::new(workspace_root.clone(), event_tx.clone());
+        let preview_handle = preview_tool.handle();
+        tools.register(Box::new(preview_tool));
+
         let question_pending = Arc::new(Mutex::new(HashMap::new()));
         tools.register(Box::new(AskQuestionTool::new(
             event_tx.clone(),

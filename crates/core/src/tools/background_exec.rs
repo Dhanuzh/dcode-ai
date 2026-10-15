@@ -30,6 +30,11 @@ struct BgRegistry {
     next_id: u32,
 }
 
+/// A running command's outcome: final status, exit code and output.
+pub type JobRun = std::pin::Pin<
+    Box<dyn std::future::Future<Output = (BackgroundJobStatus, Option<i32>, String)> + Send>,
+>;
+
 /// A snapshot of one job, for listings (`/bashes`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct JobInfo {
@@ -79,6 +84,72 @@ impl BackgroundJobs {
         let job = reg.jobs.remove(pos);
         job.handle.abort();
         true
+    }
+
+    /// Take over a command that is already running (Ctrl+B on a foreground
+    /// shell command). `run` resolves to the final status, exit code and
+    /// output; start and end are reported on `events` like `start` jobs.
+    pub async fn adopt(
+        &self,
+        command: String,
+        events: Option<mpsc::Sender<AgentEvent>>,
+        run: JobRun,
+    ) -> u32 {
+        let id = match self.0.lock() {
+            Ok(mut reg) => {
+                if reg.next_id == 0 {
+                    reg.next_id = 1;
+                }
+                let id = reg.next_id;
+                reg.next_id += 1;
+                id
+            }
+            Err(_) => 0,
+        };
+        if let Some(tx) = &events {
+            let _ = tx
+                .send(AgentEvent::BackgroundJob {
+                    job_id: id,
+                    command: command.clone(),
+                    status: BackgroundJobStatus::Running,
+                    exit_code: None,
+                    output_tail: String::new(),
+                })
+                .await;
+        }
+        let output = Arc::new(Mutex::new(String::new()));
+        let status = Arc::new(Mutex::new((BackgroundJobStatus::Running, None)));
+        let (out_c, status_c, cmd_c) = (output.clone(), status.clone(), command.clone());
+        let handle = tokio::spawn(async move {
+            let (final_status, code, text) = run.await;
+            if let Ok(mut b) = out_c.lock() {
+                *b = text.clone();
+            }
+            if let Ok(mut s) = status_c.lock() {
+                *s = (final_status, code);
+            }
+            if let Some(tx) = events {
+                let _ = tx
+                    .send(AgentEvent::BackgroundJob {
+                        job_id: id,
+                        command: cmd_c,
+                        status: final_status,
+                        exit_code: code,
+                        output_tail: output_tail(&text),
+                    })
+                    .await;
+            }
+        });
+        if let Ok(mut reg) = self.0.lock() {
+            reg.jobs.push(BgJob {
+                id,
+                cmd: command,
+                output,
+                status,
+                handle,
+            });
+        }
+        id
     }
 
     /// Stop every job (session end).

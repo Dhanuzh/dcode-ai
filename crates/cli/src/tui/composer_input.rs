@@ -378,6 +378,7 @@ pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'stati
     let mention_ranges = at_mention_char_ranges(buffer);
     let code_fence_ranges = code_fence_char_ranges(buffer);
     let placeholder_ranges = crate::tui::paste::placeholder_char_ranges(buffer);
+    let think_ranges = thinking_keyword_char_ranges(buffer);
     let cursor_char_idx = cursor_char_idx.min(chars.len());
     let mut spans = vec![prompt];
     let mut run = String::new();
@@ -426,7 +427,24 @@ pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'stati
         let in_placeholder = placeholder_ranges
             .iter()
             .any(|(start, end)| *start <= idx && idx < *end);
-        let style = if in_placeholder {
+        let think_idx = think_ranges
+            .iter()
+            .find(|(start, end)| *start <= idx && idx < *end)
+            .map(|(start, _)| idx - start);
+        let style = if let Some(offset) = think_idx {
+            // `ultrathink` / `think hard`: Claude-style rainbow letters.
+            const RAINBOW: [Color; 6] = [
+                Color::Rgb(235, 95, 87),
+                Color::Rgb(245, 139, 87),
+                Color::Rgb(250, 195, 95),
+                Color::Rgb(145, 200, 130),
+                Color::Rgb(130, 170, 220),
+                Color::Rgb(155, 130, 200),
+            ];
+            Style::default()
+                .fg(RAINBOW[offset % RAINBOW.len()])
+                .add_modifier(Modifier::BOLD)
+        } else if in_placeholder {
             // `[Image #1]` / `[Pasted text #2 +5 lines]` chips.
             Style::default()
                 .fg(theme::accent())
@@ -449,4 +467,55 @@ pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'stati
     }
 
     Line::from(spans)
+}
+
+/// Char ranges of thinking keywords (`ultrathink`, `think harder`, …) in
+/// `text`, for highlighting.
+pub(crate) fn thinking_keyword_char_ranges(text: &str) -> Vec<(usize, usize)> {
+    const KEYWORDS: [&str; 6] = [
+        "ultrathink",
+        "think super hard",
+        "think very hard",
+        "think harder",
+        "megathink",
+        "think hard",
+    ];
+    let lower: Vec<char> = text.chars().map(|c| c.to_ascii_lowercase()).collect();
+    let mut out: Vec<(usize, usize)> = Vec::new();
+    for kw in KEYWORDS {
+        let k: Vec<char> = kw.chars().collect();
+        let mut i = 0;
+        while i + k.len() <= lower.len() {
+            let boundary_ok = (i == 0 || !lower[i - 1].is_alphanumeric())
+                && lower.get(i + k.len()).is_none_or(|c| !c.is_alphanumeric());
+            if lower[i..i + k.len()] == k[..]
+                && boundary_ok
+                && !out.iter().any(|&(s, e)| i < e && s < i + k.len())
+            {
+                out.push((i, i + k.len()));
+                i += k.len();
+            } else {
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn thinking_keywords_are_found_once() {
+        assert_eq!(
+            thinking_keyword_char_ranges("ok ULTRAthink now"),
+            vec![(3, 13)]
+        );
+        assert_eq!(
+            thinking_keyword_char_ranges("think harder pls"),
+            vec![(0, 12)]
+        );
+        assert!(thinking_keyword_char_ranges("rethink hardware").is_empty());
+    }
 }

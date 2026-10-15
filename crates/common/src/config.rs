@@ -345,6 +345,10 @@ pub struct UiConfig {
     /// ("concise", "friendly", "technical", "default").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub personality: Option<String>,
+    /// Output style (`/output-style`): `default`, `explanatory`, `learning`
+    /// or a custom style from an `output-styles/*.md` file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_style: Option<String>,
     /// Status-bar items to hide. Valid keys: "agent", "effort", "time",
     /// "context", "model". Empty = show everything (default).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -393,6 +397,7 @@ impl Default for UiConfig {
             code_line_numbers: false,
             onboarding_completed: false,
             personality: None,
+            output_style: None,
             statusline_hidden: Vec::new(),
             statusline_command: None,
             keymap: BTreeMap::new(),
@@ -426,6 +431,9 @@ impl UiConfig {
         }
         if let Some(onboarding_completed) = partial.onboarding_completed {
             self.onboarding_completed = onboarding_completed;
+        }
+        if let Some(style) = partial.output_style {
+            self.output_style = Some(style).filter(|s| !s.trim().is_empty());
         }
         if let Some(personality) = partial.personality {
             self.personality = Some(personality);
@@ -554,6 +562,10 @@ pub enum WorkspaceCacheError {
         path: PathBuf,
         source: std::io::Error,
     },
+}
+
+fn default_cleanup_period_days() -> u32 {
+    30
 }
 
 pub fn workspace_config_path(workspace_root: &Path) -> PathBuf {
@@ -1260,6 +1272,10 @@ pub struct SessionConfig {
     /// After a turn that changed files, run the read-only verifier (`/verify`).
     #[serde(default)]
     pub verify_after_edits: bool,
+    /// Delete saved sessions untouched for this many days, at startup
+    /// (Claude Code's `cleanupPeriodDays`). 0 keeps them forever.
+    #[serde(default = "default_cleanup_period_days")]
+    pub cleanup_period_days: u32,
 }
 
 impl Default for SessionConfig {
@@ -1273,6 +1289,7 @@ impl Default for SessionConfig {
             auto_compact_on_finish: false,
             max_cost_usd: 0.0,
             verify_after_edits: false,
+            cleanup_period_days: default_cleanup_period_days(),
         }
     }
 }
@@ -1614,6 +1631,9 @@ impl SessionConfig {
         if let Some(v) = partial.max_cost_usd {
             self.max_cost_usd = v.max(0.0);
         }
+        if let Some(v) = partial.cleanup_period_days {
+            self.cleanup_period_days = v;
+        }
         if let Some(v) = partial.verify_after_edits {
             self.verify_after_edits = v;
         }
@@ -1663,6 +1683,7 @@ struct PartialUiConfig {
     code_line_numbers: Option<bool>,
     onboarding_completed: Option<bool>,
     personality: Option<String>,
+    output_style: Option<String>,
     statusline_hidden: Option<Vec<String>>,
     statusline_command: Option<String>,
     keymap: Option<BTreeMap<String, String>>,
@@ -1745,6 +1766,7 @@ struct PartialSessionConfig {
     auto_compact_on_finish: Option<bool>,
     max_cost_usd: Option<f64>,
     verify_after_edits: Option<bool>,
+    cleanup_period_days: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

@@ -669,10 +669,15 @@ fn render_block(
             let all: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
             let live = &all[all.len().saturating_sub(4)..];
             if live.is_empty() {
+                let text = if name == "execute_bash" {
+                    "Running… (ctrl+b to run in background)"
+                } else {
+                    "Running…"
+                };
                 push_transcript_line(
                     lines,
                     hits,
-                    result_line(true, vec![Span::styled("Running…", dim())]),
+                    result_line(true, vec![Span::styled(text, dim())]),
                     None,
                 );
             } else {

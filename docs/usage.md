@@ -30,6 +30,7 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 | `Tab` | Complete `@file` or `/command`; otherwise cycle the agent profile |
 | `F2` / `Shift+F2` | Next / previous model |
 | `Ctrl+P` | Command palette |
+| `Ctrl+B` | Move the running shell command to the background |
 | `Ctrl+T` | Show or hide thinking |
 | `Ctrl+O` | Fold or unfold tool output |
 | `Ctrl+F` · `n` / `N` | Search the transcript |
@@ -45,6 +46,10 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 | `!command` | Run a shell command (the input rule turns pink) |
 | `# note` | Save a memory note for future sessions |
 | `/command` | Slash commands, including plugin commands `/plugin:command` |
+
+Thinking keywords raise reasoning effort for that message only, and are
+highlighted as you type: `think hard` (high), `think harder` / `megathink`
+(xhigh), `ultrathink` (max).
 
 `[Image #N]` and `[Pasted text #N +L lines]` chips delete as one unit with
 Backspace; deleting an image chip removes that image from the message.
@@ -74,6 +79,7 @@ Type `/` to see them all with descriptions. The most used:
 | --- | --- |
 | `/model`, `/models`, `/provider`, `/effort` | Choose model, provider and reasoning effort |
 | `/theme` | Theme picker with live preview |
+| `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
 | `/permissions` | Permission mode and rules |
 | `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use |
 | `/compact [--preview]` | Summarise the conversation to free context |
@@ -126,6 +132,11 @@ Every conversation is saved per workspace:
 <workspace>/.dcode-ai/worktrees/
 └── <session-id>/                 # isolated git worktree (sub-agents)
 ```
+
+Sessions untouched for 30 days are deleted at startup
+(`[session] cleanup_period_days`, `0` keeps them); `dcode-ai sessions --prune
+<DAYS>` does it on demand. `/resume` (or `dcode-ai -r`) picks one to continue,
+`dcode-ai -c` continues the latest.
 
 A session records its model, provider, token counts, estimated cost,
 timestamps, parent/child lineage and orchestration metadata. Resuming keeps
@@ -214,7 +225,8 @@ The agent runs long commands (dev servers, test suites, builds) with
 running`. When a command finishes you see
 `● Background command "cargo test" completed (exit code 0)` and the agent is
 told automatically — exit code and last output lines — so it can react
-without polling. `/bashes` lists the jobs with their latest output;
+without polling. A shell command already running in the foreground can be
+sent to the background with `Ctrl+B`. `/bashes` lists the jobs with their latest output;
 `/bashes kill <id>` stops one.
 
 ## Automation

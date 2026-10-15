@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.4 — 2026-10-15
+
+### New (Claude Code parity)
+- **Ctrl+B** moves a running shell command to the background; it keeps
+  running, shows in the footer and `/bashes`, and the agent is notified
+  when it finishes. Running commands show `(ctrl+b to run in background)`.
+- **Thinking keywords**: `think hard`, `think harder` / `megathink` and
+  `ultrathink` raise reasoning effort for that message (highlighted as you
+  type).
+- **Output styles**: `/output-style` with Default, Explanatory (★ Insight
+  notes) and Learning (`TODO(human)`), plus custom `output-styles/*.md`.
+- **Session cleanup**: sessions untouched for 30 days are deleted at startup
+  (`[session] cleanup_period_days`, 0 = keep); `dcode-ai sessions --prune
+  <DAYS>`.
+
 ## 1.0.3 — 2026-10-15
 
 ### Background shells (Claude Code style)

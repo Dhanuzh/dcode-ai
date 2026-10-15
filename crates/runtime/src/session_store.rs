@@ -168,6 +168,32 @@ impl SessionStore {
         Ok(deleted)
     }
 
+    /// Delete sessions last updated before `cutoff`: state, event log and
+    /// attachments. Sessions whose process is still alive are kept. Returns
+    /// the deleted ids.
+    pub async fn prune_older_than(
+        &self,
+        cutoff: chrono::DateTime<chrono::Utc>,
+    ) -> Result<Vec<String>, SessionStoreError> {
+        let (snapshots, _) = self.load_all_snapshots().await?;
+        let mut deleted = Vec::new();
+        for snap in snapshots {
+            if snap.updated_at >= cutoff || snap.status_label() == "running" {
+                continue;
+            }
+            if self.delete(&snap.id).await.is_ok() {
+                // Attachments live in `<sessions>/<id>/`; the id is a
+                // generated name, never a path, so stay inside our directory.
+                let dir = self.sessions_dir.join(&snap.id);
+                if !snap.id.contains(['/', '\\']) && !snap.id.contains("..") && dir.is_dir() {
+                    let _ = tokio::fs::remove_dir_all(&dir).await;
+                }
+                deleted.push(snap.id);
+            }
+        }
+        Ok(deleted)
+    }
+
     /// Load all session snapshots from disk in batch.
     /// Returns two lists: successful loads and IDs that could not be loaded.
     pub async fn load_all_snapshots(
@@ -232,6 +258,36 @@ mod tests {
             total_output_tokens: 0,
             estimated_cost_usd: 0.0,
         }
+    }
+
+    #[tokio::test]
+    async fn prune_deletes_only_old_finished_sessions() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = SessionStore::new(dir.path());
+        let now = chrono::Utc::now();
+        let mut old = make_session_state("session-old");
+        old.meta.updated_at = now - chrono::Duration::days(40);
+        let mut live = make_session_state("session-live");
+        live.meta.updated_at = now - chrono::Duration::days(40);
+        live.meta.status = SessionStatus::Running;
+        live.meta.pid = Some(std::process::id());
+        let fresh = make_session_state("session-fresh");
+        for s in [&old, &live, &fresh] {
+            store.save(s).await.unwrap();
+        }
+        let attachments = dir.path().join("session-old/attachments");
+        std::fs::create_dir_all(&attachments).unwrap();
+        std::fs::write(attachments.join("a.png"), b"x").unwrap();
+
+        let deleted = store
+            .prune_older_than(now - chrono::Duration::days(30))
+            .await
+            .unwrap();
+        assert_eq!(deleted, vec!["session-old".to_string()]);
+        assert!(!dir.path().join("session-old").exists());
+        let mut left = store.list().await.unwrap();
+        left.sort();
+        assert_eq!(left, vec!["session-fresh", "session-live"]);
     }
 
     #[tokio::test]

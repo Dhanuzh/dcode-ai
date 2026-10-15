@@ -2505,6 +2505,57 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     }
                 }
             }
+            "/output-style" | "/output-styles" => {
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let styles = dcode_ai_common::output_styles::discover(&ws);
+                let current = self
+                    .runtime
+                    .config()
+                    .ui
+                    .output_style
+                    .clone()
+                    .unwrap_or_else(|| "default".into())
+                    .to_ascii_lowercase();
+                let target = rest.trim().to_ascii_lowercase();
+                if target.is_empty() {
+                    let mut lines = vec!["Choose how dcode-ai talks to you:".to_string(), String::new()];
+                    for st in &styles {
+                        let mark = if st.key == current { "✔" } else { " " };
+                        let origin = if st.source.is_some() { " (custom)" } else { "" };
+                        lines.push(format!("{mark} {:<12} {}{origin}", st.key, st.description));
+                    }
+                    lines.push(String::new());
+                    lines.push("/output-style <name> to switch · custom styles: .claude/output-styles/*.md".into());
+                    if let ReplOutput::Tui(st) = &out {
+                        if let Ok(mut g) = st.lock() {
+                            g.open_info_modal("Output style", lines);
+                        }
+                    } else {
+                        for l in lines {
+                            out.println(&l);
+                        }
+                    }
+                } else if let Some(style) = styles.iter().find(|st| st.key == target) {
+                    let value = (style.key != "default").then(|| style.key.clone());
+                    self.runtime.config_mut().ui.output_style = value.clone();
+                    self.runtime.refresh_system_prompt();
+                    // Like the theme, the style follows you across projects.
+                    let saved = dcode_ai_common::config::DcodeAiConfig::load_global_file()
+                        .and_then(|mut g| {
+                            g.ui.output_style = value;
+                            g.save_global()
+                        });
+                    if let Err(e) = saved {
+                        out.eprintln(&format!("warn: failed to save output style: {e}"));
+                    }
+                    out.println(&format!("[output-style] {} — {}", style.name, style.description));
+                } else {
+                    out.eprintln(&format!(
+                        "[output-style] unknown '{target}'; choose {}",
+                        styles.iter().map(|s| s.key.as_str()).collect::<Vec<_>>().join("|")
+                    ));
+                }
+            }
             "/personality" => {
                 let target = rest.trim().to_ascii_lowercase();
                 let valid = ["concise", "friendly", "technical", "default"];
@@ -4904,6 +4955,40 @@ then switch).",
                     } else {
                         Vec::new()
                     };
+                    // `think hard` / `ultrathink`: raise effort for this turn.
+                    let effort_restore = match thinking_keyword_effort(&expanded) {
+                        Some(level) => {
+                            let current = self
+                                .runtime
+                                .config()
+                                .provider
+                                .anthropic
+                                .effort
+                                .clone()
+                                .unwrap_or_else(|| "high".into());
+                            if effort_rank(level) > effort_rank(&current) {
+                                let saved = self.runtime.config().clone();
+                                let mut cfg = saved.clone();
+                                cfg.provider.anthropic.effort = Some(level.into());
+                                cfg.provider.copilot.reasoning_effort = Some(level.into());
+                                cfg.model.enable_thinking = true;
+                                if self.runtime.apply_dcode_ai_config(cfg).is_ok() {
+                                    if let Ok(mut g) = tui_state.lock() {
+                                        g.show_toast(
+                                            format!("Thinking effort {level} for this turn"),
+                                            crate::tui::state::ToastKind::Info,
+                                        );
+                                    }
+                                    Some(saved)
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        None => None,
+                    };
                     let before = git_change_snapshot(self.runtime.workspace_root());
                     let turn_started = std::time::Instant::now();
                     let turn = if attachments.is_empty() {
@@ -4913,6 +4998,9 @@ then switch).",
                             .run_turn_with_images(&expanded, attachments)
                             .await
                     };
+                    if let Some(saved) = effort_restore {
+                        let _ = self.runtime.apply_dcode_ai_config(saved);
+                    }
                     let turn_ok = turn.is_ok();
                     if let Err(e) = turn {
                         // Let queued events (e.g. the echoed prompt of a

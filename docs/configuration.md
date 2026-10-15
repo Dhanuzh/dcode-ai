@@ -101,7 +101,12 @@ max_turns_per_run      = 100
 max_tool_calls_per_turn = 50
 checkpoint_interval    = 1
 auto_compact_on_finish = false
+cleanup_period_days    = 30   # delete sessions untouched this long, at startup (0 = keep)
+max_cost_usd           = 0.0  # stop the agent at this estimated spend (0 = off)
+verify_after_edits     = false
 ```
+
+`dcode-ai sessions --prune <DAYS>` deletes old sessions on demand.
 
 ## `[harness]` — instructions & skills
 
@@ -197,6 +202,7 @@ file_path = ".dcode-ai/memory.json"
 ```toml
 [ui]
 theme             = "..."     # or use /theme
+output_style      = "default" # or use /output-style (explanatory, learning, custom)
 editor            = "vim"
 mouse_capture     = true
 code_line_numbers = true

@@ -225,6 +225,9 @@ enum Command {
         /// Include sub-agent sessions (normally shown as a count on their parent)
         #[arg(long)]
         all: bool,
+        /// Delete sessions not updated in the last DAYS days, then exit
+        #[arg(long, value_name = "DAYS")]
+        prune: Option<u32>,
     },
     Resume {
         session_id: String,
@@ -669,6 +672,17 @@ async fn try_main() -> anyhow::Result<()> {
     }
 
     let workspace_root = PathBuf::from(".");
+    // Claude Code's `cleanupPeriodDays`: drop old sessions in the background.
+    if config.session.cleanup_period_days > 0 {
+        let (cfg, ws) = (config.clone(), workspace_root.clone());
+        tokio::spawn(async move {
+            if let Ok(n) = prune_sessions(&cfg, &ws, cfg.session.cleanup_period_days).await
+                && n > 0
+            {
+                tracing::info!("removed {n} session(s) older than the cleanup period");
+            }
+        });
+    }
     match cli.command {
         Some(Command::Run {
             prompt,
@@ -776,7 +790,13 @@ async fn try_main() -> anyhow::Result<()> {
             search,
             limit,
             all,
+            prune,
         }) => {
+            if let Some(days) = prune {
+                let n = prune_sessions(&config, &workspace_root, days).await?;
+                println!("deleted {n} session(s) older than {days} day(s)");
+                return Ok(());
+            }
             list_sessions(
                 &config,
                 &workspace_root,
@@ -1597,6 +1617,23 @@ fn merge_worktree(
         );
     }
     Ok(())
+}
+
+/// Delete sessions untouched for `days` days; returns how many.
+async fn prune_sessions(
+    config: &DcodeAiConfig,
+    workspace_root: &Path,
+    days: u32,
+) -> anyhow::Result<usize> {
+    let store = dcode_ai_runtime::session_store::SessionStore::new(
+        workspace_root.join(&config.session.history_dir),
+    );
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(i64::from(days));
+    Ok(store
+        .prune_older_than(cutoff)
+        .await
+        .map_err(anyhow::Error::msg)?
+        .len())
 }
 
 async fn latest_session_id(
