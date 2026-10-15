@@ -1,12 +1,15 @@
 # Changelog
 
-## Unreleased
+## 1.0.5 — 2026-10-15
 
 ### New (Claude Code parity)
 - **MCP tool search**: with more than 15 MCP tools (`[mcp]
   tool_search_threshold`), their schemas are loaded on demand through
   `tool_search` instead of being sent with every request.
 - `/release-notes` shows what's new; `/todos` shows the agent's task list.
+- Scripting flags like Claude Code: `--append-system-prompt <text>`,
+  `--allowed-tools` and `--disallowed-tools` (Claude names such as `Read`,
+  `Edit`, `Bash(git:*)`, or dcode-ai rules such as `execute_bash:cargo *`).
 
 ## 1.0.4 — 2026-10-15
 

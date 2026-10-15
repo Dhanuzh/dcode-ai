@@ -130,6 +130,19 @@ struct Cli {
     #[arg(long)]
     max_turns: Option<u32>,
 
+    /// Extra instructions appended to the system prompt for this run
+    #[arg(long, value_name = "TEXT")]
+    append_system_prompt: Option<String>,
+
+    /// Tools allowed without asking, e.g. "Read,Edit,Bash(git:*)" or
+    /// dcode-ai rules like "execute_bash:cargo test*"
+    #[arg(long, value_name = "TOOLS", value_delimiter = ',')]
+    allowed_tools: Vec<String>,
+
+    /// Tools never allowed, same formats as --allowed-tools
+    #[arg(long, value_name = "TOOLS", value_delimiter = ',')]
+    disallowed_tools: Vec<String>,
+
     /// Ask once at startup to approve all tools for this session
     #[arg(long)]
     startup_approve_all: bool,
@@ -661,6 +674,17 @@ async fn try_main() -> anyhow::Result<()> {
         config.model.enable_thinking = true;
         config.model.thinking_budget = cli.thinking_budget;
     }
+    if let Some(text) = cli.append_system_prompt.clone() {
+        config.harness.append_system_prompt = Some(text);
+    }
+    config
+        .permissions
+        .allow
+        .extend(cli_tool_rules(&cli.allowed_tools));
+    config
+        .permissions
+        .deny
+        .extend(cli_tool_rules(&cli.disallowed_tools));
     if let Some(max_turns) = cli.max_turns {
         config.session.max_turns_per_run = max_turns;
     }
@@ -1617,6 +1641,27 @@ fn merge_worktree(
         );
     }
     Ok(())
+}
+
+/// Permission rules for `--allowed-tools` / `--disallowed-tools`: Claude
+/// Code names (`Read`, `Edit`, `Bash(git:*)`), dcode-ai rules
+/// (`execute_bash:cargo *`) or bare tool names (`read_file`).
+fn cli_tool_rules(items: &[String]) -> Vec<String> {
+    items
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .flat_map(|t| {
+            let claude = dcode_ai_core::skills::allowed_tool_patterns(&[t.to_string()]);
+            if !claude.is_empty() {
+                claude
+            } else if t.contains(':') {
+                vec![t.to_string()]
+            } else {
+                vec![format!("{t}:*")]
+            }
+        })
+        .collect()
 }
 
 /// Delete sessions untouched for `days` days; returns how many.
@@ -2829,6 +2874,26 @@ fn classify_exit_code(error: &anyhow::Error) -> ExitCode {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cli_tool_rules_accept_claude_and_dcode_names() {
+        let rules = cli_tool_rules(&[
+            "Read".into(),
+            "Bash(git:*)".into(),
+            "execute_bash:cargo test*".into(),
+            "mcp__many__weather_lookup".into(),
+            " ".into(),
+        ]);
+        assert_eq!(
+            rules,
+            vec![
+                "read_file:*",
+                "execute_bash:git*",
+                "execute_bash:cargo test*",
+                "mcp__many__weather_lookup:*",
+            ]
+        );
+    }
+
     #[test]
     fn session_ids_resolve_by_suffix() {
         let ids = vec![

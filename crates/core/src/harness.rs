@@ -145,6 +145,16 @@ pub fn build_system_prompt(
         sections.push(section);
     }
 
+    if let Some(extra) = config
+        .harness
+        .append_system_prompt
+        .as_deref()
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+    {
+        sections.push(format!("Additional Instructions:\n{extra}"));
+    }
+
     sections.join("\n\n---\n\n")
 }
 

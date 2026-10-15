@@ -1304,6 +1304,10 @@ pub struct HarnessConfig {
     /// the agent starts oriented. Off by default — it adds tokens every session.
     #[serde(default)]
     pub include_repo_map: bool,
+    /// Extra system-prompt text for this run (`--append-system-prompt`).
+    /// Never saved.
+    #[serde(skip)]
+    pub append_system_prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1521,6 +1525,7 @@ impl Default for HarnessConfig {
             local_instructions_path: PathBuf::from(".dcode-ai/instructions.md"),
             skill_directories: default_skill_directories(),
             include_repo_map: false,
+            append_system_prompt: None,
         }
     }
 }

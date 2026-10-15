@@ -106,6 +106,9 @@ dcode-ai -r [id]                  # resume the last session, or one by id (or it
 dcode-ai --plain                  # plain output for screen readers
 dcode-ai --model opus             # pick a model for this run
 dcode-ai -s                       # read-only safe mode
+dcode-ai -p "…" --append-system-prompt "Answer in French"
+dcode-ai -p "…" --allowed-tools "Read,Edit,Bash(git:*)" --disallowed-tools "WebFetch"
+dcode-ai -p "…" --max-turns 20
 
 dcode-ai spawn --prompt "…"       # detached session
 dcode-ai attach <id>              # follow its live output

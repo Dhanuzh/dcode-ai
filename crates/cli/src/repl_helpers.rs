@@ -759,6 +759,9 @@ mod release_notes_tests {
             vec!["1.0.2", "Fixes", "- b", "", "1.0.1", "- a"]
         );
         let newest = &release_notes(CHANGELOG, 1)[0];
-        assert!(newest.starts_with("1.") || newest == "Unreleased", "{newest}");
+        assert!(
+            newest.starts_with("1.") || newest == "Unreleased",
+            "{newest}"
+        );
     }
 }
