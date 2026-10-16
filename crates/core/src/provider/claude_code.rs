@@ -412,13 +412,13 @@ async fn pump_turn(session: &mut CcSession, tx: &tokio::sync::mpsc::Sender<Strea
                     }
                     Ok(None) => {}
                     Err(partial) => {
+                        tool_calls += 1;
                         let _ = tx
-                            .send(StreamChunk::Error(format!(
-                                "Claude ended the turn inside an unterminated tool call: {}",
-                                truncate(&partial, 200)
+                            .send(StreamChunk::ToolUse(invalid_call(
+                                "the call was never closed with </tool_call>",
+                                &partial,
                             )))
                             .await;
-                        return false;
                     }
                 }
                 if tool_calls > 0 {
@@ -459,14 +459,12 @@ async fn emit_segments(
                         input,
                     })
                 }
+                // Like Claude Code: hand the parse error back to the model
+                // as a failed tool result so it can fix the call, instead of
+                // failing the whole turn.
                 Err(err) => {
-                    let _ = tx
-                        .send(StreamChunk::Error(format!(
-                            "Claude emitted a malformed tool call ({err}): {}",
-                            truncate(&raw, 200)
-                        )))
-                        .await;
-                    return Flow::Abort;
+                    *tool_calls += 1;
+                    StreamChunk::ToolUse(invalid_call(&err, &raw))
                 }
             },
         };
@@ -475,6 +473,16 @@ async fn emit_segments(
         }
     }
     Flow::Continue
+}
+
+/// A tool call that could not be parsed, sent through as the
+/// `invalid_tool_call` tool so the model gets the error back.
+fn invalid_call(err: &str, raw: &str) -> ToolCall {
+    ToolCall {
+        id: format!("cc_{}_{}", std::process::id(), next_call_seq()),
+        name: dcode_ai_common::tool::INVALID_TOOL_CALL.into(),
+        input: json!({ "error": err, "raw": truncate(raw, 400) }),
+    }
 }
 
 fn next_call_seq() -> u64 {
@@ -522,6 +530,22 @@ struct ToolCallSplitter {
     call: String,
     /// Set once a fabricated result was seen; all later input is ignored.
     cut: bool,
+    /// Inside a ``` code block in the visible text: markers there are
+    /// examples, not protocol.
+    fence_open: bool,
+    /// Last character of text already emitted, so a backtick that arrived
+    /// in an earlier chunk still quotes a marker at the start of this one.
+    last_char: Option<char>,
+}
+
+/// Flip `fence` for every ``` in `s` and remember its last character.
+fn track_fences(fence: &mut bool, last: &mut Option<char>, s: &str) {
+    if s.matches("```").count() % 2 == 1 {
+        *fence = !*fence;
+    }
+    if let Some(c) = s.chars().next_back() {
+        *last = Some(c);
+    }
 }
 
 impl ToolCallSplitter {
@@ -547,9 +571,10 @@ impl ToolCallSplitter {
                 self.carry = work[split..].to_string();
                 break;
             }
-            match next_marker(&work) {
+            match next_marker(&work, self.fence_open, self.last_char) {
                 Marker::Result(pos) => {
                     text.push_str(&work[..pos]);
+                    track_fences(&mut self.fence_open, &mut self.last_char, &work[..pos]);
                     if !text.is_empty() {
                         out.push(Segment::Text(text));
                     }
@@ -559,6 +584,7 @@ impl ToolCallSplitter {
                 }
                 Marker::Call { start, body } => {
                     text.push_str(&work[..start]);
+                    track_fences(&mut self.fence_open, &mut self.last_char, &work[..start]);
                     if !text.is_empty() {
                         out.push(Segment::Text(std::mem::take(&mut text)));
                     }
@@ -567,14 +593,19 @@ impl ToolCallSplitter {
                 }
                 Marker::Undecided(pos) => {
                     text.push_str(&work[..pos]);
+                    track_fences(&mut self.fence_open, &mut self.last_char, &work[..pos]);
                     self.carry = work[pos..].to_string();
                     break;
                 }
                 Marker::None => {
                     let keep = partial_marker_tail_len(&work, TOOL_OPEN)
                         .max(partial_marker_tail_len(&work, RESULT_OPEN));
+                    // Hold back a possible half-written ``` too, so fence
+                    // tracking never splits one.
+                    let keep = keep.max(work.len() - work.trim_end_matches('`').len());
                     let split = work.len() - keep;
                     text.push_str(&work[..split]);
+                    track_fences(&mut self.fence_open, &mut self.last_char, &work[..split]);
                     self.carry = work[split..].to_string();
                     break;
                 }
@@ -619,7 +650,7 @@ enum Marker {
 /// backticks (`` `<tool_call>` ``) is a mention, and so is a `<tool_call>`
 /// not followed by its JSON body (`{` or a fenced block) — the model
 /// talking *about* the protocol must not open a call.
-fn next_marker(work: &str) -> Marker {
+fn next_marker(work: &str, fence_open: bool, before: Option<char>) -> Marker {
     let mut from = 0;
     loop {
         let call = work[from..].find(TOOL_OPEN).map(|p| p + from);
@@ -635,8 +666,13 @@ fn next_marker(work: &str) -> Marker {
         } else {
             RESULT_OPEN.len()
         };
-        let quoted = work[..pos].ends_with('`');
-        if quoted {
+        let quoted = if pos == 0 {
+            before == Some('`')
+        } else {
+            work[..pos].ends_with('`')
+        };
+        let in_fence = fence_open ^ (work[..pos].matches("```").count() % 2 == 1);
+        if quoted || in_fence {
             from = pos + len;
             continue;
         }
@@ -648,11 +684,24 @@ fn next_marker(work: &str) -> Marker {
         if rest.is_empty() || (rest.starts_with('`') && rest.len() < 3) {
             return Marker::Undecided(pos);
         }
-        if rest.starts_with('{') || rest.starts_with("```") {
+        if rest.starts_with("```") {
             return Marker::Call {
                 start: pos,
                 body: pos + len,
             };
+        }
+        // A JSON body: `{` then a key or `}` — not `{json}` in prose.
+        if let Some(obj) = rest.strip_prefix('{') {
+            match obj.trim_start().chars().next() {
+                None => return Marker::Undecided(pos),
+                Some('"') | Some('}') => {
+                    return Marker::Call {
+                        start: pos,
+                        body: pos + len,
+                    };
+                }
+                Some(_) => {}
+            }
         }
         from = pos + len;
     }
@@ -731,6 +780,7 @@ Rules:\n\
 - The block must contain one valid JSON object and nothing else. Use one block per call; several blocks in one reply run in order.\n\
 - After your last </tool_call>, STOP your reply immediately. You cannot see results in the same reply: they only arrive in the NEXT user message, written by dcode-ai as <tool_result id=\"…\" name=\"…\">…</tool_result>.\n\
 - Never write <tool_result> yourself and never guess what a tool returned. If you need a result before deciding the next step, make the call and stop.\n\
+- Write real calls as plain text, never inside a ``` code block. To mention or show the protocol in prose, wrap it in backticks (`<tool_call>`); mentions, examples and code blocks are never executed.\n\
 - When the task is complete, answer normally with no tool_call block.\n\n\
 ## Available tools\n",
     );
@@ -932,6 +982,69 @@ mod tests {
         };
         assert_eq!(parse_tool_call(raw).unwrap().0, "git_status");
         assert_eq!(rest, Ok(None));
+    }
+
+    #[test]
+    fn examples_in_code_blocks_and_placeholder_bodies_are_text() {
+        // From a real session: Claude describing the protocol.
+        let (segments, rest) = split_all(&[
+            "The backend uses <tool_call>{json}</tool_call> blocks.\n```\n",
+            "<tool_call>\n{\"name\": \"read_file\", \"input\": {}}\n</tool_call>\n``",
+            "`\nDone.",
+        ]);
+        assert!(
+            segments.iter().all(|s| matches!(s, Segment::Text(_))),
+            "{segments:?}"
+        );
+        assert_eq!(rest, Ok(None));
+        // After the fence closes, a real call works again.
+        let mut sp = ToolCallSplitter::default();
+        sp.feed("```\n<tool_call>{}</tool_call>\n```\n");
+        let segs = sp.feed("<tool_call>\n{\"name\":\"git_status\"}\n</tool_call>");
+        assert!(
+            matches!(segs.last(), Some(Segment::ToolCall(_))),
+            "{segs:?}"
+        );
+    }
+
+    #[test]
+    fn backtick_from_an_earlier_chunk_still_quotes() {
+        // The bug: "as a `" then "<tool_result>`." cut the reply short.
+        let (segments, rest) = split_all(&["results come back as a `", "<tool_result>` block."]);
+        assert!(
+            !segments.contains(&Segment::FabricatedResult),
+            "{segments:?}"
+        );
+        let text: String = segments
+            .iter()
+            .map(|s| match s {
+                Segment::Text(t) => t.as_str(),
+                _ => "",
+            })
+            .collect::<String>()
+            + rest.unwrap().as_deref().unwrap_or("");
+        assert_eq!(text, "results come back as a `<tool_result>` block.");
+    }
+
+    #[tokio::test]
+    async fn malformed_calls_go_back_to_the_model() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut calls = 0;
+        let flow = emit_segments(
+            &tx,
+            vec![Segment::ToolCall("{\"name\": read_file}".into())],
+            &mut calls,
+        )
+        .await;
+        assert!(matches!(flow, Flow::Continue));
+        assert_eq!(calls, 1);
+        let Some(StreamChunk::ToolUse(call)) = rx.recv().await else {
+            panic!("expected a tool use");
+        };
+        assert_eq!(call.name, dcode_ai_common::tool::INVALID_TOOL_CALL);
+        let res = crate::tools::ToolRegistry::new().execute(&call).await;
+        assert!(!res.success);
+        assert!(res.error.unwrap().contains("could not be read"));
     }
 
     #[test]

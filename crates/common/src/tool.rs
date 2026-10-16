@@ -33,3 +33,7 @@ pub enum PermissionTier {
     Ask,
     Denied,
 }
+
+/// Pseudo-tool for a tool call the model wrote but that could not be parsed;
+/// executing it returns the parse error so the model can retry.
+pub const INVALID_TOOL_CALL: &str = "invalid_tool_call";

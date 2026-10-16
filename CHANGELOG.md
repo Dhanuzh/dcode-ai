@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- Claude: protocol examples no longer break or cut a turn. `<tool_call>`
+  inside a ``` code block, a placeholder like `<tool_call>{json}</tool_call>`,
+  and a backtick-quoted tag split across stream chunks are all plain text.
+- A tool call Claude writes but that cannot be parsed (or is never closed)
+  is returned to it as a failed `invalid_tool_call` result so it can retry,
+  instead of failing the turn.
+
 ## 1.0.5 — 2026-10-15
 
 ### New (Claude Code parity)

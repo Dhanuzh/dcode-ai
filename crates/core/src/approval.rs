@@ -219,6 +219,7 @@ impl ApprovalPolicy {
                 | "git_diff"
                 | "inspect_binary"
                 | "tool_search"
+                | "invalid_tool_call"
                 | "query_symbols"
                 | "web_search"
                 | "fetch_url"

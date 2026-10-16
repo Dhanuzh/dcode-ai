@@ -188,6 +188,20 @@ impl ToolRegistry {
     }
 
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {
+        if call.name == dcode_ai_common::tool::INVALID_TOOL_CALL {
+            return ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Your tool call could not be read ({}): {}\nWrite it again on its own lines \
+as <tool_call>{{\"name\": \"<tool>\", \"input\": {{...}}}}</tool_call>. If you were only \
+mentioning the protocol in prose, put it in backticks.",
+                    call.input["error"].as_str().unwrap_or("parse error"),
+                    call.input["raw"].as_str().unwrap_or("")
+                )),
+            };
+        }
         for tool in &self.tools {
             if tool.definition().name == call.name {
                 return tool.execute(call).await;
