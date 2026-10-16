@@ -771,7 +771,11 @@ pub fn run_blocking(
             let _ = run_transcript_overlay(&state);
             if let Some(dt) = dash_terminal.as_mut() {
                 // The overlay left the alternate screen; return to it.
-                let _ = execute!(stdout(), crossterm::terminal::EnterAlternateScreen);
+                let _ = execute!(
+                    stdout(),
+                    crossterm::terminal::EnterAlternateScreen,
+                    crossterm::event::EnableMouseCapture
+                );
                 let _ = dt.clear();
             } else {
                 let _ = terminal.clear();
@@ -788,18 +792,34 @@ pub fn run_blocking(
             // ── Hybrid view: enter/leave the full-screen dashboard ──
             let want_dashboard = g.view_mode == crate::tui::state::ViewMode::Dashboard;
             if want_dashboard && dash_terminal.is_none() {
-                let _ = execute!(stdout(), crossterm::terminal::EnterAlternateScreen);
+                // The dashboard owns the screen, so it takes the mouse too:
+                // without capture, terminals turn the wheel into arrow keys
+                // and clicks never arrive. (The inline view leaves the mouse
+                // to the terminal for native scrollback and selection.)
+                let _ = execute!(
+                    stdout(),
+                    crossterm::terminal::EnterAlternateScreen,
+                    crossterm::event::EnableMouseCapture
+                );
                 match ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout())) {
                     Ok(t) => dash_terminal = Some(t),
                     Err(e) => {
-                        let _ = execute!(stdout(), crossterm::terminal::LeaveAlternateScreen);
+                        let _ = execute!(
+                            stdout(),
+                            crossterm::event::DisableMouseCapture,
+                            crossterm::terminal::LeaveAlternateScreen
+                        );
                         g.view_mode = crate::tui::state::ViewMode::Inline;
                         g.push_error(format!("dashboard unavailable: {e}"));
                     }
                 }
                 transcript_cache.invalidate();
             } else if !want_dashboard && dash_terminal.take().is_some() {
-                let _ = execute!(stdout(), crossterm::terminal::LeaveAlternateScreen);
+                let _ = execute!(
+                    stdout(),
+                    crossterm::event::DisableMouseCapture,
+                    crossterm::terminal::LeaveAlternateScreen
+                );
                 // Repaint the inline pane; blocks produced meanwhile flush
                 // into scrollback below.
                 let _ = terminal.clear();
@@ -1162,7 +1182,11 @@ pub fn run_blocking(
     }
 
     if dash_terminal.take().is_some() {
-        let _ = execute!(stdout(), crossterm::terminal::LeaveAlternateScreen);
+        let _ = execute!(
+            stdout(),
+            crossterm::event::DisableMouseCapture,
+            crossterm::terminal::LeaveAlternateScreen
+        );
     }
     restore_terminal(mouse_capture);
     let _ = execute!(stdout(), MoveToColumn(0));

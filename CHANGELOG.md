@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Fixes
+- Dashboard (Ctrl+\\): the mouse wheel scrolls the transcript and clicks on
+  tabs, hunks and agents work in real terminals. The dashboard now turns on
+  mouse capture (the inline view still leaves the mouse to the terminal).
+
 ## 1.0.6 — 2026-10-16
 
 ### Fixes

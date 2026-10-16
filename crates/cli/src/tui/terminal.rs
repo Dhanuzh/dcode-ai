@@ -66,6 +66,7 @@ pub fn restore_terminal(_mouse_capture: bool) {
     let mut out = stdout();
     // Harmless when not on the alternate screen; required when the dashboard
     // (or a panic inside it) exits while it is active.
+    let _ = execute!(out, crossterm::event::DisableMouseCapture);
     let _ = execute!(out, crossterm::terminal::LeaveAlternateScreen);
     let _ = execute!(out, Show);
     let _ = execute!(out, DisableBracketedPaste);
