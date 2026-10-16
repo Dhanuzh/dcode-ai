@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.6 — 2026-10-16
 
 ### Fixes
 - Claude: protocol examples no longer break or cut a turn. `<tool_call>`
