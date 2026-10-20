@@ -452,37 +452,65 @@ pub(super) fn handle_key_event(
 
     // Question modal keyboard handling.
     if g.question_modal_open {
-        let mapped = match (key.code, key.modifiers) {
-            (KeyCode::Esc, _) => Some(QuestionModalKey::Cancel),
-            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                Some(QuestionModalKey::Up)
-            }
-            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                Some(QuestionModalKey::Down)
-            }
-            (KeyCode::Enter, _) => Some(QuestionModalKey::Accept),
-            _ => None,
-        };
-        if let Some(k) = mapped
-            && let QuestionModalOutcome::Answer {
-                question_id,
-                selection,
-            } = g.apply_question_modal_key(k)
-        {
-            // Route the answer. STARTUP_APPROVE_ALL keeps active_question
-            // so its follow-up flow still sees it.
-            if question_id != STARTUP_APPROVE_ALL_QUESTION_ID {
-                g.active_question = None;
-            }
-            if question_id == STARTUP_APPROVE_ALL_QUESTION_ID {
-                let _ = cmd_tx.send(TuiCmd::QuestionAnswer(selection));
-            } else if let Some(tx) = question_answer_tx {
-                let _ = tx.send((question_id, selection));
-            } else {
+        // The startup "approve all tools?" popup: Esc (or just starting to
+        // type) keeps the default approval flow. Typed keys then go to the
+        // composer, so a first message is never swallowed by the popup.
+        let startup_popup = g
+            .active_question
+            .as_ref()
+            .is_some_and(|q| q.question_id == STARTUP_APPROVE_ALL_QUESTION_ID);
+        let typing = matches!(key.code, KeyCode::Char(_))
+            && !key.modifiers.contains(KeyModifiers::CONTROL)
+            && !key.modifiers.contains(KeyModifiers::ALT)
+            && !matches!(key.code, KeyCode::Char('j' | 'k'));
+        if startup_popup && (key.code == KeyCode::Esc || typing) {
+            let decline = g
+                .active_question
+                .as_ref()
+                .map(|q| q.options.len().saturating_sub(1))
+                .unwrap_or(1);
+            g.question_modal_index = decline;
+            if let QuestionModalOutcome::Answer { selection, .. } =
+                g.apply_question_modal_key(QuestionModalKey::Accept)
+            {
                 let _ = cmd_tx.send(TuiCmd::QuestionAnswer(selection));
             }
+            if !typing {
+                return KeyFlow::Continue;
+            }
+        } else {
+            let mapped = match (key.code, key.modifiers) {
+                (KeyCode::Esc, _) => Some(QuestionModalKey::Cancel),
+                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                    Some(QuestionModalKey::Up)
+                }
+                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                    Some(QuestionModalKey::Down)
+                }
+                (KeyCode::Enter, _) => Some(QuestionModalKey::Accept),
+                _ => None,
+            };
+            if let Some(k) = mapped
+                && let QuestionModalOutcome::Answer {
+                    question_id,
+                    selection,
+                } = g.apply_question_modal_key(k)
+            {
+                // Route the answer. STARTUP_APPROVE_ALL keeps active_question
+                // so its follow-up flow still sees it.
+                if question_id != STARTUP_APPROVE_ALL_QUESTION_ID {
+                    g.active_question = None;
+                }
+                if question_id == STARTUP_APPROVE_ALL_QUESTION_ID {
+                    let _ = cmd_tx.send(TuiCmd::QuestionAnswer(selection));
+                } else if let Some(tx) = question_answer_tx {
+                    let _ = tx.send((question_id, selection));
+                } else {
+                    let _ = cmd_tx.send(TuiCmd::QuestionAnswer(selection));
+                }
+            }
+            return KeyFlow::Continue;
         }
-        return KeyFlow::Continue;
     }
 
     // Permission picker keyboard handling.

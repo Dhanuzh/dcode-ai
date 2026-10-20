@@ -1791,15 +1791,33 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     out.println(&format!("compaction preview:\n{}", preview));
                     return Ok(true);
                 }
-                self.runtime.run_pre_compact_hooks("manual").await;
-                let summary = self.runtime.compact_summary();
-                self.runtime.set_session_summary(Some(summary.clone()));
-                self.runtime
-                    .append_memory_note("session-summary", Some(summary.clone()))
-                    .await
-                    .map_err(anyhow::Error::msg)?;
-                self.runtime.save().await.map_err(anyhow::Error::msg)?;
-                out.println(&format!("saved session summary:\n{}", summary));
+                // Claude Code's /compact: summarize the conversation (with
+                // optional focus instructions) and continue from the summary.
+                let focus = (!rest.trim().is_empty()).then_some(rest.trim());
+                out.println("[compact] summarizing the conversation…");
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.set_busy(true);
+                }
+                let result = self.runtime.compact_now(focus).await;
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.set_busy(false);
+                }
+                match result {
+                    Ok((before, after, summary)) => {
+                        let _ = self
+                            .runtime
+                            .append_memory_note("session-summary", Some(summary.clone()))
+                            .await;
+                        out.println(&format!(
+                            "[compact] conversation compacted: ~{before} → ~{after} tokens. Summary:\n{summary}"
+                        ));
+                    }
+                    Err(e) => out.eprintln(&format!("[compact] {e}")),
+                }
             }
             "/models" => {
                 let catalog =

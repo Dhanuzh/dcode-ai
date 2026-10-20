@@ -131,9 +131,14 @@ pub fn anthropic_request_body_with(
         "model": model,
         "max_tokens": max_tokens,
         "messages": anthropic_messages,
-        "tools": tools,
         "stream": true,
     });
+    // Omit `tools` when there are none: `"tools": null` is rejected by some
+    // Messages endpoints (GitHub Copilot: "tools must be an array"), which
+    // broke tool-less requests such as compaction summaries.
+    if let Some(tools) = tools {
+        body["tools"] = json!(tools);
+    }
 
     match family {
         ClaudeFamily::AdaptiveNoSampling | ClaudeFamily::AdaptiveWithSampling => {
@@ -771,6 +776,12 @@ mod tests {
         )
         .expect("body");
         assert!(body.get("system").is_none());
+    }
+
+    #[test]
+    fn tool_less_requests_omit_tools() {
+        let body = body_for("claude-sonnet-5", &opts(false, None));
+        assert!(body.get("tools").is_none(), "{body}");
     }
 
     fn opts(thinking: bool, effort: Option<&str>) -> AnthropicRequestOptions {

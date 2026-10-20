@@ -277,10 +277,6 @@ impl SessionRuntime {
         self.supervisor.agent_mut().approval.set_mode(mode);
     }
 
-    pub async fn run_pre_compact_hooks(&self, trigger: &str) {
-        self.supervisor.run_pre_compact_hooks(trigger).await;
-    }
-
     /// Sender into this session's event stream (sub-agent activity).
     pub fn event_sender(
         &self,
@@ -371,6 +367,14 @@ impl SessionRuntime {
 
     pub fn snapshot(&self) -> SessionSnapshot {
         self.supervisor.snapshot()
+    }
+
+    /// `/compact [focus]`: replace the conversation with a model summary.
+    pub async fn compact_now(
+        &mut self,
+        focus: Option<&str>,
+    ) -> Result<(usize, usize, String), String> {
+        self.supervisor.compact_now(focus).await
     }
 
     pub fn compact_summary(&self) -> String {

@@ -2,7 +2,17 @@
 
 ## Unreleased
 
+### New
+- `/compact [focus]` now really compacts, like Claude Code: the model
+  summarizes the whole conversation (giving most detail to what you ask it
+  to focus on) and the session continues from that summary.
+
 ### Fixes
+- The startup "approve all tools?" popup: Esc now dismisses it, and typing
+  dismisses it too, with your keystrokes going to the prompt (a first message
+  typed quickly was swallowed).
+- Requests without tools no longer send `"tools": null`, which GitHub Copilot
+  rejected, so compaction summaries on Copilot fell back to a plain extract.
 - Dashboard (Ctrl+\\): the mouse wheel scrolls the transcript and clicks on
   tabs, hunks and agents work in real terminals. The dashboard now turns on
   mouse capture (the inline view still leaves the mouse to the terminal).

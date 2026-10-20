@@ -197,17 +197,22 @@ pub fn openai_request_body(
         )
     };
 
-    Ok(json!({
+    let mut body = json!({
         "model": model,
         "messages": to_openai_messages(messages, workspace_root, model_supports_vision(model))?,
-        "tools": tools,
         "stream": true,
         "stream_options": {
             "include_usage": true
         },
         "max_tokens": max_tokens,
         "temperature": temperature,
-    }))
+    });
+    // No `"tools": null` for tool-less requests (compaction summaries):
+    // strict endpoints reject it.
+    if let Some(tools) = tools {
+        body["tools"] = json!(tools);
+    }
+    Ok(body)
 }
 
 /// Request body for the OpenAI Responses API (`POST /responses`), always

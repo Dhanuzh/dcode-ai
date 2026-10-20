@@ -959,6 +959,68 @@ impl Supervisor {
         Ok(())
     }
 
+    /// `/compact [focus]` (Claude Code's manual compaction): summarize the
+    /// whole conversation with the model, optionally steered by `focus`, and
+    /// replace it with that summary. Returns tokens before and after, and the
+    /// summary.
+    pub async fn compact_now(
+        &mut self,
+        focus: Option<&str>,
+    ) -> Result<(usize, usize, String), String> {
+        use dcode_ai_common::message::Message;
+        let prefix = self
+            .agent
+            .messages
+            .iter()
+            .take_while(|m| m.role == Role::System)
+            .count();
+        let conversation: Vec<Message> = self.agent.messages[prefix..].to_vec();
+        if !conversation.iter().any(|m| m.role != Role::System) {
+            return Err("nothing to compact yet".into());
+        }
+        self.run_pre_compact_hooks("manual").await;
+        let before = self
+            .context_manager
+            .stats(&self.agent.messages)
+            .estimated_tokens;
+        let mut prompt = self.context_manager.summary_prompt(&conversation);
+        if let Some(focus) = focus.map(str::trim).filter(|f| !f.is_empty()) {
+            prompt.push_str(&format!(
+                "\nThe user asked the summary to focus on: {focus}\nGive that the most detail.\n"
+            ));
+        }
+        let summary = match self.summarize_with_ai(&prompt).await {
+            Ok(s) if !s.trim().is_empty() => s,
+            Ok(_) => build_compaction_fallback_summary(&conversation),
+            Err(e) => {
+                tracing::warn!("compaction summary failed ({e}); using extractive summary");
+                build_compaction_fallback_summary(&conversation)
+            }
+        };
+        let mut messages: Vec<Message> = self.agent.messages[..prefix].to_vec();
+        messages.push(Message::system(format!(
+            "## Conversation Summary (Earlier Context)\n\n{summary}"
+        )));
+        self.agent.compact_messages(messages);
+        self.session_summary = Some(summary.clone());
+        let after = self
+            .context_manager
+            .stats(&self.agent.messages)
+            .estimated_tokens;
+        self.last_summary_at_tokens = after;
+        if let Some(tx) = self.agent.event_sender() {
+            let _ = tx
+                .send(AgentEvent::ContextCompaction {
+                    phase: "completed".to_string(),
+                    message: format!("Conversation compacted (~{before} → ~{after} tokens)"),
+                    context_tokens: after as u64,
+                })
+                .await;
+        }
+        let _ = self.save().await;
+        Ok((before, after, summary))
+    }
+
     fn summary_rearm_ready(&mut self, current_tokens: usize) -> bool {
         if self.last_summary_at_tokens == 0 {
             return true;
@@ -1005,6 +1067,10 @@ impl Supervisor {
                     summary.push_str(&delta);
                 }
                 dcode_ai_core::provider::StreamChunk::Done => break,
+                dcode_ai_core::provider::StreamChunk::Error(e)
+                | dcode_ai_core::provider::StreamChunk::FatalError(e) => {
+                    return Err(e);
+                }
                 _ => {}
             }
         }
