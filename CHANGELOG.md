@@ -11,6 +11,9 @@
   to focus on) and the session continues from that summary.
 
 ### Fixes
+- Copilot: a Claude model id Copilot does not offer (e.g. `--model sonnet`,
+  which names the Anthropic API's newest Sonnet) now uses Copilot's newest
+  model of the same family instead of failing with `model_not_supported`.
 - The startup "approve all tools?" popup: Esc now dismisses it, and typing
   dismisses it too, with your keystrokes going to the prompt (a first message
   typed quickly was swallowed).

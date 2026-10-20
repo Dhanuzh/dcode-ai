@@ -138,6 +138,50 @@ impl CopilotProvider {
             .await;
         models.get(model).cloned()
     }
+
+    /// The model id to send: `model` itself, or — for a Claude id Copilot does
+    /// not serve (e.g. the `sonnet` alias resolving to the Anthropic API's
+    /// newest id) — Copilot's newest model of the same family.
+    async fn served_model(&self, model: &str) -> String {
+        if self.model_info(model).await.is_some() {
+            return model.to_string();
+        }
+        let models = self.models.get().cloned().unwrap_or_default();
+        match closest_claude_model(models.keys().map(String::as_str), model) {
+            Some(m) => {
+                tracing::info!("Copilot does not serve `{model}`; using `{m}`");
+                m
+            }
+            None => model.to_string(),
+        }
+    }
+}
+
+/// Copilot's newest Claude model in the same family (opus / sonnet / haiku /
+/// fable) as `wanted`, when `wanted` itself is not offered.
+fn closest_claude_model<'a>(
+    available: impl Iterator<Item = &'a str>,
+    wanted: &str,
+) -> Option<String> {
+    let w = wanted.to_ascii_lowercase();
+    if !w.starts_with("claude") {
+        return None;
+    }
+    let family = ["opus", "sonnet", "haiku", "fable"]
+        .into_iter()
+        .find(|f| w.contains(f))?;
+    let version = |id: &str| -> Vec<u32> {
+        id.split(|c: char| !c.is_ascii_digit())
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    };
+    available
+        .filter(|id| {
+            let id = id.to_ascii_lowercase();
+            id.starts_with("claude") && id.contains(family)
+        })
+        .max_by_key(|id| version(id))
+        .map(str::to_string)
 }
 
 /// Claude models go to the native Messages API when Copilot serves them
@@ -194,6 +238,7 @@ impl Provider for CopilotProvider {
         } else {
             model.to_string()
         };
+        let model = self.served_model(&model).await;
         let info = self.model_info(&model).await;
         let api = pick_api(info.as_ref().map(|i| i.endpoints.as_slice()), &model);
         let (body, path) = match api {
@@ -391,6 +436,29 @@ fn chat_model_ids(value: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn unknown_claude_ids_map_to_copilots_newest_in_family() {
+        let ids = [
+            "claude-sonnet-4.5",
+            "claude-sonnet-5",
+            "claude-opus-4.8",
+            "gpt-5-mini",
+        ];
+        assert_eq!(
+            closest_claude_model(ids.into_iter(), "claude-sonnet-5-5").as_deref(),
+            Some("claude-sonnet-5")
+        );
+        assert_eq!(
+            closest_claude_model(ids.into_iter(), "claude-opus-5-5").as_deref(),
+            Some("claude-opus-4.8")
+        );
+        assert_eq!(
+            closest_claude_model(ids.into_iter(), "claude-haiku-5-5"),
+            None
+        );
+        assert_eq!(closest_claude_model(ids.into_iter(), "gpt-9"), None);
+    }
 
     #[test]
     fn model_list_keeps_enabled_chat_models() {
