@@ -888,6 +888,14 @@ pub(super) fn handle_key_event(
         return KeyFlow::Continue;
     }
 
+    // `/vim`: NORMAL-mode keys edit the prompt; Esc still interrupts a
+    // running turn first.
+    if !(key.code == KeyCode::Esc && escape_cancels_active_turn(g))
+        && super::vim::handle_vim_key(key, g)
+    {
+        return KeyFlow::Continue;
+    }
+
     match (key.code, key.modifiers) {
         (KeyCode::Esc, _) if escape_cancels_active_turn(g) => {
             request_turn_cancel(g, cancel_flag, cmd_tx);

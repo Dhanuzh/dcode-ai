@@ -144,6 +144,14 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
         return;
     }
     let mut left: Vec<Span<'static>> = vec![Span::raw("  ")];
+    if g.vim_enabled {
+        let mode = if g.vim_normal {
+            "-- NORMAL -- "
+        } else {
+            "-- INSERT -- "
+        };
+        left.push(Span::styled(mode, Style::default().fg(theme::muted())));
+    }
     if let Some(toast) = g.toast.as_ref().filter(|t| !t.is_expired()) {
         left.push(Span::styled(
             toast.message.clone(),

@@ -30,6 +30,7 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 | `Tab` | Complete `@file` or `/command`; otherwise cycle the agent profile |
 | `F2` / `Shift+F2` | Next / previous model |
 | `Ctrl+P` | Command palette |
+| `/vim` | Vim keys in the prompt: Esc → NORMAL (`h l w b 0 $ x dd dw cw cc D C u p`), `i a A I o O` → INSERT |
 | `Ctrl+B` | Move the running shell command to the background |
 | `Ctrl+T` | Show or hide thinking |
 | `Ctrl+O` | Fold or unfold tool output |
@@ -82,7 +83,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
 | `/permissions` | Permission mode and rules |
 | `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use |
-| `/compact [--preview]` | Summarise the conversation to free context |
+| `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept) |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation |
 | `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in) |
 | `/plan`, `/review`, `/fix`, `/test` | Switch agent profile |

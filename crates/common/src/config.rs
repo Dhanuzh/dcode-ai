@@ -323,6 +323,9 @@ pub struct UiConfig {
     /// Hide hint text in the composer area.
     #[serde(default)]
     pub hide_tips: bool,
+    /// Vim keys in the prompt (`/vim`): Esc → NORMAL, `i` → INSERT.
+    #[serde(default)]
+    pub vim_mode: bool,
     /// Suppress transient startup notices (MCP server starting/ready and the
     /// "[permissions] startup approval granted" line). Defaults to hidden; the
     /// `/quiet` command toggles it. Failures are always shown regardless.
@@ -391,6 +394,7 @@ impl Default for UiConfig {
             editor: None,
             theme: None,
             hide_tips: false,
+            vim_mode: false,
             quiet_startup: default_quiet_startup(),
             scroll_speed: default_scroll_speed(),
             mouse_capture: default_mouse_capture(),
@@ -413,6 +417,9 @@ impl UiConfig {
         }
         if let Some(theme) = partial.theme {
             self.theme = Some(theme);
+        }
+        if let Some(v) = partial.vim_mode {
+            self.vim_mode = v;
         }
         if let Some(hide_tips) = partial.hide_tips {
             self.hide_tips = hide_tips;
@@ -1704,6 +1711,7 @@ struct PartialUiConfig {
     editor: Option<String>,
     theme: Option<String>,
     hide_tips: Option<bool>,
+    vim_mode: Option<bool>,
     quiet_startup: Option<bool>,
     scroll_speed: Option<u16>,
     mouse_capture: Option<bool>,

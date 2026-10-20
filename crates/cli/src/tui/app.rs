@@ -62,6 +62,7 @@ mod dashboard;
 mod frame;
 mod keys;
 mod mouse;
+mod vim;
 
 use dashboard::draw_dashboard_frame;
 use frame::draw_inline_frame;

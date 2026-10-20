@@ -1533,6 +1533,30 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     }
                 }
             }
+            "/vim" => {
+                let on = !self.runtime.config().ui.vim_mode;
+                self.runtime.config_mut().ui.vim_mode = on;
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.vim_enabled = on;
+                    g.vim_normal = false;
+                    g.vim_pending = None;
+                }
+                let saved = dcode_ai_common::config::DcodeAiConfig::load_global_file()
+                    .and_then(|mut c| {
+                        c.ui.vim_mode = on;
+                        c.save_global()
+                    });
+                if let Err(e) = saved {
+                    out.eprintln(&format!("warn: failed to save vim mode: {e}"));
+                }
+                out.println(if on {
+                    "[vim] vim mode on — Esc for NORMAL, i for INSERT (/vim to turn off)"
+                } else {
+                    "[vim] vim mode off"
+                });
+            }
             "/release-notes" => {
                 let lines = release_notes(CHANGELOG, 3);
                 if let ReplOutput::Tui(st) = &out {
@@ -3951,6 +3975,7 @@ then switch).",
             g.statusline_hidden = self.runtime.config().ui.statusline_hidden.clone();
             g.statusline_command = self.runtime.config().ui.statusline_command.clone();
             g.quiet_startup = self.runtime.config().ui.quiet_startup;
+            g.vim_enabled = self.runtime.config().ui.vim_mode;
             g.key_bindings =
                 crate::tui::keymap::build_key_bindings(&self.runtime.config().ui.keymap);
         }

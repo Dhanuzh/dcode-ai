@@ -14,6 +14,13 @@ ignore = [
     # unsafe-libyaml is unmaintained (no fixed release); pulled by serde_yaml
     # for skill/agent/command frontmatter, which is local, user-owned files.
     "RUSTSEC-2024-0449",
+    # zbus 5.x's zvariant / zbus_names / zvariant_derive are folded into
+    # zbus 6 (unmaintained as separate crates, no fixed 5.x release). Pulled
+    # only by notify-rust for Linux desktop notifications over D-Bus; drop
+    # these once notify-rust moves to zbus 6.
+    "RUSTSEC-2026-0370",
+    "RUSTSEC-2026-0371",
+    "RUSTSEC-2026-0372",
 ]
 
 [licenses]

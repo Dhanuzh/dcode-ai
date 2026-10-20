@@ -365,6 +365,11 @@ pub struct TuiSessionState {
     /// Suppress transient startup notices (MCP server status, permissions
     /// approval). Seeded from `ui.quiet_startup`; toggled by `/quiet`.
     pub quiet_startup: bool,
+    /// `/vim`: vim keys in the prompt; `vim_normal` = NORMAL mode;
+    /// `vim_pending` = an operator (`d`, `c`) waiting for its motion.
+    pub vim_enabled: bool,
+    pub vim_normal: bool,
+    pub vim_pending: Option<char>,
     /// Monotonic revision for transcript render caching.
     pub transcript_rev: u64,
     /// Maps paste placeholder tokens (e.g. `[Pasted text #1 +5 lines]`) to their real content.

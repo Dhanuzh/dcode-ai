@@ -1,8 +1,11 @@
 # Changelog
 
-## Unreleased
+## 1.0.7 — 2026-10-20
 
 ### New
+- `/vim`: vim keys in the prompt like Claude Code: Esc → NORMAL (`h l w b
+  0 $ x dd dw cw cc D C u p`), `i a A I o O` → INSERT; the footer shows
+  `-- INSERT --` / `-- NORMAL --`. Saved in `[ui] vim_mode`.
 - `/compact [focus]` now really compacts, like Claude Code: the model
   summarizes the whole conversation (giving most detail to what you ask it
   to focus on) and the session continues from that summary.
