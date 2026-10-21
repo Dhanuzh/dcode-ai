@@ -369,6 +369,15 @@ impl SessionRuntime {
         self.supervisor.snapshot()
     }
 
+    /// Swap the tool called `tool.definition().name` for `tool` (e.g. the
+    /// editor-backed file tools of an ACP session).
+    pub fn replace_tool(&mut self, tool: Box<dyn dcode_ai_core::tools::ToolExecutor>) {
+        let name = tool.definition().name;
+        let tools = &mut self.supervisor.agent_mut().tools;
+        tools.retain_by_name(|n| n != name);
+        tools.register(tool);
+    }
+
     /// One tool-less request to the session's model; returns the reply.
     pub async fn complete_text(&self, prompt: &str) -> Result<String, String> {
         self.supervisor.complete_text(prompt).await

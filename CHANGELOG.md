@@ -8,6 +8,9 @@
   changes; your agent fixes each finding or explains why it is not a
   problem. `[session] cross_review = true` runs it after every turn that
   changed files; `[session] second_opinion_model` picks the reviewer.
+- **Editors (ACP)**: with an editor that offers them, files are read and
+  written through the editor (unsaved changes included) and shell commands run
+  in editor terminals shown in the tool call.
 - **`/add-dir <path>`** (and `--add-dir`, `[permissions]
   additional_directories`): let dcode-ai read and edit another folder
   besides the workspace, like Claude Code's additional directories.

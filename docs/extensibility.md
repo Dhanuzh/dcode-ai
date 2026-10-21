@@ -242,8 +242,11 @@ approvals as the editor's permission prompts, reopening saved sessions
 }
 ```
 
-dcode-ai reads and writes files and runs commands itself; it does not yet use
-the editor's unsaved buffers or terminals.
+When the editor offers them (`clientCapabilities`), dcode-ai reads and writes
+files through the editor (`fs/read_text_file`, `fs/write_text_file`) — so it
+sees unsaved changes and the editor tracks its edits — and runs shell commands
+in editor terminals (`terminal/*`), shown live in the tool call. If an editor
+request fails it falls back to the disk and its own shell.
 
 ## CI
 

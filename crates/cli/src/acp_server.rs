@@ -219,6 +219,27 @@ struct Server {
     config: DcodeAiConfig,
     out: Arc<Outbox>,
     sessions: Mutex<HashMap<String, Arc<Session>>>,
+    /// What the editor said it can do in `initialize`.
+    client: std::sync::Mutex<ClientCaps>,
+}
+
+/// Editor capabilities from `initialize.clientCapabilities`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ClientCaps {
+    pub read_text_file: bool,
+    pub write_text_file: bool,
+    pub terminal: bool,
+}
+
+impl ClientCaps {
+    pub fn from_initialize(params: &Value) -> Self {
+        let c = &params["clientCapabilities"];
+        Self {
+            read_text_file: c["fs"]["readTextFile"].as_bool().unwrap_or(false),
+            write_text_file: c["fs"]["writeTextFile"].as_bool().unwrap_or(false),
+            terminal: c["terminal"].as_bool().unwrap_or(false),
+        }
+    }
 }
 
 type RpcResult = Result<Value, (i64, String)>;
@@ -285,6 +306,22 @@ impl Server {
             .await
         };
         let mut runtime = built.map_err(|e| (-32603, e.to_string()))?;
+        // Use the editor's buffers and terminals when it offers them.
+        let caps = self.client.lock().map(|c| *c).unwrap_or_default();
+        let editor = EditorLink {
+            out: Arc::clone(&self.out),
+            session_id: session_id.clone(),
+            root: runtime.workspace_root().to_path_buf(),
+        };
+        if caps.read_text_file {
+            runtime.replace_tool(Box::new(EditorReadFile(editor.clone())));
+        }
+        if caps.write_text_file {
+            runtime.replace_tool(Box::new(EditorWriteFile(editor.clone())));
+        }
+        if caps.terminal {
+            runtime.replace_tool(Box::new(EditorTerminal(editor)));
+        }
 
         // Stream this session's events to the client.
         if let Some(mut rx) = runtime.take_event_rx() {
@@ -386,17 +423,24 @@ impl Server {
         // A response to one of our own requests.
         if method.is_none() {
             if let Some(n) = id.as_ref().and_then(Value::as_u64) {
-                let result = msg
-                    .get("result")
-                    .cloned()
-                    .unwrap_or_else(|| json!({ "outcome": { "outcome": "cancelled" } }));
+                let result = match (msg.get("result"), msg.get("error")) {
+                    (Some(r), _) => r.clone(),
+                    // Client-side failure (e.g. fs/read_text_file on a
+                    // missing file): callers fall back to local tools.
+                    (None, Some(e)) => json!({ "__error": e }),
+                    (None, None) => json!({ "outcome": { "outcome": "cancelled" } }),
+                };
                 self.out.resolve(n, result);
             }
             return;
         }
         let params = msg.get("params").cloned().unwrap_or_default();
         let result: RpcResult = match method.unwrap_or("") {
-            "initialize" => Ok(json!({
+            "initialize" => {
+                if let Ok(mut caps) = self.client.lock() {
+                    *caps = ClientCaps::from_initialize(&params);
+                }
+                Ok(json!({
                 "protocolVersion": PROTOCOL_VERSION,
                 "agentCapabilities": {
                     "loadSession": true,
@@ -404,7 +448,8 @@ impl Server {
                 },
                 "authMethods": [],
                 "agentInfo": { "name": "dcode-ai", "version": env!("CARGO_PKG_VERSION") },
-            })),
+                }))
+            }
             "authenticate" => Ok(json!({})),
             "session/new" => self.new_session(&params).await,
             "session/load" => self.load_session(&params).await,
@@ -424,6 +469,221 @@ impl Server {
                 json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
             }
         });
+    }
+}
+
+/// How editor-backed tools reach the editor for one session.
+#[derive(Clone)]
+struct EditorLink {
+    out: Arc<Outbox>,
+    session_id: String,
+    root: PathBuf,
+}
+
+impl EditorLink {
+    /// Absolute path inside the workspace (or an `/add-dir` folder).
+    fn resolve(&self, path: &str) -> Result<PathBuf, String> {
+        let p = self.root.join(path);
+        let parent = p.parent().unwrap_or(&p);
+        let canonical_parent = dcode_ai_common::config::canonicalize_simplified(parent)
+            .map_err(|e| format!("{}: {e}", parent.display()))?;
+        let root = dcode_ai_common::config::canonicalize_simplified(&self.root)
+            .unwrap_or_else(|_| self.root.clone());
+        if !dcode_ai_common::workspace_scope::allows(&root, &canonical_parent) {
+            return Err("Path is outside the workspace".into());
+        }
+        Ok(canonical_parent.join(p.file_name().unwrap_or_default()))
+    }
+
+    /// Request to the editor; `None` when it failed (callers fall back).
+    async fn call(&self, method: &str, mut params: Value) -> Option<Value> {
+        params["sessionId"] = json!(self.session_id);
+        let result = self.out.request(method, params).await?;
+        (result.get("__error").is_none()).then_some(result)
+    }
+}
+
+fn tool_ok(call: &ToolCall, output: String) -> dcode_ai_common::tool::ToolResult {
+    dcode_ai_common::tool::ToolResult {
+        call_id: call.id.clone(),
+        success: true,
+        output,
+        error: None,
+    }
+}
+
+/// `read_file` through `fs/read_text_file`, so unsaved editor changes are
+/// seen. Falls back to the disk.
+struct EditorReadFile(EditorLink);
+
+#[async_trait::async_trait]
+impl dcode_ai_core::tools::ToolExecutor for EditorReadFile {
+    fn definition(&self) -> dcode_ai_common::tool::ToolDefinition {
+        dcode_ai_core::tools::filesystem::ReadFileTool::new(self.0.root.clone()).definition()
+    }
+
+    async fn execute(&self, call: &ToolCall) -> dcode_ai_common::tool::ToolResult {
+        let local = dcode_ai_core::tools::filesystem::ReadFileTool::new(self.0.root.clone());
+        let path = call.input["path"].as_str().unwrap_or("");
+        let Ok(abs) = self.0.resolve(path) else {
+            return local.execute(call).await;
+        };
+        match self
+            .0
+            .call(
+                "fs/read_text_file",
+                json!({ "path": abs.display().to_string() }),
+            )
+            .await
+            .and_then(|r| r["content"].as_str().map(str::to_string))
+        {
+            Some(content) => tool_ok(call, content),
+            None => local.execute(call).await,
+        }
+    }
+}
+
+/// `write_file` through `fs/write_text_file`, so the editor sees the change
+/// (and can show or undo it). Falls back to the disk.
+struct EditorWriteFile(EditorLink);
+
+#[async_trait::async_trait]
+impl dcode_ai_core::tools::ToolExecutor for EditorWriteFile {
+    fn definition(&self) -> dcode_ai_common::tool::ToolDefinition {
+        dcode_ai_core::tools::write_file::WriteFileTool::new(self.0.root.clone()).definition()
+    }
+
+    async fn execute(&self, call: &ToolCall) -> dcode_ai_common::tool::ToolResult {
+        let local = dcode_ai_core::tools::write_file::WriteFileTool::new(self.0.root.clone());
+        let path = call.input["path"].as_str().unwrap_or("");
+        let content = call.input["content"].as_str().unwrap_or("");
+        let Ok(abs) = self.0.resolve(path) else {
+            return local.execute(call).await;
+        };
+        match self
+            .0
+            .call(
+                "fs/write_text_file",
+                json!({ "path": abs.display().to_string(), "content": content }),
+            )
+            .await
+        {
+            Some(_) => tool_ok(
+                call,
+                format!("Wrote {} ({} lines)", path, content.lines().count()),
+            ),
+            None => local.execute(call).await,
+        }
+    }
+}
+
+/// `execute_bash` in an editor terminal (`terminal/*`), shown live in the
+/// editor's tool-call view. Falls back to the built-in shell.
+struct EditorTerminal(EditorLink);
+
+#[async_trait::async_trait]
+impl dcode_ai_core::tools::ToolExecutor for EditorTerminal {
+    fn definition(&self) -> dcode_ai_common::tool::ToolDefinition {
+        dcode_ai_common::tool::ToolDefinition {
+            name: "execute_bash".into(),
+            description: "Run a non-interactive shell command in the workspace (in the \
+editor's terminal). Use write_file / edit_file to change files, not shell redirection."
+                .into(),
+            parameters: json!({
+                "type": "object",
+                "properties": {
+                    "command": { "type": "string", "description": "Command to run" },
+                    "timeout_secs": { "type": "integer", "description": "Timeout in seconds (default 120)" }
+                },
+                "required": ["command"]
+            }),
+        }
+    }
+
+    async fn execute(&self, call: &ToolCall) -> dcode_ai_common::tool::ToolResult {
+        let command = call.input["command"].as_str().unwrap_or("").to_string();
+        let timeout = call.input["timeout_secs"].as_u64().unwrap_or(120);
+        let fail = |e: String| dcode_ai_common::tool::ToolResult {
+            call_id: call.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some(e),
+        };
+        let (shell, flag) = if cfg!(windows) {
+            ("cmd", "/C")
+        } else {
+            ("sh", "-c")
+        };
+        let Some(created) = self
+            .0
+            .call(
+                "terminal/create",
+                json!({
+                    "command": shell,
+                    "args": [flag, command],
+                    "cwd": self.0.root.display().to_string(),
+                    "outputByteLimit": 1_000_000,
+                }),
+            )
+            .await
+        else {
+            return fail("the editor could not start a terminal".into());
+        };
+        let Some(tid) = created["terminalId"].as_str().map(str::to_string) else {
+            return fail("the editor returned no terminal id".into());
+        };
+        // Show the live terminal in the tool call.
+        self.0.out.update(
+            &self.0.session_id,
+            json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": call.id,
+                "content": [{ "type": "terminal", "terminalId": tid }],
+            }),
+        );
+        let exit = tokio::time::timeout(
+            std::time::Duration::from_secs(timeout),
+            self.0
+                .call("terminal/wait_for_exit", json!({ "terminalId": tid })),
+        )
+        .await;
+        if exit.is_err() {
+            let _ = self
+                .0
+                .call("terminal/kill", json!({ "terminalId": tid }))
+                .await;
+        }
+        let output = self
+            .0
+            .call("terminal/output", json!({ "terminalId": tid }))
+            .await
+            .unwrap_or_default();
+        let _ = self
+            .0
+            .call("terminal/release", json!({ "terminalId": tid }))
+            .await;
+        let text = output["output"].as_str().unwrap_or("").to_string();
+        let code = match &exit {
+            Ok(Some(v)) => v["exitCode"].as_i64(),
+            _ => output["exitStatus"]["exitCode"].as_i64(),
+        };
+        match (exit.is_err(), code) {
+            (true, _) => fail(format!("Command timed out after {timeout}s\n{text}")),
+            (false, Some(0)) | (false, None) => tool_ok(
+                call,
+                if text.is_empty() {
+                    "Command exited with status 0".into()
+                } else {
+                    text
+                },
+            ),
+            (false, Some(c)) => dcode_ai_common::tool::ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: format!("{text}\nCommand exited with status {c}"),
+                error: None,
+            },
+        }
     }
 }
 
@@ -520,6 +780,7 @@ pub async fn run(config: DcodeAiConfig) -> anyhow::Result<()> {
         config,
         out: Arc::new(Outbox::new(tx)),
         sessions: Mutex::new(HashMap::new()),
+        client: std::sync::Mutex::new(ClientCaps::default()),
     });
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
     while let Some(line) = lines.next_line().await? {
@@ -606,6 +867,66 @@ mod tests {
         assert_eq!(u.len(), 2);
         assert_eq!(u[0]["sessionUpdate"], "user_message_chunk");
         assert_eq!(u[1]["content"]["text"], "done");
+    }
+
+    #[test]
+    fn client_capabilities_are_read_from_initialize() {
+        let caps = ClientCaps::from_initialize(&json!({"clientCapabilities": {
+            "fs": {"readTextFile": true, "writeTextFile": false}, "terminal": true}}));
+        assert_eq!(
+            caps,
+            ClientCaps {
+                read_text_file: true,
+                write_text_file: false,
+                terminal: true
+            }
+        );
+        assert_eq!(
+            ClientCaps::from_initialize(&json!({})),
+            ClientCaps::default()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_file_goes_through_the_editor_and_falls_back() {
+        use dcode_ai_core::tools::ToolExecutor;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "on disk").unwrap();
+        let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+        let out = Arc::new(Outbox::new(tx));
+        let link = EditorLink {
+            out: Arc::clone(&out),
+            session_id: "s1".into(),
+            root: dir.path().to_path_buf(),
+        };
+        // Fake editor: first read returns the unsaved buffer, second errors.
+        let editor = Arc::clone(&out);
+        tokio::spawn(async move {
+            let mut n = 0;
+            while let Some(req) = rx.recv().await {
+                let id = req["id"].as_u64().unwrap();
+                assert_eq!(req["method"], "fs/read_text_file");
+                assert_eq!(req["params"]["sessionId"], "s1");
+                n += 1;
+                let reply = if n == 1 {
+                    json!({"content": "unsaved buffer"})
+                } else {
+                    json!({"__error": {"code": -32000}})
+                };
+                editor.resolve(id, reply);
+            }
+        });
+        let tool = EditorReadFile(link);
+        let call = ToolCall {
+            id: "c".into(),
+            name: "read_file".into(),
+            input: json!({"path": "a.txt"}),
+        };
+        assert_eq!(tool.execute(&call).await.output, "unsaved buffer");
+        assert!(
+            tool.execute(&call).await.output.contains("on disk"),
+            "falls back to disk"
+        );
     }
 
     #[test]
