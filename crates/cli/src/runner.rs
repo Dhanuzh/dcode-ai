@@ -369,6 +369,11 @@ impl SessionRuntime {
         self.supervisor.snapshot()
     }
 
+    /// One tool-less request to the session's model; returns the reply.
+    pub async fn complete_text(&self, prompt: &str) -> Result<String, String> {
+        self.supervisor.complete_text(prompt).await
+    }
+
     /// `/compact [focus]`: replace the conversation with a model summary.
     pub async fn compact_now(
         &mut self,

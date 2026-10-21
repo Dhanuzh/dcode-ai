@@ -1043,6 +1043,17 @@ impl Supervisor {
             .as_deref()
             .map(|m| self.config.model.resolve_alias(m))
             .unwrap_or_else(|| self.model.clone());
+        self.complete_with_model(&summary_model, prompt).await
+    }
+
+    /// One tool-less request to the session's model (e.g. writing an agent
+    /// file for `/agents new`). Returns the reply text.
+    pub async fn complete_text(&self, prompt: &str) -> Result<String, String> {
+        self.complete_with_model(&self.model.clone(), prompt).await
+    }
+
+    async fn complete_with_model(&self, model: &str, prompt: &str) -> Result<String, String> {
+        let summary_model = model.to_string();
         use dcode_ai_common::message::Message;
 
         let messages = vec![Message::user(prompt)];

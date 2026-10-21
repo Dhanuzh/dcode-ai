@@ -8,6 +8,9 @@
   changes; your agent fixes each finding or explains why it is not a
   problem. `[session] cross_review = true` runs it after every turn that
   changed files; `[session] second_opinion_model` picks the reviewer.
+- **`/agents new <description>`** writes a sub-agent file for you (name,
+  description, tools, instructions), validated before it is saved; `--user`
+  saves it for every project.
 - **Startup permission chooser**: Manual (ask before edits and commands),
   Accept edits, or Auto (every tool, this session only), replacing the yes/no
   "approve all tools?" popup.

@@ -2070,6 +2070,52 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     }
                 }
             }
+            "/agents" if rest.trim_start().starts_with("new") => {
+                // Claude Code's "Generate with Claude": describe the agent,
+                // the model writes `agents/<name>.md`.
+                let mut desc = rest.trim_start().trim_start_matches("new").trim().to_string();
+                let user_scope = desc.starts_with("--user");
+                if user_scope {
+                    desc = desc.trim_start_matches("--user").trim().to_string();
+                }
+                if desc.is_empty() {
+                    out.println("usage: /agents new [--user] <what the agent should do>");
+                    return Ok(true);
+                }
+                let dir = if user_scope {
+                    match dcode_ai_common::config::dcode_ai_home_dir() {
+                        Some(h) => h.join("agents"),
+                        None => {
+                            out.eprintln("[agents] no home directory");
+                            return Ok(true);
+                        }
+                    }
+                } else {
+                    self.runtime.workspace_root().join(".dcode-ai/agents")
+                };
+                out.println("[agents] writing the agent definition…");
+                let reply = match self.runtime.complete_text(&agent_generation_prompt(&desc)).await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        out.eprintln(&format!("[agents] {e}"));
+                        return Ok(true);
+                    }
+                };
+                match save_generated_agent(&dir, &reply) {
+                    Ok((path, def)) => out.println(&format!(
+                        "[agents] created `{}` — {}\n  {}\n  tools: {} · model: {}\nEdit the file to adjust it; the agent is available to spawn_subagent now.",
+                        def.name,
+                        def.description,
+                        path.display(),
+                        def.tools
+                            .as_ref()
+                            .map(|t| t.join(", "))
+                            .unwrap_or_else(|| "all".into()),
+                        def.model.as_deref().unwrap_or("inherit"),
+                    )),
+                    Err(e) => out.eprintln(&format!("[agents] {e}")),
+                }
+            }
             "/agents" => {
                 let snapshot = self.runtime.snapshot();
                 let defs = dcode_ai_core::agent_defs::discover(
@@ -5641,6 +5687,77 @@ fn git_change_snapshot(ws: &std::path::Path) -> Option<String> {
 }
 
 /// The verifier reports `No problems found.` when everything checks out.
+/// Prompt for `/agents new`: produce one agent file in Claude Code format.
+fn agent_generation_prompt(description: &str) -> String {
+    format!(
+        "Write a sub-agent definition file for a coding assistant. The user wants an agent that: \
+{description}\n\n\
+Reply with ONLY the file content, no code fences, in exactly this format:\n\
+---\n\
+name: <short-kebab-case-name>\n\
+description: <one sentence saying what it does and when to use it, starting with \"Use when\" or \"Use for\">\n\
+tools: <comma-separated subset of: Read, Grep, Glob, Edit, Write, Bash, WebFetch, WebSearch — only what it needs; omit this line to allow all tools>\n\
+model: inherit\n\
+---\n\
+<the agent's system prompt in second person: its role, step-by-step approach, what to check, \
+what to return and in what format, and what it must not do. 10-30 lines.>"
+    )
+}
+
+/// Validate the model's reply as an agent file and save it as
+/// `<dir>/<name>.md` (never overwriting an existing agent).
+fn save_generated_agent(
+    dir: &std::path::Path,
+    reply: &str,
+) -> Result<(std::path::PathBuf, dcode_ai_core::agent_defs::AgentDef), String> {
+    let text = reply.trim();
+    let text = text
+        .strip_prefix("```markdown")
+        .or_else(|| text.strip_prefix("```md"))
+        .or_else(|| text.strip_prefix("```"))
+        .map(|t| t.trim_end().trim_end_matches("```").trim())
+        .unwrap_or(text);
+    if !text.starts_with("---") {
+        return Err(format!("the model did not return an agent file:\n{text}"));
+    }
+    std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    let tmp = dir.join(".new-agent.md.tmp");
+    std::fs::write(&tmp, format!("{text}\n")).map_err(|e| e.to_string())?;
+    let parsed = dcode_ai_core::agent_defs::parse_agent_file(&tmp);
+    let def = match parsed {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(format!(
+                "generated file is not a valid agent ({e}):\n{text}"
+            ));
+        }
+    };
+    let name: String = def
+        .name
+        .to_ascii_lowercase()
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect::<String>()
+        .trim_matches('-')
+        .to_string();
+    if name.is_empty() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("generated agent has no name".into());
+    }
+    let path = dir.join(format!("{name}.md"));
+    if path.exists() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!(
+            "{} already exists — not overwritten",
+            path.display()
+        ));
+    }
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+    let def = dcode_ai_core::agent_defs::parse_agent_file(&path).unwrap_or(def);
+    Ok((path, def))
+}
+
 /// Config and label for the `/second-opinion` reviewer: `[session]
 /// second_opinion_model` when set, otherwise the strongest available model
 /// of a different family than `current_model` (GPT/Gemini on Copilot for a
@@ -5735,6 +5852,17 @@ fn verifier_found_problems(report: &str) -> bool {
 #[cfg(test)]
 mod verifier_tests {
     use super::verifier_found_problems;
+
+    #[test]
+    fn generated_agents_are_validated_and_never_overwrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let reply = "```markdown\n---\nname: Test Runner\ndescription: Use when tests fail.\ntools: Read, Bash\nmodel: inherit\n---\nRun the tests and fix failures.\n```";
+        let (path, def) = super::save_generated_agent(dir.path(), reply).unwrap();
+        assert!(path.ends_with("test-runner.md"), "{}", path.display());
+        assert_eq!(def.description, "Use when tests fail.");
+        assert!(super::save_generated_agent(dir.path(), reply).is_err());
+        assert!(super::save_generated_agent(dir.path(), "no frontmatter").is_err());
+    }
 
     #[test]
     fn reviewer_comes_from_another_family() {

@@ -138,6 +138,11 @@ model: sonnet                      # optional; omit or `inherit` for the parent'
 You are a test specialist. Run the tests, read failures, fix them …
 ```
 
+`/agents new <what it should do>` writes one for you, like Claude Code's
+"Generate with Claude": the model picks a name, a description, the tools it
+needs and its instructions, and saves `.dcode-ai/agents/<name>.md` (`--user`
+for `~/.dcode-ai/agents/`). Existing agents are never overwritten.
+
 The main agent sees them in `spawn_subagent`; the child runs with only the
 listed tools and the body as its instructions. `/agents` lists definitions and
 past sub-agent sessions.
