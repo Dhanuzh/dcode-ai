@@ -1442,7 +1442,8 @@ mod tests {
     #[tokio::test]
     async fn mixed_batches_run_in_order_and_finish() {
         let temp = tempfile::tempdir().expect("tempdir");
-        let root = temp.path().canonicalize().expect("canonical");
+        let root =
+            dcode_ai_common::config::canonicalize_simplified(temp.path()).expect("canonical");
         let call = |id: &str, name: &str, input: serde_json::Value| {
             StreamChunk::ToolUse(ToolCall {
                 id: id.into(),
