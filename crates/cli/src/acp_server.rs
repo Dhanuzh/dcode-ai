@@ -481,6 +481,13 @@ struct EditorLink {
 }
 
 impl EditorLink {
+    /// The workspace root as file tools compare it (canonical: macOS
+    /// `/private/var`, Windows 8.3 names).
+    fn local_root(&self) -> PathBuf {
+        dcode_ai_common::config::canonicalize_simplified(&self.root)
+            .unwrap_or_else(|_| self.root.clone())
+    }
+
     /// Absolute path inside the workspace (or an `/add-dir` folder).
     fn resolve(&self, path: &str) -> Result<PathBuf, String> {
         let p = self.root.join(path);
@@ -519,11 +526,11 @@ struct EditorReadFile(EditorLink);
 #[async_trait::async_trait]
 impl dcode_ai_core::tools::ToolExecutor for EditorReadFile {
     fn definition(&self) -> dcode_ai_common::tool::ToolDefinition {
-        dcode_ai_core::tools::filesystem::ReadFileTool::new(self.0.root.clone()).definition()
+        dcode_ai_core::tools::filesystem::ReadFileTool::new(self.0.local_root()).definition()
     }
 
     async fn execute(&self, call: &ToolCall) -> dcode_ai_common::tool::ToolResult {
-        let local = dcode_ai_core::tools::filesystem::ReadFileTool::new(self.0.root.clone());
+        let local = dcode_ai_core::tools::filesystem::ReadFileTool::new(self.0.local_root());
         let path = call.input["path"].as_str().unwrap_or("");
         let Ok(abs) = self.0.resolve(path) else {
             return local.execute(call).await;
@@ -550,11 +557,11 @@ struct EditorWriteFile(EditorLink);
 #[async_trait::async_trait]
 impl dcode_ai_core::tools::ToolExecutor for EditorWriteFile {
     fn definition(&self) -> dcode_ai_common::tool::ToolDefinition {
-        dcode_ai_core::tools::write_file::WriteFileTool::new(self.0.root.clone()).definition()
+        dcode_ai_core::tools::write_file::WriteFileTool::new(self.0.local_root()).definition()
     }
 
     async fn execute(&self, call: &ToolCall) -> dcode_ai_common::tool::ToolResult {
-        let local = dcode_ai_core::tools::write_file::WriteFileTool::new(self.0.root.clone());
+        let local = dcode_ai_core::tools::write_file::WriteFileTool::new(self.0.local_root());
         let path = call.input["path"].as_str().unwrap_or("");
         let content = call.input["content"].as_str().unwrap_or("");
         let Ok(abs) = self.0.resolve(path) else {
