@@ -46,7 +46,9 @@ impl ToolExecutor for ReadFileTool {
 
         // Verify the path stays inside the workspace
         match dcode_ai_common::config::canonicalize_simplified(&full_path) {
-            Ok(canonical) if canonical.starts_with(&self.workspace_root) => {
+            Ok(canonical)
+                if dcode_ai_common::workspace_scope::allows(&self.workspace_root, &canonical) =>
+            {
                 match tokio::fs::read_to_string(&canonical).await {
                     Ok(content) => {
                         self.freshness.note(&canonical);

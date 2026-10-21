@@ -20,6 +20,13 @@ pub struct PtyManager {
 }
 
 impl PtyManager {
+    /// Configured writable roots plus `/add-dir` folders.
+    fn writable_roots(&self) -> Vec<std::path::PathBuf> {
+        let mut roots = self.sandbox_writable_roots.clone();
+        roots.extend(dcode_ai_common::workspace_scope::dirs());
+        roots
+    }
+
     pub fn new(workspace_root: impl AsRef<Path>) -> Self {
         Self::with_sandbox(workspace_root, false, Vec::new())
     }
@@ -56,7 +63,7 @@ impl PtyManager {
         // macOS: confine through Seatbelt (`sandbox-exec`); Linux uses Landlock
         // in `pre_exec` below.
         let mut cmd = if cfg!(target_os = "macos") && self.sandbox {
-            crate::sandbox::seatbelt_command(command, &effective_root, &self.sandbox_writable_roots)
+            crate::sandbox::seatbelt_command(command, &effective_root, &self.writable_roots())
         } else {
             shell_command(command)
         };
@@ -74,7 +81,7 @@ impl PtyManager {
         #[cfg(unix)]
         if self.sandbox {
             let ws = effective_root.clone();
-            let extra = self.sandbox_writable_roots.clone();
+            let extra = self.writable_roots();
             // Applied between fork and exec: confines only the child.
             unsafe {
                 cmd.pre_exec(move || crate::sandbox::apply_workspace_sandbox(&ws, &extra));

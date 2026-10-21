@@ -71,7 +71,11 @@ impl ToolExecutor for EditFileTool {
             .unwrap_or_else(|_| self.workspace_root.clone());
         let full_path = self.workspace_root.join(path);
         let canonical = match dcode_ai_common::config::canonicalize_simplified(&full_path) {
-            Ok(canonical) if canonical.starts_with(&workspace_root) => canonical,
+            Ok(canonical)
+                if dcode_ai_common::workspace_scope::allows(&workspace_root, &canonical) =>
+            {
+                canonical
+            }
             _ => {
                 return ToolResult {
                     call_id: call.id.clone(),

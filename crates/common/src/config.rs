@@ -1150,6 +1150,10 @@ pub struct PermissionConfig {
     /// so `cargo build` can use its registry cache). `~` expands to $HOME.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sandbox_writable_roots: Vec<String>,
+    /// Extra folders the agent may read and edit besides the workspace
+    /// (Claude Code's `additionalDirectories`; also `/add-dir`, `--add-dir`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub additional_directories: Vec<String>,
     /// Rules from `policy.toml` files (never written back to config.toml).
     #[serde(skip)]
     pub policy: PolicyRules,
@@ -1218,6 +1222,7 @@ impl Default for PermissionConfig {
             startup_approve_all: false,
             sandbox_bash: false,
             sandbox_writable_roots: Vec::new(),
+            additional_directories: Vec::new(),
             policy: PolicyRules::default(),
         }
     }
@@ -1242,6 +1247,9 @@ impl PermissionConfig {
         }
         if let Some(sandbox_bash) = partial.sandbox_bash {
             self.sandbox_bash = sandbox_bash;
+        }
+        if let Some(dirs) = partial.additional_directories {
+            self.additional_directories = dirs;
         }
         if let Some(sandbox_writable_roots) = partial.sandbox_writable_roots {
             self.sandbox_writable_roots = sandbox_writable_roots;
@@ -1805,6 +1813,7 @@ struct PartialPermissionConfig {
     startup_approve_all: Option<bool>,
     sandbox_bash: Option<bool>,
     sandbox_writable_roots: Option<Vec<String>>,
+    additional_directories: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

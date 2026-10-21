@@ -32,7 +32,7 @@ fn canonicalize_workspace_path(
     let full_path = workspace_root.join(path);
     let canonical = dcode_ai_common::config::canonicalize_simplified(&full_path)
         .map_err(|err| format!("Failed to resolve path '{path}': {err}"))?;
-    if canonical.starts_with(&canonical_root) {
+    if dcode_ai_common::workspace_scope::allows(&canonical_root, &canonical) {
         Ok(canonical)
     } else {
         Err("Path is outside the workspace".into())

@@ -55,7 +55,9 @@ impl ToolExecutor for RunValidationTool {
 
         let full_cwd = self.workspace_root.join(cwd);
         let canonical_cwd = match dcode_ai_common::config::canonicalize_simplified(&full_cwd) {
-            Ok(path) if path.starts_with(&self.workspace_root) => path,
+            Ok(path) if dcode_ai_common::workspace_scope::allows(&self.workspace_root, &path) => {
+                path
+            }
             _ => {
                 return ToolResult {
                     call_id: call.id.clone(),

@@ -42,7 +42,9 @@ impl ToolExecutor for CopyPathTool {
         let to_path = self.workspace_root.join(to);
 
         let canonical_from = match dcode_ai_common::config::canonicalize_simplified(&from_path) {
-            Ok(path) if path.starts_with(&self.workspace_root) => path,
+            Ok(path) if dcode_ai_common::workspace_scope::allows(&self.workspace_root, &path) => {
+                path
+            }
             _ => {
                 return ToolResult {
                     call_id: call.id.clone(),
@@ -63,7 +65,8 @@ impl ToolExecutor for CopyPathTool {
                 };
             }
             match dcode_ai_common::config::canonicalize_simplified(parent) {
-                Ok(path) if path.starts_with(&self.workspace_root) => {}
+                Ok(path)
+                    if dcode_ai_common::workspace_scope::allows(&self.workspace_root, &path) => {}
                 _ => {
                     return ToolResult {
                         call_id: call.id.clone(),

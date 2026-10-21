@@ -8,6 +8,9 @@
   changes; your agent fixes each finding or explains why it is not a
   problem. `[session] cross_review = true` runs it after every turn that
   changed files; `[session] second_opinion_model` picks the reviewer.
+- **`/add-dir <path>`** (and `--add-dir`, `[permissions]
+  additional_directories`): let dcode-ai read and edit another folder
+  besides the workspace, like Claude Code's additional directories.
 - **MCP OAuth sign-in**: `dcode-ai mcp login <name>` signs in to
   OAuth-protected remote MCP servers such as Atlassian (PKCE, dynamic client
   registration, automatic refresh); `mcp logout`; `mcp list` shows the

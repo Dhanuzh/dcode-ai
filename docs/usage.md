@@ -149,6 +149,14 @@ A session records its model, provider, token counts, estimated cost,
 timestamps, parent/child lineage and orchestration metadata. Resuming keeps
 the provider and model it ran on.
 
+## Extra working folders
+
+By default dcode-ai reads and edits only inside the folder you start it in.
+`/add-dir <path>` (or `--add-dir <path>`, repeatable) lets it work in another
+folder too for this session — e.g. a sibling repo or a shared library. Keep
+folders permanently with `[permissions] additional_directories = ["~/code/lib"]`.
+The shell sandbox allows writes there as well.
+
 ## Sub-agents
 
 The agent delegates with `spawn_subagent`. Each child:

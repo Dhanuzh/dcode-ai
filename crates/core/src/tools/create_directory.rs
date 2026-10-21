@@ -41,7 +41,7 @@ impl ToolExecutor for CreateDirectoryTool {
             Err(_) => self.workspace_root.clone(),
         };
 
-        if !canonical_parent.starts_with(&self.workspace_root) {
+        if !dcode_ai_common::workspace_scope::allows(&self.workspace_root, &canonical_parent) {
             return ToolResult {
                 call_id: call.id.clone(),
                 success: false,

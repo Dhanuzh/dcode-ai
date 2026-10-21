@@ -1536,6 +1536,44 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     }
                 }
             }
+            "/add-dir" => {
+                let arg = rest.trim();
+                if arg.is_empty() {
+                    let dirs = dcode_ai_common::workspace_scope::dirs();
+                    if dirs.is_empty() {
+                        out.println("[add-dir] no extra folders. Usage: /add-dir <path>");
+                    } else {
+                        out.println("[add-dir] extra working folders:");
+                        for d in dirs {
+                            out.println(&format!("  {}", d.display()));
+                        }
+                    }
+                    return Ok(true);
+                }
+                let path = match arg.strip_prefix("~/") {
+                    Some(r) => dcode_ai_common::config::home_dir()
+                        .map(|h| h.join(r))
+                        .unwrap_or_else(|| std::path::PathBuf::from(arg)),
+                    None => {
+                        let p = std::path::PathBuf::from(arg);
+                        if p.is_absolute() {
+                            p
+                        } else {
+                            self.runtime.workspace_root().join(p)
+                        }
+                    }
+                };
+                match dcode_ai_common::workspace_scope::add_dir(&path) {
+                    Ok(dir) => {
+                        self.runtime.refresh_system_prompt();
+                        out.println(&format!(
+                            "[add-dir] dcode-ai can now read and edit {} (this session; add it to [permissions] additional_directories to keep it)",
+                            dir.display()
+                        ));
+                    }
+                    Err(e) => out.eprintln(&format!("[add-dir] {e}")),
+                }
+            }
             "/vim" => {
                 let on = !self.runtime.config().ui.vim_mode;
                 self.runtime.config_mut().ui.vim_mode = on;

@@ -64,6 +64,10 @@ fn relative_search_root(workspace_root: &Path, scope: Option<&str>) -> Result<St
     let canonical = dcode_ai_common::config::canonicalize_simplified(&candidate)
         .map_err(|err| format!("Failed to resolve search path '{scope}': {err}"))?;
     if !canonical.starts_with(&canonical_root) {
+        // An `/add-dir` folder: search it by absolute path.
+        if dcode_ai_common::workspace_scope::added_dir_containing(&canonical).is_some() {
+            return Ok(canonical.display().to_string());
+        }
         return Err("Search path is outside the workspace".into());
     }
     canonical

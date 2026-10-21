@@ -45,7 +45,9 @@ impl ToolExecutor for ListDirectoryTool {
         };
 
         match dcode_ai_common::config::canonicalize_simplified(&full_path) {
-            Ok(canonical) if canonical.starts_with(&self.workspace_root) => {
+            Ok(canonical)
+                if dcode_ai_common::workspace_scope::allows(&self.workspace_root, &canonical) =>
+            {
                 let mut entries = match tokio::fs::read_dir(&canonical).await {
                     Ok(reader) => reader,
                     Err(e) => {

@@ -41,7 +41,7 @@ impl ToolExecutor for RenamePathTool {
 }
 
 pub(super) async fn rename_impl(
-    workspace_root: &std::path::PathBuf,
+    workspace_root: &std::path::Path,
     call: &ToolCall,
     verb: &str,
 ) -> ToolResult {
@@ -51,7 +51,7 @@ pub(super) async fn rename_impl(
     let to_path = workspace_root.join(to);
 
     let canonical_from = match dcode_ai_common::config::canonicalize_simplified(&from_path) {
-        Ok(path) if path.starts_with(workspace_root) => path,
+        Ok(path) if dcode_ai_common::workspace_scope::allows(workspace_root, &path) => path,
         _ => {
             return ToolResult {
                 call_id: call.id.clone(),
@@ -72,7 +72,7 @@ pub(super) async fn rename_impl(
             };
         }
         let canonical_parent = match dcode_ai_common::config::canonicalize_simplified(parent) {
-            Ok(path) if path.starts_with(workspace_root) => path,
+            Ok(path) if dcode_ai_common::workspace_scope::allows(workspace_root, &path) => path,
             _ => {
                 return ToolResult {
                     call_id: call.id.clone(),

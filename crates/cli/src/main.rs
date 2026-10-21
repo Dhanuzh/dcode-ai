@@ -130,6 +130,10 @@ struct Cli {
     #[arg(long)]
     max_turns: Option<u32>,
 
+    /// Extra folder the agent may work in besides this one (repeatable)
+    #[arg(long = "add-dir", value_name = "DIR")]
+    add_dir: Vec<PathBuf>,
+
     /// Extra instructions appended to the system prompt for this run
     #[arg(long, value_name = "TEXT")]
     append_system_prompt: Option<String>,
@@ -673,6 +677,19 @@ async fn try_main() -> anyhow::Result<()> {
     if cli.enable_thinking {
         config.model.enable_thinking = true;
         config.model.thinking_budget = cli.thinking_budget;
+    }
+    // Extra working folders: `[permissions] additional_directories`, then
+    // `--add-dir` (relative to the current directory; `~` expanded).
+    for dir in config
+        .permissions
+        .additional_directories
+        .iter()
+        .map(|d| expand_home(d))
+        .chain(cli.add_dir.iter().cloned())
+    {
+        if let Err(e) = dcode_ai_common::workspace_scope::add_dir(&dir) {
+            eprintln!("warning: --add-dir {}: {e}", dir.display());
+        }
     }
     if let Some(text) = cli.append_system_prompt.clone() {
         config.harness.append_system_prompt = Some(text);
@@ -1643,6 +1660,16 @@ fn merge_worktree(
         );
     }
     Ok(())
+}
+
+/// `~/x` → `$HOME/x`.
+fn expand_home(path: &str) -> PathBuf {
+    match path.strip_prefix("~/") {
+        Some(rest) => dcode_ai_common::config::home_dir()
+            .map(|h| h.join(rest))
+            .unwrap_or_else(|| PathBuf::from(path)),
+        None => PathBuf::from(path),
+    }
 }
 
 /// Permission rules for `--allowed-tools` / `--disallowed-tools`: Claude

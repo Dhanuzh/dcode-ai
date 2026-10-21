@@ -82,6 +82,19 @@ fn environment_section(workspace_root: &Path) -> String {
         shell_name = shell.display_name(),
         hint = shell.prompt_hint(),
         ws = workspace_root.display()
+    ) + &added_dirs_line()
+}
+
+/// `- Additional working directories: …` when `/add-dir` folders exist.
+fn added_dirs_line() -> String {
+    let dirs = dcode_ai_common::workspace_scope::dirs();
+    if dirs.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = dirs.iter().map(|d| d.display().to_string()).collect();
+    format!(
+        "\n- Additional working directories (use absolute paths): {}",
+        list.join(", ")
     )
 }
 

@@ -17,3 +17,4 @@ pub mod redact;
 pub mod session;
 pub mod shell;
 pub mod tool;
+pub mod workspace_scope;

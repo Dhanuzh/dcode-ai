@@ -847,4 +847,3 @@ mod tests {
         assert!(err.contains("dcode-ai mcp login remote"), "{err}");
     }
 }
-
