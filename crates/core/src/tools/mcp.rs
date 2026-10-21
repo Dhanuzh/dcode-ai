@@ -521,6 +521,10 @@ struct HttpMcpClient {
     next_id: u64,
     session_id: Option<String>,
     headers: Vec<(String, String)>,
+    server_name: String,
+    /// OAuth sign-in from `dcode-ai mcp login`, used when no Authorization
+    /// header is configured.
+    oauth: Option<dcode_ai_common::mcp_auth::McpServerLogin>,
 }
 
 impl HttpMcpClient {
@@ -531,37 +535,108 @@ impl HttpMcpClient {
                 server.name
             )
         })?;
-        let headers = server
-            .headers
+        let headers = resolve_headers(server)?;
+        let has_auth = headers
             .iter()
-            .map(|(k, v)| (k.clone(), expand_env_vars(v)))
-            .collect();
+            .any(|(k, _)| k.eq_ignore_ascii_case("authorization"));
+        let oauth = if has_auth {
+            None
+        } else {
+            dcode_ai_common::mcp_auth::McpAuthStore::load()
+                .login_for(url)
+                .cloned()
+        };
         Ok(Self {
             client,
             url: url.to_string(),
             next_id: 1,
             session_id: None,
             headers,
+            server_name: server.name.clone(),
+            oauth,
         })
     }
 
+    /// Refresh the stored OAuth tokens and save them. `false` = no login or
+    /// refresh failed.
+    async fn refresh_login(&mut self) -> bool {
+        let Some(login) = self.oauth.clone() else {
+            return false;
+        };
+        match crate::mcp_oauth::refresh(&self.client, &login, &self.url).await {
+            Ok(t) => {
+                let mut updated = login;
+                updated.access_token = t.access_token;
+                updated.refresh_token = t.refresh_token;
+                updated.expires_at = t.expires_at;
+                let mut store = dcode_ai_common::mcp_auth::McpAuthStore::load();
+                store
+                    .servers
+                    .insert(dcode_ai_common::mcp_auth::key(&self.url), updated.clone());
+                let _ = store.save();
+                self.oauth = Some(updated);
+                true
+            }
+            Err(e) => {
+                tracing::warn!("MCP `{}`: token refresh failed: {e}", self.server_name);
+                false
+            }
+        }
+    }
+
+    fn sign_in_error(&self) -> String {
+        format!(
+            "MCP server `{0}` needs sign-in: run `dcode-ai mcp login {0}`",
+            self.server_name
+        )
+    }
+
     async fn post(&mut self, payload: &Value) -> Result<reqwest::Response, String> {
-        let mut req = self
-            .client
-            .post(&self.url)
-            .header("content-type", "application/json")
-            .header("accept", "application/json, text/event-stream");
-        for (key, value) in &self.headers {
-            req = req.header(key, value);
+        if self
+            .oauth
+            .as_ref()
+            .is_some_and(|l| l.is_expired(chrono::Utc::now().timestamp()))
+        {
+            self.refresh_login().await;
         }
-        if let Some(sid) = &self.session_id {
-            req = req.header("mcp-session-id", sid.clone());
-        }
-        let resp = req
-            .json(payload)
-            .send()
-            .await
-            .map_err(|err| format!("MCP HTTP request failed: {err}"))?;
+        let mut retried = false;
+        let resp = loop {
+            let mut req = self
+                .client
+                .post(&self.url)
+                .header("content-type", "application/json")
+                .header("accept", "application/json, text/event-stream");
+            for (key, value) in &self.headers {
+                req = req.header(key, value);
+            }
+            if let Some(login) = &self.oauth {
+                req = req.bearer_auth(&login.access_token);
+            }
+            if let Some(sid) = &self.session_id {
+                req = req.header("mcp-session-id", sid.clone());
+            }
+            let resp = req
+                .json(payload)
+                .send()
+                .await
+                .map_err(|err| format!("MCP HTTP request failed: {err}"))?;
+            if resp.status() == reqwest::StatusCode::UNAUTHORIZED {
+                let oauth_server = resp
+                    .headers()
+                    .get("www-authenticate")
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(crate::mcp_oauth::parse_www_authenticate)
+                    .is_some();
+                if !retried && self.oauth.is_some() && self.refresh_login().await {
+                    retried = true;
+                    continue;
+                }
+                if oauth_server || self.oauth.is_some() {
+                    return Err(self.sign_in_error());
+                }
+            }
+            break resp;
+        };
 
         if let Some(sid) = resp
             .headers()
@@ -642,8 +717,26 @@ impl HttpMcpClient {
     }
 }
 
-fn expand_env_vars(value: &str) -> String {
-    dcode_ai_common::mcp_json::expand_vars(value, &std::collections::BTreeMap::new())
+/// Expand `${VAR}`s in a server's HTTP headers. An unset variable is an
+/// error naming the server, header and variable: sending e.g.
+/// `Authorization: Basic ` would only come back as an unexplained 401.
+fn resolve_headers(server: &McpServerConfig) -> Result<Vec<(String, String)>, String> {
+    let no_extra = std::collections::BTreeMap::new();
+    server
+        .headers
+        .iter()
+        .map(|(key, value)| {
+            dcode_ai_common::mcp_json::expand_vars_strict(value, &no_extra)
+                .map(|v| (key.clone(), v))
+                .map_err(|var| {
+                    format!(
+                        "MCP server `{}`: header `{key}` uses ${{{var}}}, which is not set; \
+                         export {var} before starting dcode-ai",
+                        server.name
+                    )
+                })
+        })
+        .collect()
 }
 
 /// Like [`load_mcp_tools`] but one failing server does not hide the others:
@@ -681,3 +774,77 @@ pub async fn load_mcp_tools(
     }
     Ok(tools)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Never set anywhere; tests must not call `set_var` (edition 2024).
+    const UNSET: &str = "DCODE_AI_TEST_UNSET_MCP_HEADER_4C1E";
+
+    fn http_server(auth: &str) -> McpServerConfig {
+        let doc = serde_json::json!({ "mcpServers": { "atl": {
+            "type": "http",
+            "url": "https://mcp.example.com/mcp",
+            "headers": { "Authorization": auth },
+        }}});
+        // Same path as a real `.mcp.json`: parse first, then connect.
+        dcode_ai_common::mcp_json::servers_from_value(&doc, "user", &Default::default())
+            .expect("parse")
+            .remove(0)
+    }
+
+    #[test]
+    fn unset_header_variable_fails_connect_with_a_clear_error() {
+        let server = http_server(&format!("Basic ${{{UNSET}}}"));
+        let err = match HttpMcpClient::connect(server.url.as_deref().unwrap(), &server) {
+            Ok(_) => panic!("connect must fail when a header variable is unset"),
+            Err(e) => e,
+        };
+        assert!(err.contains("`atl`"), "{err}");
+        assert!(err.contains("`Authorization`"), "{err}");
+        assert!(err.contains(UNSET), "{err}");
+    }
+
+    #[test]
+    fn resolved_and_defaulted_headers_connect() {
+        let server = http_server(&format!("Bearer ${{{UNSET}:-fallback}}"));
+        let client = HttpMcpClient::connect(server.url.as_deref().unwrap(), &server)
+            .expect("a default makes the header resolvable");
+        assert_eq!(
+            client.headers,
+            vec![("Authorization".to_string(), "Bearer fallback".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn oauth_challenge_without_login_says_how_to_sign_in() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 4096];
+            let _ = sock.read(&mut buf).await;
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Bearer resource_metadata=\"https://x/.well-known/oauth-protected-resource\"\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+        });
+        let doc = serde_json::json!({ "mcpServers": { "remote": {
+            "type": "http", "url": format!("http://{addr}/mcp") }}});
+        let server =
+            dcode_ai_common::mcp_json::servers_from_value(&doc, "user", &Default::default())
+                .unwrap()
+                .remove(0);
+        let mut client = HttpMcpClient::connect(server.url.as_deref().unwrap(), &server).unwrap();
+        client.oauth = None; // ignore any real login on this machine
+        let err = client
+            .request("initialize", serde_json::json!({}))
+            .await
+            .unwrap_err();
+        assert!(err.contains("dcode-ai mcp login remote"), "{err}");
+    }
+}
+

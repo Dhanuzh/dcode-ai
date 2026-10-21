@@ -87,6 +87,14 @@ every request. The model sees their names and loads the ones it needs with
 `tool_search` (keywords, or `select:<name>`), like Claude Code's deferred
 tools. This keeps big servers from filling the context.
 
+**Signing in to remote servers:** servers that use OAuth (e.g. Atlassian's
+`https://mcp.atlassian.com/v2/mcp`) need `dcode-ai mcp login <name>` once: it
+opens the browser, and the tokens are kept in `~/.dcode-ai/mcp-auth.json`
+(owner-only) and refreshed automatically. `dcode-ai mcp logout <name>` forgets
+them; `mcp list` shows `[signed in]`. A configured `Authorization` header
+always wins. Header values like `${TOKEN}` must be set, or the server reports
+which variable is missing.
+
 **dcode-ai as a server:** `dcode-ai mcp serve` exposes dcode-ai's read and
 search tools over stdio (`--allow-writes` adds edit tools), for example
 `claude mcp add dcode -- dcode-ai mcp serve`.

@@ -29,6 +29,8 @@ tempfile = "3"
 urlencoding = "2"
 object = { version = "0.36", default-features = false, features = ["read", "std"] }
 flate2 = "1"
+sha2 = "0.10"
+rand = "0.8"
 
 [dev-dependencies]
 proptest = "1"

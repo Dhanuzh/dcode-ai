@@ -931,6 +931,8 @@ async fn try_main() -> anyhow::Result<()> {
             Some(mcp_cli::McpCommand::Serve { allow_writes }) => {
                 mcp_serve::run(&config, &workspace_root, allow_writes).await?
             }
+            Some(mcp_cli::McpCommand::Login { name }) => mcp_cli::login(&config, &name).await?,
+            Some(mcp_cli::McpCommand::Logout { name }) => mcp_cli::logout(&config, &name)?,
         },
         Some(Command::Memory { command, json }) => match command {
             MemoryCommand::List => show_memory(&config, &workspace_root, json).await?,

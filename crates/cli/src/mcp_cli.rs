@@ -49,6 +49,10 @@ pub enum McpCommand {
         #[arg(long, short = 's')]
         scope: Option<String>,
     },
+    /// Sign in to an OAuth-protected remote server (opens the browser)
+    Login { name: String },
+    /// Forget the sign-in for a remote server
+    Logout { name: String },
 }
 
 fn parse_scope(s: &str) -> anyhow::Result<McpScope> {
@@ -70,6 +74,221 @@ fn target_label(server: &McpServerConfig) -> String {
             .trim_end()
             .to_string(),
     }
+}
+
+/// `  [signed in]` etc. for remote servers.
+fn auth_label(
+    server: &McpServerConfig,
+    logins: &dcode_ai_common::mcp_auth::McpAuthStore,
+) -> &'static str {
+    let Some(url) = &server.url else {
+        return "";
+    };
+    if server
+        .headers
+        .keys()
+        .any(|k| k.eq_ignore_ascii_case("authorization"))
+    {
+        "  [header auth]"
+    } else if logins.login_for(url).is_some() {
+        "  [signed in]"
+    } else {
+        ""
+    }
+}
+
+fn find_remote<'a>(
+    config: &'a DcodeAiConfig,
+    name: &str,
+) -> anyhow::Result<(&'a McpServerConfig, String)> {
+    let server = config
+        .mcp
+        .servers
+        .iter()
+        .find(|s| s.name == name)
+        .ok_or_else(|| anyhow::anyhow!("no MCP server named `{name}` (see `dcode-ai mcp list`)"))?;
+    let url = server.url.clone().ok_or_else(|| {
+        anyhow::anyhow!("`{name}` is a local (stdio) server; only remote servers sign in")
+    })?;
+    Ok((server, url))
+}
+
+/// `dcode-ai mcp login <name>`: OAuth 2.1 authorization code + PKCE with a
+/// loopback redirect (the MCP authorization spec).
+pub async fn login(config: &DcodeAiConfig, name: &str) -> anyhow::Result<()> {
+    use dcode_ai_common::mcp_auth::{McpAuthStore, McpServerLogin, client_key, key};
+    use dcode_ai_core::mcp_oauth;
+    let (_server, url) = find_remote(config, name)?;
+    let http = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(20))
+        .build()?;
+    // An unauthenticated request returns the 401 challenge that names the
+    // server's metadata.
+    let probe = http
+        .post(&url)
+        .header("content-type", "application/json")
+        .header("accept", "application/json, text/event-stream")
+        .json(
+            &serde_json::json!({"jsonrpc": "2.0", "id": 0, "method": "initialize", "params": {
+            "protocolVersion": "2025-06-18", "capabilities": {},
+            "clientInfo": {"name": "dcode-ai", "version": env!("CARGO_PKG_VERSION")}}}),
+        )
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("could not reach {url}: {e}"))?;
+    let challenge = probe
+        .headers()
+        .get("www-authenticate")
+        .and_then(|v| v.to_str().ok())
+        .and_then(mcp_oauth::parse_www_authenticate);
+    if probe.status().is_success() && challenge.is_none() {
+        println!("`{name}` does not ask for sign-in; nothing to do.");
+        return Ok(());
+    }
+    let discovery = mcp_oauth::discover(&http, &url, challenge.as_ref())
+        .await
+        .map_err(anyhow::Error::msg)?;
+
+    let listener = match tokio::net::TcpListener::bind("127.0.0.1:53682").await {
+        Ok(l) => l,
+        Err(_) => tokio::net::TcpListener::bind("127.0.0.1:0").await?,
+    };
+    let port = listener.local_addr()?.port();
+    let redirect_uri = format!("http://127.0.0.1:{port}/callback");
+
+    let mut store = McpAuthStore::load();
+    let ckey = client_key(&discovery.auth_server.issuer, &redirect_uri);
+    let client = match store.clients.get(&ckey) {
+        Some(c) => c.clone(),
+        None => {
+            let c = mcp_oauth::register_client(&http, &discovery.auth_server, &redirect_uri)
+                .await
+                .map_err(anyhow::Error::msg)?;
+            store.clients.insert(ckey, c.clone());
+            store.save().map_err(anyhow::Error::msg)?;
+            c
+        }
+    };
+    let pkce = mcp_oauth::Pkce::new();
+    let state = mcp_oauth::random_token();
+    let auth_url = mcp_oauth::authorize_url(&discovery, &client, &pkce, &state);
+    println!("Sign in to `{name}` in your browser:\n\n  {auth_url}\n");
+    if !crate::oauth_login::try_open_browser(&auth_url) {
+        println!("(Open the link above yourself.)");
+    }
+    println!("Waiting for the sign-in to finish (5 minutes)…");
+    let code = tokio::time::timeout(
+        std::time::Duration::from_secs(300),
+        wait_for_callback(&listener, &state),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("timed out waiting for the browser sign-in"))??;
+    let tokens = mcp_oauth::exchange_code(&http, &discovery, &client, &code, &pkce)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    store.servers.insert(
+        key(&url),
+        McpServerLogin {
+            issuer: discovery.auth_server.issuer.clone(),
+            token_endpoint: discovery.auth_server.token_endpoint.clone(),
+            client,
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            expires_at: tokens.expires_at,
+            scope: tokens.scope,
+        },
+    );
+    store.save().map_err(anyhow::Error::msg)?;
+    println!(
+        "Signed in to `{name}`. Its tools load in new sessions (or `/reload` in a running one)."
+    );
+    Ok(())
+}
+
+/// Serve one redirect on the loopback listener; return the `code` once the
+/// `state` matches.
+async fn wait_for_callback(
+    listener: &tokio::net::TcpListener,
+    state: &str,
+) -> anyhow::Result<String> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    loop {
+        let (mut sock, _) = listener.accept().await?;
+        let mut buf = vec![0u8; 8192];
+        let n = sock.read(&mut buf).await.unwrap_or(0);
+        let request = String::from_utf8_lossy(&buf[..n]).to_string();
+        let path = request.split_whitespace().nth(1).unwrap_or("").to_string();
+        let parsed = url::Url::parse(&format!("http://127.0.0.1{path}")).ok();
+        let get = |k: &str| {
+            parsed.as_ref().and_then(|u| {
+                u.query_pairs()
+                    .find(|(name, _)| name == k)
+                    .map(|(_, v)| v.to_string())
+            })
+        };
+        if !path.starts_with("/callback") {
+            let _ = sock
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                )
+                .await;
+            continue;
+        }
+        let (ok, message) = if let Some(err) = get("error") {
+            (
+                false,
+                format!(
+                    "Sign-in failed: {err} {}",
+                    get("error_description").unwrap_or_default()
+                ),
+            )
+        } else if get("state").as_deref() != Some(state) {
+            (
+                false,
+                "Sign-in failed: state mismatch (possible CSRF); try again.".to_string(),
+            )
+        } else if get("code").is_some() {
+            (
+                true,
+                "Signed in to dcode-ai. You can close this tab.".to_string(),
+            )
+        } else {
+            (
+                false,
+                "Sign-in failed: no code in the redirect.".to_string(),
+            )
+        };
+        let body = format!(
+            "<html><body style=\"font-family:sans-serif\"><h3>{message}</h3></body></html>"
+        );
+        let resp = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: text/html; charset=utf-8\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = sock.write_all(resp.as_bytes()).await;
+        return if ok {
+            Ok(get("code").unwrap_or_default())
+        } else {
+            Err(anyhow::anyhow!(message))
+        };
+    }
+}
+
+/// `dcode-ai mcp logout <name>`.
+pub fn logout(config: &DcodeAiConfig, name: &str) -> anyhow::Result<()> {
+    let (_server, url) = find_remote(config, name)?;
+    let mut store = dcode_ai_common::mcp_auth::McpAuthStore::load();
+    if store
+        .servers
+        .remove(&dcode_ai_common::mcp_auth::key(&url))
+        .is_some()
+    {
+        store.save().map_err(anyhow::Error::msg)?;
+        println!("Signed out of `{name}`.");
+    } else {
+        println!("`{name}` was not signed in.");
+    }
+    Ok(())
 }
 
 /// Mask values that look like secrets (tokens, keys, auth headers).
@@ -117,13 +336,15 @@ pub fn list(config: &DcodeAiConfig, json: bool) -> anyhow::Result<()> {
         .map(|s| s.name.chars().count())
         .max()
         .unwrap_or(0);
+    let logins = dcode_ai_common::mcp_auth::McpAuthStore::load();
     for s in &config.mcp.servers {
         let dot = if s.enabled { "●" } else { "○" };
         println!(
-            "{dot} {:<width$}  {:<12}  {}",
+            "{dot} {:<width$}  {:<12}  {}{}",
             s.name,
             origin_label(s),
-            target_label(s)
+            target_label(s),
+            auth_label(s, &logins)
         );
     }
     Ok(())

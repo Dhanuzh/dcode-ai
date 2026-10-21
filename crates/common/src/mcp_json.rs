@@ -59,7 +59,37 @@ impl McpScope {
 /// `extra` variables (e.g. `CLAUDE_PLUGIN_ROOT`). Unset variables without a
 /// default expand to an empty string.
 pub fn expand_vars(value: &str, extra: &BTreeMap<String, String>) -> String {
+    expand(value, extra, false).0
+}
+
+/// Like [`expand_vars`], but a `${VAR}` that is unset (or empty) and has no
+/// default is left in place verbatim, so a later [`expand_vars_strict`] can
+/// report it. Used for MCP headers, which are resolved again at connect time.
+pub fn expand_vars_keep_unset(value: &str, extra: &BTreeMap<String, String>) -> String {
+    expand(value, extra, true).0
+}
+
+/// Like [`expand_vars`], but fails instead of substituting an empty string.
+/// The error is the name of the first unset (or empty) variable that has no
+/// `:-default`.
+pub fn expand_vars_strict(value: &str, extra: &BTreeMap<String, String>) -> Result<String, String> {
+    let (out, missing) = expand(value, extra, false);
+    match missing.into_iter().next() {
+        Some(name) => Err(name),
+        None => Ok(out),
+    }
+}
+
+/// Shared expansion. Returns the expanded text and the names of variables
+/// that were unset (or empty) with no default; those are either dropped or,
+/// with `keep_unset`, written back as `${…}`.
+fn expand(
+    value: &str,
+    extra: &BTreeMap<String, String>,
+    keep_unset: bool,
+) -> (String, Vec<String>) {
     let mut out = String::with_capacity(value.len());
+    let mut missing = Vec::new();
     let mut rest = value;
     while let Some(start) = rest.find("${") {
         out.push_str(&rest[..start]);
@@ -79,11 +109,21 @@ pub fn expand_vars(value: &str, extra: &BTreeMap<String, String>) -> String {
             .cloned()
             .or_else(|| std::env::var(name).ok())
             .filter(|v| !v.is_empty());
-        out.push_str(&found.unwrap_or_else(|| default.unwrap_or("").to_string()));
+        match found.or_else(|| default.map(str::to_string)) {
+            Some(v) => out.push_str(&v),
+            None => {
+                missing.push(name.to_string());
+                if keep_unset {
+                    out.push_str("${");
+                    out.push_str(inner);
+                    out.push('}');
+                }
+            }
+        }
         rest = &after[end + 1..];
     }
     out.push_str(rest);
-    out
+    (out, missing)
 }
 
 /// Parse the `mcpServers` object of an `.mcp.json` document. `origin` is
@@ -115,12 +155,12 @@ pub fn servers_from_value(
         let obj = spec
             .as_object()
             .ok_or_else(|| format!("server `{name}` must be an object"))?;
-        let strings = |key: &str| -> BTreeMap<String, String> {
+        let strings = |key: &str, f: &dyn Fn(&str) -> String| -> BTreeMap<String, String> {
             obj.get(key)
                 .and_then(Value::as_object)
                 .map(|m| {
                     m.iter()
-                        .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), x(v))))
+                        .filter_map(|(k, v)| v.as_str().map(|v| (k.clone(), f(v))))
                         .collect()
                 })
                 .unwrap_or_default()
@@ -146,13 +186,15 @@ pub fn servers_from_value(
                 .and_then(Value::as_array)
                 .map(|a| a.iter().filter_map(Value::as_str).map(x).collect())
                 .unwrap_or_default(),
-            env: strings("env"),
+            env: strings("env", &x),
             cwd: obj
                 .get("cwd")
                 .and_then(Value::as_str)
                 .map(|c| PathBuf::from(x(c))),
             url,
-            headers: strings("headers"),
+            // Unset `${VAR}`s stay literal so the HTTP client can fail loudly
+            // at connect time instead of sending e.g. `Authorization: Basic `.
+            headers: strings("headers", &|s| expand_vars_keep_unset(s, vars)),
             enabled: !obj
                 .get("disabled")
                 .and_then(Value::as_bool)
@@ -303,6 +345,64 @@ mod tests {
         assert_eq!(web.url.as_deref(), Some("https://example.com/mcp"));
         assert_eq!(web.headers["Authorization"], "Bearer none");
         assert!(!servers.iter().find(|s| s.name == "off").unwrap().enabled);
+    }
+
+    // Never set in any environment; tests must not call `set_var` (edition 2024).
+    const UNSET: &str = "DCODE_AI_TEST_UNSET_VAR_9F3A";
+
+    #[test]
+    fn strict_expansion_reports_the_unset_variable() {
+        let mut extra = BTreeMap::new();
+        extra.insert("USER_X".to_string(), "me".to_string());
+        assert_eq!(
+            expand_vars_strict("Basic ${USER_X}", &extra).as_deref(),
+            Ok("Basic me")
+        );
+        assert_eq!(
+            expand_vars_strict(&format!("Basic ${{{UNSET}}}"), &extra),
+            Err(UNSET.to_string())
+        );
+        // A default (even an empty one) is an explicit choice, not an error.
+        assert_eq!(
+            expand_vars_strict(&format!("a${{{UNSET}:-b}}c"), &extra).as_deref(),
+            Ok("abc")
+        );
+        assert_eq!(
+            expand_vars_strict(&format!("a${{{UNSET}:-}}c"), &extra).as_deref(),
+            Ok("ac")
+        );
+        // An empty value counts as unset.
+        extra.insert("EMPTY_X".to_string(), String::new());
+        assert_eq!(
+            expand_vars_strict("${EMPTY_X}", &extra),
+            Err("EMPTY_X".to_string())
+        );
+    }
+
+    #[test]
+    fn keep_unset_leaves_only_unresolved_placeholders() {
+        let mut extra = BTreeMap::new();
+        extra.insert("ROOT_X".to_string(), "/plug".to_string());
+        let kept =
+            expand_vars_keep_unset(&format!("${{ROOT_X}}:${{{UNSET}}}:${{{UNSET}:-d}}"), &extra);
+        assert_eq!(kept, format!("/plug:${{{UNSET}}}:d"));
+        // The lenient form is unchanged: unset becomes empty.
+        assert_eq!(expand_vars(&format!("x${{{UNSET}}}y"), &extra), "xy");
+    }
+
+    #[test]
+    fn unset_header_variables_survive_parsing_but_env_does_not() {
+        let text = format!(
+            r#"{{"mcpServers": {{"atl": {{"type": "http", "url": "https://x/mcp",
+                "headers": {{"Authorization": "Basic ${{{UNSET}}}"}},
+                "env": {{"K": "v${{{UNSET}}}"}}}}}}}}"#
+        );
+        let servers = parse_servers(&text, "user", &BTreeMap::new()).expect("parse");
+        assert_eq!(
+            servers[0].headers["Authorization"],
+            format!("Basic ${{{UNSET}}}")
+        );
+        assert_eq!(servers[0].env["K"], "v");
     }
 
     #[test]

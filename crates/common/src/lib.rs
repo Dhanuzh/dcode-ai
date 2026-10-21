@@ -5,6 +5,7 @@ pub mod config;
 pub mod credentials;
 pub mod event;
 pub mod lsp;
+pub mod mcp_auth;
 pub mod mcp_json;
 pub mod mentions;
 pub mod message;
