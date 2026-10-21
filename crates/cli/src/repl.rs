@@ -4005,19 +4005,23 @@ then switch).",
             g.active_question = Some(InteractiveQuestionPayload {
                 question_id: STARTUP_APPROVE_ALL_QUESTION_ID.to_string(),
                 call_id: STARTUP_APPROVE_ALL_QUESTION_ID.to_string(),
-                prompt: "Grant one-time approval for ALL tools in this session?".into(),
+                prompt: "How should dcode-ai ask for permission this session?".into(),
                 options: vec![
                     QuestionOption {
-                        id: "approve_all".into(),
-                        label: "Approve all tools (session only)".into(),
+                        id: "manual".into(),
+                        label: "Manual — ask before edits and commands".into(),
                     },
                     QuestionOption {
-                        id: "keep_default".into(),
-                        label: "Keep default approval flow".into(),
+                        id: "accept_edits".into(),
+                        label: "Accept edits — edit files freely, ask before commands".into(),
+                    },
+                    QuestionOption {
+                        id: "auto".into(),
+                        label: "Auto — run every tool without asking (this session only)".into(),
                     },
                 ],
                 allow_custom: false,
-                suggested_answer: "approve_all".into(),
+                suggested_answer: "manual".into(),
             });
             g.open_question_modal();
         }
@@ -4866,32 +4870,34 @@ then switch).",
                     };
                     if let Some(qid) = qid {
                         if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
-                            let approved = match selection {
-                                QuestionSelection::Suggested => true,
-                                QuestionSelection::Option { option_id } => {
-                                    option_id == "approve_all"
+                            let choice = match selection {
+                                QuestionSelection::Option { option_id } => option_id,
+                                QuestionSelection::Suggested | QuestionSelection::Custom { .. } => {
+                                    "manual".to_string()
                                 }
-                                QuestionSelection::Custom { .. } => false,
                             };
-                            if approved {
-                                self.runtime.add_session_allow_pattern("*".to_string());
-                            }
+                            let note = match choice.as_str() {
+                                "auto" => {
+                                    self.runtime.add_session_allow_pattern("*".to_string());
+                                    "Auto — every tool runs without asking this session"
+                                }
+                                "accept_edits" => {
+                                    self.set_mode_and_profile(PermissionMode::AcceptEdits);
+                                    "Accept edits — file edits run without asking; commands still ask"
+                                }
+                                _ => "Manual — dcode-ai asks before edits and commands",
+                            };
                             if let Ok(mut g) = tui_state.lock() {
                                 g.active_question = None;
                                 g.close_question_modal();
-                                if approved {
-                                    if !g.quiet_startup {
-                                        g.blocks.push(DisplayBlock::System(
-                                            "[permissions] startup approval granted for this session."
-                                                .into(),
-                                        ));
-                                    }
-                                } else {
-                                    g.blocks.push(DisplayBlock::System(
-                                        "[permissions] startup approval declined; using default approval flow."
-                                            .into(),
-                                    ));
-                                }
+                                g.set_agent_profile(&self.current_agent_label);
+                                g.set_permission_mode(&format!(
+                                    "{:?}",
+                                    self.runtime.permission_mode()
+                                ));
+                                g.blocks.push(DisplayBlock::System(format!(
+                                    "[permissions] {note}. Shift+Tab changes the mode any time."
+                                )));
                                 g.touch_transcript();
                             }
                         } else if !self.runtime.submit_question_answer(&qid, selection)

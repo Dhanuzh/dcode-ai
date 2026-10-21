@@ -464,11 +464,16 @@ pub(super) fn handle_key_event(
             && !key.modifiers.contains(KeyModifiers::ALT)
             && !matches!(key.code, KeyCode::Char('j' | 'k'));
         if startup_popup && (key.code == KeyCode::Esc || typing) {
+            // Esc / typing = the safe choice (Manual).
             let decline = g
                 .active_question
                 .as_ref()
-                .map(|q| q.options.len().saturating_sub(1))
-                .unwrap_or(1);
+                .and_then(|q| {
+                    q.options
+                        .iter()
+                        .position(|o| o.id == "manual" || o.id == "keep_default")
+                })
+                .unwrap_or(0);
             g.question_modal_index = decline;
             if let QuestionModalOutcome::Answer { selection, .. } =
                 g.apply_question_modal_key(QuestionModalKey::Accept)
