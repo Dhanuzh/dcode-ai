@@ -1,5 +1,42 @@
 # Changelog
 
+## 1.0.9 — 2026-10-21
+
+### New
+- **Smarter auto mode**: commands that are neither read-only nor ordinary dev
+  tools get a quick model check (safe → runs, otherwise you are asked);
+  risky actions still always ask.
+- **`/security-review`**: a security reviewer over the pending change, or the
+  branch against its base when nothing is uncommitted.
+- **`/pr-comments [n]`**: fetches the pull request's reviews and inline
+  comments with `gh` and summarizes what reviewers ask for.
+- **`/permissions` rule editor**: lists every rule with its source;
+  `allow|ask|deny|remove <rule>` edits them live and in the config
+  (`--user` for all projects). The mode picker is `/permissions mode`.
+- **`/hooks add|remove`**: edit hooks for all eleven events without
+  opening a config file.
+- **Auto memory**: the agent remembers corrections, preferences and
+  non-obvious project facts by itself; notes about you are kept in
+  `~/.dcode-ai/memory.json` and recalled in every project. `/memory auto
+  on|off`, `/memory forget <id>`.
+- **`/setup` picker**: tick roles and languages with Space, Enter installs.
+  Packs live in `packs/packs.toml` and update with `dcode-ai setup --update`.
+
+### Fixes
+- Sub-agents now really work in their own worktree: their shell ran in your
+  checkout before. They also follow your permission mode instead of
+  bypassing it.
+- Tool calls that write or run commands in one batch run in order (a read
+  after a write sees it); a batch mixing a denied call and others no longer
+  waits until cancelled.
+- `read_file` says "File not found" instead of "outside the workspace".
+
+### Faster
+- `dcode-ai sessions`, `status`, `logs`, `plugin`, `mcp`, `setup` and other
+  commands that don't call a model start in ~60 ms instead of ~500 ms.
+- Fewer dependencies (removed genai, mcpr, globset, cli-prompts and an old
+  crossterm); the binary no longer compiles shared modules twice.
+
 ## 1.0.8 — 2026-10-21
 
 ### New
