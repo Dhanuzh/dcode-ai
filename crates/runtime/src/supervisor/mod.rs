@@ -161,10 +161,13 @@ impl Supervisor {
         };
         // Cross-session memory: the agent saves durable notes with this tool;
         // resolve_memory_path + the system-prompt section below recall them.
-        tools.register(Box::new(crate::memory_tool::SaveMemoryTool::new(
-            resolve_memory_path(&config, &workspace_root),
-            config.memory.max_notes,
-        )));
+        tools.register(Box::new(
+            crate::memory_tool::SaveMemoryTool::new(
+                resolve_memory_path(&config, &workspace_root),
+                config.memory.max_notes,
+            )
+            .with_user_path(crate::memory_tool::user_memory_path()),
+        ));
         let (event_tx, event_rx) = mpsc::channel(256);
 
         let (mcp_event_tx, mut mcp_event_rx) = mpsc::unbounded_channel();
@@ -1642,19 +1645,27 @@ const MEMORY_NOTE_CHARS: usize = 300;
 /// from sync session resets and reads one small local JSON file. Returns None
 /// when there is nothing to recall so the prompt stays untouched.
 fn memory_prompt_section(config: &DcodeAiConfig, workspace_root: &Path) -> Option<String> {
-    let path = resolve_memory_path(config, workspace_root);
-    let raw = std::fs::read_to_string(path).ok()?;
-    let state: crate::memory_store::MemoryState = serde_json::from_str(&raw).ok()?;
-    if state.notes.is_empty() {
-        return None;
-    }
-    let mut out = String::from(
-        "\n\n## Persistent memory (from past sessions)\n\
-         Durable notes saved earlier in this workspace (newest first). Honor \
-         them unless the user says otherwise; update them with `save_memory` \
-         when they change:\n",
-    );
-    for note in state.notes.iter().rev().take(MEMORY_RECALL_LIMIT) {
+    let read = |path: PathBuf| -> Vec<crate::memory_store::MemoryNote> {
+        std::fs::read_to_string(path)
+            .ok()
+            .and_then(|raw| serde_json::from_str::<crate::memory_store::MemoryState>(&raw).ok())
+            .map(|s| s.notes)
+            .unwrap_or_default()
+    };
+    let user = crate::memory_tool::user_memory_path()
+        .map(read)
+        .unwrap_or_default();
+    let project = read(resolve_memory_path(config, workspace_root));
+    render_memory_section(&user, &project, config.memory.auto)
+}
+
+fn render_memory_section(
+    user: &[crate::memory_store::MemoryNote],
+    project: &[crate::memory_store::MemoryNote],
+    auto: bool,
+) -> Option<String> {
+    let mut out = String::new();
+    let line = |note: &crate::memory_store::MemoryNote| {
         let mut line: String = note
             .content
             .split_whitespace()
@@ -1663,9 +1674,40 @@ fn memory_prompt_section(config: &DcodeAiConfig, workspace_root: &Path) -> Optio
         if line.chars().count() > MEMORY_NOTE_CHARS {
             line = line.chars().take(MEMORY_NOTE_CHARS).collect::<String>() + "…";
         }
-        out.push_str(&format!("- [{}] {}\n", note.kind, line));
+        format!("- [{}] {}\n", note.kind, line)
+    };
+    if !user.is_empty() || !project.is_empty() {
+        out.push_str(
+            "\n\n## Persistent memory (from past sessions)\n\
+             Durable notes saved earlier (newest first). Honor them unless the \
+             user says otherwise; update them with `save_memory` when they change.\n",
+        );
+        if !user.is_empty() {
+            out.push_str("\nAbout the user (every project):\n");
+            for note in user.iter().rev().take(MEMORY_RECALL_LIMIT / 2) {
+                out.push_str(&line(note));
+            }
+        }
+        if !project.is_empty() {
+            out.push_str("\nThis project:\n");
+            for note in project.iter().rev().take(MEMORY_RECALL_LIMIT) {
+                out.push_str(&line(note));
+            }
+        }
     }
-    Some(out)
+    if auto {
+        out.push_str(
+            "\n\n## Auto memory\n\
+             Without being asked, call `save_memory` when the user corrects you, \
+             states a preference or a way they like to work (scope \"user\"), or \
+             when you learn a non-obvious fact about this project that a future \
+             session would need (scope \"project\"): build or test commands, \
+             conventions, decisions and their reasons. Save one short, \
+             self-contained sentence; skip anything the code or git history \
+             already shows, and never save secrets.\n",
+        );
+    }
+    (!out.is_empty()).then_some(out)
 }
 
 fn parse_json_values_on_line(line: &str) -> Vec<Value> {
@@ -1959,6 +2001,29 @@ impl ApprovalHandler for AutoDenyHandler {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn memory_section_lists_user_then_project_and_adds_auto_guidance() {
+        let note = |kind: &str, content: &str| crate::memory_store::MemoryNote {
+            id: content.into(),
+            created_at: Utc::now(),
+            kind: kind.into(),
+            title: None,
+            content: content.into(),
+        };
+        let user = [note("preference", "prefers terse answers")];
+        let project = [note("convention", "run make test")];
+        let s = render_memory_section(&user, &project, true).unwrap();
+        let (u, p) = (s.find("terse").unwrap(), s.find("make test").unwrap());
+        assert!(u < p);
+        assert!(s.contains("## Auto memory"));
+        assert!(render_memory_section(&[], &[], false).is_none());
+        assert!(
+            render_memory_section(&[], &[], true)
+                .unwrap()
+                .contains("save_memory")
+        );
+    }
 
     use dcode_ai_common::event::AgentCommand;
     use dcode_ai_common::message::Message;

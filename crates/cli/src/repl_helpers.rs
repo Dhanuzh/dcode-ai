@@ -308,6 +308,29 @@ pub(crate) fn git_changed_files(ws: &std::path::Path) -> Vec<String> {
     }
 }
 
+/// Files the current branch changed against its base (`origin/HEAD`, `main`
+/// or `master`), with the base used. `None` outside git or on the base itself.
+pub(crate) fn git_branch_changes(ws: &std::path::Path) -> Option<(String, Vec<String>)> {
+    let git = |args: &[&str]| {
+        std::process::Command::new("git")
+            .args(args)
+            .current_dir(ws)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    };
+    let base = ["origin/HEAD", "main", "master"]
+        .into_iter()
+        .find_map(|b| git(&["merge-base", "HEAD", b]))?;
+    let files: Vec<String> = git(&["diff", "--name-only", &format!("{base}...HEAD")])?
+        .lines()
+        .map(str::to_string)
+        .filter(|l| !l.is_empty())
+        .collect();
+    (!files.is_empty()).then_some((base, files))
+}
+
 // ── /web helper: fetch URL and return plain text ──────────────────────────────
 
 /// Fetch a URL and return its content as plain text (HTML tags stripped).

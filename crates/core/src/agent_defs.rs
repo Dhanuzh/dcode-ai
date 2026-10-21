@@ -203,6 +203,34 @@ it may have missed, and question choices that look plausible but are wrong.",
     def
 }
 
+/// `/security-review`: a read-only reviewer looking only for exploitable
+/// vulnerabilities in the change.
+pub fn security_reviewer() -> AgentDef {
+    let mut def = verifier();
+    def.name = "security-reviewer".into();
+    def.description = "Security review of the pending change".into();
+    def.prompt = SECURITY_PROMPT.trim().to_string();
+    def
+}
+
+const SECURITY_PROMPT: &str = r#"
+You are a senior application-security engineer reviewing a code change. You
+cannot edit files. Review ONLY what the change introduces or touches:
+1. Read the diff (git_diff, or the base comparison given in the task) and the
+   code paths it reaches.
+2. Look for exploitable issues: injection (SQL, command, template, path
+   traversal), broken authentication or authorization, secrets or tokens in
+   code or logs, unsafe deserialization, SSRF, XSS / unsafe HTML, weak or
+   misused cryptography, insecure defaults, missing input validation on a
+   trust boundary, unsafe `unsafe` code or memory handling.
+3. Ignore denial of service, rate limiting, missing hardening with no concrete
+   exploit, and anything in tests or docs only.
+Report only findings you are confident are real, most severe first:
+`[HIGH|MEDIUM|LOW] path:line — vulnerability — how it is exploited — fix`.
+If nothing qualifies, reply exactly: `No security issues found.` and list what
+you checked.
+"#;
+
 const VERIFIER_PROMPT: &str = r#"
 You are a careful code reviewer verifying another agent's uncommitted changes.
 You cannot edit files. Steps:

@@ -358,6 +358,25 @@ impl ApprovalPolicy {
         self.config.mode
     }
 
+    /// The live permission settings (rules and mode).
+    pub fn permissions(&self) -> &PermissionConfig {
+        &self.config
+    }
+
+    /// Add or remove an `allow` / `ask` / `deny` rule for this session.
+    pub fn set_rule(&mut self, kind: &str, rule: &str, present: bool) {
+        let list = match kind {
+            "allow" => &mut self.config.allow,
+            "ask" => &mut self.config.ask,
+            "deny" => &mut self.config.deny,
+            _ => return,
+        };
+        list.retain(|r| r != rule);
+        if present {
+            list.push(rule.to_string());
+        }
+    }
+
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.config.mode = mode;
         if let Ok(mut m) = self.mode_cell.write() {

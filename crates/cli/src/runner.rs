@@ -277,6 +277,39 @@ impl SessionRuntime {
         self.supervisor.agent_mut().approval.set_mode(mode);
     }
 
+    /// Add or remove a permission rule in the live session.
+    pub fn set_permission_rule(&mut self, kind: &str, rule: &str, present: bool) {
+        self.supervisor
+            .agent_mut()
+            .approval
+            .set_rule(kind, rule, present);
+    }
+
+    /// Live rules: `(kind, rule, origin)`, plus session approvals.
+    pub fn permission_rules(&self) -> Vec<(String, String, String)> {
+        let approval = &self.supervisor.agent().approval;
+        let p = approval.permissions();
+        let mut out = Vec::new();
+        for (kind, list) in [("allow", &p.allow), ("ask", &p.ask), ("deny", &p.deny)] {
+            for r in list {
+                out.push((kind.to_string(), r.clone(), "settings".to_string()));
+            }
+        }
+        for (kind, list) in [
+            ("allow", &p.policy.allow),
+            ("ask", &p.policy.ask),
+            ("deny", &p.policy.deny),
+        ] {
+            for (r, origin) in list {
+                out.push((kind.to_string(), r.clone(), origin.clone()));
+            }
+        }
+        for r in &approval.session_allow {
+            out.push(("allow".into(), r.clone(), "this session".into()));
+        }
+        out
+    }
+
     /// Sender into this session's event stream (sub-agent activity).
     pub fn event_sender(
         &self,

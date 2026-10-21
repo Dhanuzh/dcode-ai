@@ -35,6 +35,14 @@ mod cmd_session;
 mod cmd_settings;
 mod cmd_work;
 
+/// Which reviewer `run_review` sends over the change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReviewKind {
+    Verify,
+    SecondOpinion,
+    Security,
+}
+
 /// Where slash-command and preset output goes (TTY transcript vs full-screen TUI).
 pub(crate) enum ReplOutput<'a> {
     Stdio,
@@ -843,8 +851,8 @@ impl Repl {
             | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
-            "/verify" | "/second-opinion" | "/plan" | "/review" | "/fix" | "/test" | "/image"
-            | "/run" | "/web" | "/commit" => {
+            "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/plan"
+            | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit" => {
                 return self.cmd_work(input, command, rest, parts, out).await;
             }
             _ => {
@@ -896,7 +904,7 @@ impl Repl {
     /// `/verify`: a read-only verifier sub-agent reviews the uncommitted
     /// changes (and runs checks); real problems go back to the main agent.
     async fn run_verifier(&mut self, focus: &str, out: &ReplOutput<'_>) -> anyhow::Result<()> {
-        self.run_review(focus, out, false).await
+        self.run_review(focus, out, ReviewKind::Verify).await
     }
 
     /// `/verify` (same model) or `/second-opinion` (a model from a different
@@ -906,15 +914,29 @@ impl Repl {
         &mut self,
         focus: &str,
         out: &ReplOutput<'_>,
-        second_opinion: bool,
+        kind: ReviewKind,
     ) -> anyhow::Result<()> {
+        let second_opinion = kind == ReviewKind::SecondOpinion;
         let ws = self.runtime.workspace_root().to_path_buf();
-        let changed = git_changed_files(&ws);
+        let mut changed = git_changed_files(&ws);
+        let mut base_note = String::new();
+        if changed.is_empty()
+            && kind == ReviewKind::Security
+            && let Some((base, files)) = git_branch_changes(&ws)
+        {
+            base_note = format!(
+                "\n\nThere are no uncommitted changes: review the branch's commits, \
+                 `git diff {base}...HEAD` (run it with run_validation or read the files)."
+            );
+            changed = files;
+        }
         if changed.is_empty() {
             out.println("Nothing to review — no uncommitted changes.");
             return Ok(());
         }
-        let (child_config, reviewer_label) = if second_opinion {
+        let (child_config, reviewer_label) = if kind == ReviewKind::Security {
+            (self.runtime.config().clone(), "Security review".to_string())
+        } else if second_opinion {
             match second_opinion_config(self.runtime.config(), self.runtime.model()).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -929,17 +951,22 @@ impl Repl {
             "{reviewer_label} reviewing {} changed file(s)…",
             changed.len()
         ));
-        let mut task = String::from("Verify the uncommitted changes in this workspace.");
+        let mut task = String::from(if kind == ReviewKind::Security {
+            "Security-review the pending changes in this workspace."
+        } else {
+            "Verify the uncommitted changes in this workspace."
+        });
+        task.push_str(&base_note);
         if !focus.is_empty() {
             task.push_str(&format!("\n\nFocus especially on: {focus}"));
         }
         let cfg = dcode_ai_runtime::supervisor::ChildSessionConfig {
             parent_session_id: self.runtime.session_id().to_string(),
             task,
-            agent: Some(if second_opinion {
-                dcode_ai_core::agent_defs::second_opinion()
-            } else {
-                dcode_ai_core::agent_defs::verifier()
+            agent: Some(match kind {
+                ReviewKind::SecondOpinion => dcode_ai_core::agent_defs::second_opinion(),
+                ReviewKind::Security => dcode_ai_core::agent_defs::security_reviewer(),
+                ReviewKind::Verify => dcode_ai_core::agent_defs::verifier(),
             }),
             workspace_root: ws,
             config: child_config,
@@ -979,7 +1006,8 @@ impl Repl {
         } else {
             out.println(&format!("{reviewer_label}:\n{}", report.trim()));
         }
-        if verifier_found_problems(&report) {
+        // Like Claude Code, a security review reports; fixing is the user's call.
+        if kind != ReviewKind::Security && verifier_found_problems(&report) {
             let prompt = if second_opinion {
                 format!(
                     "A reviewer using a different model ({reviewer_label}) checked your uncommitted \
@@ -2228,7 +2256,7 @@ impl Repl {
                         && git_change_snapshot(self.runtime.workspace_root()) != before
                     {
                         let _ = self
-                            .run_review("", &ReplOutput::Tui(&tui_state), true)
+                            .run_review("", &ReplOutput::Tui(&tui_state), ReviewKind::SecondOpinion)
                             .await;
                     }
                     if let Ok(mut g) = tui_state.lock() {

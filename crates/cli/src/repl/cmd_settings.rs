@@ -90,30 +90,130 @@ impl Repl {
                 });
             }
             "/permissions" => {
-                if let Some(mode) = parts.next() {
-                    if let Some(parsed_mode) = parse_permission_mode(mode) {
-                        self.runtime.set_permission_mode(parsed_mode);
-                        if let ReplOutput::Tui(st) = out
-                            && let Ok(mut g) = st.lock()
-                        {
-                            g.set_permission_mode(&format!("{parsed_mode:?}"));
+                let arg = rest.trim();
+                let mut words = arg.split_whitespace();
+                let first = words.next().unwrap_or("");
+                match first {
+                    "" => {
+                        let mut lines = vec![
+                            format!("Mode: {:?}", self.runtime.permission_mode()),
+                            String::new(),
+                        ];
+                        let rules = self.runtime.permission_rules();
+                        for kind in ["allow", "ask", "deny"] {
+                            let of: Vec<_> = rules.iter().filter(|r| r.0 == kind).collect();
+                            lines.push(format!("{} ({})", kind.to_uppercase(), of.len()));
+                            for (_, rule, origin) in of {
+                                lines.push(format!("  {rule}    · {origin}"));
+                            }
+                            lines.push(String::new());
                         }
-                        out.println(&format!("permission mode set to {parsed_mode:?}"));
-                    } else {
-                        out.println(
-                            "invalid mode; expected one of: default, plan, accept-edits, dont-ask, bypass-permissions",
+                        lines.push(
+                            "/permissions allow|ask|deny <rule> [--user] · /permissions remove <rule> [--user] · /permissions mode"
+                                .into(),
                         );
+                        lines.push(
+                            "Rules look like `execute_bash:cargo *`, `edit_file`, `Bash(git:*)`; saved to .dcode-ai/config.local.toml (or ~/.dcode-ai/config.toml with --user)."
+                                .into(),
+                        );
+                        if let ReplOutput::Tui(st) = &out {
+                            if let Ok(mut g) = st.lock() {
+                                g.open_info_modal("Permissions", lines);
+                            }
+                        } else {
+                            for l in &lines {
+                                out.println(l);
+                            }
+                        }
                     }
-                } else if let ReplOutput::Tui(st) = &out {
-                    let current_idx = permission_mode_index(self.runtime.permission_mode());
-                    if let Ok(mut g) = st.lock() {
-                        g.open_permission_picker(current_idx);
+                    "mode" => {
+                        if let ReplOutput::Tui(st) = &out {
+                            let current_idx = permission_mode_index(self.runtime.permission_mode());
+                            if let Ok(mut g) = st.lock() {
+                                g.open_permission_picker(current_idx);
+                            }
+                        } else {
+                            out.println(&format!(
+                                "permission_mode: {:?}",
+                                self.runtime.permission_mode()
+                            ));
+                        }
                     }
-                } else {
-                    out.println(&format!(
-                        "permission_mode: {:?}",
-                        self.runtime.permission_mode()
-                    ));
+                    "allow" | "ask" | "deny" | "remove" => {
+                        let user = arg.split_whitespace().any(|w| w == "--user");
+                        let rule = words
+                            .filter(|w| *w != "--user")
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if rule.is_empty() {
+                            out.eprintln(
+                                "usage: /permissions allow|ask|deny|remove <rule> [--user]",
+                            );
+                            return Ok(true);
+                        }
+                        // Claude Code names (`Bash(git:*)`, `Read`) map to dcode-ai rules.
+                        let rules = crate::cli_tool_rules(std::slice::from_ref(&rule));
+                        let path = if user {
+                            match dcode_ai_common::config::global_config_file() {
+                                Some(p) => p,
+                                None => {
+                                    out.eprintln("no home directory");
+                                    return Ok(true);
+                                }
+                            }
+                        } else {
+                            dcode_ai_common::config::workspace_config_path(
+                                self.runtime.workspace_root(),
+                            )
+                        };
+                        let kinds: &[&str] = if first == "remove" {
+                            &["allow", "ask", "deny"]
+                        } else {
+                            &[first]
+                        };
+                        let mut msg = Vec::new();
+                        for kind in kinds.iter().flat_map(|k| rules.iter().map(move |r| (k, r))) {
+                            let (kind, rule) = kind;
+                            let add = first != "remove";
+                            self.runtime.set_permission_rule(kind, rule, add);
+                            match dcode_ai_common::config::edit_permission_rule(
+                                &path, kind, rule, add,
+                            ) {
+                                Ok(true) => msg.push(format!(
+                                    "{} {kind} `{rule}` ({})",
+                                    if add { "added" } else { "removed" },
+                                    path.display()
+                                )),
+                                Ok(false) => {}
+                                Err(e) => msg.push(format!("error: {e}")),
+                            }
+                        }
+                        if msg.is_empty() {
+                            msg.push(if first == "remove" {
+                                format!("`{rule}` was not saved in {}", path.display())
+                            } else {
+                                format!("`{rule}` already in {first}")
+                            });
+                        }
+                        for m in msg {
+                            out.println(&format!("[permissions] {m}"));
+                        }
+                    }
+                    mode => {
+                        if let Some(parsed_mode) = parse_permission_mode(mode) {
+                            self.runtime.set_permission_mode(parsed_mode);
+                            if let ReplOutput::Tui(st) = out
+                                && let Ok(mut g) = st.lock()
+                            {
+                                g.set_permission_mode(&format!("{parsed_mode:?}"));
+                            }
+                            out.println(&format!("permission mode set to {parsed_mode:?}"));
+                        } else {
+                            out.println(
+                                "usage: /permissions [mode | <mode> | allow|ask|deny|remove <rule>]; modes: default, plan, accept-edits, auto, dont-ask, bypass-permissions",
+                            );
+                        }
+                    }
                 }
             }
             "/permission-bypass" => {

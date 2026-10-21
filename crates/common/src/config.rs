@@ -575,6 +575,143 @@ fn default_cleanup_period_days() -> u32 {
     30
 }
 
+/// Add (`add`) or remove a `[permissions]` rule (`kind` is `allow`, `ask` or
+/// `deny`) in one config file, keeping everything else in it. Returns
+/// whether the file changed.
+pub fn edit_permission_rule(
+    path: &Path,
+    kind: &str,
+    rule: &str,
+    add: bool,
+) -> Result<bool, String> {
+    if !matches!(kind, "allow" | "ask" | "deny") {
+        return Err(format!("unknown rule kind `{kind}`"));
+    }
+    let mut doc: toml::Table = match std::fs::read_to_string(path) {
+        Ok(raw) => toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(_) => toml::Table::new(),
+    };
+    let perms = doc
+        .entry("permissions")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or("`permissions` is not a table")?;
+    let list = perms
+        .entry(kind)
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| format!("`permissions.{kind}` is not a list"))?;
+    let present = list.iter().any(|v| v.as_str() == Some(rule));
+    let changed = if add && !present {
+        list.push(toml::Value::String(rule.to_string()));
+        true
+    } else if !add && present {
+        list.retain(|v| v.as_str() != Some(rule));
+        true
+    } else {
+        false
+    };
+    if changed {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let text = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+        std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(changed)
+}
+
+/// Hook events `[hooks]` accepts, in lifecycle order.
+pub const HOOK_EVENTS: [&str; 11] = [
+    "session_start",
+    "user_prompt_submit",
+    "pre_tool_use",
+    "post_tool_use",
+    "post_tool_failure",
+    "approval_requested",
+    "subagent_start",
+    "subagent_stop",
+    "pre_compact",
+    "stop",
+    "session_end",
+];
+
+impl HookConfig {
+    /// The hooks registered for `event` (one of [`HOOK_EVENTS`]).
+    pub fn for_event(&self, event: &str) -> &[HookCommand] {
+        match event {
+            "session_start" => &self.session_start,
+            "session_end" => &self.session_end,
+            "pre_tool_use" => &self.pre_tool_use,
+            "post_tool_use" => &self.post_tool_use,
+            "post_tool_failure" => &self.post_tool_failure,
+            "approval_requested" => &self.approval_requested,
+            "subagent_start" => &self.subagent_start,
+            "subagent_stop" => &self.subagent_stop,
+            "user_prompt_submit" => &self.user_prompt_submit,
+            "stop" => &self.stop,
+            "pre_compact" => &self.pre_compact,
+            _ => &[],
+        }
+    }
+}
+
+/// Add a hook to, or remove hooks running `command` from, one config file's
+/// `[[hooks.<event>]]` list. Returns whether the file changed.
+pub fn edit_hook(path: &Path, event: &str, hook: &HookCommand, add: bool) -> Result<bool, String> {
+    if !HOOK_EVENTS.contains(&event) {
+        return Err(format!(
+            "unknown hook event `{event}`; one of: {}",
+            HOOK_EVENTS.join(", ")
+        ));
+    }
+    let mut doc: toml::Table = match std::fs::read_to_string(path) {
+        Ok(raw) => toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(_) => toml::Table::new(),
+    };
+    let hooks = doc
+        .entry("hooks")
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or("`hooks` is not a table")?;
+    let list = hooks
+        .entry(event)
+        .or_insert_with(|| toml::Value::Array(Vec::new()))
+        .as_array_mut()
+        .ok_or_else(|| format!("`hooks.{event}` is not a list"))?;
+    let same =
+        |v: &toml::Value| v.get("command").and_then(|c| c.as_str()) == Some(hook.command.as_str());
+    let changed = if add {
+        let mut t = toml::Table::new();
+        t.insert("command".into(), toml::Value::String(hook.command.clone()));
+        if let Some(m) = &hook.matcher {
+            t.insert("matcher".into(), toml::Value::String(m.clone()));
+        }
+        if hook.blocking {
+            t.insert("blocking".into(), toml::Value::Boolean(true));
+        }
+        list.push(toml::Value::Table(t));
+        true
+    } else {
+        let before = list.len();
+        list.retain(|v| !same(v));
+        list.len() != before
+    };
+    if changed {
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        }
+        let text = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+        std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+    }
+    Ok(changed)
+}
+
+/// `~/.dcode-ai/config.toml`.
+pub fn global_config_file() -> Option<PathBuf> {
+    global_config_path()
+}
+
 pub fn workspace_config_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".dcode-ai").join("config.local.toml")
 }
@@ -1399,6 +1536,10 @@ pub struct McpServerConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     pub file_path: PathBuf,
+    /// Auto memory: the agent saves corrections, preferences and
+    /// non-obvious facts without being asked (Claude Code's auto memory).
+    #[serde(default = "default_true")]
+    pub auto: bool,
     #[serde(default = "default_max_memory_notes")]
     pub max_notes: usize,
     #[serde(default)]
@@ -1598,6 +1739,7 @@ impl Default for MemoryConfig {
     fn default() -> Self {
         Self {
             file_path: PathBuf::from(".dcode-ai/memory.json"),
+            auto: true,
             max_notes: default_max_memory_notes(),
             auto_compact_on_finish: false,
             context: ContextConfig::default(),
@@ -1612,6 +1754,9 @@ impl MemoryConfig {
         }
         if let Some(max_notes) = partial.max_notes {
             self.max_notes = max_notes;
+        }
+        if let Some(auto) = partial.auto {
+            self.auto = auto;
         }
         if let Some(auto_compact_on_finish) = partial.auto_compact_on_finish {
             self.auto_compact_on_finish = auto_compact_on_finish;
@@ -1855,6 +2000,7 @@ struct PartialMcpConfig {
 #[derive(Debug, Clone, Deserialize, Default)]
 struct PartialMemoryConfig {
     file_path: Option<PathBuf>,
+    auto: Option<bool>,
     max_notes: Option<usize>,
     auto_compact_on_finish: Option<bool>,
     context: Option<PartialContextConfig>,
@@ -1928,6 +2074,21 @@ fn default_skill_directories() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn permission_rules_edit_keeps_the_rest_of_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.local.toml");
+        std::fs::write(&path, "[model]\ndefault_model = \"x\"\n").unwrap();
+        assert!(edit_permission_rule(&path, "allow", "execute_bash:cargo *", true).unwrap());
+        assert!(!edit_permission_rule(&path, "allow", "execute_bash:cargo *", true).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains("default_model"));
+        assert!(text.contains("execute_bash:cargo *"));
+        assert!(edit_permission_rule(&path, "allow", "execute_bash:cargo *", false).unwrap());
+        assert!(!std::fs::read_to_string(&path).unwrap().contains("cargo"));
+        assert!(edit_permission_rule(&path, "maybe", "x", true).is_err());
+    }
 
     #[test]
     fn session_accepts_max_turn_per_run_typo_alias() {

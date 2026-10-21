@@ -1,4 +1,4 @@
-//! Work commands: review, verify, plan, run, web, commit.
+//! Work commands: review, verify, security review, PR comments, plan, run, web, commit.
 
 use super::*;
 
@@ -17,7 +17,12 @@ impl Repl {
                 self.run_verifier(rest.trim(), &out).await?;
             }
             "/second-opinion" => {
-                self.run_review(rest.trim(), &out, true).await?;
+                self.run_review(rest.trim(), &out, ReviewKind::SecondOpinion)
+                    .await?;
+            }
+            "/security-review" => {
+                self.run_review(rest.trim(), &out, ReviewKind::Security)
+                    .await?;
             }
             "/plan" if rest.trim().is_empty() => {
                 self.set_mode_and_profile(PermissionMode::Plan);
@@ -45,6 +50,28 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     out,
                 )
                 .await?
+            }
+            "/pr-comments" => {
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let pr = rest.trim().trim_start_matches('#').to_string();
+                out.println("[pr-comments] fetching comments with gh…");
+                let fetched = tokio::task::spawn_blocking(move || pr_comments(&ws, &pr))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+                match fetched {
+                    Ok(text) => {
+                        self.run_preset(
+                            "Here are the comments on this pull request. Show them grouped by \
+file (with the line or code each refers to), then list the changes reviewers ask for, \
+most important first, and say which ones you think are already addressed. Do not edit \
+anything until I ask.\n\n",
+                            &text,
+                            out,
+                        )
+                        .await?
+                    }
+                    Err(e) => out.eprintln(&format!("[pr-comments] {e}")),
+                }
             }
             "/review" => {
                 self.run_preset(
@@ -314,4 +341,98 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
         }
         Ok(true)
     }
+}
+
+/// The open PR's conversation and inline review comments, as text for the
+/// model. `pr` is a number, or empty for the current branch's PR.
+fn pr_comments(ws: &std::path::Path, pr: &str) -> Result<String, String> {
+    let gh = |args: &[&str]| -> Result<String, String> {
+        let o = std::process::Command::new("gh")
+            .args(args)
+            .current_dir(ws)
+            .output()
+            .map_err(|e| {
+                format!("gh not found ({e}); install GitHub CLI and run `gh auth login`")
+            })?;
+        if !o.status.success() {
+            return Err(String::from_utf8_lossy(&o.stderr).trim().to_string());
+        }
+        Ok(String::from_utf8_lossy(&o.stdout).to_string())
+    };
+    let mut view = vec!["pr", "view"];
+    if !pr.is_empty() {
+        view.push(pr);
+    }
+    view.extend(["--json", "number,title,url,body,comments,reviews"]);
+    let info: serde_json::Value =
+        serde_json::from_str(&gh(&view)?).map_err(|e| format!("unexpected gh output: {e}"))?;
+    let number = info["number"].as_u64().ok_or("no pull request found")?;
+    let repo = gh(&[
+        "repo",
+        "view",
+        "--json",
+        "nameWithOwner",
+        "-q",
+        ".nameWithOwner",
+    ])?;
+    let inline: serde_json::Value = serde_json::from_str(&gh(&[
+        "api",
+        "--paginate",
+        &format!("repos/{}/pulls/{number}/comments", repo.trim()),
+    ])?)
+    .unwrap_or_default();
+
+    let mut out = format!(
+        "PR #{number}: {}\n{}\n",
+        info["title"].as_str().unwrap_or(""),
+        info["url"].as_str().unwrap_or("")
+    );
+    let author = |v: &serde_json::Value| v["author"]["login"].as_str().unwrap_or("?").to_string();
+    for r in info["reviews"].as_array().into_iter().flatten() {
+        let body = r["body"].as_str().unwrap_or("").trim();
+        if !body.is_empty() {
+            out.push_str(&format!(
+                "\n[review by @{} — {}]\n{body}\n",
+                author(r),
+                r["state"].as_str().unwrap_or("")
+            ));
+        }
+    }
+    for c in info["comments"].as_array().into_iter().flatten() {
+        out.push_str(&format!(
+            "\n[comment by @{}]\n{}\n",
+            author(c),
+            c["body"].as_str().unwrap_or("").trim()
+        ));
+    }
+    let mut n_inline = 0;
+    for c in inline.as_array().into_iter().flatten() {
+        n_inline += 1;
+        let line = c["line"].as_u64().or_else(|| c["original_line"].as_u64());
+        out.push_str(&format!(
+            "\n[inline by @{} on {}{}]\n```diff\n{}\n```\n{}\n",
+            c["user"]["login"].as_str().unwrap_or("?"),
+            c["path"].as_str().unwrap_or("?"),
+            line.map(|l| format!(":{l}")).unwrap_or_default(),
+            c["diff_hunk"]
+                .as_str()
+                .unwrap_or("")
+                .lines()
+                .rev()
+                .take(6)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join("\n"),
+            c["body"].as_str().unwrap_or("").trim()
+        ));
+    }
+    if n_inline == 0
+        && info["comments"].as_array().is_none_or(|a| a.is_empty())
+        && info["reviews"].as_array().is_none_or(|a| a.is_empty())
+    {
+        return Err(format!("PR #{number} has no comments yet"));
+    }
+    Ok(out)
 }

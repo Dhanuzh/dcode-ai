@@ -90,46 +90,99 @@ impl Repl {
                 }
             }
             "/memory" => {
-                if rest.is_empty() {
-                    let store = MemoryStore::new(self.runtime.memory_store_path());
-                    let mem = store.load().await.map_err(anyhow::Error::msg)?;
-                    if mem.notes.is_empty() {
-                        let lines = vec!["No memory notes stored.".into()];
-                        if let ReplOutput::Tui(st) = &out {
-                            if let Ok(mut g) = st.lock() {
-                                g.open_info_modal("memory", lines);
-                            }
+                let user_path = dcode_ai_runtime::memory_tool::user_memory_path();
+                let project_path = self.runtime.memory_store_path();
+                let arg = rest.trim();
+                if arg.is_empty() {
+                    let mut lines = vec![format!(
+                        "Auto memory: {}  (/memory auto on|off)",
+                        if self.runtime.config().memory.auto {
+                            "on"
                         } else {
-                            out.println("no memory notes stored");
+                            "off"
+                        }
+                    )];
+                    for (title, path) in [
+                        ("About you (every project)", user_path.clone()),
+                        ("This project", Some(project_path.clone())),
+                    ] {
+                        lines.push(String::new());
+                        let notes = match path {
+                            Some(p) => MemoryStore::new(&p)
+                                .load()
+                                .await
+                                .map(|m| m.notes)
+                                .unwrap_or_default(),
+                            None => Vec::new(),
+                        };
+                        lines.push(format!("{title} — {} note(s)", notes.len()));
+                        for note in notes.iter().rev().take(20) {
+                            let text = note
+                                .content
+                                .split_whitespace()
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            lines.push(format!(
+                                "  {}  [{}] {}",
+                                note.id,
+                                note.kind,
+                                crate::tui::render_helpers::truncate_chars(&text, 140)
+                            ));
+                        }
+                    }
+                    lines.push(String::new());
+                    lines.push(
+                        "/memory <text> saves a note · /memory forget <id> removes one".into(),
+                    );
+                    if let ReplOutput::Tui(st) = &out {
+                        if let Ok(mut g) = st.lock() {
+                            g.open_info_modal("Memory", lines);
                         }
                     } else {
-                        let lines: Vec<String> = mem
-                            .notes
-                            .iter()
-                            .rev()
-                            .take(20)
-                            .map(|note| {
-                                format!(
-                                    "{} {} {}",
-                                    note.id,
-                                    note.kind,
-                                    note.content.replace('\n', " ")
-                                )
-                            })
-                            .collect();
-                        if let ReplOutput::Tui(st) = &out {
-                            if let Ok(mut g) = st.lock() {
-                                g.open_info_modal("memory", lines);
-                            }
-                        } else {
-                            for l in lines.iter().take(5) {
-                                out.println(l);
+                        for l in &lines {
+                            out.println(l);
+                        }
+                    }
+                } else if let Some(v) = arg.strip_prefix("auto") {
+                    let on = match v.trim() {
+                        "on" => true,
+                        "off" => false,
+                        _ => !self.runtime.config().memory.auto,
+                    };
+                    self.runtime.config_mut().memory.auto = on;
+                    let saved = dcode_ai_common::config::DcodeAiConfig::load_global_file()
+                        .and_then(|mut c| {
+                            c.memory.auto = on;
+                            c.save_global()
+                        });
+                    if let Err(e) = saved {
+                        out.eprintln(&format!("warn: failed to save: {e}"));
+                    }
+                    out.println(&format!(
+                        "[memory] auto memory {} — applies from the next session (/new)",
+                        if on { "on" } else { "off" }
+                    ));
+                } else if let Some(id) = arg.strip_prefix("forget ").map(str::trim) {
+                    let mut removed = false;
+                    for path in [user_path, Some(project_path)].into_iter().flatten() {
+                        let store = MemoryStore::new(&path);
+                        if let Ok(mut m) = store.load().await {
+                            let before = m.notes.len();
+                            m.notes.retain(|n| n.id != id);
+                            if m.notes.len() != before {
+                                removed = true;
+                                store.save(&m).await.map_err(anyhow::Error::msg)?;
                             }
                         }
                     }
+                    out.println(&if removed {
+                        format!("[memory] forgot {id}")
+                    } else {
+                        format!("[memory] no note with id {id}")
+                    });
                 } else {
                     self.runtime
-                        .append_memory_note("note", Some(rest.to_string()))
+                        .append_memory_note("note", Some(arg.to_string()))
                         .await
                         .map_err(anyhow::Error::msg)?;
                     out.println("memory note saved");
@@ -445,42 +498,132 @@ impl Repl {
                 }
             }
             "/hooks" => {
-                let h = &self.runtime.config().hooks;
-                let groups: [(&str, &[dcode_ai_common::config::HookCommand]); 8] = [
-                    ("session_start", &h.session_start),
-                    ("session_end", &h.session_end),
-                    ("pre_tool_use", &h.pre_tool_use),
-                    ("post_tool_use", &h.post_tool_use),
-                    ("post_tool_failure", &h.post_tool_failure),
-                    ("approval_requested", &h.approval_requested),
-                    ("subagent_start", &h.subagent_start),
-                    ("subagent_stop", &h.subagent_stop),
-                ];
-                let mut lines = vec!["Lifecycle hooks:".to_string(), String::new()];
-                let mut any = false;
-                for (name, cmds) in groups {
-                    for c in cmds {
-                        any = true;
-                        let m = c
-                            .matcher
-                            .as_deref()
-                            .map(|m| format!(" [{m}]"))
-                            .unwrap_or_default();
-                        let block = if c.blocking { " (blocking)" } else { "" };
-                        lines.push(format!("  {name}{m}{block}: {}", c.command));
+                use dcode_ai_common::config::{HOOK_EVENTS, HookCommand};
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let arg = rest.trim();
+                let mut words = arg.split_whitespace();
+                let sub = words.next().unwrap_or("");
+                // Read from disk so hooks added from here (or in an editor) show.
+                let fresh = dcode_ai_common::config::DcodeAiConfig::load_for_workspace(&ws)
+                    .map(|c| c.hooks)
+                    .unwrap_or_else(|_| self.runtime.config().hooks.clone());
+                match sub {
+                    "" => {
+                        let mut lines = vec!["Hooks (run on lifecycle events):".to_string()];
+                        let mut any = false;
+                        for event in HOOK_EVENTS {
+                            let hooks = fresh.for_event(event);
+                            if hooks.is_empty() {
+                                continue;
+                            }
+                            any = true;
+                            lines.push(String::new());
+                            lines.push(event.to_string());
+                            for (n, c) in hooks.iter().enumerate() {
+                                let m = c
+                                    .matcher
+                                    .as_deref()
+                                    .map(|m| format!(" [{m}]"))
+                                    .unwrap_or_default();
+                                let block = if c.blocking { " (blocking)" } else { "" };
+                                let origin = if c.origin.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!("  · {}", c.origin)
+                                };
+                                lines.push(format!("  {}. {}{m}{block}{origin}", n + 1, c.command));
+                            }
+                        }
+                        if !any {
+                            lines.push("  (none)".into());
+                        }
+                        lines.push(String::new());
+                        lines.push(
+                            "/hooks add <event> [--matcher <tool>] [--blocking] [--user] <command>"
+                                .into(),
+                        );
+                        lines.push("/hooks remove <event> <n> [--user]".into());
+                        lines.push(format!("Events: {}", HOOK_EVENTS.join(", ")));
+                        if let ReplOutput::Tui(st) = &out {
+                            if let Ok(mut g) = st.lock() {
+                                g.open_info_modal("Hooks", lines);
+                            }
+                        } else {
+                            for l in &lines {
+                                out.println(l);
+                            }
+                        }
                     }
-                }
-                if !any {
-                    lines.push("  (none configured — add under [hooks] in .dcode.toml)".into());
-                }
-                if let ReplOutput::Tui(st) = &out {
-                    if let Ok(mut g) = st.lock() {
-                        g.open_info_modal("hooks", lines.clone());
+                    "add" | "remove" => {
+                        let event = words.next().unwrap_or("").to_string();
+                        let mut matcher = None;
+                        let mut blocking = false;
+                        let mut user = false;
+                        let mut rest_words = Vec::new();
+                        while let Some(w) = words.next() {
+                            match w {
+                                "--matcher" => matcher = words.next().map(String::from),
+                                "--blocking" => blocking = true,
+                                "--user" => user = true,
+                                _ => rest_words.push(w),
+                            }
+                        }
+                        let path = if user {
+                            dcode_ai_common::config::global_config_file()
+                        } else {
+                            Some(dcode_ai_common::config::workspace_config_path(&ws))
+                        };
+                        let Some(path) = path else {
+                            out.eprintln("no home directory");
+                            return Ok(true);
+                        };
+                        let command_text = if sub == "add" {
+                            rest_words.join(" ")
+                        } else {
+                            // `remove <event> <n>`: the n-th hook listed for the event.
+                            let n: usize =
+                                rest_words.first().and_then(|w| w.parse().ok()).unwrap_or(0);
+                            fresh
+                                .for_event(&event)
+                                .get(n.wrapping_sub(1))
+                                .map(|h| h.command.clone())
+                                .unwrap_or_default()
+                        };
+                        if event.is_empty() || command_text.is_empty() {
+                            out.eprintln(
+                                "usage: /hooks add <event> [--matcher <tool>] [--blocking] [--user] <command> · /hooks remove <event> <n> [--user]",
+                            );
+                            return Ok(true);
+                        }
+                        let hook = HookCommand {
+                            command: command_text.clone(),
+                            matcher,
+                            blocking,
+                            origin: String::new(),
+                        };
+                        match dcode_ai_common::config::edit_hook(&path, &event, &hook, sub == "add") {
+                            Ok(true) => {
+                                out.println(&format!(
+                                    "[hooks] {} {event}: {command_text} ({})",
+                                    if sub == "add" { "added" } else { "removed" },
+                                    path.display()
+                                ));
+                                if let Some(tx) = &self.self_cmd_tx {
+                                    let _ = tx.send(TuiCmd::ReloadExtensions);
+                                } else if let Err(e) = self.runtime.reload_extensions().await {
+                                    out.eprintln(&format!("[reload] {e}"));
+                                }
+                            }
+                            Ok(false) => out.println(&format!(
+                                "[hooks] `{command_text}` is not in {} (plugin hooks are removed with the plugin)",
+                                path.display()
+                            )),
+                            Err(e) => out.eprintln(&format!("[hooks] {e}")),
+                        }
                     }
-                } else {
-                    for l in &lines {
-                        out.println(l);
-                    }
+                    other => out.eprintln(&format!(
+                        "[hooks] unknown `{other}`; use /hooks, /hooks add …, /hooks remove …"
+                    )),
                 }
             }
             "/init" => {
