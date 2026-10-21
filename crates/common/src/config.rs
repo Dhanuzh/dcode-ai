@@ -1279,6 +1279,15 @@ pub struct SessionConfig {
     /// After a turn that changed files, run the read-only verifier (`/verify`).
     #[serde(default)]
     pub verify_after_edits: bool,
+    /// After a turn that changed files, get a second opinion from a model of
+    /// a different family (`/second-opinion`).
+    #[serde(default)]
+    pub cross_review: bool,
+    /// Reviewer for `/second-opinion`: a model id, optionally prefixed with
+    /// the provider (`copilot:gpt-5`, `anthropic:opus`). Empty = pick a model
+    /// from a different family automatically.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub second_opinion_model: Option<String>,
     /// Delete saved sessions untouched for this many days, at startup
     /// (Claude Code's `cleanupPeriodDays`). 0 keeps them forever.
     #[serde(default = "default_cleanup_period_days")]
@@ -1296,6 +1305,8 @@ impl Default for SessionConfig {
             auto_compact_on_finish: false,
             max_cost_usd: 0.0,
             verify_after_edits: false,
+            cross_review: false,
+            second_opinion_model: None,
             cleanup_period_days: default_cleanup_period_days(),
         }
     }
@@ -1668,6 +1679,12 @@ impl SessionConfig {
         if let Some(v) = partial.cleanup_period_days {
             self.cleanup_period_days = v;
         }
+        if let Some(v) = partial.cross_review {
+            self.cross_review = v;
+        }
+        if let Some(v) = partial.second_opinion_model {
+            self.second_opinion_model = Some(v).filter(|m| !m.trim().is_empty());
+        }
         if let Some(v) = partial.verify_after_edits {
             self.verify_after_edits = v;
         }
@@ -1801,6 +1818,8 @@ struct PartialSessionConfig {
     auto_compact_on_finish: Option<bool>,
     max_cost_usd: Option<f64>,
     verify_after_edits: Option<bool>,
+    cross_review: Option<bool>,
+    second_opinion_model: Option<String>,
     cleanup_period_days: Option<u32>,
 }
 

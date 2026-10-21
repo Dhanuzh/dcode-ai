@@ -1214,6 +1214,9 @@ impl Repl {
             "/verify" => {
                 self.run_verifier(rest.trim(), &out).await?;
             }
+            "/second-opinion" => {
+                self.run_review(rest.trim(), &out, true).await?;
+            }
             "/reload" => {
                 if let Some(tx) = &self.self_cmd_tx {
                     let _ = tx.send(TuiCmd::ReloadExtensions);
@@ -3792,14 +3795,37 @@ then switch).",
     /// `/verify`: a read-only verifier sub-agent reviews the uncommitted
     /// changes (and runs checks); real problems go back to the main agent.
     async fn run_verifier(&mut self, focus: &str, out: &ReplOutput<'_>) -> anyhow::Result<()> {
+        self.run_review(focus, out, false).await
+    }
+
+    /// `/verify` (same model) or `/second-opinion` (a model from a different
+    /// family) over the uncommitted changes; real problems go back to the
+    /// main agent.
+    async fn run_review(
+        &mut self,
+        focus: &str,
+        out: &ReplOutput<'_>,
+        second_opinion: bool,
+    ) -> anyhow::Result<()> {
         let ws = self.runtime.workspace_root().to_path_buf();
         let changed = git_changed_files(&ws);
         if changed.is_empty() {
-            out.println("Nothing to verify — no uncommitted changes.");
+            out.println("Nothing to review — no uncommitted changes.");
             return Ok(());
         }
+        let (child_config, reviewer_label) = if second_opinion {
+            match second_opinion_config(self.runtime.config(), self.runtime.model()).await {
+                Ok(v) => v,
+                Err(e) => {
+                    out.eprintln(&format!("[second-opinion] {e}"));
+                    return Ok(());
+                }
+            }
+        } else {
+            (self.runtime.config().clone(), "Verifier".to_string())
+        };
         out.println(&format!(
-            "Verifier reviewing {} changed file(s)…",
+            "{reviewer_label} reviewing {} changed file(s)…",
             changed.len()
         ));
         let mut task = String::from("Verify the uncommitted changes in this workspace.");
@@ -3809,9 +3835,13 @@ then switch).",
         let cfg = dcode_ai_runtime::supervisor::ChildSessionConfig {
             parent_session_id: self.runtime.session_id().to_string(),
             task,
-            agent: Some(dcode_ai_core::agent_defs::verifier()),
+            agent: Some(if second_opinion {
+                dcode_ai_core::agent_defs::second_opinion()
+            } else {
+                dcode_ai_core::agent_defs::verifier()
+            }),
             workspace_root: ws,
-            config: self.runtime.config().clone(),
+            config: child_config,
             parent_summary: dcode_ai_runtime::supervisor::build_parent_summary(
                 self.runtime.messages(),
             ),
@@ -3838,19 +3868,28 @@ then switch).",
             && let Ok(mut g) = st.lock()
         {
             g.push_block(DisplayBlock::Assistant(format!(
-                "**Verifier**\n\n{}",
+                "**{reviewer_label}**\n\n{}",
                 report.trim()
             )));
             g.touch_transcript();
         } else {
-            out.println(&format!("Verifier:\n{}", report.trim()));
+            out.println(&format!("{reviewer_label}:\n{}", report.trim()));
         }
         if verifier_found_problems(&report) {
-            let prompt = format!(
-                "A read-only verifier reviewed your uncommitted changes and reported:\n\n{}\n\n\
-                 Fix the real problems (ignore anything that is not actually wrong) and re-run the relevant checks.",
-                report.trim()
-            );
+            let prompt = if second_opinion {
+                format!(
+                    "A reviewer using a different model ({reviewer_label}) checked your uncommitted \
+                     changes and reported:\n\n{}\n\nFor each point, either fix it or say in one line \
+                     why it is not a problem. Re-run the relevant checks after fixing.",
+                    report.trim()
+                )
+            } else {
+                format!(
+                    "A read-only verifier reviewed your uncommitted changes and reported:\n\n{}\n\n\
+                     Fix the real problems (ignore anything that is not actually wrong) and re-run the relevant checks.",
+                    report.trim()
+                )
+            };
             if let ReplOutput::Tui(st) = out
                 && let Ok(mut g) = st.lock()
             {
@@ -5078,6 +5117,15 @@ then switch).",
                     {
                         let _ = self.run_verifier("", &ReplOutput::Tui(&tui_state)).await;
                     }
+                    // `[session] cross_review`: a different model reviews the change.
+                    if turn_ok
+                        && self.runtime.config().session.cross_review
+                        && git_change_snapshot(self.runtime.workspace_root()) != before
+                    {
+                        let _ = self
+                            .run_review("", &ReplOutput::Tui(&tui_state), true)
+                            .await;
+                    }
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_busy(false);
                         let shells = g.background_shells.len();
@@ -5593,6 +5641,92 @@ fn git_change_snapshot(ws: &std::path::Path) -> Option<String> {
 }
 
 /// The verifier reports `No problems found.` when everything checks out.
+/// Config and label for the `/second-opinion` reviewer: `[session]
+/// second_opinion_model` when set, otherwise the strongest available model
+/// of a different family than `current_model` (GPT/Gemini on Copilot for a
+/// Claude session, Claude for anything else).
+async fn second_opinion_config(
+    config: &dcode_ai_common::config::DcodeAiConfig,
+    current_model: &str,
+) -> Result<(dcode_ai_common::config::DcodeAiConfig, String), String> {
+    use dcode_ai_common::config::ProviderKind;
+    let mut c = config.clone();
+    if let Some(spec) = config.session.second_opinion_model.as_deref() {
+        let (provider, model) = match spec.split_once(':') {
+            Some((p, m)) if ProviderKind::from_cli_name(p).is_some() => {
+                (ProviderKind::from_cli_name(p), m)
+            }
+            _ => (None, spec),
+        };
+        if let Some(kind) = provider {
+            c.set_default_provider(kind);
+        }
+        c.apply_model_override(model);
+        let label = format!("Second opinion ({})", c.model.default_model);
+        return Ok((c, label));
+    }
+    let current_is_claude = current_model.to_ascii_lowercase().contains("claude");
+    let copilot_ready = config.provider.api_key_present_for(ProviderKind::Copilot)
+        || dcode_ai_common::auth::AuthStore::load()
+            .unwrap_or_default()
+            .copilot
+            .is_some();
+    if !current_is_claude
+        && dcode_ai_common::provider_runtime::anthropic_signed_in(&config.provider.anthropic)
+    {
+        c.set_default_provider(ProviderKind::Anthropic);
+        let label = format!("Second opinion ({})", c.model.default_model);
+        return Ok((c, label));
+    }
+    if !copilot_ready {
+        return Err(
+            "no reviewer from another model family is available — sign in to \
+             GitHub Copilot or set [session] second_opinion_model"
+                .into(),
+        );
+    }
+    c.set_default_provider(ProviderKind::Copilot);
+    let ids = dcode_ai_runtime::model_limits_api::fetch_provider_model_ids(&c)
+        .await
+        .map_err(|e| format!("could not list Copilot models: {e}"))?;
+    let model = pick_reviewer_model(current_model, &ids).ok_or_else(|| {
+        "Copilot offers no model from another family — set [session] second_opinion_model"
+            .to_string()
+    })?;
+    c.apply_model_override(&model);
+    Ok((c, format!("Second opinion ({model})")))
+}
+
+/// Strongest model in `available` from a different family than `current`:
+/// for Claude, the newest full GPT (then Gemini, then any non-Claude); for
+/// others, the newest Claude.
+fn pick_reviewer_model(current: &str, available: &[String]) -> Option<String> {
+    let version = |id: &str| -> Vec<u32> {
+        id.split(|c: char| !c.is_ascii_digit())
+            .filter_map(|p| p.parse().ok())
+            .collect()
+    };
+    let small = |id: &str| {
+        ["mini", "nano", "flash", "lite", "haiku"]
+            .iter()
+            .any(|s| id.contains(s))
+    };
+    let newest = |pred: &dyn Fn(&str) -> bool| -> Option<String> {
+        available
+            .iter()
+            .filter(|id| pred(&id.to_ascii_lowercase()))
+            .max_by_key(|id| (!small(&id.to_ascii_lowercase()), version(id)))
+            .cloned()
+    };
+    if current.to_ascii_lowercase().contains("claude") {
+        newest(&|id| id.starts_with("gpt-") && !id.contains("codex"))
+            .or_else(|| newest(&|id| id.starts_with("gemini")))
+            .or_else(|| newest(&|id| !id.contains("claude")))
+    } else {
+        newest(&|id| id.starts_with("claude"))
+    }
+}
+
 fn verifier_found_problems(report: &str) -> bool {
     let r = report.trim();
     !r.is_empty() && !r.to_ascii_lowercase().starts_with("no problems found")
@@ -5601,6 +5735,28 @@ fn verifier_found_problems(report: &str) -> bool {
 #[cfg(test)]
 mod verifier_tests {
     use super::verifier_found_problems;
+
+    #[test]
+    fn reviewer_comes_from_another_family() {
+        let ids: Vec<String> = [
+            "claude-sonnet-5",
+            "gpt-5-mini",
+            "gpt-5.2",
+            "gpt-5.3-codex",
+            "gemini-3.8-flash",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            super::pick_reviewer_model("claude-sonnet-5", &ids).as_deref(),
+            Some("gpt-5.2")
+        );
+        assert_eq!(
+            super::pick_reviewer_model("gpt-5.2", &ids).as_deref(),
+            Some("claude-sonnet-5")
+        );
+    }
 
     #[test]
     fn clean_reports_do_not_trigger_fixes() {

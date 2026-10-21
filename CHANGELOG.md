@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **`/second-opinion`**: a model from a different family (GPT/Gemini via
+  Copilot for a Claude session, Claude otherwise) reviews your uncommitted
+  changes; your agent fixes each finding or explains why it is not a
+  problem. `[session] cross_review = true` runs it after every turn that
+  changed files; `[session] second_opinion_model` picks the reviewer.
+- **Startup permission chooser**: Manual (ask before edits and commands),
+  Accept edits, or Auto (every tool, this session only), replacing the yes/no
+  "approve all tools?" popup.
+
 ## 1.0.7 — 2026-10-20
 
 ### New

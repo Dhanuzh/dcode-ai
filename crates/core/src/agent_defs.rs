@@ -189,6 +189,20 @@ pub fn verifier() -> AgentDef {
     }
 }
 
+/// `/second-opinion`: the verifier, run on a model from a different family.
+pub fn second_opinion() -> AgentDef {
+    let mut def = verifier();
+    def.name = "second-opinion".into();
+    def.description = "Independent review of uncommitted changes by a different model".into();
+    def.prompt = format!(
+        "{}\nYou are a different model from the one that wrote this change. Do not \
+assume its reasoning was right: re-derive what the code must do, check the cases \
+it may have missed, and question choices that look plausible but are wrong.",
+        def.prompt
+    );
+    def
+}
+
 const VERIFIER_PROMPT: &str = r#"
 You are a careful code reviewer verifying another agent's uncommitted changes.
 You cannot edit files. Steps:

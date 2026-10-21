@@ -88,6 +88,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in) |
 | `/plan`, `/review`, `/fix`, `/test` | Switch agent profile |
 | `/verify` | Read-only review of the uncommitted diff |
+| `/second-opinion` | The same review by a model from a different family |
 | `/agents`, `/skills`, `/plugins`, `/mcp`, `/hooks`, `/reload` | Extensions |
 | `/memory`, `/init` | Memory notes; create project instructions |
 | `/todos` | The agent's current task list |
@@ -203,6 +204,16 @@ sandbox_writable_roots = ["/tmp/build-cache"]
 Shell commands may read everywhere but write only inside the workspace, temp
 directories and the listed roots — Landlock on Linux, Seatbelt (`sandbox-exec`)
 on macOS.
+
+### Second opinion
+
+`/second-opinion [focus]` has a model from a **different family** review your
+uncommitted changes: a Claude session gets GPT or Gemini (through Copilot), a
+GPT session gets Claude. The reviewer runs the project's checks read-only;
+anything it finds goes back to your agent, which must fix each point or say
+why it is not a problem. Pick the reviewer with `[session]
+second_opinion_model = "copilot:gpt-5"`; `[session] cross_review = true` does
+this after every turn that changed files.
 
 ### Verifier
 
