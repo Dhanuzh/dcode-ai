@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.10 — 2026-10-22
+
+### Changed
+- The startup permission question is asked once per folder: the answer
+  (Manual, Accept edits or Auto) is remembered in `~/.dcode-ai/folders.json`
+  and applied silently next time. A new folder still asks. Picking a mode in
+  `/permissions mode` updates the remembered choice.
+
 ## 1.0.9 — 2026-10-21
 
 ### New
