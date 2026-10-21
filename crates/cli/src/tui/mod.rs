@@ -29,6 +29,7 @@ pub mod render;
 pub mod render_helpers;
 pub mod replay;
 pub mod scroll_buffer;
+pub mod setup_picker;
 pub mod slash_entries;
 pub mod state;
 pub mod statusline;

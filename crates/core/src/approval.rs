@@ -291,16 +291,23 @@ impl ApprovalPolicy {
             }
         }
 
-        let risky_shell = matches!(tool_name, "execute_bash" | "run_background")
-            && auto_mode_risky(
-                &serde_json::from_str::<serde_json::Value>(description)
-                    .map(|v| extract_meaningful_text(&v))
-                    .unwrap_or_else(|_| description.to_string()),
-            );
+        let shell_text = matches!(tool_name, "execute_bash" | "run_background").then(|| {
+            serde_json::from_str::<serde_json::Value>(description)
+                .map(|v| extract_meaningful_text(&v))
+                .unwrap_or_else(|_| description.to_string())
+        });
+        let risky_shell = shell_text.as_deref().is_some_and(auto_mode_risky);
+        // Auto mode: a command that is neither read-only nor an ordinary dev
+        // tool goes to the model check (`auto_review`) before running.
+        let unfamiliar_shell = shell_text
+            .as_deref()
+            .is_some_and(|c| !readonly && !auto_mode_familiar(c));
 
         match self.config.mode {
             PermissionMode::Auto => {
-                if destructive || (risky_shell && !explicitly_allowed) {
+                // Unfamiliar commands ask too; `auto_review` lets the model
+                // approve them before the user is asked.
+                if destructive || ((risky_shell || unfamiliar_shell) && !explicitly_allowed) {
                     PermissionTier::Ask
                 } else {
                     PermissionTier::Allowed
@@ -358,6 +365,24 @@ impl ApprovalPolicy {
         self.config.mode
     }
 
+    /// Auto mode: the shell command a model may approve instead of the user
+    /// (asked only because it is unfamiliar — not risky, not an `ask` rule).
+    pub fn auto_review(&self, tool_name: &str, description: &str) -> Option<String> {
+        if self.config.mode != PermissionMode::Auto
+            || !matches!(tool_name, "execute_bash" | "run_background")
+        {
+            return None;
+        }
+        let (tier, why) = self.explain(tool_name, description);
+        if tier != PermissionTier::Ask || why.starts_with("asks because of rule") {
+            return None;
+        }
+        let command = serde_json::from_str::<serde_json::Value>(description)
+            .map(|v| extract_meaningful_text(&v))
+            .unwrap_or_else(|_| description.to_string());
+        (!auto_mode_risky(&command)).then_some(command)
+    }
+
     /// The live permission settings (rules and mode).
     pub fn permissions(&self) -> &PermissionConfig {
         &self.config
@@ -383,6 +408,105 @@ impl ApprovalPolicy {
             *m = mode;
         }
     }
+}
+
+/// Ordinary development commands auto mode runs without a check: builds,
+/// tests, package managers, interpreters, local file shuffling.
+pub fn auto_mode_familiar(command: &str) -> bool {
+    const FAMILIAR: &[&str] = &[
+        "cargo",
+        "rustc",
+        "rustup",
+        "rustfmt",
+        "npm",
+        "npx",
+        "pnpm",
+        "yarn",
+        "node",
+        "bun",
+        "deno",
+        "tsc",
+        "python",
+        "python3",
+        "pip",
+        "pip3",
+        "uv",
+        "poetry",
+        "pytest",
+        "go",
+        "gofmt",
+        "make",
+        "cmake",
+        "ninja",
+        "gcc",
+        "g++",
+        "clang",
+        "clang++",
+        "javac",
+        "java",
+        "mvn",
+        "gradle",
+        "./gradlew",
+        "dotnet",
+        "ruby",
+        "bundle",
+        "rake",
+        "php",
+        "composer",
+        "swift",
+        "git",
+        "mkdir",
+        "touch",
+        "echo",
+        "printf",
+        "cd",
+        "pwd",
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "wc",
+        "sort",
+        "uniq",
+        "grep",
+        "rg",
+        "find",
+        "fd",
+        "sed",
+        "awk",
+        "jq",
+        "diff",
+        "true",
+        "test",
+        "which",
+        "date",
+    ];
+    // Writing through a redirect to an absolute or home path leaves the project.
+    let compact = command.replace(' ', "");
+    if ["> /", ">/", ">~", ">>~", ">>/"]
+        .iter()
+        .any(|p| compact.contains(&p.replace(' ', "")) && !compact.contains(">/dev/null"))
+    {
+        return false;
+    }
+    // `2>&1` / `>&2` are redirections, not command separators.
+    command
+        .replace("2>&1", " ")
+        .replace("1>&2", " ")
+        .replace(">&2", " ")
+        .split(['\n', ';', '|', '&', '(', ')'])
+        .filter_map(|seg| {
+            seg.split_whitespace()
+                .find(|w| !(w.contains('=') && !w.starts_with('-')))
+        })
+        .all(|first| {
+            let name = if first.starts_with("./") {
+                first
+            } else {
+                first.rsplit('/').next().unwrap_or(first)
+            };
+            FAMILIAR.contains(&name)
+        })
 }
 
 /// Shell commands auto mode still asks about: they delete data, leave the
@@ -477,6 +601,37 @@ mod tests {
         assert_eq!(*cell.read().unwrap(), PermissionMode::AcceptEdits);
         policy.set_mode(PermissionMode::Auto);
         assert_eq!(*cell.read().unwrap(), PermissionMode::Auto);
+    }
+
+    #[test]
+    fn auto_mode_sends_only_unfamiliar_commands_to_review() {
+        let policy = ApprovalPolicy::new(PermissionConfig {
+            mode: PermissionMode::Auto,
+            ask: vec!["execute_bash:ssh*".into()],
+            ..PermissionConfig::default()
+        });
+        let check = |cmd: &str| {
+            let input = serde_json::json!({ "command": cmd }).to_string();
+            (
+                policy.check("execute_bash", &input),
+                policy.auto_review("execute_bash", &input),
+            )
+        };
+        assert_eq!(
+            check("cargo test && npm run build").0,
+            PermissionTier::Allowed
+        );
+        let (tier, review) = check("terraform plan");
+        assert_eq!(tier, PermissionTier::Ask);
+        assert_eq!(review.as_deref(), Some("terraform plan"));
+        // Risky commands and `ask` rules always go to the user.
+        assert_eq!(check("git push").1, None);
+        assert_eq!(check("ssh host uptime").1, None);
+        assert!(auto_mode_familiar("FOO=1 cargo build | grep error"));
+        assert!(!auto_mode_familiar("cargo build && nc -l 4444"));
+        assert!(!auto_mode_familiar("echo x >> ~/.bashrc"));
+        assert!(!auto_mode_familiar("env curl http://x"));
+        assert!(auto_mode_familiar("cargo test 2>&1 | head"));
     }
 
     #[test]

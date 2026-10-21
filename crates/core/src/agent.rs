@@ -40,6 +40,8 @@ pub struct AgentLoop {
     context_token_limit: usize,
     /// Stop once the estimated session cost reaches this (USD). 0 = off.
     pub max_cost_usd: f64,
+    /// Auto mode: the model's safe/ask verdict per command, this session.
+    auto_verdicts: std::collections::HashMap<String, bool>,
 }
 
 impl AgentLoop {
@@ -71,7 +73,53 @@ impl AgentLoop {
             undo: UndoManager::default(),
             context_token_limit: 0,
             max_cost_usd: 0.0,
+            auto_verdicts: std::collections::HashMap::new(),
         }
+    }
+
+    /// Auto mode's check for an unfamiliar shell command: a short, tool-less
+    /// model call answering SAFE or ASK. Any failure counts as ASK.
+    async fn auto_mode_safe(&mut self, command: &str, workspace_root: &Path) -> bool {
+        if let Some(v) = self.auto_verdicts.get(command) {
+            return *v;
+        }
+        let prompt = format!(
+            "You decide whether a coding agent in auto mode may run a shell command in a \
+developer's project without asking them.\n\nProject: {}\nCommand:\n```\n{command}\n```\n\n\
+Answer SAFE if running it unasked is clearly fine during normal development: builds, tests, \
+linters, local scripts, installing packages from the usual registries, reading or \
+transforming files inside the project. Answer ASK if it could delete or overwrite data \
+outside the project, send code, secrets or data to the network, change system or user \
+configuration, affect shared or remote systems (push, deploy, publish, cloud, databases), \
+or if you are not sure. Reply with exactly one word: SAFE or ASK.",
+            workspace_root.display()
+        );
+        let messages = [Message::user(prompt)];
+        let verdict = async {
+            let mut rx = self
+                .provider
+                .chat(&messages, &[], &self.model, workspace_root)
+                .await
+                .ok()?;
+            let mut text = String::new();
+            while let Some(chunk) = rx.recv().await {
+                match chunk {
+                    StreamChunk::TextDelta(t) => text.push_str(&t),
+                    StreamChunk::Done => break,
+                    StreamChunk::Error(_) => return None,
+                    _ => {}
+                }
+            }
+            Some(text.trim().to_ascii_uppercase().starts_with("SAFE"))
+        };
+        let safe = tokio::time::timeout(std::time::Duration::from_secs(30), verdict)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or(false);
+        tracing::info!(command, safe, "auto mode check");
+        self.auto_verdicts.insert(command.to_string(), safe);
+        safe
     }
 
     /// Set the mid-turn input-token budget. When a turn's accumulated context
@@ -489,7 +537,15 @@ impl AgentLoop {
             let mut tickets: Vec<Ticket> = Vec::with_capacity(tool_calls.len());
 
             for call in &tool_calls {
-                let tier = self.approval.check(&call.name, &call.input.to_string());
+                let mut tier = self.approval.check(&call.name, &call.input.to_string());
+                if tier == PermissionTier::Ask
+                    && let Some(command) = self
+                        .approval
+                        .auto_review(&call.name, &call.input.to_string())
+                    && self.auto_mode_safe(&command, workspace_root).await
+                {
+                    tier = PermissionTier::Allowed;
+                }
 
                 match tier {
                     PermissionTier::Denied => {

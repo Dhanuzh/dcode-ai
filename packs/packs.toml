@@ -1,4 +1,5 @@
-# Built-in starter packs for `dcode-ai setup`.
+# Starter packs for `dcode-ai setup`. Built into the binary and fetched from
+# GitHub by `dcode-ai setup --update`, so packs change without a release.
 # Plugins come from the official marketplace (claude-plugins-official).
 # Extra packs: ~/.dcode-ai/packs/*.toml and <repo>/.dcode-ai/packs/*.toml.
 

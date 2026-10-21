@@ -918,7 +918,7 @@ async fn try_main() -> anyhow::Result<()> {
             }
         },
         Some(Command::Plugin { command }) => plugin_cli::run(command)?,
-        Some(Command::Setup(args)) => setup_cli::run(&workspace_root, args)?,
+        Some(Command::Setup(args)) => setup_cli::run(&workspace_root, args).await?,
         Some(Command::Acp) => acp_server::run(config).await?,
         Some(Command::Policy { command }) => policy_cli::run(&config, &workspace_root, command),
         Some(Command::Ci(args)) => {

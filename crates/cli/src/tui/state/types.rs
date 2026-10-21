@@ -184,6 +184,8 @@ pub struct TuiSessionState {
     pub reload_slash_entries: bool,
     /// `/plugins` browser, when open.
     pub plugin_browser: Option<Box<crate::tui::plugin_browser::PluginBrowser>>,
+    /// `/setup` starter-pack picker.
+    pub setup_picker: Option<Box<crate::tui::setup_picker::SetupPicker>>,
     /// `[ui] statusline_command` and its latest output line.
     pub statusline_command: Option<String>,
     pub statusline_text: Option<String>,

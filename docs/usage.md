@@ -81,7 +81,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/model`, `/models`, `/provider`, `/effort` | Choose model, provider and reasoning effort |
 | `/theme` | Theme picker with live preview |
 | `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
-| `/permissions` | Permission mode and rules |
+| `/permissions` | List rules; `allow`/`ask`/`deny`/`remove <rule>` to edit them; `mode` for the mode picker |
 | `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use |
 | `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept) |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation |
@@ -89,14 +89,18 @@ Type `/` to see them all with descriptions. The most used:
 | `/plan`, `/review`, `/fix`, `/test` | Switch agent profile |
 | `/verify` | Read-only review of the uncommitted diff |
 | `/second-opinion` | The same review by a model from a different family |
-| `/agents`, `/skills`, `/plugins`, `/mcp`, `/hooks`, `/reload` | Extensions |
-| `/memory`, `/init` | Memory notes; create project instructions |
+| `/security-review` | Security review of the pending change (or the branch against its base) |
+| `/pr-comments [n]` | Fetch the PR's review comments with `gh` and summarize them by file |
+| `/agents`, `/skills`, `/plugins`, `/mcp`, `/reload` | Extensions |
+| `/hooks` | List hooks; `/hooks add <event> [--matcher <tool>] <command>`, `/hooks remove <event> <n>` |
+| `/memory` | Your notes and the project's; `/memory auto on\|off`, `/memory forget <id>` |
+| `/init` | Create project instructions |
 | `/todos` | The agent's current task list |
 | `/release-notes` | What's new in this version |
 | `/image`, `/web`, `/run` | Attach an image, fetch a page, run a command into context |
 | `/diff`, `/commit` | Review and commit changes |
 | `/bashes` | Background shells the agent started (`/bashes kill <id>`) |
-| `/setup` | Starter packs: list them, or `/setup <id>…` to install |
+| `/setup` | Starter-pack picker (or `/setup <id>…` to install directly) |
 | `/doctor`, `/login`, `/logout`, `/auth` | Diagnostics and sign-in |
 
 ## Command line
@@ -166,10 +170,16 @@ dcode-ai setup --list             # packs and what each adds (● = installed)
 dcode-ai setup --detect           # languages found in this repo
 dcode-ai setup --remove frontend  # undo a pack (keeps plugins another pack uses)
 dcode-ai setup --save team.toml   # share your packs; teammates run --from team.toml
+dcode-ai setup --update           # fetch the latest packs from GitHub
 ```
 
-In a session, `/setup` lists the packs and `/setup <id>…` installs them.
-Re-running is safe: installed plugins are skipped.
+In a session, `/setup` opens a checkbox picker (Space to tick, Enter to
+install); `/setup <id>…` installs directly. Re-running is safe: installed
+plugins are skipped.
+
+Packs come from [`packs/packs.toml`](../packs/packs.toml) in this repository.
+The binary has a copy; `dcode-ai setup --update` (and `setup` itself, weekly)
+fetches the latest, so packs improve without a new release.
 
 Make your own packs in `~/.dcode-ai/packs/*.toml` or
 `<repo>/.dcode-ai/packs/*.toml` (an id that exists replaces the built-in):
@@ -208,7 +218,11 @@ The agent delegates with `spawn_subagent`. Each child:
 
 - gets its own session id, linked to the parent in metadata;
 - starts from a summary of the parent conversation;
-- runs in an isolated worktree on branch `dcode-ai/<session-id>`;
+- runs in an isolated worktree on branch `dcode-ai/<session-id>` — its files,
+  shell and sandbox are all rooted there, never in your checkout;
+- follows your permission mode: default, accept edits and auto become auto
+  (it cannot ask you, so a risky call is refused and reported back); plan,
+  don't-ask and bypass carry over;
 - returns its result to the parent (merge with `dcode-ai worktrees merge <id>`).
 
 Their live activity shows in place in the transcript and in the dashboard's
@@ -222,13 +236,18 @@ agents tab. Define specialised agents in `agents/*.md` — see
 | `plan` | Read and research only — no writes or shell |
 | `default` | Reads run; edits and unknown commands ask |
 | `accept-edits` | Edits run; commands still ask |
-| `auto` | Reads, edits and ordinary commands run; risky actions (deleting, `git push`, `reset --hard`, publishing, deploying, `sudo`, cloud CLIs) still ask |
+| `auto` | Reads, edits and ordinary dev commands run; other commands get a quick model check (safe → runs, otherwise asks); risky actions (deleting, `git push`, `reset --hard`, publishing, deploying, `sudo`, cloud CLIs) always ask |
 | `dont-ask` | Read-only, no prompts (headless) |
 | `bypass-permissions` | Everything runs without prompts (destructive commands are still refused) — trusted environments only |
 
 Shift+Tab cycles default → accept edits → plan → auto; the footer shows the
 mode (`⏵⏵ auto mode on`). The startup chooser and `--permission-mode auto`
 also pick it.
+
+Rules: `/permissions` lists every allow, ask and deny rule with where it comes
+from. `/permissions allow Bash(cargo test:*)` adds one for this session and
+saves it to `.dcode-ai/config.local.toml` (`--user` saves it to
+`~/.dcode-ai/config.toml`); `/permissions remove <rule>` deletes it.
 
 Shell commands are parsed (quoting, pipelines) rather than matched as text:
 read-only commands (`ls`, `cat`, `rg`, `git status`, …) run in every mode except
@@ -352,5 +371,11 @@ Instructions are merged in this order:
 5. available skills
 6. orchestration context from `DCODE_AI_ORCH_*`
 
-Memory notes live in `.dcode-ai/memory.json`: add them with `# note` in the
-prompt, `/memory <text>` or `dcode-ai memory add "…"`.
+Memory has two scopes: notes about you in `~/.dcode-ai/memory.json` (recalled
+in every project) and notes about the project in `.dcode-ai/memory.json`. Add
+them with `# note` in the prompt, `/memory <text>` or `dcode-ai memory add "…"`.
+
+**Auto memory** (on by default, `[memory] auto = false` or `/memory auto off`
+to stop): the agent saves corrections, your preferences and non-obvious
+project facts on its own, one short sentence each, never secrets. `/memory`
+shows both scopes; `/memory forget <id>` removes a note.

@@ -37,6 +37,43 @@ pub struct SetupArgs {
     /// Show what would be installed without changing anything
     #[arg(long)]
     pub dry_run: bool,
+    /// Fetch the latest packs from GitHub now
+    #[arg(long)]
+    pub update: bool,
+}
+
+/// Fetch the latest pack file into the cache. Without `force`, only when the
+/// cache is missing or a week old. Returns how many packs it holds.
+pub async fn refresh_remote(force: bool) -> Result<Option<usize>, String> {
+    let path = packs::remote_cache_path().ok_or("no home directory")?;
+    let fresh = std::fs::metadata(&path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .is_some_and(|age| age < std::time::Duration::from_secs(7 * 24 * 3600));
+    if fresh && !force {
+        return Ok(None);
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(if force { 20 } else { 4 }))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let resp = client
+        .get(packs::REMOTE_URL)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        return Err(format!("{} returned {}", packs::REMOTE_URL, resp.status()));
+    }
+    let text = resp.text().await.map_err(|e| e.to_string())?;
+    // Only keep a file this version can read.
+    let n = packs::parse(&text)?.len();
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, text).map_err(|e| e.to_string())?;
+    Ok(Some(n))
 }
 
 /// Lines describing every pack, with detected languages and installed packs
@@ -355,11 +392,28 @@ fn wizard(workspace_root: &Path, all: &[Pack]) -> Option<(Vec<String>, McpScope)
     yes_no("Continue?", true).then_some((ids, scope))
 }
 
-pub fn run(workspace_root: &Path, args: SetupArgs) -> anyhow::Result<()> {
+pub async fn run(workspace_root: &Path, args: SetupArgs) -> anyhow::Result<()> {
     let workspace_root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
     let say = &mut |l: String| println!("{l}");
+
+    if args.update {
+        match refresh_remote(true).await {
+            Ok(n) => println!(
+                "Updated packs from {} ({} packs).",
+                packs::REMOTE_URL,
+                n.unwrap_or(0)
+            ),
+            Err(e) => anyhow::bail!("could not update packs: {e}"),
+        }
+        if args.packs.is_empty() && !args.list && args.from.is_none() {
+            return Ok(());
+        }
+    } else if args.remove.is_none() && args.save.is_none() {
+        // Best effort: an offline machine keeps the packs it has.
+        let _ = refresh_remote(false).await;
+    }
 
     if args.list {
         for l in list_lines(&workspace_root) {

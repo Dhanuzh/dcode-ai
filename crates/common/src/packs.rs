@@ -10,7 +10,16 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-const BUILTIN: &str = include_str!("packs/builtin.toml");
+const BUILTIN: &str = include_str!("../../../packs/packs.toml");
+
+/// The latest packs, served from the repository's main branch.
+pub const REMOTE_URL: &str =
+    "https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/packs/packs.toml";
+
+/// Where `dcode-ai setup --update` keeps the fetched packs.
+pub fn remote_cache_path() -> Option<PathBuf> {
+    crate::config::dcode_ai_home_dir().map(|h| h.join("cache").join("packs.toml"))
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -97,10 +106,26 @@ fn pack_dirs(workspace_root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// Built-in packs, then user and project pack files. Returns the packs and
-/// any file errors.
+/// Built-in packs, the fetched update (if any), then user and project pack
+/// files. Returns the packs and any file errors.
 pub fn load(workspace_root: &Path) -> (Vec<Pack>, Vec<String>) {
-    load_from(builtin(), &pack_dirs(workspace_root))
+    let mut base = builtin();
+    if let Some(cached) = remote_cache_path()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| parse(&t).ok())
+    {
+        merge(&mut base, cached);
+    }
+    load_from(base, &pack_dirs(workspace_root))
+}
+
+fn merge(packs: &mut Vec<Pack>, more: Vec<Pack>) {
+    for p in more {
+        match packs.iter_mut().find(|q| q.id == p.id) {
+            Some(slot) => *slot = p,
+            None => packs.push(p),
+        }
+    }
 }
 
 fn load_from(mut packs: Vec<Pack>, dirs: &[PathBuf]) -> (Vec<Pack>, Vec<String>) {
@@ -120,14 +145,7 @@ fn load_from(mut packs: Vec<Pack>, dirs: &[PathBuf]) -> (Vec<Pack>, Vec<String>)
                 .map_err(|e| e.to_string())
                 .and_then(|t| parse(&t));
             match parsed {
-                Ok(list) => {
-                    for p in list {
-                        match packs.iter_mut().find(|q| q.id == p.id) {
-                            Some(slot) => *slot = p,
-                            None => packs.push(p),
-                        }
-                    }
-                }
+                Ok(list) => merge(&mut packs, list),
                 Err(e) => errors.push(format!("{}: {e}", f.display())),
             }
         }

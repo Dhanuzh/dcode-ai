@@ -230,6 +230,7 @@ impl TuiSessionState {
             replaying: false,
             statusline_command: None,
             plugin_browser: None,
+            setup_picker: None,
             reload_slash_entries: false,
             theme_picker_original: None,
             statusline_text: None,

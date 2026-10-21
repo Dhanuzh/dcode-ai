@@ -117,6 +117,22 @@ pub(super) fn handle_key_event(
         g.mouse_selection = None;
     }
 
+    // `/setup` picker owns the keyboard while open (Ctrl+C still exits).
+    if let Some(picker) = g.setup_picker.as_mut()
+        && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        use crate::tui::setup_picker::SetupKey;
+        match picker.handle_key(key) {
+            SetupKey::Handled => {}
+            SetupKey::Close => g.setup_picker = None,
+            SetupKey::Install(ids) => {
+                g.setup_picker = None;
+                let _ = cmd_tx.send(TuiCmd::Submit(format!("/setup {}", ids.join(" "))));
+            }
+        }
+        return KeyFlow::Continue;
+    }
+
     // `/plugins` browser owns the keyboard while open (Ctrl+C still exits).
     if let Some(browser) = g.plugin_browser.as_mut()
         && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))

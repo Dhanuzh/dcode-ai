@@ -188,7 +188,19 @@ impl Repl {
                     out.println("memory note saved");
                 }
             }
+            // In the TUI, bare `/setup` opens the checkbox picker.
+            "/setup" if rest.trim().is_empty() && matches!(out, ReplOutput::Tui(_)) => {
+                let _ = crate::setup_cli::refresh_remote(false).await;
+                if let ReplOutput::Tui(st) = &out {
+                    let picker =
+                        crate::tui::setup_picker::SetupPicker::load(self.runtime.workspace_root());
+                    if let Ok(mut g) = st.lock() {
+                        g.setup_picker = Some(Box::new(picker));
+                    }
+                }
+            }
             "/setup" => {
+                let _ = crate::setup_cli::refresh_remote(false).await;
                 let ws = self.runtime.workspace_root().to_path_buf();
                 let args = rest.trim().to_string();
                 let installs = !args.is_empty();

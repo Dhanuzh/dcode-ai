@@ -1077,7 +1077,9 @@ pub fn run_blocking(
                 Event::Mouse(_) if g.pins_modal_open => continue,
                 Event::Mouse(_) if g.subagent_modal_open => continue,
                 Event::Mouse(_) if g.transcript_search_open => continue,
-                Event::Mouse(_) if g.plugin_browser.is_some() => continue,
+                Event::Mouse(_) if g.plugin_browser.is_some() || g.setup_picker.is_some() => {
+                    continue;
+                }
                 Event::Mouse(m) if g.view_mode == crate::tui::state::ViewMode::Dashboard => {
                     handle_dashboard_mouse(
                         m,
