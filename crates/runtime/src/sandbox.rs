@@ -201,3 +201,42 @@ mod tests {
         assert!(!status.success(), "outside write should have failed");
     }
 }
+
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod macos_tests {
+    use std::process::Command;
+
+    /// End-to-end on a real Mac (CI `check-macos`): under `sandbox-exec`
+    /// with the generated Seatbelt profile, a child can write inside the
+    /// workspace but not elsewhere in $HOME.
+    #[test]
+    fn seatbelt_child_cannot_write_outside_workspace() {
+        let workspace = tempfile::tempdir().unwrap();
+        let home = std::env::var_os("HOME").expect("HOME");
+        let outside = tempfile::tempdir_in(home).unwrap();
+        let inside_file = workspace.path().join("ok.txt");
+        let outside_file = outside.path().join("blocked.txt");
+        let ws = dcode_ai_common::config::canonicalize_simplified(workspace.path()).unwrap();
+        let status = Command::new("/usr/bin/sandbox-exec")
+            .arg("-p")
+            .arg(super::seatbelt_profile(&ws, &[]))
+            .arg("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "echo hi > '{}'; echo hi > '{}'",
+                inside_file.display(),
+                outside_file.display()
+            ))
+            .status()
+            .expect("run sandbox-exec");
+        assert!(
+            inside_file.exists(),
+            "workspace write must succeed ({status})"
+        );
+        assert!(
+            !outside_file.exists(),
+            "write outside the workspace must be blocked"
+        );
+    }
+}
