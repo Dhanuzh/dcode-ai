@@ -40,7 +40,6 @@ anyhow = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 
 # External crates
-cli-prompts = "0.1"
 
 # Internal crates
 dcode-ai-common = { path = "crates/common" }

@@ -22,12 +22,11 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 reqwest = { workspace = true }
-cli-prompts = { workspace = true }
 clap = { version = "4", features = ["derive", "env"] }
 clap_complete = "4"
 crossterm = { version = "0.29", features = ["event-stream"] }
 futures = "0.3"
-reedline = "0.38"
+reedline = "0.52"
 syntect = { version = "5", default-features = false, features = ["default-syntaxes", "default-themes", "parsing", "html", "regex-fancy"] }
 two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"] }
 pulldown-cmark = "0.12"

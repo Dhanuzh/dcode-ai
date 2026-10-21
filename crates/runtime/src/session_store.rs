@@ -89,13 +89,58 @@ impl SessionStore {
         serde_json::from_value(value).map_err(|e| SessionStoreError::Deserialize(e.to_string()))
     }
 
+    /// The session's metadata without building its message history: the
+    /// transcript is skipped while parsing. Older schemas take the full,
+    /// migrating path.
     pub async fn load_snapshot(
         &self,
         session_id: &str,
     ) -> Result<SessionSnapshot, SessionStoreError> {
-        self.load(session_id)
+        #[derive(serde::Deserialize)]
+        struct Header {
+            #[serde(default)]
+            schema_version: u32,
+            meta: dcode_ai_common::session::SessionMeta,
+            #[serde(default)]
+            total_input_tokens: u64,
+            #[serde(default)]
+            total_output_tokens: u64,
+            #[serde(default)]
+            estimated_cost_usd: f64,
+        }
+        let path = self.sessions_dir.join(format!("{session_id}.json"));
+        let json = tokio::fs::read_to_string(&path)
             .await
-            .map(|session| session.snapshot())
+            .map_err(|e| SessionStoreError::Io(e.to_string()))?;
+        match serde_json::from_str::<Header>(&json) {
+            Ok(h) if h.schema_version == SESSION_SCHEMA_VERSION => Ok(SessionState {
+                meta: h.meta,
+                messages: Vec::new(),
+                total_input_tokens: h.total_input_tokens,
+                total_output_tokens: h.total_output_tokens,
+                estimated_cost_usd: h.estimated_cost_usd,
+            }
+            .snapshot()),
+            _ => self.load(session_id).await.map(|s| s.snapshot()),
+        }
+    }
+
+    /// Snapshots of many sessions, read concurrently. Unreadable ids are
+    /// returned separately.
+    pub async fn load_snapshots(&self, ids: Vec<String>) -> (Vec<SessionSnapshot>, Vec<String>) {
+        let loads = ids.into_iter().map(|id| async move {
+            let r = self.load_snapshot(&id).await;
+            (id, r)
+        });
+        let mut ok = Vec::new();
+        let mut bad = Vec::new();
+        for (id, r) in futures_util::future::join_all(loads).await {
+            match r {
+                Ok(s) => ok.push(s),
+                Err(_) => bad.push(id),
+            }
+        }
+        (ok, bad)
     }
 
     pub async fn list(&self) -> Result<Vec<String>, SessionStoreError> {
@@ -200,15 +245,7 @@ impl SessionStore {
         &self,
     ) -> Result<(Vec<SessionSnapshot>, Vec<String>), SessionStoreError> {
         let ids = self.list().await?;
-        let mut snapshots = Vec::new();
-        let mut unreadable = Vec::new();
-        for id in ids {
-            match self.load_snapshot(&id).await {
-                Ok(snapshot) => snapshots.push(snapshot),
-                Err(_) => unreadable.push(id),
-            }
-        }
-        Ok((snapshots, unreadable))
+        Ok(self.load_snapshots(ids).await)
     }
 }
 

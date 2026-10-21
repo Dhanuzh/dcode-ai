@@ -1,4 +1,4 @@
-//! Interactive CLI approval prompts using cli-prompts library.
+//! Interactive CLI approval prompts (plain `[y/N]` on stderr).
 //!
 //! Provides enhanced approval dialogs with:
 //! - Rich tool descriptions
@@ -6,10 +6,6 @@
 //! - Confirmation prompts with help text
 //! - Multi-select for batch approvals
 
-use cli_prompts::{
-    DisplayPrompt,
-    prompts::{AbortReason, Confirmation},
-};
 use dcode_ai_common::tool::ToolCall;
 use dcode_ai_core::approval::{ApprovalHandler, ApprovalVerdict};
 use serde_json::Value;
@@ -26,6 +22,23 @@ pub fn format_json_pretty(value: &Value) -> String {
     }
 }
 
+/// Ask `question` on stderr and read `y`/`n` from stdin (default no).
+/// `None` when stdin is closed or unreadable.
+fn confirm(question: &str) -> Option<bool> {
+    use std::io::{BufRead, Write};
+    let mut err = std::io::stderr();
+    let _ = write!(err, "{question}\nApprove? [y/N] ");
+    let _ = err.flush();
+    let mut answer = String::new();
+    match std::io::stdin().lock().read_line(&mut answer) {
+        Ok(0) | Err(_) => None,
+        Ok(_) => Some(matches!(
+            answer.trim().to_ascii_lowercase().as_str(),
+            "y" | "yes"
+        )),
+    }
+}
+
 /// Truncate long strings with ellipsis
 pub fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
@@ -39,7 +52,7 @@ pub fn truncate(s: &str, max_len: usize) -> String {
     }
 }
 
-/// Interactive approval handler using cli-prompts library.
+/// Interactive approval handler with a terminal `[y/N]` prompt.
 /// Provides rich TUI prompts for tool approval.
 #[allow(dead_code)]
 pub struct InteractiveApprovalHandler {
@@ -79,15 +92,7 @@ impl InteractiveApprovalHandler {
             )
         };
 
-        let confirmed = Confirmation::new(&prompt_msg)
-            .default_positive(false)
-            .display();
-
-        match confirmed {
-            Ok(true) => Some(true),
-            Ok(false) => Some(false),
-            Err(AbortReason::Interrupt) | Err(AbortReason::Error(_)) => None,
-        }
+        confirm(&prompt_msg)
     }
 
     #[allow(dead_code)]
@@ -159,15 +164,7 @@ impl InteractiveIpcApprovalHandler {
             )
         };
 
-        let confirmed = Confirmation::new(&prompt_msg)
-            .default_positive(false)
-            .display();
-
-        match confirmed {
-            Ok(true) => Some(true),
-            Ok(false) => Some(false),
-            Err(AbortReason::Interrupt) | Err(AbortReason::Error(_)) => None,
-        }
+        confirm(&prompt_msg)
     }
 }
 

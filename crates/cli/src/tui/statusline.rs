@@ -57,7 +57,7 @@ async fn run_once(command: &str, input: Value) -> Option<String> {
 }
 
 /// Keep `statusline_text` fresh while the session runs.
-pub(crate) fn spawn_poller(state: Arc<Mutex<TuiSessionState>>) {
+pub fn spawn_poller(state: Arc<Mutex<TuiSessionState>>) {
     tokio::spawn(async move {
         loop {
             let snapshot = match state.lock() {

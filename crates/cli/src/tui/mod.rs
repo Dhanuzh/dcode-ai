@@ -31,7 +31,7 @@ pub mod replay;
 pub mod scroll_buffer;
 pub mod slash_entries;
 pub mod state;
-pub(crate) mod statusline;
+pub mod statusline;
 pub mod terminal;
 pub mod theme;
 pub mod tool_summary;

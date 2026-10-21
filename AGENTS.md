@@ -15,8 +15,8 @@
 
 ## Learned Workspace Facts
 
-- Rust workspace with **4 crates**: `dcode-ai-common`, `dcode-ai-core`, `dcode-ai-runtime`, `dcode-ai-cli`
-- IPC between CLI and runtime uses Unix domain sockets with newline-delimited JSON
+- Rust workspace with **5 crates**: `dcode-ai-common`, `dcode-ai-core`, `dcode-ai-runtime`, `dcode-ai-cli`, `dcode-ai-autoresearch`
+- IPC between CLI and runtime uses Unix domain sockets (localhost TCP with a `<sid>.<port>.tcp` marker on Windows) with length-prefixed JSON frames (4-byte big-endian length, v2; see `crates/runtime/src/ipc.rs`)
 - Sessions persisted as `<id>.json` (state) + `<id>.events.jsonl` (event log) in `<workspace>/.dcode-ai/sessions/`
 - Master plan: `docs/plans/2026-10-12-v1-master-plan.md` (research, architecture, milestones M1–M8)
 - Extensibility follows Claude Code's open file formats: `.mcp.json` (local/project/user scopes), `commands/**/*.md`, `agents/*.md`, plugins (`.claude-plugin/plugin.json` layout) installed under `~/.dcode-ai/plugins/` (`dcode-ai plugin …`)

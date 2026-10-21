@@ -516,6 +516,8 @@ impl Repl {
                         "\n[cancel] Press Ctrl+D to exit, or wait for current operation to complete"
                     );
                 }
+                // Host commands and external breaks are not used here.
+                Ok(_) => {}
                 Err(err) => {
                     eprintln!("read error: {err}");
                     break;
@@ -5330,7 +5332,16 @@ then switch).",
 
 /// Tab completion for REPL commands and skills
 impl Completer for Repl {
-    fn complete(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
+    fn complete(&mut self, line: &str, pos: usize) -> reedline::CompletionResult {
+        reedline::CompletionResult::Fresh {
+            suggestions: self.complete_line(line, pos).into(),
+            partial: None,
+        }
+    }
+}
+
+impl Repl {
+    fn complete_line(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
 
         if let Some((at_byte, prefix)) = at_token_before_cursor(line, pos) {
@@ -5346,6 +5357,7 @@ impl Completer for Repl {
                     },
                     append_whitespace: false,
                     style: None,
+                    ..Default::default()
                 });
             }
             if !suggestions.is_empty() {
@@ -5364,6 +5376,7 @@ impl Completer for Repl {
                         span: reedline::Span { start: 0, end: 0 },
                         append_whitespace: true,
                         style: None,
+                        ..Default::default()
                     });
                 }
             }
@@ -5386,6 +5399,7 @@ impl Completer for Repl {
                         span: reedline::Span { start: 0, end: 0 },
                         append_whitespace: true,
                         style: None,
+                        ..Default::default()
                     });
                 }
             }
@@ -5406,6 +5420,7 @@ impl Completer for Repl {
                         span: reedline::Span { start: 0, end: 0 },
                         append_whitespace: true,
                         style: None,
+                        ..Default::default()
                     });
                 }
             }

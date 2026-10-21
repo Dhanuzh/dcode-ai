@@ -153,7 +153,7 @@ pub(crate) fn wrap_preformatted_line(line: &str, width: usize) -> Vec<String> {
 }
 
 /// Truncate `s` to `max` chars, appending `…` when shortened.
-pub(crate) fn truncate_chars(s: &str, max: usize) -> String {
+pub fn truncate_chars(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {

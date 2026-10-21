@@ -2,29 +2,23 @@
 // clippy 1.99+ reports that as `double_must_use`.
 #![allow(clippy::double_must_use)]
 mod acp_server;
-mod activity;
-mod approval_prompts;
 mod ci_cmd;
 mod cli_index;
-mod file_mentions;
-mod image_attach;
-mod ipc_pending;
 mod mcp_cli;
 mod mcp_serve;
-mod oauth_login;
 mod plugin_cli;
 mod policy_cli;
-mod prompt;
 mod repl;
 mod repl_helpers;
 mod runner;
 mod setup_cli;
-mod slash_commands;
-mod stream;
-mod tool_ui;
-mod tui;
-mod update_check;
 mod web_server;
+
+// Shared with the library target; compiled once there.
+use dcode_ai_cli::{
+    approval_prompts, file_mentions, image_attach, ipc_pending, oauth_login, prompt,
+    slash_commands, stream, tool_ui, tui, update_check,
+};
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;
 use clap::CommandFactory;
@@ -673,7 +667,11 @@ async fn try_main() -> anyhow::Result<()> {
 
     tracing::info!("dcode-ai starting");
     let mut config = DcodeAiConfig::load()?;
-    apply_logged_provider_preference(&mut config);
+    // Picking a provider can ask `claude` whether it is signed in (a few
+    // hundred ms); commands that never call a model skip it.
+    if uses_model(cli.command.as_ref()) {
+        apply_logged_provider_preference(&mut config);
+    }
     let orchestration_context = OrchestrationContext::from_env();
     if let Some(model) = &cli.model {
         config.apply_model_override(model);
@@ -1459,15 +1457,7 @@ async fn list_sessions(
         workspace_root.join(&config.session.history_dir),
     );
     let ids = store.list().await.map_err(anyhow::Error::msg)?;
-    let mut sessions = Vec::new();
-    let mut unreadable = Vec::new();
-
-    for id in ids {
-        match store.load_snapshot(&id).await {
-            Ok(session) => sessions.push(session),
-            Err(_) => unreadable.push(id),
-        }
-    }
+    let (mut sessions, mut unreadable) = store.load_snapshots(ids).await;
 
     // Sub-agent sessions appear as `(+N sub-agents)` on their parent.
     if !include_children {
@@ -1729,10 +1719,7 @@ async fn latest_session_id(
 
     // Same view as `dcode-ai sessions`: snapshots (cheap, and readable
     // while a live session is writing), top-level sessions only.
-    for id in ids {
-        let Ok(session) = store.load_snapshot(&id).await else {
-            continue;
-        };
+    for session in store.load_snapshots(ids).await.0 {
         if session.parent_session_id.is_some() {
             continue;
         }
@@ -2814,6 +2801,30 @@ fn should_open_oauth_onboarding(config: &DcodeAiConfig) -> bool {
     }
 
     runtime_provider_from_auth(&AuthStore::load().unwrap_or_default()).is_none()
+}
+
+/// Whether `command` may call a model (and so needs the provider settled).
+fn uses_model(command: Option<&Command>) -> bool {
+    !matches!(
+        command,
+        Some(
+            Command::Sessions { .. }
+                | Command::Logs { .. }
+                | Command::Attach { .. }
+                | Command::Status { .. }
+                | Command::Cancel { .. }
+                | Command::Skills { .. }
+                | Command::Policy { .. }
+                | Command::Plugin { .. }
+                | Command::Setup(_)
+                | Command::Mcp { .. }
+                | Command::Memory { .. }
+                | Command::Completion { .. }
+                | Command::Index { .. }
+                | Command::Worktrees { .. }
+                | Command::Logout { .. }
+        )
+    )
 }
 
 fn apply_logged_provider_preference(config: &mut DcodeAiConfig) {
