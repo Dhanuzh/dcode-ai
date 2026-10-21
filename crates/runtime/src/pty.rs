@@ -17,6 +17,17 @@ pub struct PtyManager {
     /// from `[permissions] sandbox_writable_roots`.
     #[cfg_attr(not(unix), allow(dead_code))]
     sandbox_writable_roots: Vec<std::path::PathBuf>,
+    /// The session is rooted at the process's directory, so commands follow
+    /// it (`/cd`). A session rooted elsewhere (a sub-agent's worktree) always
+    /// runs in its own root.
+    follow_process_cwd: bool,
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => a == b,
+    }
 }
 
 impl PtyManager {
@@ -36,10 +47,15 @@ impl PtyManager {
         sandbox: bool,
         sandbox_writable_roots: Vec<std::path::PathBuf>,
     ) -> Self {
+        let workspace_root = workspace_root.as_ref().to_path_buf();
+        let follow_process_cwd = std::env::current_dir()
+            .map(|cwd| same_dir(&cwd, &workspace_root))
+            .unwrap_or(false);
         Self {
-            workspace_root: workspace_root.as_ref().to_path_buf(),
+            workspace_root,
             sandbox,
             sandbox_writable_roots,
+            follow_process_cwd,
         }
     }
 
@@ -57,9 +73,13 @@ impl PtyManager {
         timeout_secs: u64,
         line_tx: Option<tokio::sync::mpsc::Sender<String>>,
     ) -> Result<PtyOutput, PtyError> {
-        // Use process cwd if it differs from the stored root (e.g. after /cd).
-        let effective_root =
-            std::env::current_dir().unwrap_or_else(|_| self.workspace_root.clone());
+        // The main session follows the process directory (after /cd);
+        // sessions rooted elsewhere stay in their root.
+        let effective_root = if self.follow_process_cwd {
+            std::env::current_dir().unwrap_or_else(|_| self.workspace_root.clone())
+        } else {
+            self.workspace_root.clone()
+        };
         // macOS: confine through Seatbelt (`sandbox-exec`); Linux uses Landlock
         // in `pre_exec` below.
         let mut cmd = if cfg!(target_os = "macos") && self.sandbox {
@@ -253,4 +273,18 @@ pub enum PtyError {
     Timeout(u64),
     #[error("Spawn failed: {0}")]
     SpawnFailed(String),
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_session_rooted_elsewhere_runs_commands_in_its_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let pty = PtyManager::new(dir.path());
+        let out = pty.exec("pwd", 10).await.unwrap();
+        let got = std::path::PathBuf::from(out.stdout.trim());
+        assert!(same_dir(&got, dir.path()), "ran in {}", got.display());
+    }
 }

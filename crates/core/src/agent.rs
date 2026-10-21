@@ -661,7 +661,13 @@ impl AgentLoop {
                 self.undo.record_tool_call(call, workspace_root);
             }
 
-            if !to_execute.is_empty() {
+            // Read-only calls run in parallel; a batch that writes or runs
+            // commands runs one call at a time in the order given, so a read
+            // after a write sees the write.
+            let parallel = to_execute
+                .iter()
+                .all(|(_, call)| concurrency_safe(&call.name));
+            if parallel && !to_execute.is_empty() {
                 let mut futures: FuturesUnordered<_> = to_execute
                     .iter()
                     .map(|(i, call)| {
@@ -670,20 +676,22 @@ impl AgentLoop {
                     })
                     .collect();
 
-                // Poll tool futures with cancellation checking.
                 // When cancelled, remaining futures are dropped and their
                 // results stay `None` (skipped in final_results below).
                 loop {
-                    if results.iter().all(|r| r.is_some()) {
-                        break;
-                    }
                     tokio::select! {
-                        Some((i, result)) = futures.next() => {
-                            results[i] = Some(result);
-                        }
-                        _ = self.cancelled() => {
-                            break;
-                        }
+                        next = futures.next() => match next {
+                            Some((i, result)) => results[i] = Some(result),
+                            None => break,
+                        },
+                        _ = self.cancelled() => break,
+                    }
+                }
+            } else {
+                for (i, call) in &to_execute {
+                    tokio::select! {
+                        result = self.tools.execute(call) => results[*i] = Some(result),
+                        _ = self.cancelled() => break,
                     }
                 }
             }
@@ -996,6 +1004,23 @@ fn cap_tool_output(s: &str) -> String {
     let omitted = total - head - tail;
     format!(
         "{head_str}\n\n… [{omitted} characters truncated to keep the context small — re-run with a narrower query/range if you need the omitted part] …\n\n{tail_str}"
+    )
+}
+
+/// Tools that only read, so several can run at once.
+fn concurrency_safe(tool: &str) -> bool {
+    matches!(
+        tool,
+        "read_file"
+            | "list_directory"
+            | "search_code"
+            | "git_status"
+            | "git_diff"
+            | "inspect_binary"
+            | "query_symbols"
+            | "web_search"
+            | "fetch_url"
+            | "tool_search"
     )
 }
 
@@ -1344,6 +1369,87 @@ mod tests {
         let history = agent.messages.clone();
         agent.compact_messages(history);
         assert!(agent.messages.iter().all(|m| m.provider_blocks.is_none()));
+    }
+
+    struct DenyAll;
+
+    #[async_trait]
+    impl crate::approval::ApprovalHandler for DenyAll {
+        async fn resolve(&self, _call: &ToolCall, _description: &str) -> ApprovalVerdict {
+            ApprovalVerdict::Denied
+        }
+    }
+
+    /// A write followed by a read of the same file in one batch runs in
+    /// order, and a batch that mixes a denied call with executed ones still
+    /// finishes.
+    #[tokio::test]
+    async fn mixed_batches_run_in_order_and_finish() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root = temp.path().canonicalize().expect("canonical");
+        let call = |id: &str, name: &str, input: serde_json::Value| {
+            StreamChunk::ToolUse(ToolCall {
+                id: id.into(),
+                name: name.into(),
+                input,
+            })
+        };
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(VecDeque::from([
+                vec![
+                    call(
+                        "w",
+                        "write_file",
+                        serde_json::json!({"path": "a.txt", "content": "hi"}),
+                    ),
+                    call("r", "read_file", serde_json::json!({"path": "a.txt"})),
+                    call("d", "delete_path", serde_json::json!({"path": "a.txt"})),
+                    StreamChunk::Done,
+                ],
+                vec![StreamChunk::TextDelta("done".into()), StreamChunk::Done],
+            ])),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(crate::tools::write_file::WriteFileTool::new(
+            root.clone(),
+        )));
+        tools.register(Box::new(crate::tools::filesystem::ReadFileTool::new(
+            root.clone(),
+        )));
+        let (event_tx, _rx) = tokio::sync::mpsc::channel(256);
+        let mut agent = AgentLoop::new(
+            provider,
+            tools,
+            // Auto mode: the edit runs, deleting asks and is denied.
+            ApprovalPolicy::new(PermissionConfig {
+                mode: PermissionMode::Auto,
+                ..PermissionConfig::default()
+            })
+            .with_handler(Arc::new(DenyAll)),
+            "test-model".into(),
+            event_tx,
+            3,
+            3,
+            0,
+            None,
+        );
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            agent.run_turn("go", &root, &[]),
+        )
+        .await
+        .expect("turn finished")
+        .expect("turn ok");
+        assert_eq!(out, "done");
+        let read = agent
+            .messages
+            .iter()
+            .find(|m| m.tool_call_id.as_deref() == Some("r"))
+            .expect("read result");
+        assert!(
+            matches!(&read.content, dcode_ai_common::message::MessageContent::Text(t) if t.trim() == "hi")
+        );
+        assert!(root.join("a.txt").exists());
     }
 
     #[tokio::test]

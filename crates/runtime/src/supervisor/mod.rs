@@ -222,6 +222,8 @@ impl Supervisor {
         // so it can stream ToolOutputDelta events.
 
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
+        let mode_cell: dcode_ai_core::approval::ModeCell =
+            Arc::new(std::sync::RwLock::new(config.permissions.mode));
         if !cfg.safe_mode {
             let agents = dcode_ai_core::agent_defs::discover(
                 &workspace_root,
@@ -231,7 +233,9 @@ impl Supervisor {
             .map(|d| (d.name, d.description))
             .collect();
             tools.register(Box::new(
-                SpawnSubagentTool::new(spawn_tx).with_agents(agents),
+                SpawnSubagentTool::new(spawn_tx)
+                    .with_agents(agents)
+                    .with_parent_mode(mode_cell.clone()),
             ));
         }
 
@@ -240,18 +244,22 @@ impl Supervisor {
             match cfg.approval_handler {
                 Some(handler) => {
                     approval_pending = None;
-                    ApprovalPolicy::new(config.permissions.clone()).with_handler(handler)
+                    ApprovalPolicy::new(config.permissions.clone())
+                        .with_mode_cell(mode_cell.clone())
+                        .with_handler(handler)
                 }
                 None => {
                     let ipc_handler = IpcApprovalHandler::new();
                     approval_pending = Some(ipc_handler.pending());
                     ApprovalPolicy::new(config.permissions.clone())
+                        .with_mode_cell(mode_cell.clone())
                         .with_handler(ipc_handler as Arc<dyn ApprovalHandler>)
                 }
             }
         } else {
             approval_pending = None;
             ApprovalPolicy::new(config.permissions.clone())
+                .with_mode_cell(mode_cell.clone())
                 .fail_on_ask()
                 .with_handler(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>)
         };

@@ -3959,6 +3959,9 @@ then switch).",
             ),
             use_worktree: false,
             focus_files: changed,
+            // The reviewer has no edit tools; auto mode lets it run checks
+            // while risky commands are still refused.
+            parent_mode: Some(PermissionMode::Auto),
         };
         let report = match dcode_ai_runtime::supervisor::spawn_child_session(
             cfg,

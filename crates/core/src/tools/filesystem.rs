@@ -67,6 +67,12 @@ impl ToolExecutor for ReadFileTool {
                     },
                 }
             }
+            Err(_) if !full_path.exists() => ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(format!("File not found: {path}")),
+            },
             _ => ToolResult {
                 call_id: call.id.clone(),
                 success: false,

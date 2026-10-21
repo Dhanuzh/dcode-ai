@@ -11,6 +11,8 @@ pub struct SpawnRequest {
     pub agent: Option<String>,
     pub focus_files: Vec<String>,
     pub use_worktree: bool,
+    /// The parent's permission mode when the call was made.
+    pub parent_mode: Option<dcode_ai_common::config::PermissionMode>,
     pub reply: oneshot::Sender<SpawnResponse>,
 }
 
@@ -29,6 +31,7 @@ pub struct SpawnSubagentTool {
     spawn_tx: mpsc::Sender<SpawnRequest>,
     /// `(name, description)` of custom agents the model may pick.
     agents: Vec<(String, String)>,
+    parent_mode: Option<crate::approval::ModeCell>,
 }
 
 impl SpawnSubagentTool {
@@ -36,7 +39,14 @@ impl SpawnSubagentTool {
         Self {
             spawn_tx,
             agents: Vec::new(),
+            parent_mode: None,
         }
+    }
+
+    /// Pass the parent's live permission mode to each child.
+    pub fn with_parent_mode(mut self, cell: crate::approval::ModeCell) -> Self {
+        self.parent_mode = Some(cell);
+        self
     }
 
     /// Offer custom agents through the `agent` parameter.
@@ -165,6 +175,10 @@ impl SpawnSubagentTool {
             agent,
             focus_files,
             use_worktree,
+            parent_mode: self
+                .parent_mode
+                .as_ref()
+                .and_then(|c| c.read().ok().map(|m| *m)),
             reply: reply_tx,
         };
 

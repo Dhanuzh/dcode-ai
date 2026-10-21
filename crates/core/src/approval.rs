@@ -100,21 +100,43 @@ pub fn suggest_allow_pattern(tool_name: &str, tool_input: &serde_json::Value) ->
 }
 
 /// Determines whether a tool call or command is allowed, needs approval, or is denied.
+/// The session's current permission mode, shared with the sub-agent spawner
+/// so children follow Shift+Tab changes.
+pub type ModeCell = Arc<std::sync::RwLock<PermissionMode>>;
+
 pub struct ApprovalPolicy {
     config: PermissionConfig,
     handler: Option<Arc<dyn ApprovalHandler>>,
     fail_on_ask: bool,
     pub session_allow: Vec<String>,
+    mode_cell: ModeCell,
 }
 
 impl ApprovalPolicy {
     pub fn new(config: PermissionConfig) -> Self {
+        let mode_cell = Arc::new(std::sync::RwLock::new(config.mode));
         Self {
             config,
             handler: None,
             fail_on_ask: false,
             session_allow: Vec::new(),
+            mode_cell,
         }
+    }
+
+    /// Share `cell` as this policy's live mode (set to the current mode).
+    pub fn with_mode_cell(mut self, cell: ModeCell) -> Self {
+        if let Ok(mut m) = cell.write() {
+            *m = self.config.mode;
+        }
+        self.mode_cell = cell;
+        self
+    }
+
+    /// Sub-agents: a call that needs approval is denied (and the agent told
+    /// so) instead of ending the run.
+    pub fn set_fail_on_ask(&mut self, fail: bool) {
+        self.fail_on_ask = fail;
     }
 
     /// Add a pattern to the session-scoped allow list. Skips duplicates.
@@ -338,6 +360,9 @@ impl ApprovalPolicy {
 
     pub fn set_mode(&mut self, mode: PermissionMode) {
         self.config.mode = mode;
+        if let Ok(mut m) = self.mode_cell.write() {
+            *m = mode;
+        }
     }
 }
 
@@ -421,6 +446,19 @@ pub fn auto_mode_risky(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_mode_cell_follows_set_mode() {
+        let cell: ModeCell = Arc::new(std::sync::RwLock::new(PermissionMode::Default));
+        let mut policy = ApprovalPolicy::new(PermissionConfig {
+            mode: PermissionMode::AcceptEdits,
+            ..PermissionConfig::default()
+        })
+        .with_mode_cell(cell.clone());
+        assert_eq!(*cell.read().unwrap(), PermissionMode::AcceptEdits);
+        policy.set_mode(PermissionMode::Auto);
+        assert_eq!(*cell.read().unwrap(), PermissionMode::Auto);
+    }
 
     #[test]
     fn auto_mode_flags_risky_commands_only() {
