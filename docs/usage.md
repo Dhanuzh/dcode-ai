@@ -244,6 +244,10 @@ Shift+Tab cycles default → accept edits → plan → auto; the footer shows th
 mode (`⏵⏵ auto mode on`). The startup chooser and `--permission-mode auto`
 also pick it.
 
+The startup chooser (Manual / Accept edits / Auto) appears once per folder;
+the answer is remembered in `~/.dcode-ai/folders.json`. Pick again with
+`/permissions mode`.
+
 Rules: `/permissions` lists every allow, ask and deny rule with where it comes
 from. `/permissions allow Bash(cargo test:*)` adds one for this session and
 saves it to `.dcode-ai/config.local.toml` (`--user` saves it to

@@ -433,6 +433,22 @@ impl Repl {
         id
     }
 
+    /// Apply a startup permission choice (`manual`, `accept_edits`, `auto`);
+    /// returns the line describing it.
+    fn apply_startup_permission(&mut self, choice: &str) -> &'static str {
+        match choice {
+            "auto" => {
+                self.set_mode_and_profile(PermissionMode::Auto);
+                "Auto — runs without asking; risky actions (delete, push, publish, sudo) still ask"
+            }
+            "accept_edits" => {
+                self.set_mode_and_profile(PermissionMode::AcceptEdits);
+                "Accept edits — file edits run without asking; commands still ask"
+            }
+            _ => "Manual — dcode-ai asks before edits and commands",
+        }
+    }
+
     fn should_offer_startup_approve_all_popup(&self) -> bool {
         self.runtime.config().permissions.startup_approve_all
             && !matches!(
@@ -1168,7 +1184,22 @@ impl Repl {
 
         // Only for a fresh conversation: a resumed one (replayed blocks)
         // opens straight onto its history, like Claude Code.
-        if self.should_offer_startup_approve_all_popup()
+        // A folder answered before keeps its choice: asked once per folder.
+        let remembered = self
+            .should_offer_startup_approve_all_popup()
+            .then(|| dcode_ai_common::folders::remembered_permission(self.runtime.workspace_root()))
+            .flatten();
+        if let Some(choice) = remembered {
+            let note = self.apply_startup_permission(&choice);
+            if let Ok(mut g) = tui_state.lock() {
+                g.set_agent_profile(&self.current_agent_label);
+                g.set_permission_mode(&format!("{:?}", self.runtime.permission_mode()));
+                g.blocks.push(DisplayBlock::System(format!(
+                    "[permissions] {note} (remembered for this folder). Shift+Tab changes it; /permissions mode to pick again."
+                )));
+                g.touch_transcript();
+            }
+        } else if self.should_offer_startup_approve_all_popup()
             && let Ok(mut g) = tui_state.lock()
             && g.active_question.is_none()
             && !g.blocks.iter().any(|b| matches!(b, DisplayBlock::User(_)))
@@ -1649,6 +1680,19 @@ impl Repl {
                 TuiCmd::ApplyPermission(idx) => {
                     let mode = permission_mode_from_index(idx);
                     self.runtime.set_permission_mode(mode);
+                    // The startup choices become this folder's remembered one.
+                    let choice = match mode {
+                        PermissionMode::Default => Some("manual"),
+                        PermissionMode::AcceptEdits => Some("accept_edits"),
+                        PermissionMode::Auto => Some("auto"),
+                        _ => None,
+                    };
+                    if let Some(c) = choice {
+                        let _ = dcode_ai_common::folders::remember_permission(
+                            self.runtime.workspace_root(),
+                            c,
+                        );
+                    }
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_permission_mode(&format!("{mode:?}"));
                         g.blocks.push(DisplayBlock::System(format!(
@@ -2048,17 +2092,13 @@ impl Repl {
                                     "manual".to_string()
                                 }
                             };
-                            let note = match choice.as_str() {
-                                "auto" => {
-                                    self.set_mode_and_profile(PermissionMode::Auto);
-                                    "Auto — runs without asking; risky actions (delete, push, publish, sudo) still ask"
-                                }
-                                "accept_edits" => {
-                                    self.set_mode_and_profile(PermissionMode::AcceptEdits);
-                                    "Accept edits — file edits run without asking; commands still ask"
-                                }
-                                _ => "Manual — dcode-ai asks before edits and commands",
-                            };
+                            let note = self.apply_startup_permission(&choice);
+                            if let Err(e) = dcode_ai_common::folders::remember_permission(
+                                self.runtime.workspace_root(),
+                                &choice,
+                            ) {
+                                tracing::warn!("could not remember the permission choice: {e}");
+                            }
                             if let Ok(mut g) = tui_state.lock() {
                                 g.active_question = None;
                                 g.close_question_modal();
