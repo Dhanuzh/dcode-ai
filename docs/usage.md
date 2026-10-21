@@ -96,6 +96,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/image`, `/web`, `/run` | Attach an image, fetch a page, run a command into context |
 | `/diff`, `/commit` | Review and commit changes |
 | `/bashes` | Background shells the agent started (`/bashes kill <id>`) |
+| `/setup` | Starter packs: list them, or `/setup <id>…` to install |
 | `/doctor`, `/login`, `/logout`, `/auth` | Diagnostics and sign-in |
 
 ## Command line
@@ -122,6 +123,7 @@ dcode-ai cancel <id>              # stop a running session
 dcode-ai login anthropic|copilot  # sign in
 dcode-ai models                   # models on the active provider
 dcode-ai doctor                   # diagnose setup
+dcode-ai setup                    # starter packs for your role and languages
 dcode-ai policy show|test         # permission rules
 dcode-ai worktrees list|prune|merge <id>
 dcode-ai web                      # local browser chat for a live session
@@ -148,6 +150,49 @@ Sessions untouched for 30 days are deleted at startup
 A session records its model, provider, token counts, estimated cost,
 timestamps, parent/child lineage and orchestration metadata. Resuming keeps
 the provider and model it ran on.
+
+## Starter packs
+
+Optional. `dcode-ai setup` asks what you work on (Backend, Frontend / UI-UX,
+DevOps, Automation, Data / ML, Security) and which languages (the ones found
+in the repo are preselected), then installs the plugins that fit from the
+official marketplace. Language tools such as `gopls` are never installed for
+you; missing ones are listed with their install command.
+
+```bash
+dcode-ai setup                    # wizard
+dcode-ai setup backend rust       # install packs directly
+dcode-ai setup --list             # packs and what each adds (● = installed)
+dcode-ai setup --detect           # languages found in this repo
+dcode-ai setup --remove frontend  # undo a pack (keeps plugins another pack uses)
+dcode-ai setup --save team.toml   # share your packs; teammates run --from team.toml
+```
+
+In a session, `/setup` lists the packs and `/setup <id>…` installs them.
+Re-running is safe: installed plugins are skipped.
+
+Make your own packs in `~/.dcode-ai/packs/*.toml` or
+`<repo>/.dcode-ai/packs/*.toml` (an id that exists replaces the built-in):
+
+```toml
+[[pack]]
+id = "acme"
+name = "Acme backend"
+kind = "role"                      # or "language" (with detect = ["go.mod", "*.go"])
+description = "Our services"
+plugins = ["code-review@claude-plugins-official"]
+
+[[pack.mcp]]                       # asked about one by one (--yes accepts)
+name = "acme-docs"
+url = "https://docs.acme.dev/mcp"
+
+[[pack.tools]]                     # checked on PATH, never installed
+command = "acme"
+install = "brew install acme/tap/acme"
+```
+
+MCP servers go to `.mcp.json` (`--scope user` for all projects). What each
+pack added is recorded in `~/.dcode-ai/setup.json`.
 
 ## Extra working folders
 
@@ -177,8 +222,13 @@ agents tab. Define specialised agents in `agents/*.md` — see
 | `plan` | Read and research only — no writes or shell |
 | `default` | Reads run; edits and unknown commands ask |
 | `accept-edits` | Edits run; commands still ask |
+| `auto` | Reads, edits and ordinary commands run; risky actions (deleting, `git push`, `reset --hard`, publishing, deploying, `sudo`, cloud CLIs) still ask |
 | `dont-ask` | Read-only, no prompts (headless) |
 | `bypass-permissions` | Everything runs without prompts (destructive commands are still refused) — trusted environments only |
+
+Shift+Tab cycles default → accept edits → plan → auto; the footer shows the
+mode (`⏵⏵ auto mode on`). The startup chooser and `--permission-mode auto`
+also pick it.
 
 Shell commands are parsed (quoting, pipelines) rather than matched as text:
 read-only commands (`ls`, `cat`, `rg`, `git status`, …) run in every mode except

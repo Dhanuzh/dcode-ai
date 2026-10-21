@@ -730,6 +730,7 @@ fn parse_permission_mode_str(raw: &str) -> Option<PermissionMode> {
         "accept-edits" | "accept_edits" => Some(PermissionMode::AcceptEdits),
         "dont-ask" | "dont_ask" => Some(PermissionMode::DontAsk),
         "bypass-permissions" | "bypass_permissions" => Some(PermissionMode::BypassPermissions),
+        "auto" => Some(PermissionMode::Auto),
         _ => None,
     }
 }

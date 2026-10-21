@@ -103,6 +103,7 @@ pub(super) fn mode_indicator(permission_mode: &str) -> Option<(String, Color)> {
         "plan" => ("⏸ plan mode on", Color::Rgb(72, 168, 158)),
         "bypasspermissions" => ("⏵⏵ bypass permissions on", theme::error()),
         "dontask" => ("⏵⏵ don't ask mode on", theme::warn()),
+        "auto" => ("⏵⏵ auto mode on", Color::Rgb(232, 178, 64)),
         _ => return None,
     };
     Some((format!("{label} (shift+tab to cycle)"), color))
@@ -236,6 +237,10 @@ mod tests {
                 .unwrap()
                 .0
                 .starts_with("⏸ plan mode on")
+        );
+        assert_eq!(
+            mode_indicator("Auto").unwrap().0,
+            "⏵⏵ auto mode on (shift+tab to cycle)"
         );
         assert!(mode_indicator("Default").is_none());
     }

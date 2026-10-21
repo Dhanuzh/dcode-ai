@@ -131,6 +131,7 @@ Press `?` on an empty prompt for every shortcut.
 
 ### Extensible the Claude Code way
 
+- **Starter packs** — `dcode-ai setup` installs plugins for your role (Backend, UI/UX, DevOps, Automation, Data, Security) and languages; optional, shareable as a team file.
 - **Plugins and marketplaces** — `/plugins` browser; the official `anthropics/claude-plugins-official` marketplace is added for you.
 - **MCP** — `.mcp.json` (local, project, user), `dcode-ai mcp add|list|get|remove`, and `dcode-ai mcp serve` to expose dcode-ai's tools to other agents.
 - **Skills, commands, agents, hooks** — `SKILL.md`, `commands/**/*.md`, `agents/*.md`, `hooks.json`, a status-line command.

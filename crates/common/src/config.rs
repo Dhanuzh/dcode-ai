@@ -1266,6 +1266,10 @@ pub enum PermissionMode {
     AcceptEdits,
     DontAsk,
     BypassPermissions,
+    /// Claude Code's auto mode: reads, edits and ordinary commands run
+    /// without asking; risky actions (deleting, pushing, publishing, `sudo`,
+    /// …) still ask and known-destructive commands are refused.
+    Auto,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

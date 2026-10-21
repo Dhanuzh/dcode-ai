@@ -215,6 +215,10 @@ fn permission_mode_section(mode: PermissionMode) -> Option<String> {
             "Permission Mode: bypass-permissions\n- Tools run without approval prompts.\n- Known-destructive shell commands are still refused; be careful with irreversible actions."
                 .into(),
         ),
+        PermissionMode::Auto => Some(
+            "Permission Mode: auto\n- Reads, file edits and ordinary shell commands run without approval prompts.\n- Deleting files, pushing, publishing, deploying and root commands still ask the user; prefer reversible steps."
+                .into(),
+        ),
         PermissionMode::Default => None,
     }
 }

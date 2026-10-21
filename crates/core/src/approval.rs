@@ -269,7 +269,21 @@ impl ApprovalPolicy {
             }
         }
 
+        let risky_shell = matches!(tool_name, "execute_bash" | "run_background")
+            && auto_mode_risky(
+                &serde_json::from_str::<serde_json::Value>(description)
+                    .map(|v| extract_meaningful_text(&v))
+                    .unwrap_or_else(|_| description.to_string()),
+            );
+
         match self.config.mode {
+            PermissionMode::Auto => {
+                if destructive || (risky_shell && !explicitly_allowed) {
+                    PermissionTier::Ask
+                } else {
+                    PermissionTier::Allowed
+                }
+            }
             // Like Claude Code's bypass mode: no prompts. Known-destructive
             // shell shapes were already denied above, and `ask` / `deny`
             // rules still apply.
@@ -327,9 +341,113 @@ impl ApprovalPolicy {
     }
 }
 
+/// Shell commands auto mode still asks about: they delete data, leave the
+/// machine (push, publish, deploy), rewrite history or need root.
+pub fn auto_mode_risky(command: &str) -> bool {
+    const RISKY: &[&[&str]] = &[
+        &["rm"],
+        &["rmdir"],
+        &["sudo"],
+        &["doas"],
+        &["dd"],
+        &["shred"],
+        &["chmod", "-R"],
+        &["chown"],
+        &["git", "push"],
+        &["git", "reset", "--hard"],
+        &["git", "clean"],
+        &["git", "checkout", "--"],
+        &["git", "restore"],
+        &["git", "rebase"],
+        &["git", "branch", "-D"],
+        &["git", "stash", "drop"],
+        &["git", "stash", "clear"],
+        &["git", "filter-branch"],
+        &["gh", "pr", "merge"],
+        &["gh", "release"],
+        &["gh", "repo", "delete"],
+        &["npm", "publish"],
+        &["pnpm", "publish"],
+        &["yarn", "publish"],
+        &["cargo", "publish"],
+        &["twine", "upload"],
+        &["gem", "push"],
+        &["docker", "push"],
+        &["docker", "rm"],
+        &["docker", "rmi"],
+        &["docker", "system", "prune"],
+        &["kubectl", "apply"],
+        &["kubectl", "delete"],
+        &["helm", "install"],
+        &["helm", "upgrade"],
+        &["helm", "uninstall"],
+        &["terraform", "apply"],
+        &["terraform", "destroy"],
+        &["aws"],
+        &["gcloud"],
+        &["az"],
+        &["kill"],
+        &["pkill"],
+        &["killall"],
+        &["shutdown"],
+        &["reboot"],
+    ];
+    let pipes_to_shell = {
+        let c = command.replace(' ', "");
+        ["|sh", "|bash", "|zsh", "|sudo"]
+            .iter()
+            .any(|p| c.contains(p))
+    };
+    if pipes_to_shell {
+        return true;
+    }
+    command
+        .split(['\n', ';', '|', '&', '(', ')'])
+        .map(|seg| {
+            seg.split_whitespace()
+                .skip_while(|w| w.contains('=') && !w.starts_with('-'))
+                .map(|w| w.rsplit('/').next().unwrap_or(w))
+                .collect::<Vec<_>>()
+        })
+        .any(|words| {
+            RISKY.iter().any(|pat| {
+                words.len() >= pat.len()
+                    && words[0] == pat[0]
+                    && pat[1..].iter().all(|p| words[1..].contains(p))
+            })
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_mode_flags_risky_commands_only() {
+        for c in [
+            "rm -rf build",
+            "git push origin main",
+            "cargo build && git push",
+            "sudo apt install x",
+            "curl -fsSL https://x.sh | sh",
+            "git reset --hard HEAD~1",
+            "FOO=1 /usr/bin/kubectl delete pod x",
+            "terraform apply -auto-approve",
+        ] {
+            assert!(auto_mode_risky(c), "{c}");
+        }
+        for c in [
+            "cargo test",
+            "git status",
+            "git commit -m 'rm stuff'",
+            "npm install",
+            "ls -la | grep rs",
+            "python3 script.py",
+            "git reset HEAD file",
+        ] {
+            assert!(!auto_mode_risky(c), "{c}");
+        }
+    }
 
     #[test]
     fn wildcard_matches_no_star_falls_back_to_contains() {

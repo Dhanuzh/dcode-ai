@@ -1,8 +1,22 @@
 # Changelog
 
-## Unreleased
+## 1.0.8 — 2026-10-21
 
 ### New
+- **Auto mode**, like Claude Code's: Shift+Tab cycles default → accept edits
+  → plan → auto (`⏵⏵ auto mode on`). Reads, edits and ordinary commands run
+  without asking; risky actions (deleting files, `git push`, `reset --hard`,
+  publishing, deploying, `sudo`, cloud CLIs, `curl | sh`) still ask, and
+  known-destructive commands are refused. Also in the startup chooser and as
+  `--permission-mode auto`.
+- **Starter packs** (`dcode-ai setup`, `/setup`): pick your roles (Backend,
+  Frontend / UI-UX, DevOps, Automation, Data / ML, Security) and languages
+  (detected from the repo) and dcode-ai installs the plugins that fit from
+  the official marketplace, lists missing language tools with their install
+  command, and asks before adding any MCP server. `--remove`, `--save
+  team.toml` / `--from team.toml`, and your own packs in
+  `~/.dcode-ai/packs/` or `.dcode-ai/packs/`. Entirely optional — never
+  offered at startup.
 - **`/second-opinion`**: a model from a different family (GPT/Gemini via
   Copilot for a Claude session, Claude otherwise) reviews your uncommitted
   changes; your agent fixes each finding or explains why it is not a

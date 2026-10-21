@@ -1937,6 +1937,34 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                     }
                 }
             }
+            "/setup" => {
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let args = rest.trim().to_string();
+                let installs = !args.is_empty();
+                if installs {
+                    out.println("[setup] installing packs…");
+                }
+                let lines = tokio::task::spawn_blocking(move || crate::setup_cli::slash(&ws, &args))
+                    .await
+                    .unwrap_or_else(|e| vec![format!("[setup] {e}")]);
+                if installs {
+                    if let Some(tx) = &self.self_cmd_tx {
+                        let _ = tx.send(TuiCmd::ReloadExtensions);
+                    } else if let Err(e) = self.runtime.reload_extensions().await {
+                        out.eprintln(&format!("[reload] {e}"));
+                    }
+                }
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.reload_slash_entries = true;
+                        g.open_info_modal("Starter packs", lines);
+                    }
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
+                }
+            }
             "/plugins" | "/plugin" if rest.trim().is_empty() && matches!(out, ReplOutput::Tui(_)) => {
                 // The interactive browser (Discover · Installed · Marketplaces · Errors).
                 if let ReplOutput::Tui(st) = &out {
@@ -4140,7 +4168,7 @@ then switch).",
                     },
                     QuestionOption {
                         id: "auto".into(),
-                        label: "Auto — run every tool without asking (this session only)".into(),
+                        label: "Auto — run without asking; risky actions (delete, push, sudo) still ask".into(),
                     },
                 ],
                 allow_custom: false,
@@ -4457,6 +4485,7 @@ then switch).",
                     let next = match self.runtime.permission_mode() {
                         PermissionMode::Default => PermissionMode::AcceptEdits,
                         PermissionMode::AcceptEdits => PermissionMode::Plan,
+                        PermissionMode::Plan => PermissionMode::Auto,
                         _ => PermissionMode::Default,
                     };
                     self.set_mode_and_profile(next);
@@ -5001,8 +5030,8 @@ then switch).",
                             };
                             let note = match choice.as_str() {
                                 "auto" => {
-                                    self.runtime.add_session_allow_pattern("*".to_string());
-                                    "Auto — every tool runs without asking this session"
+                                    self.set_mode_and_profile(PermissionMode::Auto);
+                                    "Auto — runs without asking; risky actions (delete, push, publish, sudo) still ask"
                                 }
                                 "accept_edits" => {
                                     self.set_mode_and_profile(PermissionMode::AcceptEdits);

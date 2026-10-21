@@ -18,6 +18,7 @@ mod prompt;
 mod repl;
 mod repl_helpers;
 mod runner;
+mod setup_cli;
 mod slash_commands;
 mod stream;
 mod tool_ui;
@@ -307,6 +308,8 @@ enum Command {
         #[command(subcommand)]
         command: Option<plugin_cli::PluginCommand>,
     },
+    /// Starter packs: plugins for your role and languages (optional)
+    Setup(setup_cli::SetupArgs),
     /// MCP servers: list, get, add, remove (`.mcp.json` compatible)
     Mcp {
         #[arg(long)]
@@ -484,6 +487,7 @@ enum CliPermissionMode {
     AcceptEdits,
     DontAsk,
     BypassPermissions,
+    Auto,
 }
 
 #[derive(clap::ValueEnum, Clone, Copy, Debug)]
@@ -502,6 +506,7 @@ impl From<CliPermissionMode> for PermissionMode {
             CliPermissionMode::AcceptEdits => Self::AcceptEdits,
             CliPermissionMode::DontAsk => Self::DontAsk,
             CliPermissionMode::BypassPermissions => Self::BypassPermissions,
+            CliPermissionMode::Auto => Self::Auto,
         }
     }
 }
@@ -514,6 +519,7 @@ impl CliPermissionMode {
             CliPermissionMode::AcceptEdits => "accept-edits",
             CliPermissionMode::DontAsk => "dont-ask",
             CliPermissionMode::BypassPermissions => "bypass-permissions",
+            CliPermissionMode::Auto => "auto",
         }
     }
 }
@@ -914,6 +920,7 @@ async fn try_main() -> anyhow::Result<()> {
             }
         },
         Some(Command::Plugin { command }) => plugin_cli::run(command)?,
+        Some(Command::Setup(args)) => setup_cli::run(&workspace_root, args)?,
         Some(Command::Acp) => acp_server::run(config).await?,
         Some(Command::Policy { command }) => policy_cli::run(&config, &workspace_root, command),
         Some(Command::Ci(args)) => {

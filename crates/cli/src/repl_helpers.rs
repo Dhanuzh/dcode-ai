@@ -107,6 +107,7 @@ pub(crate) fn permission_mode_index(mode: PermissionMode) -> usize {
         PermissionMode::AcceptEdits => 2,
         PermissionMode::DontAsk => 3,
         PermissionMode::BypassPermissions => 4,
+        PermissionMode::Auto => 5,
     }
 }
 
@@ -117,6 +118,7 @@ pub(crate) fn permission_mode_from_index(idx: usize) -> PermissionMode {
         2 => PermissionMode::AcceptEdits,
         3 => PermissionMode::DontAsk,
         4 => PermissionMode::BypassPermissions,
+        5 => PermissionMode::Auto,
         _ => PermissionMode::Default,
     }
 }
@@ -130,6 +132,7 @@ pub(crate) fn parse_permission_mode(raw: &str) -> Option<PermissionMode> {
         "bypass-permissions" | "bypass_permissions" | "bypasspermissions" => {
             Some(PermissionMode::BypassPermissions)
         }
+        "auto" => Some(PermissionMode::Auto),
         _ => None,
     }
 }

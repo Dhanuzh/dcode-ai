@@ -1,0 +1,204 @@
+# Built-in starter packs for `dcode-ai setup`.
+# Plugins come from the official marketplace (claude-plugins-official).
+# Extra packs: ~/.dcode-ai/packs/*.toml and <repo>/.dcode-ai/packs/*.toml.
+
+# ── Roles ──────────────────────────────────────────────────────────────
+
+[[pack]]
+id = "backend"
+name = "Backend"
+kind = "role"
+description = "APIs and services: feature workflow, code review, commits and PRs"
+plugins = ["feature-dev@claude-plugins-official", "code-review@claude-plugins-official", "commit-commands@claude-plugins-official", "pr-review-toolkit@claude-plugins-official"]
+
+[[pack]]
+id = "frontend"
+name = "Frontend / UI-UX"
+kind = "role"
+description = "Interfaces with strong design, browser testing, current web practice"
+plugins = ["frontend-design@claude-plugins-official", "playwright@claude-plugins-official", "modern-web-guidance@claude-plugins-official", "code-review@claude-plugins-official"]
+notes = "Figma users: dcode-ai plugin install figma@claude-plugins-official"
+
+[[pack]]
+id = "devops"
+name = "DevOps"
+kind = "role"
+description = "Infrastructure as code, CI and GitHub workflows"
+plugins = ["terraform@claude-plugins-official", "github@claude-plugins-official", "commit-commands@claude-plugins-official"]
+
+[[pack.tools]]
+command = "docker"
+install = "https://docs.docker.com/get-docker/"
+why = "containers"
+
+[[pack.tools]]
+command = "kubectl"
+install = "https://kubernetes.io/docs/tasks/tools/"
+why = "Kubernetes"
+
+[[pack]]
+id = "automation"
+name = "Automation"
+kind = "role"
+description = "Hooks, scripts and agents that automate work; MCP server building"
+plugins = ["hookify@claude-plugins-official", "mcp-server-dev@claude-plugins-official", "skill-creator@claude-plugins-official", "agent-sdk-dev@claude-plugins-official"]
+
+[[pack]]
+id = "data"
+name = "Data / ML"
+kind = "role"
+description = "Query data files, models and experiment tracking"
+plugins = ["duckdb-skills@claude-plugins-official", "huggingface-skills@claude-plugins-official", "mlflow@claude-plugins-official"]
+
+[[pack]]
+id = "security"
+name = "Security"
+kind = "role"
+description = "Vulnerability scanning and security review of changes"
+plugins = ["security-guidance@claude-plugins-official", "claude-security@claude-plugins-official"]
+
+# ── Languages ──────────────────────────────────────────────────────────
+
+[[pack]]
+id = "rust"
+name = "Rust"
+kind = "language"
+description = "rust-analyzer code intelligence"
+detect = ["Cargo.toml"]
+plugins = ["rust-analyzer-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "rust-analyzer"
+install = "rustup component add rust-analyzer"
+
+[[pack]]
+id = "typescript"
+name = "TypeScript / JavaScript"
+kind = "language"
+description = "TypeScript language server"
+detect = ["package.json", "tsconfig.json", "deno.json"]
+plugins = ["typescript-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "typescript-language-server"
+install = "npm install -g typescript typescript-language-server"
+
+[[pack]]
+id = "python"
+name = "Python"
+kind = "language"
+description = "Pyright type checking and code intelligence"
+detect = ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile", "*.py"]
+plugins = ["pyright-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "pyright-langserver"
+install = "pip install pyright   (or: npm install -g pyright)"
+
+[[pack]]
+id = "go"
+name = "Go"
+kind = "language"
+description = "gopls code intelligence and refactoring"
+detect = ["go.mod"]
+plugins = ["gopls-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "gopls"
+install = "go install golang.org/x/tools/gopls@latest"
+
+[[pack]]
+id = "java"
+name = "Java"
+kind = "language"
+description = "Eclipse JDT language server"
+detect = ["pom.xml", "build.gradle", "build.gradle.kts"]
+plugins = ["jdtls-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "jdtls"
+install = "https://github.com/eclipse-jdtls/eclipse.jdt.ls#installation"
+
+[[pack]]
+id = "kotlin"
+name = "Kotlin"
+kind = "language"
+description = "Kotlin language server"
+detect = ["*.kt", "settings.gradle.kts"]
+plugins = ["kotlin-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "kotlin-lsp"
+install = "https://github.com/Kotlin/kotlin-lsp#install"
+
+[[pack]]
+id = "csharp"
+name = "C#"
+kind = "language"
+description = "C# language server"
+detect = ["*.csproj", "*.sln"]
+plugins = ["csharp-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "csharp-ls"
+install = "dotnet tool install --global csharp-ls"
+
+[[pack]]
+id = "cpp"
+name = "C / C++"
+kind = "language"
+description = "clangd code intelligence"
+detect = ["CMakeLists.txt", "meson.build", "*.c", "*.cpp"]
+plugins = ["clangd-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "clangd"
+install = "apt install clangd   (macOS: brew install llvm)"
+
+[[pack]]
+id = "php"
+name = "PHP"
+kind = "language"
+description = "Intelephense code intelligence"
+detect = ["composer.json", "*.php"]
+plugins = ["php-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "intelephense"
+install = "npm install -g intelephense"
+
+[[pack]]
+id = "ruby"
+name = "Ruby"
+kind = "language"
+description = "Ruby LSP"
+detect = ["Gemfile", "*.rb"]
+plugins = ["ruby-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "ruby-lsp"
+install = "gem install ruby-lsp"
+
+[[pack]]
+id = "swift"
+name = "Swift"
+kind = "language"
+description = "SourceKit-LSP"
+detect = ["Package.swift", "*.xcodeproj"]
+plugins = ["swift-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "sourcekit-lsp"
+install = "ships with Xcode / the Swift toolchain"
+
+[[pack]]
+id = "lua"
+name = "Lua"
+kind = "language"
+description = "Lua language server"
+detect = ["*.lua", ".luarc.json"]
+plugins = ["lua-lsp@claude-plugins-official"]
+
+[[pack.tools]]
+command = "lua-language-server"
+install = "brew install lua-language-server   (or your package manager)"
