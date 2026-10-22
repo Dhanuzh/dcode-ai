@@ -284,24 +284,19 @@ pub fn banner_lines(model: &str, workspace: &str, width: u16) -> Vec<Line<'stati
             muted,
         )),
     ];
-    // "Update available" hint (Codex parity), from the cached version check.
-    if let Some(latest) = crate::update_check::pending_upgrade() {
-        lines.push(Line::from(vec![
-            Span::styled("  ⬆ update available: ", Style::default().fg(theme::warn())),
-            Span::styled(
-                format!("v{version} → v{latest}"),
-                Style::default()
-                    .fg(theme::warn())
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled("  ·  type ", Style::default().add_modifier(Modifier::DIM)),
-            Span::styled(
-                "/update",
-                Style::default()
-                    .fg(theme::muted())
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]));
+    // A newer release, shown once per version, small, right under the box.
+    if let Some(latest) = crate::update_check::take_pending_upgrade() {
+        let under_box = lines
+            .iter()
+            .position(|l| l.spans.first().is_some_and(|s| s.content.starts_with('╰')))
+            .map_or(lines.len(), |i| i + 1);
+        lines.insert(
+            under_box,
+            Line::from(Span::styled(
+                format!("  ⬆ v{latest} available (you have v{version}) · /update"),
+                muted,
+            )),
+        );
     }
     // Gentle model-deprecation hint (Codex parity for model migration).
     if let Some(hint) = outdated_model_hint(model) {
@@ -779,6 +774,15 @@ pub fn run_blocking(
     }
 
     loop {
+        // A newer release found by the background check after startup.
+        if let Some(latest) = crate::update_check::take_pending_upgrade()
+            && let Ok(mut g) = state.lock()
+        {
+            g.push_block(DisplayBlock::System(format!(
+                "⬆ dcode-ai v{latest} is available · /update"
+            )));
+            g.touch_transcript();
+        }
         // A clipboard paste waits for the clipboard off the UI thread.
         let paste = state.lock().ok().and_then(|mut g| {
             let r = g.paste_request.take();

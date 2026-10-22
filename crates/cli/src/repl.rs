@@ -1167,6 +1167,9 @@ impl Repl {
         // The TUI delivers sub-agent completion notifications, so agents can
         // run in the background here.
         self.runtime.set_background_subagents(true);
+        // Cached "newer version" for the welcome box, plus a background check
+        // when the cache is stale (it never blocks startup).
+        let _ = crate::update_check::init_and_pending_upgrade();
         // Apply the configured theme before the TUI draws its first frame.
         crate::tui::theme::set_by_name(self.runtime.config().ui.theme.as_deref());
 

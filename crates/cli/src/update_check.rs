@@ -8,7 +8,7 @@
 //! network call never blocks startup.
 
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -18,15 +18,27 @@ const CURRENT: &str = env!("CARGO_PKG_VERSION");
 /// GitHub "latest release" endpoint for the dcode-ai repo.
 const RELEASES_URL: &str = "https://api.github.com/repos/Dhanuzh/dcode-ai/releases/latest";
 /// Don't hit the network more than once per this many hours.
-const CHECK_INTERVAL_HOURS: i64 = 20;
+const CHECK_INTERVAL_HOURS: i64 = 6;
 
-/// Cached "upgrade available" version for this run (set once at startup).
-static PENDING_UPGRADE: OnceLock<Option<String>> = OnceLock::new();
+/// A newer version not yet shown to the user (from the cache at startup, or
+/// found by the background check during the session).
+static PENDING_UPGRADE: Mutex<Option<String>> = Mutex::new(None);
 
 #[derive(Serialize, Deserialize, Clone)]
 struct VersionInfo {
     latest_version: String,
     last_checked_at: DateTime<Utc>,
+    /// The newer version the user was already told about (shown once).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    notified_version: Option<String>,
+}
+
+/// A version worth telling the user about: newer than this build and not
+/// already shown.
+fn worth_showing(info: &VersionInfo) -> Option<String> {
+    (is_newer(&info.latest_version, CURRENT)
+        && info.notified_version.as_deref() != Some(info.latest_version.as_str()))
+    .then(|| info.latest_version.clone())
 }
 
 fn version_file() -> Option<PathBuf> {
@@ -66,9 +78,9 @@ fn is_newer(latest: &str, current: &str) -> bool {
     parse_ver(latest) > parse_ver(current)
 }
 
-/// Read the cached latest version (no network). If it's newer than the running
-/// build, return it. When the cache is stale or absent, spawn a background
-/// refresh for the next run. Call once, from an async (tokio) context.
+/// Read the cached latest version (no network) and, when the cache is stale,
+/// check GitHub in the background; a newer version found then is reported
+/// during the session. Call once, from an async (tokio) context.
 pub fn init_and_pending_upgrade() -> Option<String> {
     let cached = read_cache();
     let stale = match &cached {
@@ -79,24 +91,37 @@ pub fn init_and_pending_upgrade() -> Option<String> {
     };
     if stale {
         tokio::spawn(async {
-            if let Err(e) = refresh().await {
-                tracing::debug!("update check failed: {e}");
+            match refresh().await {
+                Ok(Some(newer)) => set_pending(Some(newer)),
+                Ok(None) => {}
+                Err(e) => tracing::debug!("update check failed: {e}"),
             }
         });
     }
-    let pending = cached
-        .and_then(|info| is_newer(&info.latest_version, CURRENT).then_some(info.latest_version));
-    let _ = PENDING_UPGRADE.set(pending.clone());
+    let pending = cached.as_ref().and_then(worth_showing);
+    set_pending(pending.clone());
     pending
 }
 
-/// The cached "upgrade available" version for this run, if any. No network —
-/// safe to call from rendering code (e.g. the startup banner).
-pub fn pending_upgrade() -> Option<String> {
-    PENDING_UPGRADE.get().cloned().flatten()
+fn set_pending(v: Option<String>) {
+    if let Ok(mut p) = PENDING_UPGRADE.lock() {
+        *p = v;
+    }
 }
 
-async fn refresh() -> anyhow::Result<()> {
+/// The newer version to show, once: taking it records that the user was told,
+/// so the hint doesn't come back for the same version.
+pub fn take_pending_upgrade() -> Option<String> {
+    let latest = PENDING_UPGRADE.lock().ok()?.take()?;
+    if let Some(mut info) = read_cache() {
+        info.notified_version = Some(latest.clone());
+        write_cache(&info);
+    }
+    Some(latest)
+}
+
+/// Fetch the latest release; returns it when it is newer and not yet shown.
+async fn refresh() -> anyhow::Result<Option<String>> {
     #[derive(Deserialize)]
     struct Release {
         tag_name: String,
@@ -111,9 +136,31 @@ async fn refresh() -> anyhow::Result<()> {
         .error_for_status()?
         .json()
         .await?;
-    write_cache(&VersionInfo {
+    let info = VersionInfo {
         latest_version: release.tag_name.trim_start_matches('v').to_string(),
         last_checked_at: Utc::now(),
-    });
-    Ok(())
+        notified_version: read_cache().and_then(|i| i.notified_version),
+    };
+    write_cache(&info);
+    Ok(worth_showing(&info))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_newer_version_is_worth_showing_once() {
+        let mut info = VersionInfo {
+            latest_version: "999.0.0".into(),
+            last_checked_at: Utc::now(),
+            notified_version: None,
+        };
+        assert_eq!(worth_showing(&info).as_deref(), Some("999.0.0"));
+        info.notified_version = Some("999.0.0".into());
+        assert_eq!(worth_showing(&info), None);
+        info.latest_version = "0.0.1".into();
+        info.notified_version = None;
+        assert_eq!(worth_showing(&info), None);
+    }
 }
