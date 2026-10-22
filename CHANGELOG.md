@@ -1,5 +1,36 @@
 # Changelog
 
+## 1.0.12 — 2026-10-22
+
+### Fixes
+- **Claude backend loops**: when Claude wrote its native function-call markup
+  (`<invoke name="…">`) instead of dcode-ai's `<tool_call>`, the calls were
+  printed as text and the model repeated them for minutes. They now run;
+  a call repeated word for word in one reply runs once and the third repeat
+  ends the reply.
+- **MCP**: a slow server no longer delays startup (dcode-ai waits at most 3 s;
+  servers keep connecting in the background and join at the next turn) and
+  is no longer dropped after 15 s. Servers connect in parallel. A server that
+  fails says so in the transcript, with `dcode-ai mcp login <name>` for
+  sign-in errors.
+
+### New
+- **`dcode-ai update`** (`--check`, `--force`): downloads the latest release
+  for your platform, verifies its checksum and replaces the binary.
+- Faster start: the Claude sign-in check is cached for 10 minutes (startup
+  ~60 ms instead of ~400 ms); logging out clears it.
+- Auto mode says when its model check approved a command.
+- `--plain`: Tab opens a completion menu (commands with descriptions, skills,
+  `@` files).
+- `/permissions forget` and `/permissions folders` for remembered startup
+  choices.
+- `/setup` picker shows roles and languages side by side, no scrolling.
+- Sub-agents: a worktree left unchanged is removed with its branch; one with
+  changes is reported with the merge command.
+- Releases: notes come from the CHANGELOG, and a Homebrew formula
+  (`dcode-ai.rb`) is attached; `install.sh` no longer falls back to a
+  deleted version.
+
 ## 1.0.11 — 2026-10-22
 
 ### Fixes
