@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.15 — 2026-10-23
+
+### Fixes
+- The "new version available" hint never appeared in the TUI (the check only
+  ran in `--plain`). It now shows once per version, as a small line right
+  under the welcome box; a version found by the background check during the
+  session is announced once in the transcript. Checks run every 6 hours
+  instead of 20.
+
 ## 1.0.14 — 2026-10-22
 
 ### New
