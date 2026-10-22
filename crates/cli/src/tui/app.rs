@@ -276,7 +276,7 @@ pub fn banner_lines(model: &str, workspace: &str, width: u16) -> Vec<Line<'stati
             muted,
         )),
         Line::from(Span::styled(
-            " 2. Shift+Tab switches modes: accept edits, plan",
+            " 2. Shift+Tab switches modes: accept edits, plan, auto",
             muted,
         )),
         Line::from(Span::styled(
@@ -715,7 +715,13 @@ pub fn run_blocking(
             } else {
                 g.workspace_display.clone()
             };
-            (g.model.clone(), ws, show_run_banner || g.blocks.is_empty())
+            // System notes (e.g. the remembered permission mode) don't count;
+            // a resumed conversation does.
+            let fresh = g
+                .blocks
+                .iter()
+                .all(|b| matches!(b, crate::tui::state::DisplayBlock::System(_)));
+            (g.model.clone(), ws, show_run_banner || fresh)
         } else {
             (String::new(), String::new(), show_run_banner)
         };
