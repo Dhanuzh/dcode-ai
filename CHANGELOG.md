@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.14 — 2026-10-22
+
+### New
+- **`/goal <objective> [--budget N]`**: dcode-ai keeps working across turns
+  until the objective is done. The agent closes the goal with `update_goal`
+  only after verifying it; a goal also stops at its token budget, after 50
+  automatic turns, or on Esc. `/goal pause | resume | clear`; the footer
+  shows `◎ goal · turn N`. (Design after Codex's goals.)
+- **Background sub-agents**: in the TUI, sub-agents run in the background by
+  default — the main agent gets an id at once and a `<task-notification>`
+  with the report when the agent finishes. New `agent_output` (progress,
+  optional wait) and `agent_kill` tools. A sub-agent's risky actions now ask
+  you in the main session instead of being refused. (Design after Alter
+  Zero's agent tools.)
+- **Fallback models**: `[model] fallback_models = [...]` (up to three) are
+  tried in order when the model is overloaded, rate-limited or unavailable;
+  the transcript notes the switch.
+
+### Fixes
+- A sub-agent asking for a sub-agent of its own waited ten minutes for a
+  reply that never came; sub-agents no longer get that tool.
+- Approval prompts without tool details no longer show "0 fields".
+
 ## 1.0.13 — 2026-10-22
 
 ### New
