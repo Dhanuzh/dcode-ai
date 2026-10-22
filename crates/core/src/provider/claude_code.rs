@@ -36,6 +36,19 @@ const TOOL_CLOSE: &str = "</tool_call>";
 /// Start of a tool result. Only dcode-ai writes these; if the model starts one
 /// itself it is inventing results, so the turn is cut there.
 const RESULT_OPEN: &str = "<tool_result";
+/// Claude's native function-call markup, which it sometimes writes instead of
+/// `<tool_call>` — run those calls too rather than printing them.
+const INVOKE_OPENS: [&str; 2] = ["<invoke name=\"", concat!("<", "antml", ":invoke name=\"")];
+const INVOKE_CLOSES: [&str; 2] = ["</invoke>", concat!("</", "antml", ":invoke>")];
+/// Wrapper tags around native calls; dropped from the visible text.
+const CALL_WRAPPERS: [&str; 4] = [
+    "<function_calls>",
+    "</function_calls>",
+    concat!("<", "antml", ":function_calls>"),
+    concat!("</", "antml", ":function_calls>"),
+];
+/// The same call this many times in one reply means the model is looping.
+const MAX_REPEATED_CALLS: usize = 3;
 
 /// Longest silence tolerated between two stdout lines. Thinking on hard tasks
 /// can be quiet for a while, so this is generous.
@@ -271,6 +284,7 @@ async fn spawn_session(
 async fn pump_turn(session: &mut CcSession, tx: &tokio::sync::mpsc::Sender<StreamChunk>) -> bool {
     let mut splitter = ToolCallSplitter::default();
     let mut tool_calls = 0usize;
+    let mut seen = SeenCalls::default();
     let mut input_tokens = 0u64;
 
     loop {
@@ -331,7 +345,13 @@ async fn pump_turn(session: &mut CcSession, tx: &tokio::sync::mpsc::Sender<Strea
                         let sent = match delta["type"].as_str().unwrap_or("") {
                             "text_delta" => {
                                 let text = delta["text"].as_str().unwrap_or("");
-                                match emit_segments(tx, splitter.feed(text), &mut tool_calls).await
+                                match emit_segments(
+                                    tx,
+                                    splitter.feed(text),
+                                    &mut tool_calls,
+                                    &mut seen,
+                                )
+                                .await
                                 {
                                     Flow::Continue => true,
                                     Flow::Abort => false,
@@ -440,33 +460,60 @@ enum Flow {
     Abort,
 }
 
+/// Calls already sent in this reply, to drop repeats and spot a loop.
+#[derive(Default)]
+struct SeenCalls {
+    calls: std::collections::HashSet<String>,
+    repeats: usize,
+}
+
 /// Forward splitter output to the agent.
 async fn emit_segments(
     tx: &tokio::sync::mpsc::Sender<StreamChunk>,
     segments: Vec<Segment>,
     tool_calls: &mut usize,
+    seen: &mut SeenCalls,
 ) -> Flow {
     for segment in segments {
-        let chunk = match segment {
-            Segment::FabricatedResult => return Flow::Cut,
-            Segment::Text(text) => StreamChunk::TextDelta(text),
-            Segment::ToolCall(raw) => match parse_tool_call(&raw) {
-                Ok((name, input)) => {
-                    *tool_calls += 1;
-                    StreamChunk::ToolUse(ToolCall {
-                        id: format!("cc_{}_{}", std::process::id(), next_call_seq()),
-                        name,
-                        input,
-                    })
+        let parsed = match &segment {
+            Segment::ToolCall(raw) => Some(parse_tool_call(raw)),
+            Segment::Invoke(raw) => Some(parse_invoke(raw)),
+            _ => None,
+        };
+        let chunk = match (segment, parsed) {
+            (Segment::FabricatedResult, _) => return Flow::Cut,
+            (Segment::Text(text), _) => {
+                let text = CALL_WRAPPERS.iter().fold(text, |t, w| t.replace(w, ""));
+                if text.is_empty() {
+                    continue;
                 }
-                // Like Claude Code: hand the parse error back to the model
-                // as a failed tool result so it can fix the call, instead of
-                // failing the whole turn.
-                Err(err) => {
-                    *tool_calls += 1;
-                    StreamChunk::ToolUse(invalid_call(&err, &raw))
+                StreamChunk::TextDelta(text)
+            }
+            (_, Some(Ok((name, input)))) => {
+                // A call repeated word for word in the same reply is a loop:
+                // run it once, and end the reply if it keeps coming.
+                if !seen.calls.insert(format!("{name} {input}")) {
+                    seen.repeats += 1;
+                    if seen.repeats >= MAX_REPEATED_CALLS {
+                        return Flow::Cut;
+                    }
+                    continue;
                 }
-            },
+                *tool_calls += 1;
+                StreamChunk::ToolUse(ToolCall {
+                    id: format!("cc_{}_{}", std::process::id(), next_call_seq()),
+                    name,
+                    input,
+                })
+            }
+            // Like Claude Code: hand the parse error back to the model as a
+            // failed tool result so it can fix the call, instead of failing
+            // the whole turn.
+            (Segment::ToolCall(raw) | Segment::Invoke(raw), Some(Err(err))) => {
+                *tool_calls += 1;
+                StreamChunk::ToolUse(invalid_call(&err, &raw))
+            }
+            (Segment::ToolCall(_) | Segment::Invoke(_), None) => continue,
         };
         if tx.send(chunk).await.is_err() {
             return Flow::Abort;
@@ -512,10 +559,48 @@ fn parse_tool_call(raw: &str) -> Result<(String, Value), String> {
     Ok((name, input))
 }
 
+/// A native `<invoke name="…">` call: the tool name and its
+/// `<parameter name="…">value</parameter>` children (JSON values when they
+/// parse as JSON, strings otherwise).
+fn parse_invoke(raw: &str) -> Result<(String, Value), String> {
+    let raw = raw.replace(concat!("antml", ":"), "");
+    let rest = raw
+        .trim_start()
+        .strip_prefix("<invoke name=\"")
+        .ok_or("expected <invoke name=\"…\">")?;
+    let end = rest.find('"').ok_or("unterminated tool name")?;
+    let name = rest[..end].trim().to_string();
+    if name.is_empty() {
+        return Err("missing tool name".into());
+    }
+    let mut input = serde_json::Map::new();
+    let mut body = &rest[end..];
+    while let Some(p) = body.find("<parameter name=\"") {
+        let after = &body[p + "<parameter name=\"".len()..];
+        let q = after.find('"').ok_or("unterminated parameter name")?;
+        let key = after[..q].to_string();
+        let open_end = after[q..].find('>').ok_or("unterminated <parameter>")? + q + 1;
+        let value_and_rest = &after[open_end..];
+        let close = value_and_rest
+            .find("</parameter>")
+            .ok_or_else(|| format!("parameter `{key}` was never closed"))?;
+        let text = &value_and_rest[..close];
+        let value = match serde_json::from_str::<Value>(text.trim()) {
+            Ok(v) if !v.is_string() => v,
+            _ => Value::String(text.to_string()),
+        };
+        input.insert(key, value);
+        body = &value_and_rest[close + "</parameter>".len()..];
+    }
+    Ok((name, Value::Object(input)))
+}
+
 #[derive(Debug, PartialEq)]
 enum Segment {
     Text(String),
     ToolCall(String),
+    /// A native `<invoke name="…">…` call (without the closing tag).
+    Invoke(String),
     /// The model began writing a `<tool_result>` itself; everything from here
     /// on is fabricated and is dropped.
     FabricatedResult,
@@ -526,6 +611,8 @@ enum Segment {
 #[derive(Default)]
 struct ToolCallSplitter {
     in_call: bool,
+    /// The open call is a native `<invoke>` (closed by `</invoke>`).
+    invoke: bool,
     carry: String,
     call: String,
     /// Set once a fabricated result was seen; all later input is ignored.
@@ -559,14 +646,34 @@ impl ToolCallSplitter {
         let mut text = String::new();
         loop {
             if self.in_call {
-                if let Some(pos) = work.find(TOOL_CLOSE) {
+                let closes: &[&str] = if self.invoke {
+                    &INVOKE_CLOSES
+                } else {
+                    &[TOOL_CLOSE]
+                };
+                let found = closes
+                    .iter()
+                    .filter_map(|c| work.find(c).map(|p| (p, c.len())))
+                    .min();
+                if let Some((pos, len)) = found {
                     self.call.push_str(&work[..pos]);
-                    out.push(Segment::ToolCall(std::mem::take(&mut self.call)));
+                    let raw = std::mem::take(&mut self.call);
+                    out.push(if self.invoke {
+                        Segment::Invoke(raw)
+                    } else {
+                        Segment::ToolCall(raw)
+                    });
                     self.in_call = false;
-                    work = work[pos + TOOL_CLOSE.len()..].to_string();
+                    self.invoke = false;
+                    work = work[pos + len..].to_string();
                     continue;
                 }
-                let split = work.len() - partial_marker_tail_len(&work, TOOL_CLOSE);
+                let tail = closes
+                    .iter()
+                    .map(|c| partial_marker_tail_len(&work, c))
+                    .max()
+                    .unwrap_or(0);
+                let split = work.len() - tail;
                 self.call.push_str(&work[..split]);
                 self.carry = work[split..].to_string();
                 break;
@@ -591,6 +698,17 @@ impl ToolCallSplitter {
                     self.in_call = true;
                     work = work[body..].to_string();
                 }
+                Marker::Invoke(start) => {
+                    text.push_str(&work[..start]);
+                    track_fences(&mut self.fence_open, &mut self.last_char, &work[..start]);
+                    if !text.is_empty() {
+                        out.push(Segment::Text(std::mem::take(&mut text)));
+                    }
+                    // Keep the opening tag: it carries the tool name.
+                    self.in_call = true;
+                    self.invoke = true;
+                    work = work[start..].to_string();
+                }
                 Marker::Undecided(pos) => {
                     text.push_str(&work[..pos]);
                     track_fences(&mut self.fence_open, &mut self.last_char, &work[..pos]);
@@ -598,8 +716,14 @@ impl ToolCallSplitter {
                     break;
                 }
                 Marker::None => {
-                    let keep = partial_marker_tail_len(&work, TOOL_OPEN)
-                        .max(partial_marker_tail_len(&work, RESULT_OPEN));
+                    let keep = INVOKE_OPENS
+                        .iter()
+                        .map(|m| partial_marker_tail_len(&work, m))
+                        .fold(
+                            partial_marker_tail_len(&work, TOOL_OPEN)
+                                .max(partial_marker_tail_len(&work, RESULT_OPEN)),
+                            usize::max,
+                        );
                     // Hold back a possible half-written ``` too, so fence
                     // tracking never splits one.
                     let keep = keep.max(work.len() - work.trim_end_matches('`').len());
@@ -644,6 +768,8 @@ enum Marker {
     Result(usize),
     /// A `<tool_call>` whose following text has not arrived yet.
     Undecided(usize),
+    /// A native `<invoke name="…">` call at this offset.
+    Invoke(usize),
 }
 
 /// Find the first marker that is protocol, not prose. A marker written in
@@ -655,12 +781,35 @@ fn next_marker(work: &str, fence_open: bool, before: Option<char>) -> Marker {
     loop {
         let call = work[from..].find(TOOL_OPEN).map(|p| p + from);
         let result = work[from..].find(RESULT_OPEN).map(|p| p + from);
+        let invoke = INVOKE_OPENS
+            .iter()
+            .filter_map(|m| work[from..].find(m).map(|p| (p + from, m.len())))
+            .min();
         let (pos, is_call) = match (call, result) {
-            (None, None) => return Marker::None,
+            (None, None) => match invoke {
+                None => return Marker::None,
+                Some((p, _)) => (p, false),
+            },
             (Some(c), Some(r)) if r < c => (r, false),
             (Some(c), _) => (c, true),
             (None, Some(r)) => (r, false),
         };
+        // A native call that comes first.
+        if let Some((ipos, ilen)) = invoke
+            && ipos <= pos
+        {
+            let quoted = if ipos == 0 {
+                before == Some('`')
+            } else {
+                work[..ipos].ends_with('`')
+            };
+            let in_fence = fence_open ^ (work[..ipos].matches("```").count() % 2 == 1);
+            if quoted || in_fence {
+                from = ipos + ilen;
+                continue;
+            }
+            return Marker::Invoke(ipos);
+        }
         let len = if is_call {
             TOOL_OPEN.len()
         } else {
@@ -781,6 +930,7 @@ Rules:\n\
 - After your last </tool_call>, STOP your reply immediately. You cannot see results in the same reply: they only arrive in the NEXT user message, written by dcode-ai as <tool_result id=\"…\" name=\"…\">…</tool_result>.\n\
 - Never write <tool_result> yourself and never guess what a tool returned. If you need a result before deciding the next step, make the call and stop.\n\
 - Write real calls as plain text, never inside a ``` code block. To mention or show the protocol in prose, wrap it in backticks (`<tool_call>`); mentions, examples and code blocks are never executed.\n\
+- Use only <tool_call> blocks: no function_calls/invoke markup, and never repeat a call you already made in this reply.\n\
 - When the task is complete, answer normally with no tool_call block.\n\n\
 ## Available tools\n",
     );
@@ -1034,6 +1184,7 @@ mod tests {
             &tx,
             vec![Segment::ToolCall("{\"name\": read_file}".into())],
             &mut calls,
+            &mut SeenCalls::default(),
         )
         .await;
         assert!(matches!(flow, Flow::Continue));
@@ -1045,6 +1196,90 @@ mod tests {
         let res = crate::tools::ToolRegistry::new().execute(&call).await;
         assert!(!res.success);
         assert!(res.error.unwrap().contains("could not be read"));
+    }
+
+    #[test]
+    fn native_invoke_calls_run_and_wrappers_vanish() {
+        // From a real session: Claude wrote its own function-call markup.
+        let (segments, rest) = split_all(&[
+            "Checking.\n<function_calls>\n<invoke name=\"read_f",
+            "ile\"><parameter name=\"path\">src/a.ts</parameter></invoke>\n<invoke name=\"execute_bash\">",
+            "<parameter name=\"command\">cd src && sed -n 1,5p a.ts</parameter><parameter name=\"timeout\">30</parameter></inv",
+            "oke>\n</function_calls>",
+        ]);
+        let calls: Vec<_> = segments
+            .iter()
+            .filter_map(|s| match s {
+                Segment::Invoke(raw) => Some(parse_invoke(raw).unwrap()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(calls.len(), 2, "{segments:?}");
+        assert_eq!(
+            calls[0],
+            ("read_file".to_string(), json!({"path": "src/a.ts"}))
+        );
+        assert_eq!(
+            calls[1],
+            (
+                "execute_bash".to_string(),
+                json!({"command": "cd src && sed -n 1,5p a.ts", "timeout": 30})
+            )
+        );
+        assert_eq!(rest, Ok(None));
+        // The namespaced form works the same.
+        let ns = |t: &str| {
+            t.replace("<invoke", concat!("<", "antml", ":invoke"))
+                .replace("</invoke", concat!("</", "antml", ":invoke"))
+                .replace("<parameter", concat!("<", "antml", ":parameter"))
+                .replace("</parameter", concat!("</", "antml", ":parameter"))
+        };
+        let (segments, _) = split_all(&[&ns(
+            "<invoke name=\"git_diff\"><parameter name=\"staged\">true</parameter></invoke>",
+        )]);
+        let Some(Segment::Invoke(raw)) = segments.first() else {
+            panic!("{segments:?}");
+        };
+        assert_eq!(
+            parse_invoke(raw).unwrap(),
+            ("git_diff".to_string(), json!({"staged": true}))
+        );
+        // A mention in backticks stays text.
+        let (segments, _) = split_all(&["Claude's `<invoke name=\"x\">` markup."]);
+        assert!(segments.iter().all(|s| matches!(s, Segment::Text(_))));
+    }
+
+    #[tokio::test]
+    async fn repeated_calls_run_once_and_a_loop_ends_the_reply() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
+        let call = || Segment::Invoke("<invoke name=\"git_status\">".into());
+        let mut calls = 0;
+        let mut seen = SeenCalls::default();
+        let flow = emit_segments(
+            &tx,
+            vec![
+                Segment::Text("<function_calls>\n".into()),
+                call(),
+                call(),
+                call(),
+                call(),
+            ],
+            &mut calls,
+            &mut seen,
+        )
+        .await;
+        assert!(matches!(flow, Flow::Cut));
+        assert_eq!(calls, 1);
+        drop(tx);
+        let mut uses = 0;
+        while let Some(c) = rx.recv().await {
+            match c {
+                StreamChunk::ToolUse(_) => uses += 1,
+                StreamChunk::TextDelta(t) => assert!(!t.contains("function_calls"), "{t}"),
+                _ => {}
+            }
+        }
+        assert_eq!(uses, 1);
     }
 
     #[test]
