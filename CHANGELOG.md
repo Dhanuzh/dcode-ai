@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.11 — 2026-10-22
+
+### Fixes
+- The welcome box shows again when the folder's permission choice is
+  remembered (the note used to hide it). The startup tip mentions auto mode.
+
 ## 1.0.10 — 2026-10-22
 
 ### Changed
