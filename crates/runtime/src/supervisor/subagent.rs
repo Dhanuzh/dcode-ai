@@ -154,9 +154,48 @@ pub fn spawn_subagent_consumer(
                 use_worktree: req.use_worktree,
                 focus_files: req.focus_files,
                 parent_mode: req.parent_mode,
+                child_id: None,
+                approval: req.approval.clone(),
             };
+            let mut child_cfg = child_cfg;
+            // Background: answer the tool at once with the agent's id; the
+            // result is delivered as a notification when it settles.
+            let mut reply = Some(req.reply);
+            let background = if req.background {
+                let id = super::session::generate_session_id();
+                child_cfg.child_id = Some(id.clone());
+                if let Ok(mut agents) = req.agents.lock() {
+                    agents.insert(
+                        id.clone(),
+                        dcode_ai_core::tools::spawn_subagent::AgentRecord {
+                            task: req.task.clone(),
+                            status: "running".into(),
+                            output: String::new(),
+                            started: std::time::Instant::now(),
+                            finished: None,
+                            abort: None,
+                        },
+                    );
+                }
+                if let Some(r) = reply.take() {
+                    let _ = r.send(dcode_ai_core::tools::spawn_subagent::SpawnResponse {
+                        child_session_id: id.clone(),
+                        status: "running".into(),
+                        output: req.task.clone(),
+                        workspace: workspace_root.display().to_string(),
+                        branch: None,
+                        worktree_path: None,
+                    });
+                }
+                Some((req.agents.clone(), id, req.task.clone()))
+            } else {
+                None
+            };
+            let registry_for_abort = background
+                .as_ref()
+                .map(|(a, id, _)| (a.clone(), id.clone()));
 
-            tokio::spawn(async move {
+            let handle = tokio::spawn(async move {
                 let hook_runner = {
                     let runner = HookRunner::new(child_cfg.config.hooks.clone());
                     runner.has_any().then_some(runner)
@@ -219,7 +258,7 @@ pub fn spawn_subagent_consumer(
                             branch: res.branch,
                             worktree_path: res.worktree_path,
                         };
-                        let _ = req.reply.send(response);
+                        deliver(response, reply, background, &event_tx).await;
                     }
                     Err(e) => {
                         if let Some(hooks) = &hook_runner {
@@ -250,12 +289,67 @@ pub fn spawn_subagent_consumer(
                             branch: None,
                             worktree_path: None,
                         };
-                        let _ = req.reply.send(response);
+                        deliver(response, reply, background, &event_tx).await;
                     }
                 }
             });
+            if let Some((agents, id)) = registry_for_abort
+                && let Ok(mut agents) = agents.lock()
+                && let Some(r) = agents.get_mut(&id)
+            {
+                r.abort = Some(handle.abort_handle());
+            }
         }
     })
+}
+
+/// Hand a finished child's result to whoever waits for it: the blocked tool
+/// call, or — for a background agent — the registry and a notification.
+async fn deliver(
+    response: dcode_ai_core::tools::spawn_subagent::SpawnResponse,
+    reply: Option<
+        tokio::sync::oneshot::Sender<dcode_ai_core::tools::spawn_subagent::SpawnResponse>,
+    >,
+    background: Option<(
+        dcode_ai_core::tools::spawn_subagent::BackgroundAgents,
+        String,
+        String,
+    )>,
+    event_tx: &Option<tokio::sync::mpsc::Sender<AgentEvent>>,
+) {
+    let Some((agents, id, task)) = background else {
+        if let Some(r) = reply {
+            let _ = r.send(response);
+        }
+        return;
+    };
+    let status = if response.status == "completed" {
+        "completed".to_string()
+    } else {
+        "error".to_string()
+    };
+    if let Ok(mut map) = agents.lock()
+        && let Some(r) = map.get_mut(&id)
+    {
+        // A kill already settled it.
+        if r.status != "running" {
+            return;
+        }
+        r.status = status.clone();
+        r.output = response.output.clone();
+        r.finished = Some(std::time::Instant::now());
+        r.abort = None;
+    }
+    if let Some(tx) = event_tx {
+        let _ = tx
+            .send(AgentEvent::BackgroundAgentFinished {
+                agent_id: id,
+                task,
+                status,
+                output: response.output,
+            })
+            .await;
+    }
 }
 
 /// Point the child at an agent's `model:`. Claude aliases (`sonnet`,
@@ -481,6 +575,54 @@ pub struct ChildSessionConfig {
     /// The parent's permission mode when it spawned the child (falls back to
     /// the configured mode).
     pub parent_mode: Option<dcode_ai_common::config::PermissionMode>,
+    /// The child's session id, when the caller needs it up front.
+    pub child_id: Option<String>,
+    /// The parent's approval handler; the child's prompts reach the user
+    /// through it. `None` denies them.
+    pub approval: Option<Arc<dyn ApprovalHandler>>,
+}
+
+/// A child's approval prompts, shown in the parent session: announced on the
+/// parent's event stream and answered through the parent's handler.
+struct BridgedApproval {
+    parent: Arc<dyn ApprovalHandler>,
+    events: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
+    task: String,
+}
+
+#[async_trait::async_trait]
+impl ApprovalHandler for BridgedApproval {
+    async fn resolve(
+        &self,
+        call: &dcode_ai_common::tool::ToolCall,
+        description: &str,
+    ) -> dcode_ai_core::approval::ApprovalVerdict {
+        if let Some(tx) = &self.events {
+            let _ = tx
+                .send(AgentEvent::ApprovalRequested {
+                    call_id: call.id.clone(),
+                    tool: call.name.clone(),
+                    description: format!(
+                        "Sub-agent ({}) wants to run {}: {}",
+                        truncate_child_detail(&self.task, 60),
+                        call.name,
+                        truncate_child_detail(&tool_input_one_line(&call.input), 160)
+                    ),
+                })
+                .await;
+        }
+        let verdict = self.parent.resolve(call, description).await;
+        // Clear the prompt row in the parent's transcript.
+        if let Some(tx) = &self.events {
+            let _ = tx
+                .send(AgentEvent::ApprovalResolved {
+                    call_id: call.id.clone(),
+                    approved: !matches!(verdict, dcode_ai_core::approval::ApprovalVerdict::Denied),
+                })
+                .await;
+        }
+        verdict
+    }
 }
 
 /// The mode a sub-agent runs in, given its parent's. A child can't ask the
@@ -534,7 +676,10 @@ pub async fn spawn_child_session(
 
     // Create the worktree before the session so every tool (files, shell,
     // sandbox) is rooted inside it, not in the parent's checkout.
-    let child_id = super::session::generate_session_id();
+    let child_id = cfg
+        .child_id
+        .clone()
+        .unwrap_or_else(super::session::generate_session_id);
     let mut worktree = None;
     if cfg.use_worktree {
         let wt_mgr = crate::worktree::WorktreeManager::new(&cfg.workspace_root);
@@ -558,7 +703,14 @@ pub async fn spawn_child_session(
         safe_mode: false,
         interactive_approvals: false,
         session_id: Some(child_id.clone()),
-        approval_handler: Some(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>),
+        approval_handler: Some(match cfg.approval.clone() {
+            Some(parent) => Arc::new(BridgedApproval {
+                parent,
+                events: event_tx.clone(),
+                task: cfg.task.clone(),
+            }) as Arc<dyn ApprovalHandler>,
+            None => Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>,
+        }),
         orchestration_context: None,
     })
     .await
@@ -566,6 +718,14 @@ pub async fn spawn_child_session(
     // Nobody can answer a prompt here: deny that one call and let the child
     // carry on (and report it) rather than ending its run.
     sup.agent_mut().approval.set_fail_on_ask(false);
+    // Sub-agents don't nest (as in Alter Zero): nothing would receive a
+    // child's spawn requests, so a call to it used to wait forever.
+    sup.agent_mut().tools.retain_by_name(|name| {
+        !matches!(
+            name,
+            "spawn_subagent" | "agent_output" | "agent_kill" | "update_goal"
+        )
+    });
 
     if let Some(allowed) = cfg.agent.as_ref().and_then(|a| a.tools.clone()) {
         sup.agent_mut()

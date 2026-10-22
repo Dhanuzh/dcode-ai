@@ -100,6 +100,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/image`, `/web`, `/run` | Attach an image, fetch a page, run a command into context |
 | `/diff`, `/commit` | Review and commit changes |
 | `/bashes` | Background shells the agent started (`/bashes kill <id>`) |
+| `/goal` | Keep working across turns until an objective is done (`/goal <objective> [--budget N]`, `pause`, `resume`, `clear`) |
 | `/update` | Install the latest release from inside the session (`--check` to only look) |
 | `/setup` | Starter-pack picker (or `/setup <id>…` to install directly) |
 | `/doctor`, `/login`, `/logout`, `/auth` | Diagnostics and sign-in |
@@ -206,6 +207,24 @@ install = "brew install acme/tap/acme"
 MCP servers go to `.mcp.json` (`--scope user` for all projects). What each
 pack added is recorded in `~/.dcode-ai/setup.json`.
 
+## Goals
+
+`/goal <objective>` keeps dcode-ai working across turns until the objective
+is done — for long jobs like "make the test suite pass" or "port module X":
+
+```text
+/goal make cargo test pass --budget 400000
+/goal            # status: turns, tokens used
+/goal pause | resume | clear
+```
+
+After each turn dcode-ai sends the agent a continuation message with the
+objective and the budget used. The agent ends the goal itself with the
+`update_goal` tool once it has *verified* the objective (or marks it blocked
+when the same blocker stops it three turns running). A goal also stops at
+its token budget, after 50 automatic turns, or when you press Esc. The
+footer shows `◎ goal · turn N` while it runs.
+
 ## Extra working folders
 
 By default dcode-ai reads and edits only inside the folder you start it in.
@@ -222,10 +241,16 @@ The agent delegates with `spawn_subagent`. Each child:
 - starts from a summary of the parent conversation;
 - runs in an isolated worktree on branch `dcode-ai/<session-id>` — its files,
   shell and sandbox are all rooted there, never in your checkout;
-- follows your permission mode: default, accept edits and auto become auto
-  (it cannot ask you, so a risky call is refused and reported back); plan,
-  don't-ask and bypass carry over;
-- returns its result to the parent (merge with `dcode-ai worktrees merge <id>`).
+- follows your permission mode: default, accept edits and auto become auto,
+  and anything risky asks **you**, in the main session; plan, don't-ask and
+  bypass carry over;
+- in the TUI runs **in the background** by default: the main agent gets the
+  agent's id at once, keeps working, and receives a `<task-notification>`
+  with the agent's report when it finishes (`agent_output` shows progress,
+  `agent_kill` stops it). One-shot runs (`-p`, CI, editors) wait for it;
+- leaves no worktree behind when it changed nothing; otherwise you get the
+  merge command (`dcode-ai worktrees merge <id>`);
+- cannot start sub-agents of its own.
 
 Their live activity shows in place in the transcript and in the dashboard's
 agents tab. Define specialised agents in `agents/*.md` — see

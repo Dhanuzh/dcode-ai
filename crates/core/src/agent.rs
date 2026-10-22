@@ -42,6 +42,8 @@ pub struct AgentLoop {
     pub max_cost_usd: f64,
     /// Auto mode: the model's safe/ask verdict per command, this session.
     auto_verdicts: std::collections::HashMap<String, bool>,
+    /// Models to try, in order, when the model is overloaded or unavailable.
+    pub fallback_models: Vec<String>,
 }
 
 impl AgentLoop {
@@ -74,7 +76,24 @@ impl AgentLoop {
             context_token_limit: 0,
             max_cost_usd: 0.0,
             auto_verdicts: std::collections::HashMap::new(),
+            fallback_models: Vec::new(),
         }
+    }
+
+    /// The next fallback model to try after `error`, if the error means the
+    /// model itself is the problem (overloaded, rate-limited, unavailable,
+    /// unknown). Advances `next`.
+    fn next_fallback(&self, error: &str, current: &str, next: &mut usize) -> Option<String> {
+        if !fallback_worthy(error) {
+            return None;
+        }
+        while let Some(m) = self.fallback_models.get(*next) {
+            *next += 1;
+            if m != current {
+                return Some(m.clone());
+            }
+        }
+        None
     }
 
     /// Auto mode's check for an unfamiliar shell command: a short, tool-less
@@ -271,17 +290,40 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             // response risks duplicating or corrupting what the user already
             // saw.
             let mut stream_attempt: u32 = 0;
+            // Fallback models replace the model for the rest of this request
+            // when it is overloaded or unavailable.
+            let mut model = self.model.clone();
+            let mut next_fallback = 0usize;
             let (assistant_text, assistant_reasoning, tool_calls, got_usage, replay_blocks) = loop {
                 stream_attempt += 1;
-                let mut stream = self
+                let mut stream = match self
                     .provider
                     .chat(
                         &self.messages,
                         &self.tool_definitions(),
-                        &self.model,
+                        &model,
                         workspace_root,
                     )
-                    .await?;
+                    .await
+                {
+                    Ok(stream) => stream,
+                    Err(e) => {
+                        if let Some(next) =
+                            self.next_fallback(&e.to_string(), &model, &mut next_fallback)
+                        {
+                            self.emit(AgentEvent::Notice {
+                                message: format!(
+                                    "{model} failed ({e}); trying fallback model {next}"
+                                ),
+                            })
+                            .await;
+                            model = next;
+                            stream_attempt = 0;
+                            continue;
+                        }
+                        return Err(e);
+                    }
+                };
 
                 let mut assistant_text = String::new();
                 let mut assistant_reasoning = String::new();
@@ -439,6 +481,19 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                     })
                     .await;
                     tokio::time::sleep(delay).await;
+                    continue;
+                }
+                if recoverable
+                    && let Some(next) = self.next_fallback(&message, &model, &mut next_fallback)
+                {
+                    self.emit(AgentEvent::Notice {
+                        message: format!(
+                            "{model} failed ({message}); trying fallback model {next}"
+                        ),
+                    })
+                    .await;
+                    model = next;
+                    stream_attempt = 0;
                     continue;
                 }
 
@@ -1070,6 +1125,32 @@ fn cap_tool_output(s: &str) -> String {
     )
 }
 
+/// Whether a request error means the model itself can't serve it right now,
+/// so another model may: overloaded, rate-limited, unavailable, or unknown.
+fn fallback_worthy(error: &str) -> bool {
+    let e = error.to_ascii_lowercase();
+    [
+        "overloaded",
+        "529",
+        "503",
+        "502",
+        "429",
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "unavailable",
+        "model_not_supported",
+        "not supported",
+        "unknown model",
+        "model not found",
+        "does not exist",
+        "no such model",
+        "capacity",
+    ]
+    .iter()
+    .any(|k| e.contains(k))
+}
+
 /// Tools that only read, so several can run at once.
 fn concurrency_safe(tool: &str) -> bool {
     matches!(
@@ -1432,6 +1513,71 @@ mod tests {
         let history = agent.messages.clone();
         agent.compact_messages(history);
         assert!(agent.messages.iter().all(|m| m.provider_blocks.is_none()));
+    }
+
+    /// Overloaded on every model except `good`.
+    struct PickyProvider {
+        good: &'static str,
+        seen: Mutex<Vec<String>>,
+    }
+
+    #[async_trait]
+    impl Provider for PickyProvider {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            model: &str,
+            _workspace_root: &Path,
+        ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError> {
+            self.seen.lock().unwrap().push(model.to_string());
+            if model != self.good {
+                return Err(ProviderError::RequestFailed(format!(
+                    "{model}: 529 overloaded_error"
+                )));
+            }
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _ = tx.send(StreamChunk::TextDelta("ok".into())).await;
+                let _ = tx.send(StreamChunk::Done).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn an_overloaded_model_falls_back_in_order() {
+        let (event_tx, mut events) = tokio::sync::mpsc::channel(64);
+        let provider = Box::new(PickyProvider {
+            good: "second",
+            seen: Mutex::new(Vec::new()),
+        });
+        let mut agent = AgentLoop::new(
+            provider,
+            ToolRegistry::new(),
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "primary".into(),
+            event_tx,
+            3,
+            3,
+            0,
+            None,
+        );
+        agent.fallback_models = vec!["first".into(), "second".into(), "third".into()];
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(agent.run_turn("hi", temp.path(), &[]).await.unwrap(), "ok");
+        let mut notices = 0;
+        while let Ok(e) = events.try_recv() {
+            if let AgentEvent::Notice { message } = e
+                && message.contains("trying fallback model")
+            {
+                notices += 1;
+            }
+        }
+        assert_eq!(notices, 2);
+        // Errors that aren't about the model don't switch models.
+        assert!(!fallback_worthy("invalid request: bad tool schema"));
+        assert!(fallback_worthy("HTTP 503 Service Unavailable"));
     }
 
     struct DenyAll;

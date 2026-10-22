@@ -60,6 +60,8 @@ pub struct SessionRuntime {
     /// can deny all pending approvals immediately instead of letting the
     /// approval handler block for up to 300 seconds.
     ipc_approval_pending: Option<ApprovalPendingMap>,
+    /// Sub-agents launch in the background by default (the TUI turns it on).
+    background_subagents: bool,
 }
 
 impl SessionRuntime {
@@ -275,6 +277,19 @@ impl SessionRuntime {
 
     pub fn set_permission_mode(&mut self, mode: PermissionMode) {
         self.supervisor.agent_mut().approval.set_mode(mode);
+    }
+
+    pub fn set_background_subagents(&mut self, on: bool) {
+        self.background_subagents = on;
+        self.supervisor.set_background_subagents(on);
+    }
+
+    pub fn goal_cell(&self) -> dcode_ai_runtime::goal::GoalCell {
+        self.supervisor.goal_cell()
+    }
+
+    pub fn tokens_used(&self) -> u64 {
+        self.supervisor.tokens_used()
     }
 
     /// Add or remove a permission rule in the live session.
@@ -577,6 +592,7 @@ impl SessionRuntime {
         for pattern in old_allow {
             new_runtime.add_session_allow_pattern(pattern);
         }
+        new_runtime.set_background_subagents(self.background_subagents);
 
         // Refresh the approval-pending map reference for cancel.
         new_runtime.ipc_approval_pending = new_runtime
@@ -620,6 +636,7 @@ pub async fn build_session_runtime(
         question_pending,
         config,
         ipc_approval_pending: approval_pending,
+        background_subagents: false,
     })
 }
 
@@ -649,5 +666,6 @@ pub async fn build_resumed_session_runtime(
         question_pending,
         config,
         ipc_approval_pending: approval_pending,
+        background_subagents: false,
     })
 }

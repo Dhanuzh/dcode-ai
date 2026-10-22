@@ -220,6 +220,9 @@ fn value_to_preview(value: &Value) -> Option<String> {
         Value::Number(n) => Some(n.to_string()),
         Value::Bool(b) => Some(b.to_string()),
         Value::Array(items) => Some(format!("{} item{}", items.len(), plural(items.len()))),
+        // An empty object (e.g. a sub-agent's prompt, whose input isn't
+        // known here) has nothing worth showing.
+        Value::Object(obj) if obj.is_empty() => None,
         Value::Object(obj) => Some(format!("{} field{}", obj.len(), plural(obj.len()))),
         Value::Null => None,
     }

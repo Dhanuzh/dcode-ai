@@ -35,6 +35,14 @@ mod cmd_session;
 mod cmd_settings;
 mod cmd_work;
 
+/// Footer text while a goal is active.
+fn goal_footer_label(cell: &dcode_ai_runtime::goal::GoalCell) -> Option<String> {
+    let guard = cell.lock().ok()?;
+    let goal = guard.as_ref()?;
+    (goal.status == dcode_ai_runtime::goal::GoalStatus::Active)
+        .then(|| format!("◎ goal · turn {}", goal.turns))
+}
+
 /// Which reviewer `run_review` sends over the change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ReviewKind {
@@ -892,8 +900,8 @@ impl Repl {
             | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
-            "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/plan"
-            | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit" => {
+            "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/goal"
+            | "/plan" | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit" => {
                 return self.cmd_work(input, command, rest, parts, out).await;
             }
             _ => {
@@ -1019,6 +1027,8 @@ impl Repl {
             // The reviewer has no edit tools; auto mode lets it run checks
             // while risky commands are still refused.
             parent_mode: Some(PermissionMode::Auto),
+            child_id: None,
+            approval: None,
         };
         let report = match dcode_ai_runtime::supervisor::spawn_child_session(
             cfg,
@@ -1154,6 +1164,9 @@ impl Repl {
 
     /// Full-screen TUI: transcript + streaming + composer (default on TTY).
     pub async fn run_with_tui(&mut self) -> anyhow::Result<()> {
+        // The TUI delivers sub-agent completion notifications, so agents can
+        // run in the background here.
+        self.runtime.set_background_subagents(true);
         // Apply the configured theme before the TUI draws its first frame.
         crate::tui::theme::set_by_name(self.runtime.config().ui.theme.as_deref());
 
@@ -1408,6 +1421,30 @@ impl Repl {
                 };
                 if !notes.is_empty() {
                     pending_cmds.push_back(TuiCmd::Submit(notes.join("\n\n")));
+                }
+            }
+            // An active `/goal` continues once everything else is done.
+            if pending_cmds.is_empty() && queued_steering.is_empty() && queued_followup.is_empty() {
+                let idle = tui_state
+                    .lock()
+                    .is_ok_and(|g| g.active_approval.is_none() && g.active_question.is_none());
+                if idle {
+                    let cell = self.runtime.goal_cell();
+                    let (next, note) =
+                        dcode_ai_runtime::goal::next_step(&cell, self.runtime.tokens_used());
+                    if let Ok(mut g) = tui_state.lock() {
+                        if let Some(note) = note {
+                            g.push_block(DisplayBlock::System(note));
+                            g.touch_transcript();
+                        }
+                        g.goal_label = goal_footer_label(&cell);
+                        if next.is_some() {
+                            g.suppress_next_user_block = true;
+                        }
+                    }
+                    if let Some(prompt) = next {
+                        pending_cmds.push_back(TuiCmd::Submit(prompt));
+                    }
                 }
             }
 
@@ -2297,6 +2334,16 @@ impl Repl {
                         let _ = self.runtime.apply_dcode_ai_config(saved);
                     }
                     let turn_ok = turn.is_ok();
+                    if !turn_ok
+                        && let Some(note) = dcode_ai_runtime::goal::pause_active(
+                            &self.runtime.goal_cell(),
+                            "the turn failed or was cancelled",
+                        )
+                        && let Ok(mut g) = tui_state.lock()
+                    {
+                        g.push_block(DisplayBlock::System(note));
+                        g.goal_label = None;
+                    }
                     if let Err(e) = turn {
                         // Let queued events (e.g. the echoed prompt of a
                         // refused turn) render before the error line.

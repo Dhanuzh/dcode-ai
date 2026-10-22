@@ -82,6 +82,9 @@ pub struct Supervisor {
     /// MCP servers still connecting after startup; their tools are added at
     /// the start of the next turn once ready.
     pending_mcp: Option<McpLoad>,
+    /// The session's `/goal`, shared with the `update_goal` tool.
+    goal: crate::goal::GoalCell,
+    background_default: Arc<std::sync::atomic::AtomicBool>,
 }
 
 type McpLoad = tokio::task::JoinHandle<(
@@ -245,9 +248,40 @@ impl Supervisor {
         // RuntimeBashTool is registered after event_tx is created (below)
         // so it can stream ToolOutputDelta events.
 
+        let goal: crate::goal::GoalCell = Arc::new(std::sync::Mutex::new(None));
+        if !cfg.safe_mode {
+            tools.register(Box::new(crate::goal::UpdateGoalTool::new(goal.clone())));
+        }
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
         let mode_cell: dcode_ai_core::approval::ModeCell =
             Arc::new(std::sync::RwLock::new(config.permissions.mode));
+        // Who answers approval prompts: the UI (interactive), or the handler
+        // the caller gave (sub-agents: the parent's, through a bridge).
+        let (prompt_handler, approval_pending): (
+            Option<Arc<dyn ApprovalHandler>>,
+            Option<ApprovalPendingMap>,
+        ) = match (cfg.interactive_approvals, cfg.approval_handler) {
+            (true, Some(handler)) => (Some(handler), None),
+            (true, None) => {
+                let ipc_handler = IpcApprovalHandler::new();
+                let pending = ipc_handler.pending();
+                (Some(ipc_handler as Arc<dyn ApprovalHandler>), Some(pending))
+            }
+            (false, handler) => (handler, None),
+        };
+        let background_agents: dcode_ai_core::tools::spawn_subagent::BackgroundAgents =
+            Default::default();
+        let background_default: Arc<std::sync::atomic::AtomicBool> = Default::default();
+        if !cfg.safe_mode {
+            tools.register(Box::new(
+                dcode_ai_core::tools::spawn_subagent::AgentOutputTool::new(
+                    background_agents.clone(),
+                ),
+            ));
+            tools.register(Box::new(
+                dcode_ai_core::tools::spawn_subagent::AgentKillTool::new(background_agents.clone()),
+            ));
+        }
         if !cfg.safe_mode {
             let agents = dcode_ai_core::agent_defs::discover(
                 &workspace_root,
@@ -259,33 +293,29 @@ impl Supervisor {
             tools.register(Box::new(
                 SpawnSubagentTool::new(spawn_tx)
                     .with_agents(agents)
-                    .with_parent_mode(mode_cell.clone()),
+                    .with_parent_mode(mode_cell.clone())
+                    .with_registry(background_agents.clone())
+                    // Off until a UI that delivers completion notifications
+                    // turns it on (the TUI); one-shot runs would exit under
+                    // a running agent.
+                    .with_background_default(background_default.clone())
+                    .with_approval(prompt_handler.clone().filter(|_| cfg.interactive_approvals)),
             ));
         }
 
-        let approval_pending: Option<ApprovalPendingMap>;
         let approval = if cfg.interactive_approvals {
-            match cfg.approval_handler {
-                Some(handler) => {
-                    approval_pending = None;
-                    ApprovalPolicy::new(config.permissions.clone())
-                        .with_mode_cell(mode_cell.clone())
-                        .with_handler(handler)
-                }
-                None => {
-                    let ipc_handler = IpcApprovalHandler::new();
-                    approval_pending = Some(ipc_handler.pending());
-                    ApprovalPolicy::new(config.permissions.clone())
-                        .with_mode_cell(mode_cell.clone())
-                        .with_handler(ipc_handler as Arc<dyn ApprovalHandler>)
-                }
-            }
+            ApprovalPolicy::new(config.permissions.clone())
+                .with_mode_cell(mode_cell.clone())
+                .with_handler(prompt_handler.clone().expect("interactive handler"))
         } else {
-            approval_pending = None;
             ApprovalPolicy::new(config.permissions.clone())
                 .with_mode_cell(mode_cell.clone())
                 .fail_on_ask()
-                .with_handler(Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>)
+                .with_handler(
+                    prompt_handler
+                        .clone()
+                        .unwrap_or_else(|| Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>),
+                )
         };
         // Background shells report start/end on the event channel so the UI
         // can show them and the agent is notified when one finishes.
@@ -368,6 +398,7 @@ impl Supervisor {
             hook_runner.clone(),
         );
         agent.max_cost_usd = config.session.max_cost_usd;
+        agent.fallback_models = config.model.fallback_models.clone();
         let mut system_prompt =
             build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
         if let Some(section) = memory_prompt_section(&config, &workspace_root) {
@@ -430,6 +461,8 @@ impl Supervisor {
             background_jobs,
             mcp_manager,
             pending_mcp,
+            goal,
+            background_default,
         };
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
             .await;
@@ -595,6 +628,22 @@ impl Supervisor {
                 })
                 .await;
         }
+    }
+
+    /// Launch sub-agents in the background unless the model asks otherwise.
+    pub fn set_background_subagents(&self, on: bool) {
+        self.background_default
+            .store(on, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The session's goal (`/goal`).
+    pub fn goal_cell(&self) -> crate::goal::GoalCell {
+        self.goal.clone()
+    }
+
+    /// Input + output tokens this session has used.
+    pub fn tokens_used(&self) -> u64 {
+        self.agent.cost_tracker.input_tokens + self.agent.cost_tracker.output_tokens
     }
 
     /// Add tools from MCP servers that finished connecting after startup.

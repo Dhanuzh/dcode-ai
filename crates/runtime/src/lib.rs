@@ -3,6 +3,7 @@
 #![allow(clippy::double_must_use)]
 pub mod bash_tool;
 pub mod context_manager;
+pub mod goal;
 pub mod interactive_exec;
 pub mod ipc;
 pub mod last_session;

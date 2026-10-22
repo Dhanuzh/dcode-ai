@@ -1170,6 +1170,10 @@ pub struct ModelConfig {
     /// the parent's model.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subagent_model: Option<String>,
+    /// Models tried in order (up to three) when the session's model is
+    /// overloaded or unavailable (Claude Code's `fallbackModel`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fallback_models: Vec<String>,
 }
 
 /// Convenient shorthands that map to full model IDs.
@@ -1193,6 +1197,7 @@ impl Default for ModelConfig {
             recent_models: Vec::new(),
             compact_model: None,
             subagent_model: None,
+            fallback_models: Vec::new(),
         }
     }
 }
@@ -1201,6 +1206,14 @@ impl ModelConfig {
     fn merge(&mut self, partial: PartialModelConfig) {
         if let Some(m) = partial.compact_model {
             self.compact_model = Some(m).filter(|m| !m.trim().is_empty());
+        }
+        if let Some(f) = partial.fallback_models {
+            self.fallback_models = f
+                .into_iter()
+                .map(|m| m.trim().to_string())
+                .filter(|m| !m.is_empty())
+                .take(3)
+                .collect();
         }
         if let Some(m) = partial.subagent_model {
             self.subagent_model = Some(m).filter(|m| !m.trim().is_empty());
@@ -1951,6 +1964,7 @@ struct PartialModelConfig {
     recent_models: Option<Vec<String>>,
     compact_model: Option<String>,
     subagent_model: Option<String>,
+    fallback_models: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

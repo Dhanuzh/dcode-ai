@@ -519,6 +519,15 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 stats.estimated_cost_usd()
             );
         }
+        AgentEvent::BackgroundAgentFinished {
+            agent_id, status, ..
+        } => {
+            print!("{}", theme::CLEAR_LINE);
+            println!(
+                "  {}",
+                format!("● background agent {agent_id} {status}").dimmed()
+            );
+        }
         AgentEvent::Notice { message } => {
             print!("{}", theme::CLEAR_LINE);
             println!("  {}", message.dimmed());

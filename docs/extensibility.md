@@ -224,6 +224,7 @@ Without a server it falls back to a fast local index.
 [model]
 compact_model = "haiku"      # conversation summaries
 subagent_model = "sonnet"    # sub-agents without their own `model:`
+fallback_models = ["claude-sonnet-5", "gpt-5"]  # tried in order when the model is overloaded or unavailable
 
 [session]
 max_cost_usd = 5.0           # stop at $5 estimated spend (0 = off)

@@ -51,6 +51,137 @@ work. Focus on concrete steps, risks, and validation.\n\nTask:\n",
                 )
                 .await?
             }
+            "/goal" => {
+                use dcode_ai_runtime::goal::{self as goal, Goal, GoalStatus};
+                let cell = self.runtime.goal_cell();
+                let arg = rest.trim();
+                // `--budget <tokens>` anywhere in the arguments.
+                let mut budget: Option<u64> = None;
+                let mut words: Vec<&str> = Vec::new();
+                let mut it = arg.split_whitespace();
+                while let Some(w) = it.next() {
+                    if w == "--budget" {
+                        budget = it.next().and_then(|b| b.replace(['_', ','], "").parse().ok());
+                    } else {
+                        words.push(w);
+                    }
+                }
+                let text = words.join(" ");
+                let say = |s: String| {
+                    if let ReplOutput::Tui(st) = &out
+                        && let Ok(mut g) = st.lock()
+                    {
+                        g.push_block(DisplayBlock::System(s));
+                        g.goal_label = goal_footer_label(&cell);
+                        g.touch_transcript();
+                    } else {
+                        out.println(&s);
+                    }
+                };
+                let tokens_now = self.runtime.tokens_used();
+                match text.as_str() {
+                    "" => {
+                        let line = match cell.lock().ok().and_then(|g| g.clone()) {
+                            Some(g) => format!(
+                                "◎ goal ({}): {}\n  turns {} · tokens {}{}\n  /goal pause · resume · clear",
+                                g.status.label(),
+                                g.objective,
+                                g.turns,
+                                tokens_now.saturating_sub(g.tokens_at_start),
+                                g.budget.map(|b| format!(" of {b}")).unwrap_or_default()
+                            ),
+                            None => "No goal. /goal <objective> [--budget <tokens>] keeps dcode-ai working across turns until it is done.".into(),
+                        };
+                        say(line);
+                        return Ok(true);
+                    }
+                    "clear" => {
+                        *cell.lock().unwrap_or_else(|e| e.into_inner()) = None;
+                        say("◎ goal cleared".into());
+                        return Ok(true);
+                    }
+                    "pause" => {
+                        let line = goal::pause_active(&cell, "by you")
+                            .unwrap_or_else(|| "No active goal to pause.".into());
+                        say(line);
+                        return Ok(true);
+                    }
+                    "resume" => {
+                        let resumed = {
+                            let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+                            match guard.as_mut() {
+                                Some(g) if g.status != GoalStatus::Active && g.status != GoalStatus::Complete => {
+                                    g.status = GoalStatus::Active;
+                                    g.announced = false;
+                                    g.turns = 0;
+                                    if budget.is_some() {
+                                        g.budget = budget;
+                                        g.tokens_at_start = tokens_now;
+                                    }
+                                    true
+                                }
+                                _ => false,
+                            }
+                        };
+                        if !resumed {
+                            say("No paused, blocked or budget-limited goal to resume.".into());
+                            return Ok(true);
+                        }
+                        say("◎ goal resumed".into());
+                    }
+                    objective => {
+                        if cell
+                            .lock()
+                            .ok()
+                            .and_then(|g| g.as_ref().map(|g| g.status == GoalStatus::Active))
+                            .unwrap_or(false)
+                        {
+                            say("A goal is already active — /goal clear first, or /goal to see it.".into());
+                            return Ok(true);
+                        }
+                        let new = Goal::new(objective, budget, tokens_now);
+                        let prompt = goal::start_prompt(&new);
+                        *cell.lock().unwrap_or_else(|e| e.into_inner()) = Some(new);
+                        say(format!(
+                            "◎ goal set{}: {objective}",
+                            budget.map(|b| format!(" (budget {b} tokens)")).unwrap_or_default()
+                        ));
+                        // The TUI's idle loop continues the goal after each
+                        // turn; the plain prompt runs the loop here.
+                        if let Some(tx) = &self.self_cmd_tx {
+                            if let ReplOutput::Tui(st) = &out
+                                && let Ok(mut g) = st.lock()
+                            {
+                                g.suppress_next_user_block = true;
+                            }
+                            let _ = tx.send(TuiCmd::Submit(prompt));
+                            return Ok(true);
+                        }
+                        let mut prompt = prompt;
+                        loop {
+                            match self.runtime.run_turn(&prompt).await {
+                                Ok(o) => println!("{o}"),
+                                Err(e) => {
+                                    eprintln!("error: {e}");
+                                    if let Some(n) = goal::pause_active(&cell, "the turn failed") {
+                                        println!("{n}");
+                                    }
+                                    break;
+                                }
+                            }
+                            let (next, note) = goal::next_step(&cell, self.runtime.tokens_used());
+                            if let Some(n) = note {
+                                println!("{n}");
+                            }
+                            match next {
+                                Some(p) => prompt = p,
+                                None => break,
+                            }
+                        }
+                        return Ok(true);
+                    }
+                }
+            }
             "/pr-comments" => {
                 let ws = self.runtime.workspace_root().to_path_buf();
                 let pr = rest.trim().trim_start_matches('#').to_string();

@@ -62,6 +62,22 @@ for the full output. Continue your work if this changes anything; otherwise repl
     )
 }
 
+/// What the agent is told when a background sub-agent settles.
+pub(crate) fn agent_notification(agent_id: &str, task: &str, status: &str, output: &str) -> String {
+    let report = if output.trim().is_empty() {
+        "(no report)"
+    } else {
+        output.trim()
+    };
+    format!(
+        "<task-notification>\n<agent-id>{agent_id}</agent-id>\n<summary>Background agent \"{task}\" \
+{status}</summary>\n<result>\n{report}\n</result>\n</task-notification>\n\
+This is an automated notification that a sub-agent you started in the background has \
+finished, not a message from the user. Use its result to continue your work; if nothing \
+changes, reply briefly."
+    )
+}
+
 impl TuiSessionState {
     pub fn new(
         session_id: String,
@@ -233,6 +249,7 @@ impl TuiSessionState {
             setup_picker: None,
             paste_request: None,
             pasting: false,
+            goal_label: None,
             reload_slash_entries: false,
             theme_picker_original: None,
             statusline_text: None,
@@ -1974,6 +1991,20 @@ impl TuiSessionState {
                     self.context_tokens = *context_tokens;
                 }
                 self.push_block(DisplayBlock::System(format!("⟳ {message}")));
+                transcript_dirty = true;
+            }
+            AgentEvent::BackgroundAgentFinished {
+                agent_id,
+                task,
+                status,
+                output,
+            } => {
+                self.push_block(DisplayBlock::System(format!(
+                    "● Agent \"{}\" {status} ({agent_id})",
+                    truncate(task, 60)
+                )));
+                self.pending_job_notifications
+                    .push(agent_notification(agent_id, task, status, output));
                 transcript_dirty = true;
             }
             AgentEvent::Notice { message } => {

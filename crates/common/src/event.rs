@@ -183,6 +183,14 @@ pub enum AgentEvent {
         child_session_id: String,
         status: String,
     },
+    /// A sub-agent started in the background has settled; `output` is its
+    /// final report (the parent is notified with it).
+    BackgroundAgentFinished {
+        agent_id: String,
+        task: String,
+        status: String,
+        output: String,
+    },
     /// Live activity from a child session (tools, checkpoints, nested spawns), for parent UI.
     ChildSessionActivity {
         child_session_id: String,

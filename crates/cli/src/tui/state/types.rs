@@ -189,6 +189,8 @@ pub struct TuiSessionState {
     pub paste_request: Option<bool>,
     /// A clipboard paste is in progress (footer shows "pasting image…").
     pub pasting: bool,
+    /// Footer marker while a `/goal` is active.
+    pub goal_label: Option<String>,
     /// `/setup` starter-pack picker.
     pub setup_picker: Option<Box<crate::tui::setup_picker::SetupPicker>>,
     /// `[ui] statusline_command` and its latest output line.

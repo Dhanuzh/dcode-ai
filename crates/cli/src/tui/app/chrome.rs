@@ -177,6 +177,13 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
         ));
     }
 
+    if let Some(goal) = &g.goal_label {
+        left.push(Span::styled(
+            format!(" · {goal}"),
+            Style::default().fg(theme::accent()),
+        ));
+    }
+
     if let Some(badge) = shells_badge(g) {
         left.push(Span::styled(
             format!(" · {badge}"),
