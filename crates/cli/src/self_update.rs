@@ -49,7 +49,34 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// What an update attempt did.
+pub enum Outcome {
+    UpToDate,
+    Available(String),
+    Updated { tag: String, path: PathBuf },
+}
+
+/// `dcode-ai update`: print what happened.
 pub async fn run(check_only: bool, force: bool) -> anyhow::Result<()> {
+    match update(check_only, force, &|m| println!("{m}")).await? {
+        Outcome::UpToDate => println!("dcode-ai v{CURRENT} is the latest version."),
+        Outcome::Available(tag) => {
+            println!("Update available: v{CURRENT} → {tag}. Run `dcode-ai update`.")
+        }
+        Outcome::Updated { tag, path } => {
+            println!("Updated dcode-ai v{CURRENT} → {tag} ({}).", path.display())
+        }
+    }
+    Ok(())
+}
+
+/// Check for, and unless `check_only` install, the latest release.
+/// `progress` gets short status lines.
+pub async fn update(
+    check_only: bool,
+    force: bool,
+    progress: &(dyn Fn(&str) + Send + Sync),
+) -> anyhow::Result<Outcome> {
     let client = reqwest::Client::builder()
         .user_agent(concat!("dcode-ai/", env!("CARGO_PKG_VERSION")))
         .timeout(std::time::Duration::from_secs(120))
@@ -67,12 +94,10 @@ pub async fn run(check_only: bool, force: bool) -> anyhow::Result<()> {
     }
     let newer = parse_ver(&tag) > parse_ver(CURRENT);
     if !newer && !force {
-        println!("dcode-ai v{CURRENT} is the latest version.");
-        return Ok(());
+        return Ok(Outcome::UpToDate);
     }
     if check_only {
-        println!("Update available: v{CURRENT} → {tag}. Run `dcode-ai update`.");
-        return Ok(());
+        return Ok(Outcome::Available(tag));
     }
     let target = target().ok_or_else(|| {
         anyhow::anyhow!("no prebuilt binary for this platform; build from source instead")
@@ -93,21 +118,9 @@ pub async fn run(check_only: bool, force: bool) -> anyhow::Result<()> {
     let sha_url = url_of(&format!("{archive_name}.sha256"))
         .ok_or_else(|| anyhow::anyhow!("release {tag} has no checksum for {archive_name}"))?;
 
-    println!("Downloading {archive_name} ({tag})…");
-    let bytes = client
-        .get(&archive_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?;
-    let sha_text = client
-        .get(&sha_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await?;
+    progress(&format!("Downloading {archive_name} ({tag})…"));
+    let bytes = fetch(&client, &archive_url).await?;
+    let sha_text = String::from_utf8_lossy(&fetch(&client, &sha_url).await?).into_owned();
     let want =
         expected_digest(&sha_text).ok_or_else(|| anyhow::anyhow!("unreadable checksum file"))?;
     let got = hex(&Sha256::digest(&bytes));
@@ -143,8 +156,31 @@ pub async fn run(check_only: bool, force: bool) -> anyhow::Result<()> {
     let exe = exe.canonicalize().unwrap_or(exe);
     replace_binary(&new_bin, &exe)?;
     let _ = std::fs::remove_dir_all(&work);
-    println!("Updated dcode-ai v{CURRENT} → {tag} ({}).", exe.display());
-    Ok(())
+    Ok(Outcome::Updated { tag, path: exe })
+}
+
+/// GET with a few retries: a freshly published release asset can fail once
+/// while the CDN catches up.
+async fn fetch(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<u8>> {
+    let mut last = None;
+    for attempt in 0..3u64 {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(2 * attempt)).await;
+        }
+        let result = async {
+            let resp = client.get(url).send().await?.error_for_status()?;
+            Ok::<_, reqwest::Error>(resp.bytes().await?.to_vec())
+        }
+        .await;
+        match result {
+            Ok(b) => return Ok(b),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(anyhow::anyhow!(
+        "download failed: {}",
+        last.map(|e| e.to_string()).unwrap_or_default()
+    ))
 }
 
 fn find_file(dir: &Path, name: &str) -> Option<PathBuf> {
@@ -167,7 +203,9 @@ fn replace_binary(new: &Path, exe: &Path) -> anyhow::Result<()> {
     std::fs::copy(new, &staged).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
             anyhow::anyhow!(
-                "no permission to write {} — run `sudo dcode-ai update`",
+                "no permission to write {} — run `sudo dcode-ai update`, or reinstall into a \
+                 folder you own so updates never need sudo: curl -sSL \
+                 https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | bash",
                 exe.display()
             )
         } else {

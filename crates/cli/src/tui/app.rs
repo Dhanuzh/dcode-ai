@@ -294,9 +294,9 @@ pub fn banner_lines(model: &str, workspace: &str, width: u16) -> Vec<Line<'stati
                     .fg(theme::warn())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ·  run ", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled("  ·  type ", Style::default().add_modifier(Modifier::DIM)),
             Span::styled(
-                "dcode-ai update",
+                "/update",
                 Style::default()
                     .fg(theme::muted())
                     .add_modifier(Modifier::BOLD),
@@ -396,6 +396,45 @@ fn request_turn_cancel(
 /// Stage images named by paths in `pasted`. `inline` puts an `[Image #N]`
 /// placeholder in the composer for each (paste / drag-and-drop); otherwise
 /// they ride along with the message being submitted.
+/// Read a clipboard image on a thread and attach it; with `text_fallback`,
+/// clipboard text naming image files is imported instead.
+fn spawn_clipboard_paste(state: Arc<Mutex<TuiSessionState>>, text_fallback: bool) {
+    let Some((ws, sid)) = state
+        .lock()
+        .ok()
+        .map(|g| (g.workspace_root.clone(), g.session_id.clone()))
+    else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let image = crate::image_attach::paste_clipboard_image(&ws, &sid);
+        let text = match (&image, text_fallback) {
+            (Err(_), true) => Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok()),
+            _ => None,
+        };
+        let Ok(mut g) = state.lock() else {
+            return;
+        };
+        g.pasting = false;
+        match image {
+            Ok(att) => {
+                g.attach_image_inline(att);
+            }
+            Err(image_err) if text_fallback => match text {
+                Some(text) => match stage_pasted_image_paths(&mut g, &text, true) {
+                    Ok(0) => g.push_error(format!("[image] {image_err}")),
+                    Ok(_) => {}
+                    Err(path_err) => g.push_error(format!(
+                        "[image] {image_err}; clipboard path import failed: {path_err}"
+                    )),
+                },
+                None => g.push_error(format!("[image] {image_err}")),
+            },
+            Err(_) => {}
+        }
+    });
+}
+
 fn stage_pasted_image_paths(
     state: &mut TuiSessionState,
     pasted: &str,
@@ -740,6 +779,18 @@ pub fn run_blocking(
     }
 
     loop {
+        // A clipboard paste waits for the clipboard off the UI thread.
+        let paste = state.lock().ok().and_then(|mut g| {
+            let r = g.paste_request.take();
+            if r.is_some() {
+                g.pasting = true;
+            }
+            r
+        });
+        if let Some(text_fallback) = paste {
+            spawn_clipboard_paste(Arc::clone(&state), text_fallback);
+        }
+
         // Pick up async workspace file discovery when it completes.
         if workspace_files.is_empty()
             && let Ok(files) = workspace_files_rx.try_recv()
@@ -1124,19 +1175,10 @@ pub fn run_blocking(
                         // so a clipboard *image* arrives here as an empty paste.
                         // When the paste is empty but the clipboard holds an
                         // image, stage the image instead of inserting nothing.
-                        let staged_image = if pasted.trim().is_empty() {
-                            let ws = g.workspace_root.clone();
-                            let sid = g.session_id.clone();
-                            match crate::image_attach::paste_clipboard_image(&ws, &sid) {
-                                Ok(att) => {
-                                    g.attach_image_inline(att);
-                                    true
-                                }
-                                Err(_) => false,
-                            }
-                        } else {
-                            false
-                        };
+                        let staged_image = pasted.trim().is_empty();
+                        if staged_image {
+                            g.paste_request = Some(false);
+                        }
                         if !staged_image {
                             match stage_pasted_image_paths(&mut g, &pasted, true) {
                                 Ok(0) => {

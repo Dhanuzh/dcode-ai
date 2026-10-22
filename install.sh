@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO="Dhanuzh/dcode-ai"
 BINARY="dcode-ai"
-INSTALL_DIR="${DCODE_AI_INSTALL_DIR:-/usr/local/bin}"
+INSTALL_DIR="${DCODE_AI_INSTALL_DIR:-}"
 
 info()  { printf '\033[1;34m=>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -147,6 +147,27 @@ resolve_version() {
     TAG="$tag"
 }
 
+# Where to install. A folder you own (~/.local/bin) means `dcode-ai update`
+# never needs sudo; /usr/local/bin is used when it is already writable or
+# when you choose it.
+choose_install_dir() {
+    [ -n "$INSTALL_DIR" ] && return
+    if [ -w /usr/local/bin ]; then
+        INSTALL_DIR=/usr/local/bin
+        return
+    fi
+    local answer=""
+    # Ask only when there is a terminal to answer on (curl | bash still has one).
+    if { : </dev/tty; } 2>/dev/null; then
+        printf '\033[1;34m=>\033[0m Install to ~/.local/bin (no sudo; updates never need sudo) [Y] or /usr/local/bin with sudo [s]? ' >/dev/tty
+        read -r answer </dev/tty || answer=""
+    fi
+    case "$answer" in
+        s|S|sudo) INSTALL_DIR=/usr/local/bin ;;
+        *) INSTALL_DIR="$HOME/.local/bin" ;;
+    esac
+}
+
 tmpdir=""
 cleanup() { [ -n "$tmpdir" ] && rm -rf "$tmpdir"; }
 trap cleanup EXIT
@@ -177,6 +198,10 @@ main() {
 
     tar xzf "$archive" -C "$tmpdir"
 
+    choose_install_dir
+    case "$INSTALL_DIR" in
+        "$HOME"/*) mkdir -p "$INSTALL_DIR" ;;
+    esac
     if [ -w "$INSTALL_DIR" ]; then
         mv "${tmpdir}/${BINARY}" "${INSTALL_DIR}/${BINARY}"
     else
@@ -187,6 +212,15 @@ main() {
     chmod +x "${INSTALL_DIR}/${BINARY}"
 
     info "Installed ${BINARY} ${TAG} to ${INSTALL_DIR}/${BINARY}"
+    case ":$PATH:" in
+        *":${INSTALL_DIR}:"*) ;;
+        *) warn "${INSTALL_DIR} is not on your PATH. Add it: echo 'export PATH=\"${INSTALL_DIR}:\$PATH\"' >> ~/.bashrc  (or ~/.zshrc)" ;;
+    esac
+    local found
+    found="$(command -v "$BINARY" 2>/dev/null || true)"
+    if [ -n "$found" ] && [ "$found" != "${INSTALL_DIR}/${BINARY}" ]; then
+        warn "Another ${BINARY} at ${found} comes first on your PATH; remove it (e.g. sudo rm ${found}) to use this one."
+    fi
     check_provider_tools
     info "Run 'dcode-ai' to sign in and start; update later with 'dcode-ai update'"
 }

@@ -360,18 +360,11 @@ pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'stati
         "> ",
         Style::default().add_modifier(ratatui::style::Modifier::BOLD),
     );
-    let placeholder = "Try \"explain this codebase\"";
     if buffer.is_empty() {
-        // Cursor sits on the placeholder's first letter, like Claude Code.
-        let mut chars = placeholder.chars();
-        let first = chars.next().unwrap_or(' ').to_string();
+        // An empty prompt is just the cursor.
         return Line::from(vec![
             prompt,
-            Span::styled(first, Style::default().bg(theme::muted()).fg(Color::Black)),
-            Span::styled(
-                chars.collect::<String>(),
-                Style::default().fg(theme::muted()),
-            ),
+            Span::styled(" ", Style::default().bg(theme::muted()).fg(Color::Black)),
         ]);
     }
     let chars: Vec<char> = buffer.chars().collect();

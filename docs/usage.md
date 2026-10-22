@@ -100,6 +100,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/image`, `/web`, `/run` | Attach an image, fetch a page, run a command into context |
 | `/diff`, `/commit` | Review and commit changes |
 | `/bashes` | Background shells the agent started (`/bashes kill <id>`) |
+| `/update` | Install the latest release from inside the session (`--check` to only look) |
 | `/setup` | Starter-pack picker (or `/setup <id>…` to install directly) |
 | `/doctor`, `/login`, `/logout`, `/auth` | Diagnostics and sign-in |
 
@@ -246,7 +247,8 @@ mode (`⏵⏵ auto mode on`). The startup chooser and `--permission-mode auto`
 also pick it.
 
 The startup chooser (Manual / Accept edits / Auto) appears once per folder;
-the answer is remembered in `~/.dcode-ai/folders.json`. Pick again with
+the answer is remembered in `~/.dcode-ai/folders.json` and applied quietly
+after that. Pick again with
 `/permissions mode`, clear it with `/permissions forget`, and list remembered
 folders with `/permissions folders`.
 

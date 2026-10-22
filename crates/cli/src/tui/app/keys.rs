@@ -1095,27 +1095,9 @@ pub(super) fn handle_key_event(
             if g.active_approval.is_some() || g.active_question.is_some() {
                 return KeyFlow::Continue;
             }
-            let ws = g.workspace_root.clone();
-            let sid = g.session_id.clone();
-            match crate::image_attach::paste_clipboard_image(&ws, &sid) {
-                Ok(att) => {
-                    g.attach_image_inline(att);
-                }
-                Err(image_err) => {
-                    let fallback_text = Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok());
-                    if let Some(text) = fallback_text {
-                        match stage_pasted_image_paths(g, &text, true) {
-                            Ok(0) => g.push_error(format!("[image] {image_err}")),
-                            Ok(_) => {}
-                            Err(path_err) => g.push_error(format!(
-                                "[image] {image_err}; clipboard path import failed: {path_err}"
-                            )),
-                        }
-                    } else {
-                        g.push_error(format!("[image] {image_err}"));
-                    }
-                }
-            }
+            // Reading the clipboard can take a moment (WSL goes through
+            // PowerShell): the main loop runs it in the background.
+            g.paste_request = Some(true);
         }
         (KeyCode::Char('i'), KeyModifiers::CONTROL) => {
             *composer_history_index = None;

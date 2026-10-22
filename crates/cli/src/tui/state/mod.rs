@@ -231,6 +231,8 @@ impl TuiSessionState {
             statusline_command: None,
             plugin_browser: None,
             setup_picker: None,
+            paste_request: None,
+            pasting: false,
             reload_slash_entries: false,
             theme_picker_original: None,
             statusline_text: None,

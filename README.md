@@ -61,11 +61,15 @@ curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | b
 irm https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.ps1 | iex
 ```
 
-**Update** an installed copy in place (checksum-verified):
+**Update** an installed copy in place (checksum-verified), or type `/update`
+inside a session:
 
 ```bash
 dcode-ai update          # or: dcode-ai update --check
 ```
+
+The installer offers `~/.local/bin` when `/usr/local/bin` needs sudo, so
+updates never need sudo.
 
 <details>
 <summary>Pin a version, install without sudo, or build from source</summary>

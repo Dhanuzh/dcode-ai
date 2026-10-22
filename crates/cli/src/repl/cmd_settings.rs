@@ -65,6 +65,33 @@ impl Repl {
                     }
                 }
             }
+            "/update" => {
+                out.println("[update] checking for a new version…");
+                let check_only = rest.trim() == "--check";
+                let result = crate::self_update::update(check_only, false, &|_| {}).await;
+                let line = match result {
+                    Ok(crate::self_update::Outcome::UpToDate) => format!(
+                        "[update] v{} is the latest version",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    Ok(crate::self_update::Outcome::Available(tag)) => {
+                        format!("[update] {tag} is available — /update installs it")
+                    }
+                    Ok(crate::self_update::Outcome::Updated { tag, path }) => format!(
+                        "[update] installed {tag} at {} — restart dcode-ai to use it",
+                        path.display()
+                    ),
+                    Err(e) => format!("[update] {e}"),
+                };
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.push_block(DisplayBlock::System(line));
+                    g.touch_transcript();
+                } else {
+                    out.println(&line);
+                }
+            }
             "/vim" => {
                 let on = !self.runtime.config().ui.vim_mode;
                 self.runtime.config_mut().ui.vim_mode = on;

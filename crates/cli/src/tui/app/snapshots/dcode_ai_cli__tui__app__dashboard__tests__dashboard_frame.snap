@@ -1,5 +1,6 @@
 ---
 source: crates/cli/src/tui/app/dashboard.rs
+assertion_line: 742
 expression: text
 ---
 ╭ session ───────────────╮                                                                      ╭ context │ changes │ agents ────╮
@@ -21,6 +22,6 @@ expression: text
 │                        │                                                                      │                                │
 │                        │                                                                      │                                │
 │                        │──────────────────────────────────────────────────────────────────────│                                │
-│                        │ > Try "explain this codebase"                                        │                                │
+│                        │ >                                                                    │                                │
 │                        │──────────────────────────────────────────────────────────────────────│                                │
 ╰────────────────────────╯  ? for shortcuts                                  claude-sonnet-5-5  ╰ Alt+1/2/3 · Ctrl+D focus ──────╯

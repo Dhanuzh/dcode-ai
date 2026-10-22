@@ -184,6 +184,11 @@ pub struct TuiSessionState {
     pub reload_slash_entries: bool,
     /// `/plugins` browser, when open.
     pub plugin_browser: Option<Box<crate::tui::plugin_browser::PluginBrowser>>,
+    /// A clipboard image paste to run off the UI thread; `true` falls back to
+    /// clipboard text (image paths) when there is no image.
+    pub paste_request: Option<bool>,
+    /// A clipboard paste is in progress (footer shows "pasting image…").
+    pub pasting: bool,
     /// `/setup` starter-pack picker.
     pub setup_picker: Option<Box<crate::tui::setup_picker::SetupPicker>>,
     /// `[ui] statusline_command` and its latest output line.

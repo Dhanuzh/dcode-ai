@@ -881,11 +881,11 @@ impl Repl {
             | "/todos" | "/stats" | "/doctor" | "/map" | "/feedback" => {
                 return self.cmd_info(input, command, rest, parts, out).await;
             }
-            "/agent" | "/vim" | "/permissions" | "/permission-bypass" | "/models" | "/config"
-            | "/login" | "/connect" | "/logout" | "/auth" | "/sidebar" | "/quiet" | "/settings"
-            | "/theme" | "/title" | "/raw" | "/mention" | "/output-style" | "/output-styles"
-            | "/personality" | "/keymap" | "/statusline" | "/provider" | "/apikey" | "/editor"
-            | "/set-editor" | "/auto-answer" | "/thinking" | "/effort" => {
+            "/agent" | "/update" | "/vim" | "/permissions" | "/permission-bypass" | "/models"
+            | "/config" | "/login" | "/connect" | "/logout" | "/auth" | "/sidebar" | "/quiet"
+            | "/settings" | "/theme" | "/title" | "/raw" | "/mention" | "/output-style"
+            | "/output-styles" | "/personality" | "/keymap" | "/statusline" | "/provider"
+            | "/apikey" | "/editor" | "/set-editor" | "/auto-answer" | "/thinking" | "/effort" => {
                 return self.cmd_settings(input, command, rest, parts, out).await;
             }
             "/reload" | "/add-dir" | "/skills" | "/memory" | "/setup" | "/plugins" | "/plugin"
@@ -1215,14 +1215,11 @@ impl Repl {
             .then(|| dcode_ai_common::folders::remembered_permission(self.runtime.workspace_root()))
             .flatten();
         if let Some(choice) = remembered {
-            let note = self.apply_startup_permission(&choice);
+            // Applied quietly: the footer shows the mode.
+            self.apply_startup_permission(&choice);
             if let Ok(mut g) = tui_state.lock() {
                 g.set_agent_profile(&self.current_agent_label);
                 g.set_permission_mode(&format!("{:?}", self.runtime.permission_mode()));
-                g.blocks.push(DisplayBlock::System(format!(
-                    "[permissions] {note} (remembered for this folder). Shift+Tab changes it; /permissions mode to pick again."
-                )));
-                g.touch_transcript();
             }
         } else if self.should_offer_startup_approve_all_popup()
             && let Ok(mut g) = tui_state.lock()
