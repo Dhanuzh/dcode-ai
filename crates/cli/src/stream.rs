@@ -519,6 +519,10 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 stats.estimated_cost_usd()
             );
         }
+        AgentEvent::Notice { message } => {
+            print!("{}", theme::CLEAR_LINE);
+            println!("  {}", message.dimmed());
+        }
         AgentEvent::Error { message } => {
             print!("{}", theme::CLEAR_LINE);
             println!();

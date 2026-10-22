@@ -294,12 +294,12 @@ pub fn banner_lines(model: &str, workspace: &str, width: u16) -> Vec<Line<'stati
                     .fg(theme::warn())
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("  ·  see ", Style::default().add_modifier(Modifier::DIM)),
+            Span::styled("  ·  run ", Style::default().add_modifier(Modifier::DIM)),
             Span::styled(
-                "github.com/Dhanuzh/dcode-ai/releases",
+                "dcode-ai update",
                 Style::default()
                     .fg(theme::muted())
-                    .add_modifier(Modifier::UNDERLINED),
+                    .add_modifier(Modifier::BOLD),
             ),
         ]));
     }

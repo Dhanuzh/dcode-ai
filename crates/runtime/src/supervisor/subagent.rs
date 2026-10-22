@@ -645,8 +645,25 @@ pub async fn spawn_child_session(
         f.abort();
     }
 
-    let branch = sup.branch.clone();
-    let wt_path = sup.worktree_path.clone().map(|p| p.display().to_string());
+    let mut branch = sup.branch.clone();
+    let mut wt_path = sup.worktree_path.clone().map(|p| p.display().to_string());
+    let mut output = output;
+    // A worktree the child left untouched is removed with its branch; one
+    // with work stays, and the parent is told how to merge it.
+    if let (Some(path), Some(base)) = (sup.worktree_path.clone(), sup.base_branch.clone()) {
+        let mgr = crate::worktree::WorktreeManager::new(&cfg.workspace_root);
+        if mgr.has_work(&path, &base) {
+            output.push_str(&format!(
+                "\n\n[worktree] The changes are in {} on branch {}. Review them, then merge \
+                 with `dcode-ai worktrees merge {child_id}` (or discard with `dcode-ai worktrees prune`).",
+                path.display(),
+                branch.as_deref().unwrap_or("?"),
+            ));
+        } else if mgr.remove_worktree(&child_id, true).is_ok() {
+            wt_path = None;
+            branch = None;
+        }
+    }
 
     Ok(ChildSessionResult {
         child_session_id: child_id,

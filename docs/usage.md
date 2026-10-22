@@ -127,6 +127,7 @@ dcode-ai cancel <id>              # stop a running session
 dcode-ai login anthropic|copilot  # sign in
 dcode-ai models                   # models on the active provider
 dcode-ai doctor                   # diagnose setup
+dcode-ai update [--check]         # install the latest release over this binary
 dcode-ai setup                    # starter packs for your role and languages
 dcode-ai policy show|test         # permission rules
 dcode-ai worktrees list|prune|merge <id>
@@ -246,7 +247,8 @@ also pick it.
 
 The startup chooser (Manual / Accept edits / Auto) appears once per folder;
 the answer is remembered in `~/.dcode-ai/folders.json`. Pick again with
-`/permissions mode`.
+`/permissions mode`, clear it with `/permissions forget`, and list remembered
+folders with `/permissions folders`.
 
 Rules: `/permissions` lists every allow, ask and deny rule with where it comes
 from. `/permissions allow Bash(cargo test:*)` adds one for this session and

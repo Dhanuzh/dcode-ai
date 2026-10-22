@@ -72,6 +72,34 @@ pub fn remember_permission(folder: &Path, choice: &str) -> Result<(), String> {
     all.save_to(&path)
 }
 
+/// Forget `folder`'s startup choice so the question is asked again.
+/// Returns whether there was one.
+pub fn forget_permission(folder: &Path) -> Result<bool, String> {
+    let path = store_path().ok_or("no home directory")?;
+    let mut all = FolderChoices::load_from(&path);
+    let had = all
+        .folders
+        .get_mut(&key(folder))
+        .and_then(|c| c.permission.take())
+        .is_some();
+    all.folders.retain(|_, c| c.permission.is_some());
+    if had {
+        all.save_to(&path)?;
+    }
+    Ok(had)
+}
+
+/// Every folder with a remembered startup choice: `(folder, choice)`.
+pub fn remembered_permissions() -> Vec<(String, String)> {
+    store_path()
+        .map(|p| FolderChoices::load_from(&p))
+        .unwrap_or_default()
+        .folders
+        .into_iter()
+        .filter_map(|(f, c)| c.permission.map(|p| (f, p)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

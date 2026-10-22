@@ -822,14 +822,39 @@ impl Repl {
             }
         }
 
+        // Tab opens a completion menu (slash commands, skills, `@` files).
+        builder = builder
+            .with_completer(Box::new(ReplCompleter {
+                workspace_root: self.runtime.workspace_root().to_path_buf(),
+                skill_directories: self.runtime.config().harness.skill_directories.clone(),
+            }))
+            .with_menu(reedline::ReedlineMenu::EngineCompleter(Box::new(
+                <reedline::ColumnarMenu as reedline::MenuBuilder>::with_name(
+                    reedline::ColumnarMenu::default(),
+                    "completion_menu",
+                ),
+            )));
+        let tab = reedline::ReedlineEvent::UntilFound(vec![
+            reedline::ReedlineEvent::Menu("completion_menu".into()),
+            reedline::ReedlineEvent::MenuNext,
+        ]);
+
         // Support vim mode if enabled via env
         if std::env::var("DCODE_AI_EDITOR_MODE")
             .map(|v| v.eq_ignore_ascii_case("vi") || v.eq_ignore_ascii_case("vim"))
             .unwrap_or(false)
         {
-            builder = builder.with_edit_mode(Box::new(Vi::default()));
+            let mut insert = reedline::default_vi_insert_keybindings();
+            insert.add_binding(reedline::KeyModifiers::NONE, reedline::KeyCode::Tab, tab);
+            builder = builder.with_edit_mode(Box::new(Vi::new(
+                insert,
+                reedline::default_vi_normal_keybindings(),
+                reedline::default_vi_visual_keybindings(),
+            )));
         } else {
-            builder = builder.with_edit_mode(Box::new(Emacs::default()));
+            let mut keys = reedline::default_emacs_keybindings();
+            keys.add_binding(reedline::KeyModifiers::NONE, reedline::KeyCode::Tab, tab);
+            builder = builder.with_edit_mode(Box::new(Emacs::new(keys)));
         }
 
         Ok(builder)
@@ -2385,8 +2410,14 @@ impl Repl {
     }
 }
 
-/// Tab completion for REPL commands and skills
-impl Completer for Repl {
+/// Tab completion for the plain (line-editor) prompt: slash commands,
+/// skills, `!` shell commands and `@` workspace files.
+struct ReplCompleter {
+    workspace_root: std::path::PathBuf,
+    skill_directories: Vec<std::path::PathBuf>,
+}
+
+impl Completer for ReplCompleter {
     fn complete(&mut self, line: &str, pos: usize) -> reedline::CompletionResult {
         reedline::CompletionResult::Fresh {
             suggestions: self.complete_line(line, pos).into(),
@@ -2395,12 +2426,12 @@ impl Completer for Repl {
     }
 }
 
-impl Repl {
+impl ReplCompleter {
     fn complete_line(&mut self, line: &str, pos: usize) -> Vec<Suggestion> {
         let mut suggestions = Vec::new();
 
         if let Some((at_byte, prefix)) = at_token_before_cursor(line, pos) {
-            let files = discover_workspace_files(self.runtime.workspace_root());
+            let files = discover_workspace_files(&self.workspace_root);
             for path in filter_paths_prefix(&files, &prefix) {
                 suggestions.push(Suggestion {
                     value: format!("@{path}"),
@@ -2426,9 +2457,11 @@ impl Repl {
                 if cmd.starts_with(line) {
                     suggestions.push(Suggestion {
                         value: cmd.to_string(),
-                        description: Some("REPL command".to_string()),
+                        description: Some(
+                            crate::slash_commands::slash_command_description(cmd).to_string(),
+                        ),
                         extra: None,
-                        span: reedline::Span { start: 0, end: 0 },
+                        span: reedline::Span { start: 0, end: pos },
                         append_whitespace: true,
                         style: None,
                         ..Default::default()
@@ -2451,7 +2484,7 @@ impl Repl {
                         value: full,
                         description: Some("Shell command".to_string()),
                         extra: None,
-                        span: reedline::Span { start: 0, end: 0 },
+                        span: reedline::Span { start: 0, end: pos },
                         append_whitespace: true,
                         style: None,
                         ..Default::default()
@@ -2461,10 +2494,7 @@ impl Repl {
         }
 
         // Load skills for completion
-        if let Ok(skills) = SkillCatalog::discover(
-            self.runtime.workspace_root(),
-            &self.runtime.config().harness.skill_directories,
-        ) {
+        if let Ok(skills) = SkillCatalog::discover(&self.workspace_root, &self.skill_directories) {
             for skill in skills {
                 let skill_cmd = format!("/{}", skill.command);
                 if skill_cmd.starts_with(line) {
@@ -2472,7 +2502,7 @@ impl Repl {
                         value: skill_cmd,
                         description: skill.description,
                         extra: None,
-                        span: reedline::Span { start: 0, end: 0 },
+                        span: reedline::Span { start: 0, end: pos },
                         append_whitespace: true,
                         style: None,
                         ..Default::default()

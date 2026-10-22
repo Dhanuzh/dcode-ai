@@ -73,6 +73,20 @@ impl SetupPicker {
             KeyCode::Down | KeyCode::Char('j') if n > 0 => {
                 self.cursor = (self.cursor + 1) % n;
             }
+            // Two-column layout: jump to the same row in the other column.
+            KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') if n > 0 => {
+                let roles = self
+                    .rows
+                    .iter()
+                    .filter(|r| r.kind == PackKind::Role)
+                    .count();
+                let langs = n - roles;
+                self.cursor = if self.cursor < roles {
+                    roles + self.cursor.min(langs.saturating_sub(1))
+                } else {
+                    (self.cursor - roles).min(roles.saturating_sub(1))
+                };
+            }
             KeyCode::Char(' ') | KeyCode::Tab => {
                 if let Some(r) = self.rows.get_mut(self.cursor)
                     && !r.installed
@@ -99,7 +113,13 @@ impl SetupPicker {
     }
 
     pub fn render(&self, frame: &mut ratatui::Frame<'_>, area: Rect) {
-        let height = (self.rows.len() as u16 + 9).min(area.height);
+        let roles = self
+            .rows
+            .iter()
+            .filter(|r| r.kind == PackKind::Role)
+            .count();
+        let tallest = roles.max(self.rows.len() - roles) as u16;
+        let height = (tallest + 4).min(area.height);
         let width = area.width.min(96);
         let rect = super::layout::centered_rect(area, width, height);
         frame.render_widget(Clear, rect);
@@ -113,6 +133,10 @@ impl SetupPicker {
                     .fg(theme::accent())
                     .add_modifier(Modifier::BOLD),
             ))
+            .title_bottom(Span::styled(
+                " ↑↓←→ move · Space select · Enter install · Esc close ",
+                Style::default().fg(theme::muted()),
+            ))
             .padding(Padding::horizontal(1))
             .style(Style::default().bg(theme::bg()));
         let inner = block.inner(rect);
@@ -122,6 +146,93 @@ impl SetupPicker {
     }
 
     fn lines(&self, width: usize, height: usize) -> Vec<Line<'static>> {
+        if width >= 64 {
+            return self.two_column_lines(width);
+        }
+        self.list_lines(width, height)
+    }
+
+    /// Roles left, languages right; the selected pack's description below.
+    fn two_column_lines(&self, width: usize) -> Vec<Line<'static>> {
+        let muted = Style::default().fg(theme::muted());
+        let text = Style::default().fg(theme::text());
+        let accent = Style::default().fg(theme::accent());
+        let col = width / 2;
+        let cell = |i: Option<usize>| -> Vec<Span<'static>> {
+            let Some(i) = i else {
+                return vec![Span::raw(" ".repeat(col))];
+            };
+            let r = &self.rows[i];
+            let selected = i == self.cursor;
+            let mark = if r.installed {
+                "[●]"
+            } else if r.checked {
+                "[✔]"
+            } else {
+                "[ ]"
+            };
+            let tag = if r.installed {
+                " installed"
+            } else if r.detected {
+                " found"
+            } else {
+                ""
+            };
+            let head = format!("{}{mark} ", if selected { "❯ " } else { "  " });
+            let name = truncate_chars(
+                &r.name,
+                col.saturating_sub(head.chars().count() + tag.len() + 1),
+            );
+            let pad = col.saturating_sub(head.chars().count() + name.chars().count() + tag.len());
+            let style = if selected {
+                accent.add_modifier(Modifier::BOLD)
+            } else {
+                text
+            };
+            vec![
+                Span::styled(head, style),
+                Span::styled(name, style),
+                Span::styled(tag.to_string(), accent),
+                Span::raw(" ".repeat(pad)),
+            ]
+        };
+        let roles: Vec<usize> = (0..self.rows.len())
+            .filter(|&i| self.rows[i].kind == PackKind::Role)
+            .collect();
+        let langs: Vec<usize> = (0..self.rows.len())
+            .filter(|&i| self.rows[i].kind == PackKind::Language)
+            .collect();
+        let mut out = vec![Line::from(vec![
+            Span::styled(
+                format!("{:<col$}", "What do you work on?"),
+                text.add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Languages", text.add_modifier(Modifier::BOLD)),
+        ])];
+        for k in 0..roles.len().max(langs.len()) {
+            let mut spans = cell(roles.get(k).copied());
+            spans.extend(cell(langs.get(k).copied()));
+            out.push(Line::from(spans));
+        }
+        let n = self
+            .rows
+            .iter()
+            .filter(|r| r.checked && !r.installed)
+            .count();
+        let selected = format!("{n} selected · ");
+        let desc = self
+            .rows
+            .get(self.cursor)
+            .map(|r| truncate_chars(&r.description, width.saturating_sub(selected.len())))
+            .unwrap_or_default();
+        out.push(Line::from(vec![
+            Span::styled(selected, accent),
+            Span::styled(desc, muted),
+        ]));
+        out
+    }
+
+    fn list_lines(&self, width: usize, height: usize) -> Vec<Line<'static>> {
         let muted = Style::default().fg(theme::muted());
         let text = Style::default().fg(theme::text());
         let accent = Style::default().fg(theme::accent());

@@ -109,7 +109,7 @@ impl Repl {
                             lines.push(String::new());
                         }
                         lines.push(
-                            "/permissions allow|ask|deny <rule> [--user] · /permissions remove <rule> [--user] · /permissions mode"
+                            "/permissions allow|ask|deny <rule> [--user] · remove <rule> · mode · folders · forget"
                                 .into(),
                         );
                         lines.push(
@@ -197,6 +197,41 @@ impl Repl {
                         }
                         for m in msg {
                             out.println(&format!("[permissions] {m}"));
+                        }
+                    }
+                    "forget" => {
+                        match dcode_ai_common::folders::forget_permission(
+                            self.runtime.workspace_root(),
+                        ) {
+                            Ok(true) => out.println(
+                                "[permissions] forgot this folder's choice — you'll be asked at the next start",
+                            ),
+                            Ok(false) => out.println(
+                                "[permissions] no choice was remembered for this folder",
+                            ),
+                            Err(e) => out.eprintln(&format!("[permissions] {e}")),
+                        }
+                    }
+                    "folders" => {
+                        let all = dcode_ai_common::folders::remembered_permissions();
+                        let mut lines = vec![format!(
+                            "Folders with a remembered permission choice ({}):",
+                            all.len()
+                        )];
+                        for (folder, choice) in all {
+                            lines.push(format!("  {choice:<13} {folder}"));
+                        }
+                        lines.push(String::new());
+                        lines
+                            .push("/permissions forget clears the current folder's choice.".into());
+                        if let ReplOutput::Tui(st) = &out {
+                            if let Ok(mut g) = st.lock() {
+                                g.open_info_modal("Remembered folders", lines);
+                            }
+                        } else {
+                            for l in &lines {
+                                out.println(l);
+                            }
                         }
                     }
                     mode => {
@@ -436,6 +471,7 @@ impl Repl {
                 }
             }
             "/logout" => {
+                dcode_ai_common::provider_runtime::forget_claude_signin();
                 let target = rest.trim();
                 let parsed = if target.is_empty() {
                     Some(LogoutTarget::All)

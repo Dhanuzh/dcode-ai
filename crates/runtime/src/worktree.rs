@@ -219,6 +219,19 @@ impl WorktreeManager {
             .collect()
     }
 
+    /// Whether a worktree holds any work: uncommitted or untracked changes,
+    /// or commits its base doesn't have.
+    pub fn has_work(&self, worktree_path: &Path, base_branch: &str) -> bool {
+        let dirty = Command::new("git")
+            .args(["status", "--porcelain", "--untracked-files=all"])
+            .current_dir(worktree_path)
+            .output()
+            .map(|o| !o.status.success() || !o.stdout.trim_ascii().is_empty())
+            // Unreadable: keep it rather than lose work.
+            .unwrap_or(true);
+        dirty || self.ahead_behind(worktree_path, base_branch).0 > 0
+    }
+
     /// Get the diff for a specific file in a worktree.
     pub fn file_diff(&self, worktree_path: &Path, base_branch: &str, file_path: &Path) -> String {
         let output = Command::new("git")

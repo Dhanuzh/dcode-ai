@@ -79,6 +79,40 @@ pub struct Supervisor {
     /// The agent's `run_background` jobs (for `/bashes`; stopped on finish).
     background_jobs: dcode_ai_core::tools::background_exec::BackgroundJobs,
     mcp_manager: Arc<McpConnectionManager>,
+    /// MCP servers still connecting after startup; their tools are added at
+    /// the start of the next turn once ready.
+    pending_mcp: Option<McpLoad>,
+}
+
+type McpLoad = tokio::task::JoinHandle<(
+    Vec<Box<dyn dcode_ai_core::tools::ToolExecutor>>,
+    Vec<(String, String)>,
+)>;
+
+/// How long session start waits for MCP servers before going on without the
+/// slow ones (they keep connecting in the background).
+const MCP_STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// Register loaded MCP tools, deferring them behind `tool_search` when there
+/// are many.
+fn register_mcp_tools(
+    tools: &mut ToolRegistry,
+    loaded: Vec<Box<dyn dcode_ai_core::tools::ToolExecutor>>,
+    errors: Vec<(String, String)>,
+    threshold: usize,
+) {
+    tracing::info!("loaded {} MCP tool(s)", loaded.len());
+    for (server, error) in errors {
+        tracing::warn!("MCP server `{server}` failed: {error}");
+    }
+    for tool in loaded {
+        tools.register(tool);
+    }
+    let count = tools.count_matching(|name| name.starts_with("mcp__"));
+    if threshold > 0 && count > threshold {
+        let n = tools.defer_behind_search(|name| name.starts_with("mcp__"));
+        tracing::info!("deferred {n} MCP tool(s) behind tool_search");
+    }
 }
 
 /// Configuration for creating a new supervised session.
@@ -184,35 +218,22 @@ impl Supervisor {
             }
         });
 
+        let mut pending_mcp: Option<McpLoad> = None;
         if !config.mcp.servers.is_empty() && (!cfg.safe_mode || config.mcp.expose_in_safe_mode) {
             let mcp_servers = config.mcp.servers.clone();
             let manager = Arc::clone(&mcp_manager);
-            // Load MCP tools with a timeout to prevent startup hangs.
-            // One broken server must not hide the others' tools.
-            let mcp_result = tokio::time::timeout(
-                std::time::Duration::from_secs(15),
-                load_mcp_tools_tolerant(&manager, &mcp_servers),
-            )
-            .await;
-            match mcp_result {
-                Ok((mcp_tools, errors)) => {
-                    tracing::info!("loaded {} MCP tool(s)", mcp_tools.len());
-                    for (server, error) in errors {
-                        tracing::warn!("MCP server `{server}` failed: {error}");
-                    }
-                    let count = mcp_tools.len();
-                    for tool in mcp_tools {
-                        tools.register(tool);
-                    }
-                    // Many MCP tools: load their schemas on demand
-                    // (`tool_search`) instead of sending them every request.
-                    let threshold = config.mcp.tool_search_threshold;
-                    if threshold > 0 && count > threshold {
-                        let n = tools.defer_behind_search(|name| name.starts_with("mcp__"));
-                        tracing::info!("deferred {n} MCP tool(s) behind tool_search");
-                    }
+            // Connect in the background; wait briefly so fast servers are
+            // there for the first turn, and let slow ones finish later
+            // (each server still has its own startup timeout and reports
+            // a failure to the UI).
+            let mut load: McpLoad =
+                tokio::spawn(async move { load_mcp_tools_tolerant(&manager, &mcp_servers).await });
+            match tokio::time::timeout(MCP_STARTUP_WAIT, &mut load).await {
+                Ok(Ok((loaded, errors))) => {
+                    register_mcp_tools(&mut tools, loaded, errors, config.mcp.tool_search_threshold)
                 }
-                Err(_) => tracing::warn!("MCP tool load timed out after 15s — skipping"),
+                Ok(Err(e)) => tracing::warn!("MCP load task failed: {e}"),
+                Err(_) => pending_mcp = Some(load),
             }
         }
 
@@ -408,6 +429,7 @@ impl Supervisor {
             preview_handle,
             background_jobs,
             mcp_manager,
+            pending_mcp,
         };
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
             .await;
@@ -575,6 +597,24 @@ impl Supervisor {
         }
     }
 
+    /// Add tools from MCP servers that finished connecting after startup.
+    async fn adopt_ready_mcp(&mut self) {
+        if !self.pending_mcp.as_ref().is_some_and(|h| h.is_finished()) {
+            return;
+        }
+        if let Some(handle) = self.pending_mcp.take() {
+            match handle.await {
+                Ok((loaded, errors)) => register_mcp_tools(
+                    &mut self.agent.tools,
+                    loaded,
+                    errors,
+                    self.config.mcp.tool_search_threshold,
+                ),
+                Err(e) => tracing::warn!("MCP load task failed: {e}"),
+            }
+        }
+    }
+
     pub async fn run_turn(&mut self, prompt: &str) -> Result<String, ProviderError> {
         self.run_turn_with_images(prompt, &[]).await
     }
@@ -585,6 +625,7 @@ impl Supervisor {
         prompt: &str,
         attachments: &[dcode_ai_common::message::ImageAttachment],
     ) -> Result<String, ProviderError> {
+        self.adopt_ready_mcp().await;
         if let Some(hooks) = &self.hooks
             && let Err(reason) = hooks
                 .run(

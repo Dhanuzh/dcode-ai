@@ -1,0 +1,36 @@
+# Homebrew formula for dcode-ai. The release workflow fills in the version
+# and checksums and attaches the result (dcode-ai.rb) to each release; copy it
+# into a tap repository (e.g. Dhanuzh/homebrew-tap, Formula/dcode-ai.rb) and
+# users install with: brew install Dhanuzh/tap/dcode-ai
+class DcodeAi < Formula
+  desc "Rust terminal coding agent for Claude and GitHub Copilot"
+  homepage "https://github.com/Dhanuzh/dcode-ai"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v@VERSION@/dcode-ai-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA_MAC_ARM@"
+    end
+    on_intel do
+      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v@VERSION@/dcode-ai-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA_MAC_X86@"
+    end
+  end
+
+  on_linux do
+    on_intel do
+      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v@VERSION@/dcode-ai-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_LINUX_X86@"
+    end
+  end
+
+  def install
+    bin.install "dcode-ai"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/dcode-ai --version")
+  end
+end

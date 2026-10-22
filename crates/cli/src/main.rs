@@ -11,6 +11,7 @@ mod policy_cli;
 mod repl;
 mod repl_helpers;
 mod runner;
+mod self_update;
 mod setup_cli;
 mod web_server;
 
@@ -304,6 +305,15 @@ enum Command {
     },
     /// Starter packs: plugins for your role and languages (optional)
     Setup(setup_cli::SetupArgs),
+    /// Replace this binary with the latest release (checksum-verified)
+    Update {
+        /// Only say whether a newer version exists
+        #[arg(long)]
+        check: bool,
+        /// Reinstall even when already on the latest version
+        #[arg(long)]
+        force: bool,
+    },
     /// MCP servers: list, get, add, remove (`.mcp.json` compatible)
     Mcp {
         #[arg(long)]
@@ -919,6 +929,7 @@ async fn try_main() -> anyhow::Result<()> {
         },
         Some(Command::Plugin { command }) => plugin_cli::run(command)?,
         Some(Command::Setup(args)) => setup_cli::run(&workspace_root, args).await?,
+        Some(Command::Update { check, force }) => self_update::run(check, force).await?,
         Some(Command::Acp) => acp_server::run(config).await?,
         Some(Command::Policy { command }) => policy_cli::run(&config, &workspace_root, command),
         Some(Command::Ci(args)) => {
@@ -1007,6 +1018,7 @@ async fn try_main() -> anyhow::Result<()> {
             oauth_login::login(provider).await?;
         }
         Some(Command::Logout { provider }) => {
+            dcode_ai_common::provider_runtime::forget_claude_signin();
             oauth_login::logout(provider)?;
         }
         Some(Command::Auth) => {
@@ -2817,6 +2829,7 @@ fn uses_model(command: Option<&Command>) -> bool {
                 | Command::Policy { .. }
                 | Command::Plugin { .. }
                 | Command::Setup(_)
+                | Command::Update { .. }
                 | Command::Mcp { .. }
                 | Command::Memory { .. }
                 | Command::Completion { .. }

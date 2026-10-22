@@ -410,6 +410,16 @@ impl ApprovalPolicy {
     }
 }
 
+/// `s` on one line, cut to `max` characters.
+pub fn one_line(s: &str, max: usize) -> String {
+    let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() > max {
+        flat.chars().take(max).collect::<String>() + "…"
+    } else {
+        flat
+    }
+}
+
 /// Ordinary development commands auto mode runs without a check: builds,
 /// tests, package managers, interpreters, local file shuffling.
 pub fn auto_mode_familiar(command: &str) -> bool {

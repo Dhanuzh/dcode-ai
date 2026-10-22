@@ -1974,6 +1974,10 @@ impl TuiSessionState {
                 self.push_block(DisplayBlock::System(format!("⟳ {message}")));
                 transcript_dirty = true;
             }
+            AgentEvent::Notice { message } => {
+                self.push_block(DisplayBlock::System(message.clone()));
+                transcript_dirty = true;
+            }
             AgentEvent::Error { message } => {
                 let classified = classify_error(message);
                 self.push_block(DisplayBlock::ErrorLine(classified));

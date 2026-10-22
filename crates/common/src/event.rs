@@ -163,6 +163,11 @@ pub enum AgentEvent {
     Error {
         message: String,
     },
+    /// Something worth a line in the transcript that is not an error, e.g.
+    /// auto mode approving a command after its safety check.
+    Notice {
+        message: String,
+    },
     Response {
         response: AgentResponse,
     },

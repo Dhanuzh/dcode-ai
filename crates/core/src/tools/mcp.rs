@@ -126,11 +126,25 @@ impl AsyncManagedClient {
                     });
                 }
 
-                Ok(Arc::new(Mutex::new(transport)))
+                Ok::<_, String>(Arc::new(Mutex::new(transport)))
             };
 
             tokio::select! {
-                res = connect_res => res,
+                res = connect_res => {
+                    // Report a failed connection, not only a timeout, so the
+                    // UI says which server is down and why.
+                    if let Err(err) = &res
+                        && let Some(ref tx) = event_tx
+                    {
+                        let _ = tx.send(AgentEvent::McpStartupUpdate {
+                            server: server_name.clone(),
+                            status: McpStartupStatus::Failed {
+                                message: with_login_hint(&server_name, err),
+                            },
+                        });
+                    }
+                    res
+                }
                 _ = &mut shutdown_rx => Err(format!("MCP server `{}` shutdown before initialization completed", server_name)),
                 _ = tokio::time::sleep(DEFAULT_STARTUP_TIMEOUT) => {
                     let err = format!("MCP server `{}` timed out during startup", server_name);
@@ -745,12 +759,22 @@ pub async fn load_mcp_tools_tolerant(
     manager: &Arc<McpConnectionManager>,
     servers: &[McpServerConfig],
 ) -> (Vec<Box<dyn ToolExecutor>>, Vec<(String, String)>) {
+    // In parallel: one slow server must not hold up the rest.
+    let loads = servers
+        .iter()
+        .filter(|s| s.enabled)
+        .map(|server| async move {
+            (
+                server.name.clone(),
+                load_mcp_tools(manager, std::slice::from_ref(server)).await,
+            )
+        });
     let mut tools = Vec::new();
     let mut errors = Vec::new();
-    for server in servers.iter().filter(|s| s.enabled) {
-        match load_mcp_tools(manager, std::slice::from_ref(server)).await {
+    for (name, result) in futures_util::future::join_all(loads).await {
+        match result {
             Ok(t) => tools.extend(t),
-            Err(e) => errors.push((server.name.clone(), e)),
+            Err(e) => errors.push((name, e)),
         }
     }
     (tools, errors)
@@ -775,8 +799,28 @@ pub async fn load_mcp_tools(
     Ok(tools)
 }
 
+/// Add the sign-in command to errors that mean the server wants OAuth.
+pub fn with_login_hint(server: &str, err: &str) -> String {
+    let lower = err.to_ascii_lowercase();
+    if (lower.contains("401") || lower.contains("unauthorized") || lower.contains("sign in"))
+        && !lower.contains("mcp login")
+    {
+        format!("{err} — run `dcode-ai mcp login {server}`")
+    } else {
+        err.to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn sign_in_errors_get_the_login_command() {
+        assert!(
+            super::with_login_hint("jira", "HTTP 401 Unauthorized")
+                .ends_with("dcode-ai mcp login jira`")
+        );
+        assert_eq!(super::with_login_hint("x", "spawn failed"), "spawn failed");
+    }
     use super::*;
 
     // Never set anywhere; tests must not call `set_var` (edition 2024).

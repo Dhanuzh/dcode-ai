@@ -105,6 +105,49 @@ pub fn ant_signed_in(profile: Option<&str>) -> bool {
 /// Whether the local `claude` (Claude Code) binary reports a signed-in
 /// account (`claude auth status --json` → `"loggedIn": true`).
 pub fn claude_code_signed_in() -> bool {
+    // Asking `claude` costs a few hundred ms per launch; a recent "signed in"
+    // answer is reused. A "not signed in" answer is never cached, so signing
+    // in takes effect at once.
+    let cache = crate::config::dcode_ai_home_dir().map(|h| h.join("cache/claude-signin.json"));
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    if let Some(at) = cache
+        .as_ref()
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| v["signed_in_at"].as_u64())
+        && now.saturating_sub(at) < SIGNIN_CACHE_SECS
+    {
+        return true;
+    }
+    let signed_in = claude_code_signed_in_uncached();
+    if let Some(p) = cache {
+        if signed_in {
+            if let Some(dir) = p.parent() {
+                let _ = std::fs::create_dir_all(dir);
+            }
+            let _ = std::fs::write(&p, format!("{{\"signed_in_at\": {now}}}\n"));
+        } else {
+            let _ = std::fs::remove_file(&p);
+        }
+    }
+    signed_in
+}
+
+/// Forget the cached sign-in (after logging out).
+pub fn forget_claude_signin() {
+    if let Some(p) = crate::config::dcode_ai_home_dir().map(|h| h.join("cache/claude-signin.json"))
+    {
+        let _ = std::fs::remove_file(p);
+    }
+}
+
+/// How long a positive `claude auth status` answer is trusted.
+const SIGNIN_CACHE_SECS: u64 = 10 * 60;
+
+fn claude_code_signed_in_uncached() -> bool {
     if !has_claude_cli() {
         return false;
     }

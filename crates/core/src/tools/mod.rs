@@ -50,6 +50,14 @@ impl ToolRegistry {
         }
     }
 
+    /// How many registered tools (deferred ones stay registered) satisfy `pred`.
+    pub fn count_matching(&self, pred: impl Fn(&str) -> bool) -> usize {
+        self.tools
+            .iter()
+            .filter(|t| pred(&t.definition().name))
+            .count()
+    }
+
     /// Hide every tool whose name satisfies `pred` behind `tool_search`, and
     /// register that tool. Returns how many were deferred.
     pub fn defer_behind_search(&mut self, pred: impl Fn(&str) -> bool) -> usize {

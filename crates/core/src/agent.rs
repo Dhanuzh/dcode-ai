@@ -545,6 +545,13 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                     && self.auto_mode_safe(&command, workspace_root).await
                 {
                     tier = PermissionTier::Allowed;
+                    self.emit(AgentEvent::Notice {
+                        message: format!(
+                            "auto mode: `{}` looked safe to the model check — running it",
+                            crate::approval::one_line(&command, 80)
+                        ),
+                    })
+                    .await;
                 }
 
                 match tier {

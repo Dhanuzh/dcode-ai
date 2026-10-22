@@ -4,8 +4,6 @@ set -euo pipefail
 REPO="Dhanuzh/dcode-ai"
 BINARY="dcode-ai"
 INSTALL_DIR="${DCODE_AI_INSTALL_DIR:-/usr/local/bin}"
-# Fallback when API lookup fails and no explicit version is provided.
-FALLBACK_VERSION="0.0.21"
 
 info()  { printf '\033[1;34m=>\033[0m %s\n' "$*"; }
 warn()  { printf '\033[1;33mwarning:\033[0m %s\n' "$*" >&2; }
@@ -28,6 +26,11 @@ detect_platform() {
         aarch64|arm64)  arch="aarch64" ;;
         *)              error "Unsupported architecture: $arch" ;;
     esac
+
+    # Release builds: Linux x86_64, macOS x86_64 and arm64.
+    if [ "${arch}-${os}" = "aarch64-unknown-linux-gnu" ]; then
+        error "No prebuilt binary for Linux arm64 yet; build from source: cargo build --release -p dcode-ai-cli"
+    fi
 
     echo "${arch}-${os}"
 }
@@ -112,9 +115,7 @@ resolve_version() {
     if [ "$requested" = "latest" ] || [ -z "$requested" ]; then
         tag="$(latest_release_tag)"
         if [ -z "$tag" ]; then
-            info "Could not resolve latest release from GitHub API; falling back to v${FALLBACK_VERSION}"
-            version="${FALLBACK_VERSION}"
-            tag="v${version}"
+            error "Could not reach the GitHub API to find the latest release. Set DCODE_AI_VERSION=vX.Y.Z and retry."
         fi
     else
         if [[ "$requested" == v* ]]; then
@@ -131,9 +132,7 @@ resolve_version() {
             info "Requested release ${tag} not found; falling back to latest published release."
             tag="$(latest_release_tag)"
             if [ -z "$tag" ]; then
-                info "Could not resolve latest release from GitHub API; falling back to v${FALLBACK_VERSION}"
-                version="${FALLBACK_VERSION}"
-                tag="v${version}"
+                error "Could not reach the GitHub API to find the latest release."
             else
                 version="${tag#v}"
             fi
@@ -189,7 +188,7 @@ main() {
 
     info "Installed ${BINARY} ${TAG} to ${INSTALL_DIR}/${BINARY}"
     check_provider_tools
-    info "Run 'dcode-ai' to sign in and start"
+    info "Run 'dcode-ai' to sign in and start; update later with 'dcode-ai update'"
 }
 
 # dcode-ai signs in through tools you install yourself; it never installs
