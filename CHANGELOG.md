@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.13 — 2026-10-22
+
+### New
+- **`/update`**: install the latest release from inside a session; the
+  welcome screen's "update available" line points to it. Downloads retry
+  when a freshly published release isn't reachable yet.
+- **Installer**: when `/usr/local/bin` needs sudo it offers `~/.local/bin`
+  (the default), so `dcode-ai update` never needs sudo; it warns when that
+  folder isn't on your PATH or an older copy would still be used.
+
+### Changed
+- Pasting an image no longer freezes the screen: the clipboard is read in the
+  background and the footer shows "⧗ pasting image…".
+- The empty prompt is just `>` (no "Try …" text).
+- A remembered permission choice is applied quietly; the footer shows the
+  mode.
+
 ## 1.0.12 — 2026-10-22
 
 ### Fixes
