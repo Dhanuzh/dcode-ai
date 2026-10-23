@@ -898,7 +898,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-autoresearch"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -918,7 +918,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-cli"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -966,10 +966,11 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-common"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "anyhow",
  "chrono",
+ "libc",
  "serde",
  "serde_json",
  "sha2",
@@ -982,7 +983,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-core"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "async-trait",
  "base64",
@@ -1012,7 +1013,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-runtime"
-version = "1.0.16"
+version = "1.0.17"
 dependencies = [
  "anyhow",
  "async-trait",

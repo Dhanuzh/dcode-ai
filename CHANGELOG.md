@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.17 — 2026-10-23
+
+### New
+- **sudo in commands asks through a popup**: in the TUI, `! sudo …` and the
+  agent's own sudo commands (after you approve them) ask for the password in
+  the masked popup instead of printing sudo's prompt over the screen. Commands
+  run without a terminal and with `SUDO_ASKPASS` pointing at dcode-ai's
+  helper; the password reaches only sudo and is wiped after use. Outside the
+  TUI nothing changes.
+
+### Changed
+- In the TUI, agent and `!` commands no longer inherit the terminal, so a
+  tool that wants to prompt there (ssh, gpg) fails fast instead of drawing
+  over the screen and hanging.
+
 ## 1.0.16 — 2026-10-23
 
 ### New
