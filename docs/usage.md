@@ -344,6 +344,16 @@ project's checks, and hands real problems back to the main agent.
 | Agent | `spawn_subagent`, `ask_question`, `update_plan`, `invoke_skill` |
 | MCP | `mcp__<server>__<tool>` from configured servers; with many, `tool_search` loads them on demand |
 
+### sudo
+
+In the TUI, a command that runs `sudo` — yours (`! sudo …`) or the agent's
+(which asks your permission first, since `sudo` is a risky action) — asks for
+your password in a masked popup instead of writing a prompt onto the screen.
+dcode-ai starts those commands without a terminal and points `SUDO_ASKPASS`
+at its own helper, which reaches the session over a private socket. The
+password goes only to sudo; it is never shown, logged, stored or sent to the
+model. If sudo already has a cached login, nothing is asked.
+
 ### Background shells
 
 The agent runs long commands (dev servers, test suites, builds) with

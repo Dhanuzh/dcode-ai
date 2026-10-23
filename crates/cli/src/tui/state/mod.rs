@@ -248,6 +248,7 @@ impl TuiSessionState {
             plugin_browser: None,
             setup_picker: None,
             sudo_prompt: None,
+            askpass_reply: None,
             paste_request: None,
             pasting: false,
             goal_label: None,

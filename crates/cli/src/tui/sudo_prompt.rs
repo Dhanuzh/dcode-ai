@@ -16,6 +16,8 @@ pub struct SudoPrompt {
     /// Shown after a rejected password.
     error: Option<String>,
     input: String,
+    /// What Enter does, for the hint ("install", "run").
+    action: &'static str,
 }
 
 pub enum SudoKey {
@@ -59,7 +61,14 @@ impl SudoPrompt {
             message: message.into(),
             error,
             input: String::new(),
+            action: "install",
         }
+    }
+
+    /// Name what Enter does in the hint.
+    pub fn action(mut self, action: &'static str) -> Self {
+        self.action = action;
+        self
     }
 
     pub fn handle_key(&mut self, key: KeyEvent) -> SudoKey {
@@ -94,7 +103,7 @@ impl SudoPrompt {
                     .add_modifier(Modifier::BOLD),
             ))
             .title_bottom(Span::styled(
-                " Enter install · Esc cancel ",
+                format!(" Enter {} · Esc cancel ", self.action),
                 Style::default().fg(theme::muted()),
             ))
             .padding(Padding::horizontal(1))

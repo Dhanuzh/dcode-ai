@@ -124,11 +124,26 @@ pub(super) fn handle_key_event(
             SudoKey::Handled => {}
             SudoKey::Cancel => {
                 g.sudo_prompt = None;
-                let _ = cmd_tx.send(TuiCmd::SudoCancelled);
+                match g.askpass_reply.take() {
+                    Some(tx) => {
+                        let _ = tx.send(None);
+                    }
+                    None => {
+                        let _ = cmd_tx.send(TuiCmd::SudoCancelled);
+                    }
+                }
             }
             SudoKey::Submit(password) => {
                 g.sudo_prompt = None;
-                let _ = cmd_tx.send(TuiCmd::SudoPassword(password));
+                match g.askpass_reply.take() {
+                    // A running command's sudo is waiting for it.
+                    Some(tx) => {
+                        let _ = tx.send(Some(password));
+                    }
+                    None => {
+                        let _ = cmd_tx.send(TuiCmd::SudoPassword(password));
+                    }
+                }
             }
         }
         return KeyFlow::Continue;

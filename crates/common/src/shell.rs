@@ -79,6 +79,34 @@ pub fn workspace_shell() -> &'static ShellInfo {
     SHELL.get_or_init(detect_shell)
 }
 
+/// Environment for commands the agent (or `!`) runs while a UI can answer
+/// sudo's password prompts: `SUDO_ASKPASS` and how the helper reaches the UI.
+/// Set once by the TUI; empty elsewhere.
+static SUDO_ASKPASS_ENV: OnceLock<Vec<(String, String)>> = OnceLock::new();
+
+/// Turn on askpass for agent commands (the TUI, at start).
+pub fn set_sudo_askpass_env(env: Vec<(String, String)>) {
+    let _ = SUDO_ASKPASS_ENV.set(env);
+}
+
+/// Prepare an agent / `!` command: with askpass on, give it the askpass
+/// environment and start it in its own session without a controlling
+/// terminal, so sudo asks through the UI instead of writing onto the screen.
+pub fn prepare_agent_command(cmd: &mut tokio::process::Command) {
+    let Some(env) = SUDO_ASKPASS_ENV.get() else {
+        return;
+    };
+    cmd.envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())));
+    #[cfg(unix)]
+    unsafe {
+        // Runs in the child between fork and exec; setsid is async-signal-safe.
+        cmd.pre_exec(|| {
+            libc::setsid();
+            Ok(())
+        });
+    }
+}
+
 /// Build a tokio command running `command_line` in the detected shell.
 pub fn shell_command(command_line: &str) -> tokio::process::Command {
     let shell = workspace_shell();

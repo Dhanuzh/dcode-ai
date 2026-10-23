@@ -407,7 +407,9 @@ impl Repl {
         let handle = tokio::spawn(async move {
             // Stream stdout/stderr live so `/ps` reflects progress instead of
             // staying empty until the process exits.
-            let spawned = dcode_ai_common::provider_runtime::system_shell_command(&cmd_str)
+            let mut command = dcode_ai_common::provider_runtime::system_shell_command(&cmd_str);
+            dcode_ai_common::shell::prepare_agent_command(&mut command);
+            let spawned = command
                 .current_dir(&ws)
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1205,6 +1207,8 @@ impl Repl {
             self.runtime.workspace_root().to_path_buf(),
             self.runtime.config().ui.code_line_numbers,
         )));
+        // sudo in agent / `!` commands asks through the TUI's password popup.
+        crate::askpass::start(tui_state.clone());
         // Koda-style fullscreen behavior: mouse capture is always on for
         // wheel scroll + in-app drag-select copy.
         let effective_mouse_capture = true;
@@ -2487,7 +2491,9 @@ impl Repl {
         log(st, &format!("[bash] $ {cmd}"));
         let shell = if cfg!(windows) { "cmd" } else { "sh" };
         let flag = if cfg!(windows) { "/C" } else { "-c" };
-        let output = Command::new(shell)
+        let mut command = Command::new(shell);
+        dcode_ai_common::shell::prepare_agent_command(&mut command);
+        let output = command
             .arg(flag)
             .arg(cmd)
             .current_dir(self.runtime.workspace_root())

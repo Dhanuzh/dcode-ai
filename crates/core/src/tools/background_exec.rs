@@ -306,7 +306,10 @@ For commands you need the result of right now, use the normal blocking shell too
                     // progress live instead of only appearing once the process
                     // exits. `kill_on_drop` ensures `stop` (which aborts this
                     // task) also kills the child.
-                    let spawned = dcode_ai_common::provider_runtime::system_shell_command(&cmd_str)
+                    let mut command =
+                        dcode_ai_common::provider_runtime::system_shell_command(&cmd_str);
+                    dcode_ai_common::shell::prepare_agent_command(&mut command);
+                    let spawned = command
                         .current_dir(&ws)
                         .stdout(Stdio::piped())
                         .stderr(Stdio::piped())

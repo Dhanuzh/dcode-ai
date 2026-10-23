@@ -191,8 +191,11 @@ pub struct TuiSessionState {
     pub pasting: bool,
     /// Footer marker while a `/goal` is active.
     pub goal_label: Option<String>,
-    /// Masked sudo password popup (installing an update into a system folder).
+    /// Masked sudo password popup (an update install, or a command's sudo).
     pub sudo_prompt: Option<Box<crate::tui::sudo_prompt::SudoPrompt>>,
+    /// Where the popup's answer goes when a command's sudo asked (askpass).
+    pub askpass_reply:
+        Option<tokio::sync::oneshot::Sender<Option<crate::tui::sudo_prompt::Secret>>>,
     /// `/setup` starter-pack picker.
     pub setup_picker: Option<Box<crate::tui::setup_picker::SetupPicker>>,
     /// `[ui] statusline_command` and its latest output line.

@@ -87,6 +87,7 @@ impl PtyManager {
         } else {
             shell_command(command)
         };
+        dcode_ai_common::shell::prepare_agent_command(&mut cmd);
         cmd.current_dir(&effective_root)
             // Detach stdin so an interactive command (e.g. `sudo`) fails fast
             // instead of inheriting the TUI's terminal and hanging until timeout.

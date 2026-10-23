@@ -2,6 +2,7 @@
 // clippy 1.99+ reports that as `double_must_use`.
 #![allow(clippy::double_must_use)]
 mod acp_server;
+mod askpass;
 mod ci_cmd;
 mod cli_index;
 mod mcp_cli;
@@ -305,6 +306,9 @@ enum Command {
     },
     /// Starter packs: plugins for your role and languages (optional)
     Setup(setup_cli::SetupArgs),
+    /// sudo's askpass helper: asks the running TUI for the password
+    #[command(name = "__askpass", hide = true)]
+    Askpass { prompt: Option<String> },
     /// Replace this binary with the latest release (checksum-verified)
     Update {
         /// Only say whether a newer version exists
@@ -930,6 +934,7 @@ async fn try_main() -> anyhow::Result<()> {
         Some(Command::Plugin { command }) => plugin_cli::run(command)?,
         Some(Command::Setup(args)) => setup_cli::run(&workspace_root, args).await?,
         Some(Command::Update { check, force }) => self_update::run(check, force).await?,
+        Some(Command::Askpass { prompt }) => std::process::exit(askpass::helper(prompt)),
         Some(Command::Acp) => acp_server::run(config).await?,
         Some(Command::Policy { command }) => policy_cli::run(&config, &workspace_root, command),
         Some(Command::Ci(args)) => {
@@ -2830,6 +2835,7 @@ fn uses_model(command: Option<&Command>) -> bool {
                 | Command::Plugin { .. }
                 | Command::Setup(_)
                 | Command::Update { .. }
+                | Command::Askpass { .. }
                 | Command::Mcp { .. }
                 | Command::Memory { .. }
                 | Command::Completion { .. }
