@@ -247,6 +247,7 @@ impl TuiSessionState {
             statusline_command: None,
             plugin_browser: None,
             setup_picker: None,
+            sudo_prompt: None,
             paste_request: None,
             pasting: false,
             goal_label: None,

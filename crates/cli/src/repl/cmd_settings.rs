@@ -67,8 +67,9 @@ impl Repl {
             }
             "/update" => {
                 out.println("[update] checking for a new version…");
-                let check_only = rest.trim() == "--check";
-                let result = crate::self_update::update(check_only, false, &|_| {}).await;
+                let check_only = rest.contains("--check");
+                let force = rest.contains("--force");
+                let result = crate::self_update::update(check_only, force, &|_| {}).await;
                 let line = match result {
                     Ok(crate::self_update::Outcome::UpToDate) => format!(
                         "[update] v{} is the latest version",
@@ -81,6 +82,49 @@ impl Repl {
                         "[update] installed {tag} at {} — restart dcode-ai to use it",
                         path.display()
                     ),
+                    Ok(crate::self_update::Outcome::NeedsSudo {
+                        tag,
+                        staged,
+                        target,
+                        work,
+                    }) => {
+                        let pending = PendingSudo {
+                            tag: tag.clone(),
+                            staged,
+                            target,
+                            work,
+                            tries: 0,
+                        };
+                        if let ReplOutput::Tui(st) = &out {
+                            // Ask for the password in a masked popup.
+                            if let Ok(mut g) = st.lock() {
+                                g.sudo_prompt =
+                                    Some(Box::new(crate::tui::sudo_prompt::SudoPrompt::new(
+                                        sudo_message(&pending),
+                                        None,
+                                    )));
+                            }
+                            self.pending_sudo = Some(pending);
+                            format!(
+                                "[update] {tag} downloaded and verified — enter your sudo password to install it"
+                            )
+                        } else {
+                            // Plain prompt: sudo asks on the terminal itself.
+                            let r = crate::self_update::install_with_sudo(
+                                &pending.staged,
+                                &pending.target,
+                                None,
+                            );
+                            let _ = std::fs::remove_dir_all(&pending.work);
+                            match r {
+                                Ok(()) => format!(
+                                    "[update] installed {tag} at {} — restart dcode-ai to use it",
+                                    pending.target.display()
+                                ),
+                                Err(e) => format!("[update] not installed: {e}"),
+                            }
+                        }
+                    }
                     Err(e) => format!("[update] {e}"),
                 };
                 if let ReplOutput::Tui(st) = &out

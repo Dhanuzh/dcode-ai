@@ -196,6 +196,8 @@ pub(super) fn draw_session_pane(
     // ── Centered popups ──
     if let Some(browser) = &g.plugin_browser {
         browser.render(frame, area);
+    } else if let Some(prompt) = &g.sudo_prompt {
+        prompt.render(frame, area);
     } else if let Some(picker) = &g.setup_picker {
         picker.render(frame, area);
     } else if g.connect_modal_open {

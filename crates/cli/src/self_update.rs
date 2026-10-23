@@ -53,7 +53,18 @@ fn hex(bytes: &[u8]) -> String {
 pub enum Outcome {
     UpToDate,
     Available(String),
-    Updated { tag: String, path: PathBuf },
+    Updated {
+        tag: String,
+        path: PathBuf,
+    },
+    /// Downloaded and verified, but `target` is not writable: install
+    /// `staged` with sudo ([`install_with_sudo`]), then remove `work`.
+    NeedsSudo {
+        tag: String,
+        staged: PathBuf,
+        target: PathBuf,
+        work: PathBuf,
+    },
 }
 
 /// `dcode-ai update`: print what happened.
@@ -66,9 +77,95 @@ pub async fn run(check_only: bool, force: bool) -> anyhow::Result<()> {
         Outcome::Updated { tag, path } => {
             println!("Updated dcode-ai v{CURRENT} → {tag} ({}).", path.display())
         }
+        Outcome::NeedsSudo {
+            tag,
+            staged,
+            target,
+            work,
+        } => {
+            println!(
+                "{} needs administrator rights; sudo will ask for your password.",
+                target.display()
+            );
+            let result = install_with_sudo(&staged, &target, None);
+            let _ = std::fs::remove_dir_all(&work);
+            result?;
+            println!(
+                "Updated dcode-ai v{CURRENT} → {tag} ({}).",
+                target.display()
+            );
+        }
     }
     Ok(())
 }
+
+/// Install `staged` over `target` with `sudo install -m 755`. With a
+/// `password` it is fed to `sudo -S` on stdin (never on the command line or
+/// in logs) and the buffer is wiped; without one, sudo asks on the terminal.
+pub fn install_with_sudo(
+    staged: &Path,
+    target: &Path,
+    password: Option<Vec<u8>>,
+) -> anyhow::Result<()> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    /// Zeroes the password on every return path.
+    struct Wiped(Vec<u8>);
+    impl Drop for Wiped {
+        fn drop(&mut self) {
+            self.0.fill(0);
+        }
+    }
+    let password = password.map(Wiped);
+    if cfg!(windows) {
+        anyhow::bail!(
+            "run dcode-ai as administrator to update {}",
+            target.display()
+        );
+    }
+    let mut cmd = Command::new("sudo");
+    if password.is_some() {
+        // -S: password from stdin; -k: don't reuse a cached ticket, so a
+        // wrong password is reported instead of silently succeeding later.
+        cmd.args(["-S", "-k", "-p", ""]);
+        cmd.stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+    }
+    cmd.arg("install")
+        .arg("-m")
+        .arg("755")
+        .arg(staged)
+        .arg(target);
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| anyhow::anyhow!("could not run sudo: {e}"))?;
+    if let Some(pw) = &password
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        let _ = stdin.write_all(&pw.0);
+        let _ = stdin.write_all(b"\n");
+    }
+    drop(password);
+    let out = child.wait_with_output()?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let err = String::from_utf8_lossy(&out.stderr);
+    if err.trim().is_empty() {
+        anyhow::bail!("sudo did not install it ({})", out.status);
+    }
+    if err.contains("incorrect password")
+        || err.contains("Sorry, try again")
+        || err.contains("no password was provided")
+    {
+        anyhow::bail!(WRONG_PASSWORD);
+    }
+    anyhow::bail!("sudo install failed: {}", err.trim())
+}
+
+/// The error text [`install_with_sudo`] gives for a rejected password.
+pub const WRONG_PASSWORD: &str = "sudo: wrong password";
 
 /// Check for, and unless `check_only` install, the latest release.
 /// `progress` gets short status lines.
@@ -130,6 +227,17 @@ pub async fn update(
         );
     }
 
+    // Folders left by earlier updates that stopped half way.
+    if let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) {
+        for e in rd.flatten() {
+            if e.file_name()
+                .to_string_lossy()
+                .starts_with("dcode-ai-update-")
+            {
+                let _ = std::fs::remove_dir_all(e.path());
+            }
+        }
+    }
     let work = std::env::temp_dir().join(format!("dcode-ai-update-{}", std::process::id()));
     std::fs::create_dir_all(&work)?;
     let archive = work.join(&archive_name);
@@ -154,9 +262,30 @@ pub async fn update(
 
     let exe = std::env::current_exe()?;
     let exe = exe.canonicalize().unwrap_or(exe);
-    replace_binary(&new_bin, &exe)?;
-    let _ = std::fs::remove_dir_all(&work);
-    Ok(Outcome::Updated { tag, path: exe })
+    match replace_binary(&new_bin, &exe) {
+        Ok(()) => {
+            let _ = std::fs::remove_dir_all(&work);
+            Ok(Outcome::Updated { tag, path: exe })
+        }
+        // A system folder (/usr/local/bin): keep the verified binary for a
+        // sudo install.
+        Err(e)
+            if cfg!(unix)
+                && e.downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::PermissionDenied) =>
+        {
+            Ok(Outcome::NeedsSudo {
+                tag,
+                staged: new_bin,
+                target: exe,
+                work,
+            })
+        }
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&work);
+            Err(e)
+        }
+    }
 }
 
 /// GET with a few retries: a freshly published release asset can fail once
@@ -202,12 +331,8 @@ fn replace_binary(new: &Path, exe: &Path) -> anyhow::Result<()> {
     let staged = exe.with_extension("new");
     std::fs::copy(new, &staged).map_err(|e| {
         if e.kind() == std::io::ErrorKind::PermissionDenied {
-            anyhow::anyhow!(
-                "no permission to write {} — run `sudo dcode-ai update`, or reinstall into a \
-                 folder you own so updates never need sudo: curl -sSL \
-                 https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | bash",
-                exe.display()
-            )
+            // Kept as the io error so the caller can offer sudo.
+            anyhow::Error::from(e)
         } else {
             anyhow::anyhow!("could not write {}: {e}", staged.display())
         }

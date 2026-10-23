@@ -35,6 +35,24 @@ mod cmd_session;
 mod cmd_settings;
 mod cmd_work;
 
+/// A downloaded, verified update that needs sudo to install.
+pub(crate) struct PendingSudo {
+    pub tag: String,
+    pub staged: std::path::PathBuf,
+    pub target: std::path::PathBuf,
+    pub work: std::path::PathBuf,
+    pub tries: u32,
+}
+
+/// What the sudo popup says it is for.
+pub(crate) fn sudo_message(p: &PendingSudo) -> String {
+    format!(
+        "Install dcode-ai {} to {}. That folder needs administrator rights, so sudo asks for your password.",
+        p.tag,
+        p.target.display()
+    )
+}
+
 /// Footer text while a goal is active.
 fn goal_footer_label(cell: &dcode_ai_runtime::goal::GoalCell) -> Option<String> {
     let guard = cell.lock().ok()?;
@@ -348,6 +366,8 @@ pub struct Repl {
     side_snapshots: Vec<Vec<dcode_ai_common::message::Message>>,
     /// Sender into the TUI command loop (background tasks queue follow-ups).
     self_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiCmd>>,
+    /// A verified update waiting for a sudo password.
+    pending_sudo: Option<PendingSudo>,
 }
 
 impl Repl {
@@ -367,6 +387,7 @@ impl Repl {
             next_job_id: 1,
             side_snapshots: Vec::new(),
             self_cmd_tx: None,
+            pending_sudo: None,
         }
     }
 
@@ -1621,6 +1642,64 @@ impl Repl {
                     pending_cmds.push_front(TuiCmd::Submit(
                         "The plan is approved. Implement it now, step by step.".into(),
                     ));
+                }
+                TuiCmd::SudoPassword(password) => {
+                    // Dropping `password` without a pending install wipes it.
+                    let Some(mut pending) = self.pending_sudo.take() else {
+                        continue;
+                    };
+                    let (staged, target) = (pending.staged.clone(), pending.target.clone());
+                    let bytes = password.into_bytes();
+                    let result = tokio::task::spawn_blocking(move || {
+                        crate::self_update::install_with_sudo(&staged, &target, Some(bytes))
+                    })
+                    .await
+                    .unwrap_or_else(|e| Err(anyhow::anyhow!("{e}")));
+                    let line = match result {
+                        Ok(()) => {
+                            let _ = std::fs::remove_dir_all(&pending.work);
+                            format!(
+                                "[update] installed {} at {} — restart dcode-ai to use it",
+                                pending.tag,
+                                pending.target.display()
+                            )
+                        }
+                        Err(e)
+                            if e.to_string() == crate::self_update::WRONG_PASSWORD
+                                && pending.tries < 2 =>
+                        {
+                            pending.tries += 1;
+                            let message = sudo_message(&pending);
+                            self.pending_sudo = Some(pending);
+                            if let Ok(mut g) = tui_state.lock() {
+                                g.sudo_prompt =
+                                    Some(Box::new(crate::tui::sudo_prompt::SudoPrompt::new(
+                                        message,
+                                        Some("Wrong password — try again.".into()),
+                                    )));
+                            }
+                            continue;
+                        }
+                        Err(e) => {
+                            let _ = std::fs::remove_dir_all(&pending.work);
+                            format!("[update] not installed: {e}")
+                        }
+                    };
+                    if let Ok(mut g) = tui_state.lock() {
+                        g.push_block(DisplayBlock::System(line));
+                        g.touch_transcript();
+                    }
+                }
+                TuiCmd::SudoCancelled => {
+                    if let Some(pending) = self.pending_sudo.take() {
+                        let _ = std::fs::remove_dir_all(&pending.work);
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.push_block(DisplayBlock::System(
+                                "[update] not installed (cancelled) — /update to try again".into(),
+                            ));
+                            g.touch_transcript();
+                        }
+                    }
                 }
                 TuiCmd::PluginAction(action) => {
                     spawn_plugin_action(Arc::clone(&tui_state), action, self.self_cmd_tx.clone());

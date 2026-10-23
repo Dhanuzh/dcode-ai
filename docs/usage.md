@@ -101,7 +101,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/diff`, `/commit` | Review and commit changes |
 | `/bashes` | Background shells the agent started (`/bashes kill <id>`) |
 | `/goal` | Keep working across turns until an objective is done (`/goal <objective> [--budget N]`, `pause`, `resume`, `clear`) |
-| `/update` | Install the latest release from inside the session (`--check` to only look) |
+| `/update` | Install the latest release from inside the session (`--check` to only look); asks for your sudo password in a masked popup when the binary is in a system folder |
 | `/setup` | Starter-pack picker (or `/setup <id>…` to install directly) |
 | `/doctor`, `/login`, `/logout`, `/auth` | Diagnostics and sign-in |
 

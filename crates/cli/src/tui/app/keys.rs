@@ -117,6 +117,23 @@ pub(super) fn handle_key_event(
         g.mouse_selection = None;
     }
 
+    // The sudo password popup owns the keyboard while open.
+    if let Some(prompt) = g.sudo_prompt.as_mut() {
+        use crate::tui::sudo_prompt::SudoKey;
+        match prompt.handle_key(key) {
+            SudoKey::Handled => {}
+            SudoKey::Cancel => {
+                g.sudo_prompt = None;
+                let _ = cmd_tx.send(TuiCmd::SudoCancelled);
+            }
+            SudoKey::Submit(password) => {
+                g.sudo_prompt = None;
+                let _ = cmd_tx.send(TuiCmd::SudoPassword(password));
+            }
+        }
+        return KeyFlow::Continue;
+    }
+
     // `/setup` picker owns the keyboard while open (Ctrl+C still exits).
     if let Some(picker) = g.setup_picker.as_mut()
         && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
