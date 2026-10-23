@@ -265,6 +265,35 @@ impl Repl {
                     Err(e) => out.eprintln(&format!("[diff] Failed: {e}")),
                 }
             }
+            "/copy" if matches!(rest.trim(), "link" | "url") => {
+                // The newest link in the transcript, whole (a long URL that
+                // wraps can't be copied cleanly with the mouse).
+                if let ReplOutput::Tui(st) = &out {
+                    let link = st.lock().ok().and_then(|g| {
+                        g.blocks.iter().rev().find_map(|b| {
+                            let text = match b {
+                                DisplayBlock::Assistant(t)
+                                | DisplayBlock::System(t)
+                                | DisplayBlock::User(t)
+                                | DisplayBlock::ErrorLine(t)
+                                | DisplayBlock::Notice { text: t, .. } => t.as_str(),
+                                DisplayBlock::ToolDone { detail, .. } => detail.as_str(),
+                                _ => return None,
+                            };
+                            crate::repl_helpers::last_link(text)
+                        })
+                    });
+                    match link {
+                        Some(url) => match crate::tui::clipboard::copy_to_clipboard(&url) {
+                            Ok(_) => out.println(&format!("[copy] Copied {url}")),
+                            Err(e) => out.eprintln(&format!("[copy] {e}")),
+                        },
+                        None => out.println("[copy] No link in the conversation yet."),
+                    }
+                } else {
+                    out.println("[copy] available in TUI mode");
+                }
+            }
             "/copy" => {
                 // Copy the last assistant response to the clipboard.
                 if let ReplOutput::Tui(st) = &out {

@@ -40,8 +40,11 @@ my-plugin/
 | Marketplaces | `a` add · `u` update · `x` `x` remove |
 | Errors | problems loading plugins |
 
-The official marketplace (`anthropics/claude-plugins-official`) is added the
-first time it opens. Changes apply to the running session immediately; after
+Anthropic's public marketplaces are added the first time it opens, once each
+(one you remove stays removed): `anthropics/claude-plugins-official`,
+`anthropics/claude-plugins-community` (`claude-community`) and
+`anthropics/knowledge-work-plugins`. Claude Code's "Anthropic Directory" is the
+claude.ai catalog behind your claude.ai sign-in, which dcode-ai does not use. Changes apply to the running session immediately; after
 editing `.mcp.json` or hooks by hand, run `/reload`.
 
 ```bash
@@ -78,8 +81,10 @@ dcode-ai mcp get docs            # secrets masked
 dcode-ai mcp remove docs
 ```
 
-In the TUI, `/mcp` lists servers and their health; `/mcp test <name>` connects
-and lists its tools.
+In the TUI, `/mcp` opens the server panel: each server's status
+(`✔ connected · N tools`, `! needs sign-in`, `✗ failed`, `○ disabled`). Enter
+on a server: **Authenticate**, **Reconnect**, **Sign out**, **Disable** (for
+this session). `/mcp test <name>` connects and lists its tools.
 
 **Many tools:** when servers bring more than 15 tools
 (`[mcp] tool_search_threshold`, `0` = never), their schemas are not sent with
@@ -88,8 +93,11 @@ every request. The model sees their names and loads the ones it needs with
 tools. This keeps big servers from filling the context.
 
 **Signing in to remote servers:** servers that use OAuth (e.g. Atlassian's
-`https://mcp.atlassian.com/v2/mcp`) need `dcode-ai mcp login <name>` once: it
-opens the browser, and the tokens are kept in `~/.dcode-ai/mcp-auth.json`
+`https://mcp.atlassian.com/v2/mcp`) need signing in once: `/mcp` → the server →
+**Authenticate** (or `dcode-ai mcp login <name>` in a shell). It opens the
+browser and shows the sign-in URL (`c` copies it). If the browser can't reach
+`localhost` after you approve (common on WSL), paste the address-bar URL into
+the panel. The server connects as soon as you are signed in. The sign-in and the tokens are kept in `~/.dcode-ai/mcp-auth.json`
 (owner-only) and refreshed automatically. `dcode-ai mcp logout <name>` forgets
 them; `mcp list` shows `[signed in]`. A configured `Authorization` header
 always wins. Header values like `${TOKEN}` must be set, or the server reports

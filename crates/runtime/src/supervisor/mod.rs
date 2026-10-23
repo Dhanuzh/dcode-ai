@@ -1664,6 +1664,54 @@ impl Supervisor {
     pub fn mcp_manager(&self) -> &Arc<McpConnectionManager> {
         &self.mcp_manager
     }
+
+    /// Tools this session has from MCP server `name`.
+    pub fn mcp_tool_count(&self, name: &str) -> usize {
+        let prefix = format!("mcp__{name}__");
+        self.agent
+            .tools
+            .count_matching(|tool| tool.starts_with(&prefix))
+    }
+
+    /// Drop MCP server `name` from this session: its connection and tools.
+    pub async fn disconnect_mcp_server(&mut self, name: &str) {
+        let prefix = format!("mcp__{name}__");
+        self.agent
+            .tools
+            .retain_by_name(|tool| !tool.starts_with(&prefix));
+        self.mcp_manager.disconnect(name).await;
+    }
+
+    /// Connect MCP server `name` again (after a sign-in, or to retry) and
+    /// add its tools to the session. Returns how many tools it has.
+    pub async fn reconnect_mcp_server(&mut self, name: &str) -> Result<usize, String> {
+        let server = self
+            .config
+            .mcp
+            .servers
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+            .ok_or_else(|| format!("no MCP server named `{name}`"))?;
+        self.disconnect_mcp_server(name).await;
+        let (tools, errors) = tokio::time::timeout(
+            std::time::Duration::from_secs(30),
+            load_mcp_tools_tolerant(&self.mcp_manager, std::slice::from_ref(&server)),
+        )
+        .await
+        .unwrap_or_else(|_| (Vec::new(), vec![(name.to_string(), "timed out".into())]));
+        if let Some((_, error)) = errors.into_iter().next() {
+            return Err(error);
+        }
+        let count = tools.len();
+        register_mcp_tools(
+            &mut self.agent.tools,
+            tools,
+            Vec::new(),
+            self.config.mcp.tool_search_threshold,
+        );
+        Ok(count)
+    }
 }
 
 /// Keep dcode-ai's private workspace state out of git while leaving

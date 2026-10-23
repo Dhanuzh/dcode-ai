@@ -195,7 +195,7 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/rewind" => "restore code and/or conversation to an earlier message (Esc Esc)",
         "/redo" => "redo the last undone turn",
         "/diff" => "show git diff (incl. untracked)",
-        "/copy" => "copy the last response as markdown",
+        "/copy" => "copy the last response as markdown (/copy link: the newest link)",
         "/transcript" => "full-screen transcript (scroll/expand)",
         "/dashboard" => "toggle the full-screen dashboard (Ctrl+\\)",
         "/cost" => "token cost for this session",

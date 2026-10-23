@@ -31,6 +31,7 @@ const STARTUP_APPROVE_ALL_QUESTION_ID: &str = "startup-approve-all";
 // Slash commands, by area (each a method on `Repl`).
 mod cmd_ext;
 mod cmd_info;
+mod cmd_mcp;
 mod cmd_session;
 mod cmd_settings;
 mod cmd_work;
@@ -1281,49 +1282,25 @@ impl Repl {
             g.open_question_modal();
         }
 
-        let rx = self
-            .runtime
-            .take_event_rx()
-            .ok_or_else(|| anyhow::anyhow!("internal: event channel already taken"))?;
-        let ipc = self.runtime.take_ipc_handle();
-        let approval = self.runtime.take_ipc_approval_pending();
-        let question = self.runtime.question_pending();
-        let bridge_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> =
-            Arc::new(Mutex::new(Some(spawn_tui_bridge(
-                rx,
-                log_path,
-                ipc,
-                approval.clone(),
-                question.clone(),
-                tui_state.clone(),
-            ))));
-
-        let _spawn_task = {
-            let spawn_rx = self.runtime.take_spawn_rx();
-            let event_tx = self.runtime.event_tx();
-            if let Some(srx) = spawn_rx {
-                Some(dcode_ai_runtime::supervisor::spawn_subagent_consumer(
-                    srx,
-                    self.runtime.session_id().to_string(),
-                    self.runtime.workspace_root().to_path_buf(),
-                    self.runtime.config().clone(),
-                    self.runtime.messages().to_vec(),
-                    event_tx,
-                ))
-            } else {
-                None
-            }
-        };
+        // The pending approval / question maps belong to the session
+        // runtime; `/resume` and `/project` swap it, so answers look the
+        // current maps up here instead of keeping the first ones.
+        let live = LiveMaps::default();
+        let bridge_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(
+            Some(attach_runtime_to_tui(&mut self.runtime, &tui_state, &live)),
+        ));
+        let _ = log_path;
 
         // Answers must bypass the main `cmd_rx` loop: while `run_turn` is blocked inside
         // `ask_question`, that task never receives `TuiCmd::Submit` or `QuestionAnswer`.
         let (answer_tx, mut answer_rx) =
             tokio::sync::mpsc::unbounded_channel::<(String, QuestionSelection)>();
-        let qp_dispatch = question.clone();
+        let qp_dispatch = live.clone();
         let question_state = tui_state.clone();
         tokio::spawn(async move {
             while let Some((qid, sel)) = answer_rx.recv().await {
-                if !dispatch_question_answer(&qp_dispatch, &qid, sel)
+                let current = qp_dispatch.lock().ok().and_then(|m| m.question.clone());
+                if !dispatch_question_answer(&current, &qid, sel)
                     && let Ok(mut g) = question_state.lock()
                 {
                     if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
@@ -1345,7 +1322,7 @@ impl Repl {
 
         let (approval_tx, mut approval_rx) =
             tokio::sync::mpsc::unbounded_channel::<ApprovalAnswer>();
-        let approval_dispatch = approval.clone();
+        let approval_dispatch = live.clone();
         let approval_state = tui_state.clone();
         tokio::spawn(async move {
             while let Some(answer) = approval_rx.recv().await {
@@ -1370,7 +1347,11 @@ impl Repl {
                         dcode_ai_core::approval::ApprovalVerdict::ApprovedModified(modified_input),
                     ),
                 };
-                if !dispatch_tool_approval(&approval_dispatch, &call_id, verdict)
+                let current = approval_dispatch
+                    .lock()
+                    .ok()
+                    .and_then(|m| m.approval.clone());
+                if !dispatch_tool_approval(&current, &call_id, verdict)
                     && let Ok(mut g) = approval_state.lock()
                 {
                     // A verdict with no matching pending entry is normal, not an
@@ -1390,6 +1371,7 @@ impl Repl {
         let st = tui_state.clone();
         let banner = self.run_mode;
         let cancel_flag = self.runtime.cancel_handle();
+        let tui_cancel = cancel_flag.clone();
         let mouse_capture = effective_mouse_capture;
         let scroll_speed = self.runtime.config().ui.scroll_speed;
         let ui = tokio::task::spawn_blocking(move || {
@@ -1405,10 +1387,12 @@ impl Repl {
             )
         });
 
+        let steer_inbox = self.runtime.steer_handle();
         if let Ok(mut g) = tui_state.lock() {
-            g.steer_inbox = Some(self.runtime.steer_handle());
+            g.steer_inbox = Some(steer_inbox.clone());
         }
         let mut pending_cmds: VecDeque<TuiCmd> = VecDeque::new();
+        let mut mcp_auth: Option<cmd_mcp::McpAuthTask> = None;
 
         loop {
             // Messages typed during the last turn: ones the agent did not
@@ -1642,6 +1626,10 @@ impl Repl {
                             g.touch_transcript();
                         }
                     }
+                }
+                TuiCmd::McpAction(action) => {
+                    self.handle_mcp_action(action, &tui_state, &mut mcp_auth)
+                        .await;
                 }
                 TuiCmd::PluginAction(action) => {
                     spawn_plugin_action(Arc::clone(&tui_state), action, self.self_cmd_tx.clone());
@@ -1896,31 +1884,19 @@ impl Repl {
                             .await
                         {
                             Ok(()) => {
-                                // Abort the old bridge — its channel is dead after runtime swap.
+                                // Old bridge's channel is dead after the swap.
                                 if let Ok(mut h) = bridge_handle.lock()
                                     && let Some(old) = h.take()
                                 {
                                     old.abort();
                                 }
-
-                                let new_rx = self.runtime.take_event_rx();
+                                self.runtime
+                                    .adopt_turn_handles(tui_cancel.clone(), steer_inbox.clone());
                                 let new_log = self.runtime.event_log_path();
-                                let new_ipc = self.runtime.take_ipc_handle();
-                                let new_approval = self.runtime.take_ipc_approval_pending();
-                                let new_question = self.runtime.question_pending();
-
-                                if let Some(rx) = new_rx {
-                                    let new_bridge = spawn_tui_bridge(
-                                        rx,
-                                        new_log.clone(),
-                                        new_ipc,
-                                        new_approval,
-                                        new_question,
-                                        tui_state.clone(),
-                                    );
-                                    if let Ok(mut h) = bridge_handle.lock() {
-                                        *h = Some(new_bridge);
-                                    }
+                                let nb =
+                                    attach_runtime_to_tui(&mut self.runtime, &tui_state, &live);
+                                if let Ok(mut h) = bridge_handle.lock() {
+                                    *h = Some(nb);
                                 }
 
                                 // Reset the TUI transcript and replay the resumed session.
@@ -2079,23 +2055,14 @@ impl Repl {
                                     {
                                         old.abort();
                                     }
-                                    let new_rx = self.runtime.take_event_rx();
-                                    let new_log = self.runtime.event_log_path();
-                                    let new_ipc = self.runtime.take_ipc_handle();
-                                    let new_approval = self.runtime.take_ipc_approval_pending();
-                                    let new_question = self.runtime.question_pending();
-                                    if let Some(rx) = new_rx {
-                                        let nb = spawn_tui_bridge(
-                                            rx,
-                                            new_log,
-                                            new_ipc,
-                                            new_approval,
-                                            new_question,
-                                            tui_state.clone(),
-                                        );
-                                        if let Ok(mut h) = bridge_handle.lock() {
-                                            *h = Some(nb);
-                                        }
+                                    self.runtime.adopt_turn_handles(
+                                        tui_cancel.clone(),
+                                        steer_inbox.clone(),
+                                    );
+                                    let nb =
+                                        attach_runtime_to_tui(&mut self.runtime, &tui_state, &live);
+                                    if let Ok(mut h) = bridge_handle.lock() {
+                                        *h = Some(nb);
                                     }
                                     let branch = git_current_branch(&proj_path).unwrap_or_default();
                                     if let Ok(mut g) = tui_state.lock() {
@@ -2368,7 +2335,10 @@ impl Repl {
                         g.push_block(DisplayBlock::System(note));
                         g.goal_label = None;
                     }
-                    if let Err(e) = turn {
+                    if let Err(e) = turn
+                        // The agent already reported a cancelled run.
+                        && !e.to_string().ends_with("run cancelled")
+                    {
                         // Let queued events (e.g. the echoed prompt of a
                         // refused turn) render before the error line.
                         tokio::time::sleep(std::time::Duration::from_millis(40)).await;
@@ -2585,6 +2555,46 @@ impl ReplCompleter {
     }
 }
 
+/// The current session's pending approval and question maps (see
+/// [`attach_runtime_to_tui`]).
+#[derive(Default)]
+struct LiveMapsInner {
+    approval: Option<crate::ipc_pending::ApprovalPendingMap>,
+    question: Option<crate::ipc_pending::QuestionPendingMap>,
+}
+type LiveMaps = Arc<Mutex<LiveMapsInner>>;
+
+/// Connect a (new or swapped-in) session runtime to the TUI: its event
+/// stream, pending approval / question maps and sub-agent launcher.
+fn attach_runtime_to_tui(
+    runtime: &mut SessionRuntime,
+    tui_state: &Arc<Mutex<crate::tui::state::TuiSessionState>>,
+    live: &LiveMaps,
+) -> tokio::task::JoinHandle<()> {
+    let log_path = runtime.event_log_path();
+    let ipc = runtime.take_ipc_handle();
+    let approval = runtime.take_ipc_approval_pending();
+    let question = runtime.question_pending();
+    if let Ok(mut m) = live.lock() {
+        m.approval = approval.clone();
+        m.question = question.clone();
+    }
+    if let Some(srx) = runtime.take_spawn_rx() {
+        dcode_ai_runtime::supervisor::spawn_subagent_consumer(
+            srx,
+            runtime.session_id().to_string(),
+            runtime.workspace_root().to_path_buf(),
+            runtime.config().clone(),
+            runtime.messages().to_vec(),
+            runtime.event_tx(),
+        );
+    }
+    match runtime.take_event_rx() {
+        Some(rx) => spawn_tui_bridge(rx, log_path, ipc, approval, question, tui_state.clone()),
+        None => tokio::spawn(async {}),
+    }
+}
+
 use crate::repl_helpers::*;
 
 #[cfg(test)]
@@ -2752,6 +2762,7 @@ fn spawn_plugin_action(
     let reload = !matches!(
         action,
         BrowserAction::AddMarket(_)
+            | BrowserAction::AddDefaultMarkets(_)
             | BrowserAction::UpdateMarket(_)
             | BrowserAction::RemoveMarket(_)
     );

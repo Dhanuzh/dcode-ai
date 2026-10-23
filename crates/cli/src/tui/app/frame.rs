@@ -215,7 +215,9 @@ pub(super) fn draw_session_pane(
     super::chrome::render_footer(frame, status_r, g);
 
     // ── Centered popups ──
-    if let Some(browser) = &g.plugin_browser {
+    if let Some(panel) = &g.mcp_panel {
+        panel.render(frame, area, &g.mcp_server_statuses);
+    } else if let Some(browser) = &g.plugin_browser {
         browser.render(frame, area);
     } else if let Some(prompt) = &g.sudo_prompt {
         prompt.render(frame, area);

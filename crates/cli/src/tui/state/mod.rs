@@ -245,6 +245,7 @@ impl TuiSessionState {
             replaying: false,
             statusline_command: None,
             plugin_browser: None,
+            mcp_panel: None,
             setup_picker: None,
             sudo_prompt: None,
             askpass_reply: None,

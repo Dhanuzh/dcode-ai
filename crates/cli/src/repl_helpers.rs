@@ -617,6 +617,17 @@ pub(crate) fn session_picker_meta(
     parts.join(" · ")
 }
 
+/// The last `http(s)://` link in `text`, without trailing punctuation.
+pub(crate) fn last_link(text: &str) -> Option<String> {
+    let start = text.rfind("https://").max(text.rfind("http://"))?;
+    let tail = &text[start..];
+    let end = tail
+        .find(|c: char| c.is_whitespace() || matches!(c, '`' | '"' | '\'' | '<' | '>' | ')' | ']'))
+        .unwrap_or(tail.len());
+    let url = tail[..end].trim_end_matches(['.', ',', ';', ':', '!', '?']);
+    (url.len() > "https://".len()).then(|| url.to_string())
+}
+
 /// Search across all session event logs for a keyword.
 pub(crate) fn search_session_history(
     sessions_dir: &std::path::Path,
@@ -688,6 +699,13 @@ mod session_label_tests {
             Some("user: fix   the login bug")
         );
         assert_eq!(search_session_history(dir.path(), "LOGIN", 5).len(), 1);
+
+        assert_eq!(
+            last_link("open (https://a.example/x?y=1). then `http://b.example/cb?code=2`.")
+                .as_deref(),
+            Some("http://b.example/cb?code=2")
+        );
+        assert_eq!(last_link("no links here"), None);
 
         let now = chrono::Utc::now();
         assert_eq!(time_ago(now - chrono::Duration::hours(3), now), "3h ago");

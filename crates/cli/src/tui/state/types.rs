@@ -187,6 +187,8 @@ pub struct TuiSessionState {
     pub reload_slash_entries: bool,
     /// `/plugins` browser, when open.
     pub plugin_browser: Option<Box<crate::tui::plugin_browser::PluginBrowser>>,
+    /// `/mcp` panel, when open.
+    pub mcp_panel: Option<Box<crate::tui::mcp_panel::McpPanel>>,
     /// A clipboard image paste to run off the UI thread; `true` falls back to
     /// clipboard text (image paths) when there is no image.
     pub paste_request: Option<bool>,

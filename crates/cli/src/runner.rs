@@ -99,10 +99,13 @@ impl SessionRuntime {
         self.handle.as_mut()?.take_ipc_handle()
     }
 
+    /// The map the session's approval handler waits on. Asking again (after
+    /// `/resume` already moved it out of the handle) returns the same map.
     pub fn take_ipc_approval_pending(&mut self) -> Option<ApprovalPendingMap> {
-        let map = self.handle.as_mut()?.take_approval_pending();
-        self.ipc_approval_pending = map.clone();
-        map
+        if let Some(map) = self.handle.as_mut().and_then(|h| h.take_approval_pending()) {
+            self.ipc_approval_pending = Some(map);
+        }
+        self.ipc_approval_pending.clone()
     }
 
     /// Pending `ask_question` resolvers (same map the runtime tool waits on).
@@ -370,8 +373,31 @@ impl SessionRuntime {
         self.supervisor.cancel_handle()
     }
 
+    pub fn mcp_tool_count(&self, name: &str) -> usize {
+        self.supervisor.mcp_tool_count(name)
+    }
+
+    pub async fn disconnect_mcp_server(&mut self, name: &str) {
+        self.supervisor.disconnect_mcp_server(name).await
+    }
+
+    pub async fn reconnect_mcp_server(&mut self, name: &str) -> Result<usize, String> {
+        self.supervisor.reconnect_mcp_server(name).await
+    }
+
     pub fn steer_handle(&self) -> dcode_ai_core::agent::SteerInbox {
         self.supervisor.steer_handle()
+    }
+
+    /// Point this session's cancel flag and steer inbox at ones the TUI holds.
+    pub fn adopt_turn_handles(
+        &mut self,
+        cancel: Arc<AtomicBool>,
+        steer: dcode_ai_core::agent::SteerInbox,
+    ) {
+        self.supervisor
+            .agent_mut()
+            .adopt_turn_handles(cancel, steer);
     }
 
     pub fn event_tx(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {

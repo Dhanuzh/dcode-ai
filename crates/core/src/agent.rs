@@ -1078,6 +1078,13 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         self.steer.clone()
     }
 
+    /// Use handles the UI already holds (after it swapped in a resumed
+    /// session), so Esc and mid-turn messages keep reaching this loop.
+    pub fn adopt_turn_handles(&mut self, cancel: Arc<AtomicBool>, steer: SteerInbox) {
+        self.cancel_flag = cancel;
+        self.steer = steer;
+    }
+
     /// Add messages from the steer inbox to the conversation as one user
     /// message. Returns whether there were any.
     async fn take_steering(&mut self) -> bool {

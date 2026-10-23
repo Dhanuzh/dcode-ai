@@ -235,17 +235,18 @@ impl Repl {
                 // The interactive browser (Discover · Installed · Marketplaces · Errors).
                 if let ReplOutput::Tui(st) = &out {
                     let browser = crate::tui::plugin_browser::PluginBrowser::load();
-                    let first_run = browser.markets.is_empty();
                     if let Ok(mut g) = st.lock() {
                         g.plugin_browser = Some(Box::new(browser));
                     }
-                    if first_run {
-                        // Like Claude Code, start with the official marketplace.
+                    // Like Claude Code, start with Anthropic's marketplaces
+                    // (each added once; a removed one stays removed).
+                    let missing = dcode_ai_core::plugin_installer::marketplaces_dir()
+                        .map(|d| dcode_ai_core::plugin_installer::missing_default_markets(&d))
+                        .unwrap_or_default();
+                    if !missing.is_empty() {
                         spawn_plugin_action(
                             Arc::clone(st),
-                            crate::tui::plugin_browser::BrowserAction::AddMarket(
-                                dcode_ai_core::plugin_installer::DEFAULT_MARKETPLACE.into(),
-                            ),
+                            crate::tui::plugin_browser::BrowserAction::AddDefaultMarkets(missing),
                             self.self_cmd_tx.clone(),
                         );
                     }
@@ -334,6 +335,14 @@ impl Repl {
                                 out.eprintln(&format!("[mcp] Server '{name}' not found"));
                             }
                         }
+                    }
+                } else if let ReplOutput::Tui(st) = &out
+                    && subcommand.is_empty()
+                {
+                    // The interactive panel: status, sign-in, reconnect.
+                    let panel = crate::tui::mcp_panel::McpPanel::new(self.mcp_rows());
+                    if let Ok(mut g) = st.lock() {
+                        g.mcp_panel = Some(Box::new(panel));
                     }
                 } else {
                     // /mcp — show server status overview.

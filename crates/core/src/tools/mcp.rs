@@ -600,7 +600,7 @@ impl HttpMcpClient {
 
     fn sign_in_error(&self) -> String {
         format!(
-            "MCP server `{0}` needs sign-in: run `dcode-ai mcp login {0}`",
+            "MCP server `{0}` needs sign-in: open `/mcp` and choose Authenticate (or run `dcode-ai mcp login {0}`)",
             self.server_name
         )
     }

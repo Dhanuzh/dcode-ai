@@ -116,7 +116,49 @@ fn find_remote<'a>(
 /// `dcode-ai mcp login <name>`: OAuth 2.1 authorization code + PKCE with a
 /// loopback redirect (the MCP authorization spec).
 pub async fn login(config: &DcodeAiConfig, name: &str) -> anyhow::Result<()> {
-    use dcode_ai_common::mcp_auth::{McpAuthStore, McpServerLogin, client_key, key};
+    let flow = match begin_login(config, name).await? {
+        Some(flow) => flow,
+        None => {
+            println!("`{name}` does not ask for sign-in; nothing to do.");
+            return Ok(());
+        }
+    };
+    println!(
+        "Sign in to `{name}` in your browser:\n\n  {}\n",
+        flow.auth_url
+    );
+    if !crate::oauth_login::try_open_browser(&flow.auth_url) {
+        println!("(Open the link above yourself.)");
+    }
+    println!("Waiting for the sign-in to finish (5 minutes)…");
+    let code = tokio::time::timeout(std::time::Duration::from_secs(300), flow.wait_browser())
+        .await
+        .map_err(|_| anyhow::anyhow!("timed out waiting for the browser sign-in"))??;
+    flow.finish(&code).await?;
+    println!(
+        "Signed in to `{name}`. Its tools load in new sessions (or `/reload` in a running one)."
+    );
+    Ok(())
+}
+
+/// A sign-in in progress: the URL to open, and the loopback listener that
+/// receives the browser's redirect.
+pub struct LoginFlow {
+    pub auth_url: String,
+    url: String,
+    http: reqwest::Client,
+    discovery: dcode_ai_core::mcp_oauth::Discovery,
+    client: dcode_ai_common::mcp_auth::McpOAuthClient,
+    pkce: dcode_ai_core::mcp_oauth::Pkce,
+    state: String,
+    listener: tokio::net::TcpListener,
+}
+
+/// Start signing in to `name`: discover its authorization server, register
+/// dcode-ai as a client (once per server), and build the authorization URL.
+/// `None` when the server does not ask for sign-in.
+pub async fn begin_login(config: &DcodeAiConfig, name: &str) -> anyhow::Result<Option<LoginFlow>> {
+    use dcode_ai_common::mcp_auth::{McpAuthStore, client_key};
     use dcode_ai_core::mcp_oauth;
     let (_server, url) = find_remote(config, name)?;
     let http = reqwest::Client::builder()
@@ -142,8 +184,7 @@ pub async fn login(config: &DcodeAiConfig, name: &str) -> anyhow::Result<()> {
         .and_then(|v| v.to_str().ok())
         .and_then(mcp_oauth::parse_www_authenticate);
     if probe.status().is_success() && challenge.is_none() {
-        println!("`{name}` does not ask for sign-in; nothing to do.");
-        return Ok(());
+        return Ok(None);
     }
     let discovery = mcp_oauth::discover(&http, &url, challenge.as_ref())
         .await
@@ -172,37 +213,79 @@ pub async fn login(config: &DcodeAiConfig, name: &str) -> anyhow::Result<()> {
     let pkce = mcp_oauth::Pkce::new();
     let state = mcp_oauth::random_token();
     let auth_url = mcp_oauth::authorize_url(&discovery, &client, &pkce, &state);
-    println!("Sign in to `{name}` in your browser:\n\n  {auth_url}\n");
-    if !crate::oauth_login::try_open_browser(&auth_url) {
-        println!("(Open the link above yourself.)");
+    Ok(Some(LoginFlow {
+        auth_url,
+        url,
+        http,
+        discovery,
+        client,
+        pkce,
+        state,
+        listener,
+    }))
+}
+
+impl LoginFlow {
+    /// Wait for the browser's redirect to the loopback listener.
+    pub async fn wait_browser(&self) -> anyhow::Result<String> {
+        wait_for_callback(&self.listener, &self.state).await
     }
-    println!("Waiting for the sign-in to finish (5 minutes)…");
-    let code = tokio::time::timeout(
-        std::time::Duration::from_secs(300),
-        wait_for_callback(&listener, &state),
-    )
-    .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for the browser sign-in"))??;
-    let tokens = mcp_oauth::exchange_code(&http, &discovery, &client, &code, &pkce)
+
+    /// The code from a redirect URL the user pasted (when the browser
+    /// could not reach localhost, e.g. on WSL).
+    pub fn code_from_pasted(&self, pasted: &str) -> anyhow::Result<String> {
+        code_from_redirect(pasted, &self.state)
+    }
+
+    /// Exchange the code for tokens and save the sign-in.
+    pub async fn finish(self, code: &str) -> anyhow::Result<()> {
+        use dcode_ai_common::mcp_auth::{McpAuthStore, McpServerLogin, key};
+        let tokens = dcode_ai_core::mcp_oauth::exchange_code(
+            &self.http,
+            &self.discovery,
+            &self.client,
+            code,
+            &self.pkce,
+        )
         .await
         .map_err(anyhow::Error::msg)?;
-    store.servers.insert(
-        key(&url),
-        McpServerLogin {
-            issuer: discovery.auth_server.issuer.clone(),
-            token_endpoint: discovery.auth_server.token_endpoint.clone(),
-            client,
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-            expires_at: tokens.expires_at,
-            scope: tokens.scope,
-        },
-    );
-    store.save().map_err(anyhow::Error::msg)?;
-    println!(
-        "Signed in to `{name}`. Its tools load in new sessions (or `/reload` in a running one)."
-    );
-    Ok(())
+        let mut store = McpAuthStore::load();
+        store.servers.insert(
+            key(&self.url),
+            McpServerLogin {
+                issuer: self.discovery.auth_server.issuer.clone(),
+                token_endpoint: self.discovery.auth_server.token_endpoint.clone(),
+                client: self.client,
+                access_token: tokens.access_token,
+                refresh_token: tokens.refresh_token,
+                expires_at: tokens.expires_at,
+                scope: tokens.scope,
+            },
+        );
+        store.save().map_err(anyhow::Error::msg)
+    }
+}
+
+/// `code` from a pasted redirect URL whose `state` matches.
+fn code_from_redirect(pasted: &str, state: &str) -> anyhow::Result<String> {
+    let url = url::Url::parse(pasted.trim()).map_err(|_| {
+        anyhow::anyhow!("that is not a URL; paste the whole address from the browser")
+    })?;
+    let get = |k: &str| {
+        url.query_pairs()
+            .find(|(name, _)| name == k)
+            .map(|(_, v)| v.to_string())
+    };
+    if let Some(err) = get("error") {
+        anyhow::bail!(
+            "sign-in failed: {err} {}",
+            get("error_description").unwrap_or_default()
+        );
+    }
+    if get("state").as_deref() != Some(state) {
+        anyhow::bail!("that URL is from a different sign-in (state does not match)");
+    }
+    get("code").ok_or_else(|| anyhow::anyhow!("no code in that URL"))
 }
 
 /// Serve one redirect on the loopback listener; return the `code` once the
@@ -276,19 +359,34 @@ async fn wait_for_callback(
 
 /// `dcode-ai mcp logout <name>`.
 pub fn logout(config: &DcodeAiConfig, name: &str) -> anyhow::Result<()> {
-    let (_server, url) = find_remote(config, name)?;
-    let mut store = dcode_ai_common::mcp_auth::McpAuthStore::load();
-    if store
-        .servers
-        .remove(&dcode_ai_common::mcp_auth::key(&url))
-        .is_some()
-    {
-        store.save().map_err(anyhow::Error::msg)?;
+    if sign_out(config, name)? {
         println!("Signed out of `{name}`.");
     } else {
         println!("`{name}` was not signed in.");
     }
     Ok(())
+}
+
+/// Forget the saved sign-in for `name`. False when there was none.
+pub fn sign_out(config: &DcodeAiConfig, name: &str) -> anyhow::Result<bool> {
+    let (_server, url) = find_remote(config, name)?;
+    let mut store = dcode_ai_common::mcp_auth::McpAuthStore::load();
+    if store
+        .servers
+        .remove(&dcode_ai_common::mcp_auth::key(&url))
+        .is_none()
+    {
+        return Ok(false);
+    }
+    store.save().map_err(anyhow::Error::msg)?;
+    Ok(true)
+}
+
+/// Whether a remote server at `url` has a saved sign-in.
+pub fn signed_in(url: &str) -> bool {
+    dcode_ai_common::mcp_auth::McpAuthStore::load()
+        .servers
+        .contains_key(&dcode_ai_common::mcp_auth::key(url))
 }
 
 /// Mask values that look like secrets (tokens, keys, auth headers).
@@ -470,6 +568,23 @@ pub fn remove(workspace_root: &Path, name: &str, scope: Option<&str>) -> anyhow:
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pasted_redirect_gives_the_code_only_for_this_sign_in() {
+        let ok = "http://127.0.0.1:53682/callback?code=abc&state=s1";
+        assert_eq!(code_from_redirect(ok, "s1").unwrap(), "abc");
+        assert!(code_from_redirect(ok, "other").is_err());
+        assert!(code_from_redirect("not a url", "s1").is_err());
+        assert!(
+            code_from_redirect(
+                "http://localhost/callback?error=access_denied&state=s1",
+                "s1"
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("access_denied")
+        );
+    }
 
     #[test]
     fn secrets_are_masked() {

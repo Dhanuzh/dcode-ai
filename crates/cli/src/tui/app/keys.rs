@@ -165,6 +165,21 @@ pub(super) fn handle_key_event(
         return KeyFlow::Continue;
     }
 
+    // `/mcp` panel owns the keyboard while open (Ctrl+C still exits).
+    if let Some(panel) = g.mcp_panel.as_mut()
+        && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+    {
+        use crate::tui::mcp_panel::McpKey;
+        match panel.handle_key(key) {
+            McpKey::Handled => {}
+            McpKey::Close => g.mcp_panel = None,
+            McpKey::Run(action) => {
+                let _ = cmd_tx.send(TuiCmd::McpAction(action));
+            }
+        }
+        return KeyFlow::Continue;
+    }
+
     // `/plugins` browser owns the keyboard while open (Ctrl+C still exits).
     if let Some(browser) = g.plugin_browser.as_mut()
         && !(key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))

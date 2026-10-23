@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.0.19 — 2026-10-23
+
+### New
+- **`/mcp` panel with sign-in**: `/mcp` lists servers with their status
+  (connected · tools, needs sign-in, failed, disabled). Enter on a server:
+  Authenticate, Reconnect, Sign out, Disable. Authenticate signs in right in
+  the session, like Claude Code: the browser opens, the panel shows the URL
+  (`c` copies it), and if the browser can't reach localhost after you
+  approve (WSL), paste the address-bar URL into the panel. The server
+  connects as soon as you're signed in, with no restart.
+- **More plugins**: `/plugins` now also adds Anthropic's community
+  (`claude-community`, ~2,280) and knowledge-work marketplaces next to the
+  official one, about 2,700 plugins. Official ones are listed first.
+- **`/copy link`** copies the newest link in the conversation whole (long
+  wrapped URLs can't be mouse-copied cleanly).
+
+### Fixes
+- **After `/resume` (or `/project`), answers went nowhere**: approving a
+  command, answering a question and Esc all still pointed at the previous
+  session, so a resumed session waited five minutes on every approval and
+  then reported it as denied, questions stayed on "Waiting input…", and Esc
+  did not stop the turn. Approvals, questions, Esc, mid-turn messages and
+  sub-agent launches now follow the session you resumed.
+- A cancelled run no longer prints "run cancelled" twice.
+
 ## 1.0.18 — 2026-10-23
 
 ### New

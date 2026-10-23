@@ -18,6 +18,16 @@ use crate::skill_installer::git_head_commit;
 /// The marketplace offered when none is configured.
 pub const DEFAULT_MARKETPLACE: &str = "anthropics/claude-plugins-official";
 
+/// Anthropic's public marketplaces, added once each when `/plugins` opens:
+/// official, community (`claude-community`) and knowledge-work. (Claude
+/// Code's "Anthropic Directory" is the claude.ai catalog behind a claude.ai
+/// sign-in, which dcode-ai does not use.)
+pub const DEFAULT_MARKETPLACES: &[&str] = &[
+    DEFAULT_MARKETPLACE,
+    "anthropics/claude-plugins-community",
+    "anthropics/knowledge-work-plugins",
+];
+
 /// Where a source lives.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Source {
@@ -510,6 +520,9 @@ impl KnownMarket {
 pub struct KnownMarkets {
     #[serde(default)]
     pub markets: Vec<KnownMarket>,
+    /// Default marketplaces already added once; one you remove stays removed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub defaults_added: Vec<String>,
 }
 
 impl KnownMarkets {
@@ -573,6 +586,44 @@ pub fn add_market(markets_dir: &Path, source: &str) -> Result<String, String> {
     known.markets.sort_by(|a, b| a.name.cmp(&b.name));
     known.save_to(markets_dir)?;
     Ok(name)
+}
+
+/// Default marketplaces not added yet (and never added before). Ones
+/// already present count as added.
+pub fn missing_default_markets(markets_dir: &Path) -> Vec<String> {
+    let known = KnownMarkets::load_from(markets_dir);
+    DEFAULT_MARKETPLACES
+        .iter()
+        .filter(|s| {
+            !known.defaults_added.iter().any(|d| d == *s)
+                && !known.markets.iter().any(|m| m.source == **s)
+        })
+        .map(|s| s.to_string())
+        .collect()
+}
+
+/// Add the given default marketplaces, remembering each attempt so a
+/// marketplace the user removes is not added back. Returns the names added
+/// and the errors.
+pub fn add_default_markets(markets_dir: &Path, sources: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut added = Vec::new();
+    let mut errors = Vec::new();
+    for source in sources {
+        match add_market(markets_dir, source) {
+            Ok(name) => added.push(name),
+            Err(e) => errors.push(format!("{source}: {e}")),
+        }
+    }
+    let mut known = KnownMarkets::load_from(markets_dir);
+    for source in DEFAULT_MARKETPLACES {
+        // A failed add is tried again next time.
+        let present = known.markets.iter().any(|m| m.source == *source);
+        if present && !known.defaults_added.iter().any(|d| d == source) {
+            known.defaults_added.push(source.to_string());
+        }
+    }
+    let _ = known.save_to(markets_dir);
+    (added, errors)
 }
 
 /// Pull the latest marketplace listing.
@@ -717,6 +768,25 @@ mod tests {
             install(&plugins, src, Some("weird"))
                 .unwrap_err()
                 .contains("npm")
+        );
+    }
+
+    #[test]
+    fn defaults_are_added_once_and_a_removed_one_stays_removed() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut known = KnownMarkets::default();
+        known.markets.push(KnownMarket {
+            name: "claude-plugins-official".into(),
+            source: DEFAULT_MARKETPLACE.into(),
+            local_path: None,
+            updated_at: None,
+        });
+        known.defaults_added.push(DEFAULT_MARKETPLACES[2].into());
+        known.save_to(dir.path()).unwrap();
+        // Present, or added before and since removed: not offered again.
+        assert_eq!(
+            missing_default_markets(dir.path()),
+            vec![DEFAULT_MARKETPLACES[1].to_string()]
         );
     }
 

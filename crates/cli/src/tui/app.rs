@@ -128,6 +128,8 @@ pub enum TuiCmd {
     SudoCancelled,
     /// Run a `/plugins` browser action (install, update, …) off the UI thread.
     PluginAction(crate::tui::plugin_browser::BrowserAction),
+    /// An action chosen in the `/mcp` panel.
+    McpAction(crate::tui::mcp_panel::McpAction),
     /// Leave plan mode and start building (`accept_edits` picks the mode).
     ExitPlan {
         accept_edits: bool,
@@ -1149,6 +1151,7 @@ pub fn run_blocking(
                 Event::Mouse(_) if g.transcript_search_open => continue,
                 Event::Mouse(_)
                     if g.plugin_browser.is_some()
+                        || g.mcp_panel.is_some()
                         || g.setup_picker.is_some()
                         || g.sudo_prompt.is_some() =>
                 {
@@ -1181,7 +1184,9 @@ pub fn run_blocking(
                     );
                 }
                 Event::Paste(pasted) => {
-                    if g.anthropic_oauth_modal_open {
+                    if let Some(panel) = g.mcp_panel.as_mut().filter(|p| p.in_auth()) {
+                        panel.paste(&pasted.replace(['\r', '\n'], ""));
+                    } else if g.anthropic_oauth_modal_open {
                         let normalized = pasted.replace('\r', "");
                         let value = normalized.trim_end_matches('\n');
                         g.anthropic_oauth_code_input.push_str(value);

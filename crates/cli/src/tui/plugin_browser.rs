@@ -60,11 +60,16 @@ pub struct MarketRow {
 /// Work the browser asks the REPL to do (git and disk, off the UI thread).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BrowserAction {
-    Install { market: String, name: String },
+    Install {
+        market: String,
+        name: String,
+    },
     Uninstall(String),
     SetEnabled(String, bool),
     UpdatePlugin(String),
     AddMarket(String),
+    /// Anthropic's default marketplaces not added yet.
+    AddDefaultMarkets(Vec<String>),
     UpdateMarket(String),
     RemoveMarket(String),
 }
@@ -79,6 +84,9 @@ impl BrowserAction {
             Self::SetEnabled(n, false) => format!("Disabling {n}…"),
             Self::UpdatePlugin(n) => format!("Updating {n}…"),
             Self::AddMarket(s) => format!("Adding marketplace {s}…"),
+            Self::AddDefaultMarkets(s) => {
+                format!("Adding Anthropic's marketplaces ({})…", s.len())
+            }
             Self::UpdateMarket(n) => format!("Updating marketplace {n}…"),
             Self::RemoveMarket(n) => format!("Removing marketplace {n}…"),
         }
@@ -112,6 +120,17 @@ impl BrowserAction {
             Self::AddMarket(s) => {
                 let name = plugin_installer::add_market(&markets, s)?;
                 Ok(format!("Added marketplace {name}"))
+            }
+            Self::AddDefaultMarkets(sources) => {
+                let (added, errors) = plugin_installer::add_default_markets(&markets, sources);
+                if added.is_empty() && !errors.is_empty() {
+                    return Err(errors.join("; "));
+                }
+                let mut msg = format!("Added marketplaces: {}", added.join(", "));
+                if !errors.is_empty() {
+                    msg.push_str(&format!(" (failed: {})", errors.join("; ")));
+                }
+                Ok(msg)
             }
             Self::UpdateMarket(n) => {
                 plugin_installer::update_market(&markets, n)?;
@@ -221,6 +240,19 @@ impl PluginBrowser {
                     author: e.author,
                 });
             }
+            // Anthropic's own listings first (official, then knowledge-work),
+            // then the community and other marketplaces.
+            let rank = |m: &str| match m {
+                "claude-plugins-official" => 0,
+                "knowledge-work-plugins" => 1,
+                "claude-community" => 3,
+                _ => 2,
+            };
+            self.discover.sort_by(|a, b| {
+                rank(&a.market)
+                    .cmp(&rank(&b.market))
+                    .then_with(|| a.name.cmp(&b.name))
+            });
         }
         self.clamp();
     }
