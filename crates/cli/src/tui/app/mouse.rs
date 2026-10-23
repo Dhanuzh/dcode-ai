@@ -33,13 +33,8 @@ pub(super) fn handle_mouse_event(
     } else {
         composer_input_height(g, main_area.width)
     };
-    let (tr, _, slash_r, _) = layout_chunks(
-        main_area,
-        sh,
-        input_h,
-        g.queue_preview_items.len(),
-        g.subagents.len(),
-    );
+    let (tr, _, slash_r, _) =
+        layout_chunks(main_area, sh, input_h, g.unsent_count(), g.subagents.len());
 
     // Mouse scroll works anywhere on the screen, not just inside the transcript.
     if matches!(

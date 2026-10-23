@@ -593,19 +593,28 @@ pub(crate) fn pick_session_by_suffix(ids: &[String], query: &str) -> Result<Stri
     }
 }
 
-/// Session picker row: `3h ago · <name or first prompt> · <model>`.
-pub(crate) fn session_picker_label(
+/// Session picker detail line: `3h ago · opus · main · 12.4k tokens`.
+pub(crate) fn session_picker_meta(
     when: &str,
-    name: Option<&str>,
-    first_prompt: Option<&str>,
     model: &str,
-    id: &str,
+    branch: Option<&str>,
+    tokens: u64,
 ) -> String {
-    let title = name
-        .or(first_prompt)
-        .map(|t| crate::tui::render_helpers::truncate_chars(t, 60))
-        .unwrap_or_else(|| id.to_string());
-    format!("{when:>9} · {title} · {model}")
+    let mut parts = vec![when.to_string()];
+    if !model.is_empty() {
+        parts.push(model.to_string());
+    }
+    if let Some(b) = branch.filter(|b| !b.is_empty()) {
+        parts.push(b.to_string());
+    }
+    if tokens > 0 {
+        parts.push(if tokens >= 1000 {
+            format!("{:.1}k tokens", tokens as f64 / 1000.0)
+        } else {
+            format!("{tokens} tokens")
+        });
+    }
+    parts.join(" · ")
 }
 
 /// Search across all session event logs for a keyword.
@@ -684,8 +693,8 @@ mod session_label_tests {
         assert_eq!(time_ago(now - chrono::Duration::hours(3), now), "3h ago");
         assert_eq!(time_ago(now, now), "just now");
         assert_eq!(
-            session_picker_label("3h ago", None, Some("fix the login bug"), "opus", "s1"),
-            "   3h ago · fix the login bug · opus"
+            session_picker_meta("3h ago", "opus", Some("main"), 12_400),
+            "3h ago · opus · main · 12.4k tokens"
         );
     }
 }

@@ -1515,6 +1515,11 @@ impl Supervisor {
         self.agent.cancel_handle()
     }
 
+    /// Inbox for messages the user sends while a turn runs.
+    pub fn steer_handle(&self) -> dcode_ai_core::agent::SteerInbox {
+        self.agent.steer_handle()
+    }
+
     pub fn set_worktree_info(
         &mut self,
         worktree_path: PathBuf,

@@ -69,6 +69,14 @@ pub(super) fn draw_session_pane(
         0
     };
     let _ = chrome_h;
+    // Messages typed during the turn, waiting to be sent (shown above the
+    // composer, Claude-style).
+    let queued = if prompt.is_some() {
+        Vec::new()
+    } else {
+        super::chrome::queued_lines(g, area.width.saturating_sub(2) as usize)
+    };
+    let queue_h = queued.len() as u16;
 
     // ── Live content (unflushed blocks + streaming) ──
     // Follows the tail by default; respects user scroll position
@@ -82,11 +90,18 @@ pub(super) fn draw_session_pane(
             pb,
             area.height.saturating_sub(4).max(5),
         ),
+        // `/resume` takes the composer's place.
+        None if g.session_picker_open => crate::tui::render::pickers::session_picker_height(
+            g,
+            area.height.saturating_sub(3).max(7),
+        ),
         None => input_h + 2,
     };
     // Rows available for live content = viewport − spacer − slash
     // − input box − status.
-    let avail_for_live = area.height.saturating_sub(1 + slash_h + box_h + 1) as usize;
+    let avail_for_live = area
+        .height
+        .saturating_sub(1 + queue_h + slash_h + box_h + 1) as usize;
     let total = lines.len();
     // Top-align when it fits; show the tail when at default scroll
     // state, or preserve user's manual scroll position.
@@ -129,7 +144,7 @@ pub(super) fn draw_session_pane(
     let live_h = visible.len() as u16;
 
     // Contiguous block from the top:
-    // [live][spacer][slash][input-box][status][bg].
+    // [live][spacer][queued][slash][input-box][status][bg].
     // Inline: content-hugging stack from the top of the viewport. Dashboard:
     // the transcript fills the pane and the composer is pinned to the bottom.
     let live_constraint = if dashboard {
@@ -145,6 +160,7 @@ pub(super) fn draw_session_pane(
     let chunks = Layout::vertical([
         live_constraint,
         Constraint::Length(1),
+        Constraint::Length(queue_h),
         Constraint::Length(slash_h),
         Constraint::Length(box_h),
         Constraint::Length(1),
@@ -156,9 +172,12 @@ pub(super) fn draw_session_pane(
     if let Some(line) = super::chrome::spinner_line(g) {
         frame.render_widget(Paragraph::new(line), chunks[1]);
     }
-    let panel_r = chunks[2];
-    let inp_r = chunks[3];
-    let status_r = chunks[4];
+    if queue_h > 0 {
+        frame.render_widget(Paragraph::new(Text::from(queued)), chunks[2]);
+    }
+    let panel_r = chunks[3];
+    let inp_r = chunks[4];
+    let status_r = chunks[5];
     if dashboard {
         g.dash_hits.transcript = Some((tr, start));
     }
@@ -186,6 +205,8 @@ pub(super) fn draw_session_pane(
 
     if let Some(pb) = prompt {
         crate::tui::render::prompt_box::render_prompt_box(frame, inp_r, pb);
+    } else if g.session_picker_open {
+        crate::tui::render::pickers::render_session_picker(frame, inp_r, g);
     } else {
         draw_composer(frame, inp_r, g, input_h);
     }
@@ -231,15 +252,6 @@ pub(super) fn draw_session_pane(
             &project_picker_labels(g),
             g.project_picker_index,
             "",
-        );
-    } else if g.session_picker_open {
-        render_list_picker(
-            frame,
-            area,
-            "session",
-            &session_picker_labels(g),
-            g.session_picker_index,
-            &g.session_picker_search,
         );
     } else if g.info_modal_open {
         render_info_modal(frame, area, g);

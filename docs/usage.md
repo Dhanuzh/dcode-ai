@@ -36,7 +36,9 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 | `Ctrl+O` | Fold or unfold tool output |
 | `Ctrl+F` · `n` / `N` | Search the transcript |
 | `Ctrl+R` | Search prompt history |
-| `Alt+Enter` | Queue a follow-up while the agent is busy |
+| `Enter` while the agent works | Send now: the agent reads the message at its next step (after the current tool calls) and answers it in the same turn |
+| `Tab` / `Alt+Enter` while the agent works | Queue the message to send after the turn (commands like `/…` and `!…` always queue) |
+| `↑` on an empty prompt | Take unsent messages back to edit; `Esc` also puts them back |
 
 ### In the prompt
 

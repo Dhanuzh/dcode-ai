@@ -21,6 +21,11 @@ use crate::provider::{Provider, ProviderError, StopReason, StreamChunk};
 use crate::tools::ToolRegistry;
 use crate::undo::UndoManager;
 
+/// Messages the user sent while a turn runs. The agent adds them to the
+/// conversation at its next step (after tool results, or before it would end
+/// the turn), so the model sees them without waiting for the turn to finish.
+pub type SteerInbox = Arc<std::sync::Mutex<Vec<String>>>;
+
 /// Drives the multi-turn conversation and tool-use loop.
 pub struct AgentLoop {
     pub provider: Box<dyn Provider>,
@@ -34,6 +39,7 @@ pub struct AgentLoop {
     max_tool_calls_per_turn: u32,
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
+    steer: SteerInbox,
     hooks: Option<HookRunner>,
     undo: UndoManager,
     /// Effective input-token budget for mid-turn trimming. 0 disables it.
@@ -71,6 +77,7 @@ impl AgentLoop {
             max_tool_calls_per_turn,
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
+            steer: SteerInbox::default(),
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
@@ -238,6 +245,9 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         const MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
 
         let final_text = loop {
+            if turn > 0 {
+                self.take_steering().await;
+            }
             if self.is_cancelled() {
                 self.emit(AgentEvent::Error {
                     message: "Run cancelled".into(),
@@ -544,6 +554,11 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                     content: assistant_text.clone(),
                 })
                 .await;
+                // The user wrote while this reply streamed: answer it in
+                // the same turn instead of ending.
+                if self.take_steering().await {
+                    continue;
+                }
                 break assistant_text;
             }
 
@@ -1056,6 +1071,35 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
 
     pub fn cancel_handle(&self) -> Arc<AtomicBool> {
         self.cancel_flag.clone()
+    }
+
+    /// Shared inbox for messages sent while a turn runs.
+    pub fn steer_handle(&self) -> SteerInbox {
+        self.steer.clone()
+    }
+
+    /// Add messages from the steer inbox to the conversation as one user
+    /// message. Returns whether there were any.
+    async fn take_steering(&mut self) -> bool {
+        let lines = match self.steer.lock() {
+            Ok(mut inbox) => std::mem::take(&mut *inbox),
+            Err(_) => return false,
+        };
+        let lines: Vec<String> = lines.into_iter().filter(|l| !l.trim().is_empty()).collect();
+        if lines.is_empty() {
+            return false;
+        }
+        let text = lines.join("\n\n");
+        self.messages.push(Message::user(format!(
+            "The user sent this message while you were working:\n<user-message>\n{text}\n</user-message>\n\
+Take it into account now and continue with the task."
+        )));
+        self.emit(AgentEvent::MessageReceived {
+            role: "user".into(),
+            content: text,
+        })
+        .await;
+        true
     }
 
     fn is_cancelled(&self) -> bool {
@@ -1578,6 +1622,51 @@ mod tests {
         // Errors that aren't about the model don't switch models.
         assert!(!fallback_worthy("invalid request: bad tool schema"));
         assert!(fallback_worthy("HTTP 503 Service Unavailable"));
+    }
+
+    /// A message sent while the turn runs is answered in the same turn: the
+    /// reply that would have ended it is followed by the user's message.
+    #[tokio::test]
+    async fn steering_message_is_answered_in_the_same_turn() {
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(VecDeque::from([
+                vec![StreamChunk::TextDelta("first".into()), StreamChunk::Done],
+                vec![StreamChunk::TextDelta("second".into()), StreamChunk::Done],
+            ])),
+        });
+        let (event_tx, mut events) = tokio::sync::mpsc::channel(64);
+        let mut agent = AgentLoop::new(
+            provider,
+            ToolRegistry::new(),
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "m".into(),
+            event_tx,
+            5,
+            3,
+            0,
+            None,
+        );
+        agent.steer_handle().lock().unwrap().push("use tabs".into());
+        let temp = tempfile::tempdir().unwrap();
+        assert_eq!(
+            agent.run_turn("go", temp.path(), &[]).await.unwrap(),
+            "second"
+        );
+        let texts: Vec<String> = agent
+            .messages
+            .iter()
+            .map(|m| m.content.to_summary_text())
+            .collect();
+        let first = texts.iter().position(|t| t == "first").unwrap();
+        assert!(texts[first + 1].contains("<user-message>\nuse tabs\n</user-message>"));
+        assert!(agent.steer_handle().lock().unwrap().is_empty());
+        let mut shown = false;
+        while let Ok(e) = events.try_recv() {
+            if let AgentEvent::MessageReceived { role, content } = e {
+                shown |= role == "user" && content == "use tabs";
+            }
+        }
+        assert!(shown);
     }
 
     struct DenyAll;

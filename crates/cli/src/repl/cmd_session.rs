@@ -470,44 +470,38 @@ impl Repl {
                             .join(&self.runtime.config().session.history_dir);
                         let now = chrono::Utc::now();
                         let mut rows = Vec::new();
-                        for id in &ids {
-                            let snapshot = store.load_snapshot(id).await.ok();
-                            // Sub-agent sessions live under their parent.
-                            if snapshot
-                                .as_ref()
-                                .is_some_and(|s| s.parent_session_id.is_some())
-                            {
+                        let (snapshots, _) = store.load_snapshots(ids.clone()).await;
+                        for snap in snapshots {
+                            // Sub-agent sessions live under their parent; the
+                            // session you are in is not one to resume.
+                            if snap.parent_session_id.is_some() || snap.id == current {
                                 continue;
                             }
-                            let updated = snapshot.as_ref().map(|s| s.updated_at);
-                            let name = snapshot.as_ref().and_then(|s| s.session_name.clone());
-                            let model = snapshot
-                                .as_ref()
-                                .map(|s| s.model.clone())
-                                .unwrap_or_default();
-                            let first = session_first_prompt(&sessions_dir, id);
-                            let when = updated
-                                .map(|t| time_ago(t, now))
-                                .unwrap_or_else(|| "?".into());
-                            let label = session_picker_label(
-                                &when,
-                                name.as_deref(),
-                                first.as_deref(),
-                                &model,
-                                id,
+                            let first = session_first_prompt(&sessions_dir, &snap.id);
+                            let Some(title) = snap.session_name.clone().or(first.clone()) else {
+                                // Never got a message: nothing to resume.
+                                continue;
+                            };
+                            let meta = session_picker_meta(
+                                &time_ago(snap.updated_at, now),
+                                &snap.model,
+                                snap.branch.as_deref(),
+                                snap.total_input_tokens + snap.total_output_tokens,
                             );
                             let search_text = format!(
-                                "{} {} {id}",
-                                name.unwrap_or_default(),
-                                first.unwrap_or_default()
+                                "{} {} {}",
+                                snap.session_name.clone().unwrap_or_default(),
+                                first.unwrap_or_default(),
+                                snap.id
                             );
-                            let preview =
-                                session_event_preview(&sessions_dir, id, 3).unwrap_or_default();
+                            let preview = session_event_preview(&sessions_dir, &snap.id, 3)
+                                .unwrap_or_default();
                             rows.push((
-                                updated,
+                                Some(snap.updated_at),
                                 SessionPickerEntry {
-                                    id: id.clone(),
-                                    label,
+                                    id: snap.id.clone(),
+                                    label: title,
+                                    meta,
                                     search_text,
                                     preview,
                                 },
@@ -518,7 +512,14 @@ impl Repl {
                         let entries: Vec<SessionPickerEntry> =
                             rows.into_iter().map(|(_, e)| e).collect();
                         if let Ok(mut g) = st.lock() {
-                            g.open_session_picker(entries, &current);
+                            if entries.is_empty() {
+                                g.push_block(DisplayBlock::System(
+                                    "No earlier sessions in this folder to resume.".into(),
+                                ));
+                                g.touch_transcript();
+                            } else {
+                                g.open_session_picker(entries, &current);
+                            }
                         }
                     } else {
                         let store = dcode_ai_runtime::session_store::SessionStore::new(

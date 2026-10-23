@@ -121,7 +121,10 @@ impl Toast {
 
 pub struct SessionPickerEntry {
     pub id: String,
+    /// Session name or first prompt.
     pub label: String,
+    /// `3h ago · model · branch · tokens`.
+    pub meta: String,
     pub search_text: String,
     /// Last few messages as a preview (populated from event log).
     #[allow(dead_code)]
@@ -366,12 +369,12 @@ pub struct TuiSessionState {
     pub session_picker_scroll: usize,
     /// When true, the onboarding gate is active — connect modal is locked open.
     pub onboarding_mode: bool,
-    /// Queued steering messages (Enter while busy).
-    pub queued_steering: usize,
-    /// Queued follow-up messages (Alt+Enter while busy).
-    pub queued_followup: usize,
-    /// Preview rows for queued messages rendered above the status bar.
-    pub queue_preview_items: Vec<String>,
+    /// Messages sent with Enter while a turn runs: the agent reads them at
+    /// its next step. Shared with the agent loop.
+    pub steer_inbox: Option<dcode_ai_core::agent::SteerInbox>,
+    /// Messages queued with Tab / Alt+Enter while a turn runs: sent as the
+    /// next turns, in order.
+    pub followup_queue: std::collections::VecDeque<String>,
     /// Number of enabled MCP servers (status bar segment).
     pub mcp_server_count: usize,
     /// Render fenced code blocks with line numbers in assistant markdown.

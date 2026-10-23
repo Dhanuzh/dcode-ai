@@ -370,6 +370,10 @@ impl SessionRuntime {
         self.supervisor.cancel_handle()
     }
 
+    pub fn steer_handle(&self) -> dcode_ai_core::agent::SteerInbox {
+        self.supervisor.steer_handle()
+    }
+
     pub fn event_tx(&self) -> Option<tokio::sync::mpsc::Sender<AgentEvent>> {
         self.supervisor.event_tx()
     }

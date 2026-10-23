@@ -115,10 +115,6 @@ pub enum TuiCmd {
         text: String,
         scope: crate::tui::state::RewindScope,
     },
-    /// Queue a steering message while a turn is in progress (`Enter` when busy).
-    QueueSteering(String),
-    /// Queue a follow-up message for later (`Alt+Enter` when busy).
-    QueueFollowUp(String),
     /// Answer for the current `ask_question` (from question mode or `/auto-answer`).
     QuestionAnswer(dcode_ai_common::event::QuestionSelection),
     CycleAgent,
@@ -388,6 +384,15 @@ fn request_turn_cancel(
             .blocks
             .push(DisplayBlock::System("Cancelling current run...".into()));
         state.set_busy_state(BusyState::Idle);
+        // Messages typed during the run go back into the prompt to edit,
+        // not off as new turns.
+        let mut unsent = state.take_unsent();
+        if !unsent.is_empty() {
+            if !state.input_buffer.is_empty() {
+                unsent.push(state.input_buffer.clone());
+            }
+            state.set_input_text(unsent.join("\n"));
+        }
         let _ = cmd_tx.send(TuiCmd::CancelTurn);
     }
 }
@@ -1299,7 +1304,9 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "─── Composer ─────────────────────────────────────────".into(),
         "  Enter              Send message".into(),
         "  Shift+Enter        Insert newline".into(),
-        "  Alt+Enter          Queue follow-up (when busy)".into(),
+        "  Enter (busy)       Send now: the agent reads it at its next step".into(),
+        "  Tab / Alt+Enter    Queue for after the turn (when busy)".into(),
+        "  ↑ (empty, busy)    Take back unsent messages to edit".into(),
         "  ↑ / ↓              History prev/next (or move line when multiline)".into(),
         "  Ctrl+R             History search".into(),
         "  Ctrl+A / Home      Move to line start".into(),
@@ -1879,6 +1886,29 @@ mod approval_parse_tests {
             )
             .count();
         assert_eq!(cancel_msgs, 1);
+    }
+
+    #[test]
+    fn cancel_puts_unsent_messages_back_in_the_prompt() {
+        let mut state = TuiSessionState::new(
+            "session".into(),
+            "model".into(),
+            "@build".into(),
+            "AcceptEdits".into(),
+            PathBuf::from("."),
+            false,
+        );
+        state.steer_inbox = Some(Default::default());
+        state.set_busy_state(BusyState::Streaming);
+        assert!(state.steer("use tabs".into()));
+        state.followup_queue.push_back("then run tests".into());
+        assert_eq!(state.unsent_count(), 2);
+        state.set_input_text("draft");
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<TuiCmd>();
+        let cancel = Arc::new(AtomicBool::new(false));
+        request_turn_cancel(&mut state, Some(&cancel), &tx);
+        assert_eq!(state.input_buffer, "use tabs\nthen run tests\ndraft");
+        assert_eq!(state.unsent_count(), 0);
     }
 
     // ── Snapshot tests (insta) ─────────────────────────────────────────

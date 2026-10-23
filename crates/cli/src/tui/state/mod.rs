@@ -179,9 +179,8 @@ impl TuiSessionState {
             session_picker_entries: Vec::new(),
             session_picker_scroll: 0,
             onboarding_mode: false,
-            queued_steering: 0,
-            queued_followup: 0,
-            queue_preview_items: Vec::new(),
+            steer_inbox: None,
+            followup_queue: std::collections::VecDeque::new(),
             mcp_server_count: 0,
             code_line_numbers,
             quiet_startup: false,
@@ -1479,6 +1478,42 @@ impl TuiSessionState {
         self.busy = busy;
     }
 
+    /// Messages waiting for the agent's next step (sent with Enter).
+    pub fn steering_pending(&self) -> Vec<String> {
+        self.steer_inbox
+            .as_ref()
+            .and_then(|inbox| inbox.lock().ok().map(|v| v.clone()))
+            .unwrap_or_default()
+    }
+
+    /// Send a message to the running turn. False when no agent reads the
+    /// inbox (the caller queues it instead).
+    pub fn steer(&mut self, line: String) -> bool {
+        match self.steer_inbox.as_ref().map(|inbox| inbox.lock()) {
+            Some(Ok(mut inbox)) => {
+                inbox.push(line);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// Messages typed during a turn and not yet sent.
+    pub fn unsent_count(&self) -> usize {
+        self.steering_pending().len() + self.followup_queue.len()
+    }
+
+    /// Take back every message not yet sent (for editing, or after Esc).
+    pub fn take_unsent(&mut self) -> Vec<String> {
+        let mut out = self
+            .steer_inbox
+            .as_ref()
+            .and_then(|inbox| inbox.lock().ok().map(|mut v| std::mem::take(&mut *v)))
+            .unwrap_or_default();
+        out.extend(self.followup_queue.drain(..));
+        out
+    }
+
     pub fn set_busy_state(&mut self, new_state: BusyState) {
         self.busy = new_state != BusyState::Idle;
         if self.current_busy_state != new_state {
@@ -2605,12 +2640,14 @@ mod tests {
             SessionPickerEntry {
                 id: "sess-1".into(),
                 label: "fix auth".into(),
+                meta: String::new(),
                 search_text: "fix auth".into(),
                 preview: String::new(),
             },
             SessionPickerEntry {
                 id: "sess-2".into(),
                 label: "add tests".into(),
+                meta: String::new(),
                 search_text: "add tests".into(),
                 preview: String::new(),
             },

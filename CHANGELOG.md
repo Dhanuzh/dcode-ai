@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.18 — 2026-10-23
+
+### New
+- **Send a message while dcode-ai works**: press Enter during a turn and the
+  agent reads it at its next step (after the current tool calls, or before
+  it would stop) and answers in the same turn. Tab (or Alt+Enter) queues it
+  for after the turn instead. Waiting messages are listed above the prompt
+  (`· next step` / `· after this turn`); ↑ takes them back to edit, and Esc
+  puts them back in the prompt.
+
+### Changed
+- **`/resume` picker** redrawn Claude-style in place of the prompt: full
+  width, a search line, and two rows per session (title, then
+  `3h ago · model · branch · tokens`). The current session and empty
+  sessions are left out.
+
 ## 1.0.17 — 2026-10-23
 
 ### New

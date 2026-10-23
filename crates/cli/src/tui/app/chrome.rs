@@ -94,6 +94,55 @@ pub(super) fn spinner_line(g: &TuiSessionState) -> Option<Line<'static>> {
 }
 
 /// Permission-mode indicator for the footer, `None` in the default mode.
+/// Rows for messages typed during a turn: `↳ text · next step` for ones the
+/// agent reads at its next step, `↳ text · after this turn` for queued ones,
+/// plus a hint row. At most four messages are listed.
+pub(super) fn queued_lines(g: &TuiSessionState, width: usize) -> Vec<Line<'static>> {
+    let steering = g.steering_pending();
+    let total = steering.len() + g.followup_queue.len();
+    if total == 0 {
+        return Vec::new();
+    }
+    let muted = Style::default().fg(theme::muted());
+    let text = Style::default().fg(theme::text());
+    let rows = steering.iter().map(|m| (m.as_str(), "next step")).chain(
+        g.followup_queue
+            .iter()
+            .map(|m| (m.as_str(), "after this turn")),
+    );
+    let mut out: Vec<Line<'static>> = Vec::new();
+    for (msg, when) in rows.take(4) {
+        let first = msg
+            .lines()
+            .find(|l| !l.trim().is_empty())
+            .unwrap_or("")
+            .trim();
+        let room = width.saturating_sub(when.len() + 7).max(8);
+        let shown: String = if first.chars().count() > room {
+            first
+                .chars()
+                .take(room.saturating_sub(1))
+                .chain(['…'])
+                .collect()
+        } else {
+            first.to_string()
+        };
+        out.push(Line::from(vec![
+            Span::styled("  ↳ ", muted),
+            Span::styled(shown, text),
+            Span::styled(format!(" · {when}"), muted),
+        ]));
+    }
+    let more = total.saturating_sub(4);
+    let hint = if more > 0 {
+        format!("    +{more} more · ↑ to edit")
+    } else {
+        "    ↑ to edit".to_string()
+    };
+    out.push(Line::from(Span::styled(hint, muted)));
+    out
+}
+
 pub(super) fn mode_indicator(permission_mode: &str) -> Option<(String, Color)> {
     let m = permission_mode
         .to_ascii_lowercase()
@@ -163,13 +212,13 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
             toast.message.clone(),
             Style::default().fg(theme::muted()),
         ));
-    } else if let Some((label, color)) = mode_indicator(&g.permission_mode) {
-        left.push(Span::styled(label, Style::default().fg(color)));
-    } else if g.queued_steering + g.queued_followup > 0 {
+    } else if (g.busy || g.current_busy_state.is_active()) && !g.input_buffer.trim().is_empty() {
         left.push(Span::styled(
-            format!("{} queued", g.queued_steering + g.queued_followup),
+            "enter send now · tab queue for after",
             Style::default().fg(theme::muted()),
         ));
+    } else if let Some((label, color)) = mode_indicator(&g.permission_mode) {
+        left.push(Span::styled(label, Style::default().fg(color)));
     } else {
         left.push(Span::styled(
             "? for shortcuts",

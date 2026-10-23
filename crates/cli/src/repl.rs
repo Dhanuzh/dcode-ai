@@ -176,16 +176,6 @@ fn parse_logout_target(value: &str) -> Option<LogoutTarget> {
     }
 }
 
-fn truncate_chars(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let mut out: String = s.chars().take(max.saturating_sub(1)).collect();
-        out.push('…');
-        out
-    }
-}
-
 fn keymaps_help_lines() -> Vec<String> {
     vec![
         "KEYMAPS".into(),
@@ -1415,12 +1405,33 @@ impl Repl {
             )
         });
 
-        let mut queued_steering: VecDeque<String> = VecDeque::new();
-        let mut queued_followup: VecDeque<String> = VecDeque::new();
+        if let Ok(mut g) = tui_state.lock() {
+            g.steer_inbox = Some(self.runtime.steer_handle());
+        }
         let mut pending_cmds: VecDeque<TuiCmd> = VecDeque::new();
 
         loop {
-            if pending_cmds.is_empty() && queued_steering.is_empty() && queued_followup.is_empty() {
+            // Messages typed during the last turn: ones the agent did not
+            // get to (sent as Enter right as it finished) go first, then the
+            // queued ones, one turn each.
+            if pending_cmds.is_empty()
+                && let Ok(mut g) = tui_state.lock()
+                && g.active_approval.is_none()
+                && g.active_question.is_none()
+            {
+                let leftover = g.steering_pending();
+                if !leftover.is_empty() {
+                    if let Some(inbox) = &g.steer_inbox
+                        && let Ok(mut inbox) = inbox.lock()
+                    {
+                        inbox.clear();
+                    }
+                    pending_cmds.push_back(TuiCmd::Submit(leftover.join("\n\n")));
+                } else if let Some(line) = g.followup_queue.pop_front() {
+                    pending_cmds.push_back(TuiCmd::Submit(line));
+                }
+            }
+            if pending_cmds.is_empty() {
                 // Wake up now and then so a background job that finishes
                 // while the agent is idle is reported without user input.
                 match tokio::time::timeout(std::time::Duration::from_millis(500), cmd_rx.recv())
@@ -1434,7 +1445,7 @@ impl Repl {
             // Finished background jobs: tell the agent in an automatic turn
             // once it is idle (Claude Code's task notifications). Turns run
             // inside this loop, so nothing is running at this point.
-            if pending_cmds.is_empty() && queued_steering.is_empty() && queued_followup.is_empty() {
+            if pending_cmds.is_empty() {
                 let notes = match tui_state.lock() {
                     Ok(mut g) if g.active_approval.is_none() && g.active_question.is_none() => {
                         let notes = std::mem::take(&mut g.pending_job_notifications);
@@ -1452,10 +1463,12 @@ impl Repl {
                 }
             }
             // An active `/goal` continues once everything else is done.
-            if pending_cmds.is_empty() && queued_steering.is_empty() && queued_followup.is_empty() {
-                let idle = tui_state
-                    .lock()
-                    .is_ok_and(|g| g.active_approval.is_none() && g.active_question.is_none());
+            if pending_cmds.is_empty() {
+                let idle = tui_state.lock().is_ok_and(|g| {
+                    g.active_approval.is_none()
+                        && g.active_question.is_none()
+                        && g.followup_queue.is_empty()
+                });
                 if idle {
                     let cell = self.runtime.goal_cell();
                     let (next, note) =
@@ -1480,54 +1493,7 @@ impl Repl {
                 pending_cmds.push_back(cmd);
             }
 
-            let mut retained: VecDeque<TuiCmd> = VecDeque::new();
-            while let Some(cmd) = pending_cmds.pop_front() {
-                match cmd {
-                    TuiCmd::QueueSteering(line) => queued_steering.push_back(line),
-                    TuiCmd::QueueFollowUp(line) => queued_followup.push_back(line),
-                    other => retained.push_back(other),
-                }
-            }
-            pending_cmds = retained;
-
-            if let Ok(mut g) = tui_state.lock() {
-                g.queued_steering = queued_steering.len();
-                g.queued_followup = queued_followup.len();
-                g.queue_preview_items = queued_followup
-                    .iter()
-                    .chain(queued_steering.iter())
-                    .take(6)
-                    .map(|s| truncate_chars(s, 80))
-                    .collect();
-            }
-
-            let cmd = if let Some(cmd) = pending_cmds.pop_front() {
-                cmd
-            } else if let Some(line) = queued_steering.pop_front() {
-                if let Ok(mut g) = tui_state.lock() {
-                    g.queued_steering = queued_steering.len();
-                    g.queued_followup = queued_followup.len();
-                    g.queue_preview_items = queued_followup
-                        .iter()
-                        .chain(queued_steering.iter())
-                        .take(6)
-                        .map(|s| truncate_chars(s, 80))
-                        .collect();
-                }
-                TuiCmd::Submit(line)
-            } else if let Some(line) = queued_followup.pop_front() {
-                if let Ok(mut g) = tui_state.lock() {
-                    g.queued_steering = queued_steering.len();
-                    g.queued_followup = queued_followup.len();
-                    g.queue_preview_items = queued_followup
-                        .iter()
-                        .chain(queued_steering.iter())
-                        .take(6)
-                        .map(|s| truncate_chars(s, 80))
-                        .collect();
-                }
-                TuiCmd::Submit(line)
-            } else {
+            let Some(cmd) = pending_cmds.pop_front() else {
                 continue;
             };
 
@@ -1568,34 +1534,6 @@ impl Repl {
                                 g.push_error(format!("[rewind] {e}"));
                             }
                         }
-                    }
-                    continue;
-                }
-                TuiCmd::QueueSteering(line) => {
-                    queued_steering.push_back(line);
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.queued_steering = queued_steering.len();
-                        g.queued_followup = queued_followup.len();
-                        g.queue_preview_items = queued_followup
-                            .iter()
-                            .chain(queued_steering.iter())
-                            .take(6)
-                            .map(|s| truncate_chars(s, 80))
-                            .collect();
-                    }
-                    continue;
-                }
-                TuiCmd::QueueFollowUp(line) => {
-                    queued_followup.push_back(line);
-                    if let Ok(mut g) = tui_state.lock() {
-                        g.queued_steering = queued_steering.len();
-                        g.queued_followup = queued_followup.len();
-                        g.queue_preview_items = queued_followup
-                            .iter()
-                            .chain(queued_steering.iter())
-                            .take(6)
-                            .map(|s| truncate_chars(s, 80))
-                            .collect();
                     }
                     continue;
                 }

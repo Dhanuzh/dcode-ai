@@ -1147,6 +1147,28 @@ pub(super) fn handle_key_event(
             composer_history_draft.clear();
             g.insert_input_char('\n');
         }
+        // Tab while a turn runs: queue the message for after the turn.
+        (KeyCode::Tab, KeyModifiers::NONE)
+            if (g.busy || g.current_busy_state.is_active())
+                && !g.input_buffer.trim().is_empty()
+                && !slash_panel_visible(&g.input_buffer)
+                && apply_selected_at_completion(
+                    workspace_files,
+                    &g.input_buffer,
+                    g.cursor_char_idx,
+                    g.at_menu_index,
+                    false,
+                )
+                .is_none() =>
+        {
+            let line = g.take_input_text();
+            let expanded = expand_paste_tokens(&line, &g.paste_store);
+            g.paste_store.clear();
+            g.paste_counter = 0;
+            *composer_history_index = None;
+            composer_history_draft.clear();
+            g.followup_queue.push_back(expanded);
+        }
         (KeyCode::Tab, _) => {
             if let Some((buf, cidx)) = apply_selected_at_completion(
                 workspace_files,
@@ -1567,12 +1589,11 @@ pub(super) fn handle_key_event(
             composer_history_draft.clear();
             let busy_turn = g.busy || g.current_busy_state.is_active();
             if busy_turn {
-                if mods.contains(KeyModifiers::ALT) {
-                    g.queued_followup = g.queued_followup.saturating_add(1);
-                    let _ = cmd_tx.send(TuiCmd::QueueFollowUp(expanded));
-                } else {
-                    g.queued_steering = g.queued_steering.saturating_add(1);
-                    let _ = cmd_tx.send(TuiCmd::QueueSteering(expanded));
+                // Enter: the agent reads it at its next step. Alt+Enter, and
+                // commands (`/…`, `!…`, `#…`), wait for the turn to end.
+                let command = matches!(expanded.trim_start().chars().next(), Some('/' | '!' | '#'));
+                if mods.contains(KeyModifiers::ALT) || command || !g.steer(expanded.clone()) {
+                    g.followup_queue.push_back(expanded);
                 }
                 return KeyFlow::Continue;
             }
@@ -1647,13 +1668,8 @@ pub(super) fn handle_key_event(
                 } else {
                     composer_input_height(g, main_area.width)
                 };
-                let (tr, _, _, _) = layout_chunks(
-                    main_area,
-                    sh,
-                    input_h,
-                    g.queue_preview_items.len(),
-                    g.subagents.len(),
-                );
+                let (tr, _, _, _) =
+                    layout_chunks(main_area, sh, input_h, g.unsent_count(), g.subagents.len());
                 let (lines, _hits, _) =
                     transcript_cache.get_or_rebuild(g, tr.width.saturating_sub(2));
                 let th = tr.height.saturating_sub(2) as usize;
@@ -1682,13 +1698,8 @@ pub(super) fn handle_key_event(
                 } else {
                     composer_input_height(g, main_area.width)
                 };
-                let (tr, _, _, _) = layout_chunks(
-                    main_area,
-                    sh,
-                    input_h,
-                    g.queue_preview_items.len(),
-                    g.subagents.len(),
-                );
+                let (tr, _, _, _) =
+                    layout_chunks(main_area, sh, input_h, g.unsent_count(), g.subagents.len());
                 let (lines, _hits, _) =
                     transcript_cache.get_or_rebuild(g, tr.width.saturating_sub(2));
                 let th = tr.height.saturating_sub(2) as usize;
@@ -1701,6 +1712,15 @@ pub(super) fn handle_key_event(
                 g.scroll_lines = from_top as usize;
                 g.transcript_follow_tail = scroll_buffer.is_sticky();
             }
+        }
+        // Up on an empty prompt with messages not yet sent: take them back
+        // into the prompt to edit (Claude Code's "↑ to edit queued").
+        (KeyCode::Up, KeyModifiers::NONE)
+            if g.input_buffer.is_empty()
+                && (!g.followup_queue.is_empty() || !g.steering_pending().is_empty()) =>
+        {
+            let text = g.take_unsent().join("\n");
+            g.set_input_text(text);
         }
         (KeyCode::Up, _) => {
             let at_matches =
@@ -1755,7 +1775,7 @@ pub(super) fn handle_key_event(
                                     main_area,
                                     sh,
                                     input_h,
-                                    g.queue_preview_items.len(),
+                                    g.unsent_count(),
                                     g.subagents.len(),
                                 );
                                 let (lines, _hits, _) =
@@ -1825,7 +1845,7 @@ pub(super) fn handle_key_event(
                                     main_area,
                                     sh,
                                     input_h,
-                                    g.queue_preview_items.len(),
+                                    g.unsent_count(),
                                     g.subagents.len(),
                                 );
                                 let (lines, _hits, _) =

@@ -150,13 +150,110 @@ pub(crate) fn project_picker_labels(g: &TuiSessionState) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn session_picker_labels(g: &TuiSessionState) -> Vec<String> {
+/// Session picker entries that match the search, in order.
+fn session_picker_matches(g: &TuiSessionState) -> Vec<&crate::tui::state::SessionPickerEntry> {
     let filter = g.session_picker_search.to_ascii_lowercase();
     g.session_picker_entries
         .iter()
         .filter(|e| filter.is_empty() || e.search_text.to_ascii_lowercase().contains(&filter))
-        .map(|e| e.label.clone())
         .collect()
 }
 
-// (Renderers moved to tui/render/modals.rs)
+/// Rows the `/resume` panel needs: title, search, two rows per session (at
+/// most `max_rows` in all), the hint, and the two rules.
+pub(crate) fn session_picker_height(g: &TuiSessionState, max_rows: u16) -> u16 {
+    let shown = session_picker_matches(g).len().max(1) as u16;
+    (5 + shown * 2).min(max_rows).max(7)
+}
+
+/// The `/resume` panel, drawn in the composer's place (Claude Code style):
+///
+/// ```text
+/// ─────────────────────────────────────────────
+///  Resume a session
+///  ⌕ type to search
+/// ❯ fix the login bug
+///   3h ago · opus · main · 12.4k tokens
+///   add sharepoint sync
+///   2d ago · sonnet · 3.1k tokens
+///  ↑↓ choose · enter resume · esc cancel · 2 of 9
+/// ─────────────────────────────────────────────
+/// ```
+pub(crate) fn render_session_picker(
+    frame: &mut ratatui::Frame<'_>,
+    rect: Rect,
+    g: &TuiSessionState,
+) {
+    use ratatui::widgets::{Block, Borders};
+    frame.render_widget(ClearWidget, rect);
+    let block = Block::default()
+        .borders(Borders::TOP | Borders::BOTTOM)
+        .border_style(Style::default().fg(theme::accent()));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let matches = session_picker_matches(g);
+    let muted = Style::default().fg(theme::muted());
+    let width = inner.width.saturating_sub(4) as usize;
+    let mut lines: Vec<Line> = vec![
+        Line::from(Span::styled(
+            " Resume a session",
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(vec![
+            Span::styled(" ⌕ ", muted),
+            if g.session_picker_search.is_empty() {
+                Span::styled("type to search", muted)
+            } else {
+                Span::styled(
+                    format!("{}▏", g.session_picker_search),
+                    Style::default().fg(theme::text()),
+                )
+            },
+        ]),
+    ];
+    let slots = (inner.height.saturating_sub(3) / 2).max(1) as usize;
+    let selected = g.session_picker_index.min(matches.len().saturating_sub(1));
+    let start = selected.saturating_sub(slots - 1);
+    if matches.is_empty() {
+        lines.push(Line::from(Span::styled("   no sessions match", muted)));
+    }
+    for (i, entry) in matches.iter().enumerate().skip(start).take(slots) {
+        let sel = i == selected;
+        let title_style = if sel {
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(theme::text())
+        };
+        lines.push(Line::from(vec![
+            Span::styled(if sel { " ❯ " } else { "   " }, title_style),
+            Span::styled(truncate_chars(&entry.label, width), title_style),
+        ]));
+        lines.push(Line::from(Span::styled(
+            format!("   {}", truncate_chars(&entry.meta, width)),
+            muted,
+        )));
+    }
+    // The hint sits on the last row whatever the list length.
+    let used = lines.len() as u16;
+    for _ in used..inner.height.saturating_sub(1) {
+        lines.push(Line::default());
+    }
+    let position = if matches.is_empty() {
+        String::new()
+    } else {
+        format!(" · {} of {}", selected + 1, matches.len())
+    };
+    lines.push(Line::from(Span::styled(
+        format!(" ↑↓ choose · enter resume · esc cancel{position}"),
+        muted,
+    )));
+    frame.render_widget(
+        Paragraph::new(Text::from(lines)).style(Style::default().bg(theme::bg())),
+        inner,
+    );
+}
