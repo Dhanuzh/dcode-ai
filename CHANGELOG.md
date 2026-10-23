@@ -1,5 +1,19 @@
 # Changelog
 
+## 1.0.16 — 2026-10-23
+
+### New
+- **sudo password popup for `/update`**: when dcode-ai lives in a system
+  folder (`/usr/local/bin`), the verified download is kept and a masked
+  popup asks for your sudo password (three tries). The password goes straight
+  to `sudo -S` on stdin, is never shown, logged, stored or sent to the model,
+  and is wiped from memory after use. `dcode-ai update` in a terminal lets
+  sudo ask there itself.
+
+### Fixes
+- An update that stopped half way no longer leaves `dcode-ai-update-*`
+  folders in the temp directory.
+
 ## 1.0.15 — 2026-10-23
 
 ### Fixes
