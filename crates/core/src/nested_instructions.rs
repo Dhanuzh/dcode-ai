@@ -47,11 +47,13 @@ pub fn for_path(
                 continue;
             }
             let text: String = text.chars().take(MAX_CHARS).collect();
+            // Same spelling on every OS.
+            let slash = |p: &Path| p.display().to_string().replace('\\', "/");
             out.push_str(&format!(
                 "\n\n<instructions source=\"{}\">\nThese instructions apply to work under {}/ \
                  (they add to the project's own instructions):\n{text}\n</instructions>",
-                rel_file.display(),
-                dir.display()
+                slash(&rel_file),
+                slash(&dir)
             ));
         }
     }
