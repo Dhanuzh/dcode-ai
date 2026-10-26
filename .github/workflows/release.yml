@@ -81,6 +81,9 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             archive: tar.gz
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
             archive: tar.gz
@@ -101,7 +104,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Install OpenSSL (Linux targets)
-        if: matrix.os == 'ubuntu-latest'
+        if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y libssl-dev pkg-config
@@ -173,6 +176,7 @@ jobs:
               -e "s/@SHA_MAC_ARM@/$(sha aarch64-apple-darwin)/" \
               -e "s/@SHA_MAC_X86@/$(sha x86_64-apple-darwin)/" \
               -e "s/@SHA_LINUX_X86@/$(sha x86_64-unknown-linux-gnu)/" \
+              -e "s/@SHA_LINUX_ARM@/$(sha aarch64-unknown-linux-gnu)/" \
               packaging/homebrew/dcode-ai.rb.in > dcode-ai.rb
           cat dcode-ai.rb
 
@@ -185,3 +189,21 @@ jobs:
             dcode-ai.rb
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # The repository is its own tap: `brew tap dhanuzh/dcode-ai
+      # https://github.com/Dhanuzh/dcode-ai`. Pushes made with GITHUB_TOKEN
+      # don't start new workflow runs.
+      - name: Update the Homebrew formula on main
+        run: |
+          git fetch origin main
+          git checkout -B main origin/main
+          mkdir -p Formula
+          cp dcode-ai.rb Formula/dcode-ai.rb
+          if git diff --quiet -- Formula/dcode-ai.rb && git ls-files --error-unmatch Formula/dcode-ai.rb >/dev/null 2>&1; then
+            echo "formula unchanged"; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/dcode-ai.rb
+          git commit -m "brew: dcode-ai ${GITHUB_REF_NAME}"
+          git push origin main

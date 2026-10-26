@@ -11,6 +11,8 @@ const LATEST_URL: &str = "https://api.github.com/repos/Dhanuzh/dcode-ai/releases
 fn target() -> Option<&'static str> {
     if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some("x86_64-unknown-linux-gnu")
+    } else if cfg!(all(target_os = "linux", target_arch = "aarch64")) {
+        Some("aarch64-unknown-linux-gnu")
     } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
         Some("aarch64-apple-darwin")
     } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
@@ -169,6 +171,12 @@ pub const WRONG_PASSWORD: &str = "sudo: wrong password";
 
 /// Check for, and unless `check_only` install, the latest release.
 /// `progress` gets short status lines.
+/// Whether `exe` lives in a Homebrew keg (`…/Cellar/dcode-ai/<ver>/bin`).
+fn is_homebrew_install(exe: &Path) -> bool {
+    exe.components().any(|c| c.as_os_str() == "Cellar")
+        && exe.to_string_lossy().contains("/dcode-ai/")
+}
+
 pub async fn update(
     check_only: bool,
     force: bool,
@@ -195,6 +203,14 @@ pub async fn update(
     }
     if check_only {
         return Ok(Outcome::Available(tag));
+    }
+    // Homebrew owns its copy; replacing it would confuse `brew`.
+    if let Ok(exe) = std::env::current_exe()
+        && is_homebrew_install(&exe.canonicalize().unwrap_or(exe))
+    {
+        anyhow::bail!(
+            "{tag} is available — this copy came from Homebrew: run `brew upgrade dcode-ai`"
+        );
     }
     let target = target().ok_or_else(|| {
         anyhow::anyhow!("no prebuilt binary for this platform; build from source instead")
@@ -354,6 +370,16 @@ fn replace_binary(new: &Path, exe: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn homebrew_copies_are_left_to_brew() {
+        assert!(super::is_homebrew_install(Path::new(
+            "/opt/homebrew/Cellar/dcode-ai/1.0.21/bin/dcode-ai"
+        )));
+        assert!(!super::is_homebrew_install(Path::new(
+            "/usr/local/bin/dcode-ai"
+        )));
+    }
+
     use super::*;
 
     #[test]

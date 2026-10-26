@@ -55,6 +55,13 @@ One binary. Your Claude or GitHub Copilot sign-in. No API keys, no Electron, no 
 curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | bash
 ```
 
+**Homebrew (macOS / Linux)**
+
+```bash
+brew tap dhanuzh/dcode-ai https://github.com/Dhanuzh/dcode-ai
+brew install dcode-ai          # update: brew upgrade dcode-ai
+```
+
 **Windows (PowerShell)**
 
 ```powershell
@@ -86,7 +93,8 @@ cargo build --release
 sudo cp target/release/dcode-ai /usr/local/bin/
 ```
 
-Release archives ship `.sha256` checksums, which the installer verifies. On Windows,
+Prebuilt for Linux x86_64 and arm64, macOS (Intel and Apple silicon) and
+Windows x86_64. Release archives ship `.sha256` checksums, which the installer verifies. On Windows,
 `search_code` uses ripgrep: `winget install BurntSushi.ripgrep.MSVC`.
 
 </details>

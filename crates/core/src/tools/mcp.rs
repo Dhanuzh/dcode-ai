@@ -571,12 +571,32 @@ impl HttpMcpClient {
         })
     }
 
+    /// The login saved for this server now (another dcode-ai session may
+    /// have refreshed it since this one loaded it).
+    fn stored_login(&self) -> Option<dcode_ai_common::mcp_auth::McpServerLogin> {
+        dcode_ai_common::mcp_auth::McpAuthStore::load()
+            .login_for(&self.url)
+            .cloned()
+    }
+
     /// Refresh the stored OAuth tokens and save them. `false` = no login or
     /// refresh failed.
     async fn refresh_login(&mut self) -> bool {
-        let Some(login) = self.oauth.clone() else {
+        let Some(mine) = self.oauth.clone() else {
             return false;
         };
+        let now = chrono::Utc::now().timestamp();
+        // Servers rotate refresh tokens: when another session already
+        // refreshed, use its tokens instead of spending our stale one.
+        let stored = self.stored_login();
+        if let Some(s) = &stored
+            && s.access_token != mine.access_token
+            && !s.is_expired(now)
+        {
+            self.oauth = stored;
+            return true;
+        }
+        let login = stored.unwrap_or(mine);
         match crate::mcp_oauth::refresh(&self.client, &login, &self.url).await {
             Ok(t) => {
                 let mut updated = login;
@@ -592,6 +612,13 @@ impl HttpMcpClient {
                 true
             }
             Err(e) => {
+                // Lost a race with another session's refresh: take its result.
+                if let Some(s) = self.stored_login()
+                    && s.access_token != login.access_token
+                {
+                    self.oauth = Some(s);
+                    return true;
+                }
                 tracing::warn!("MCP `{}`: token refresh failed: {e}", self.server_name);
                 false
             }

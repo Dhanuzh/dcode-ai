@@ -27,11 +27,7 @@ detect_platform() {
         *)              error "Unsupported architecture: $arch" ;;
     esac
 
-    # Release builds: Linux x86_64, macOS x86_64 and arm64.
-    if [ "${arch}-${os}" = "aarch64-unknown-linux-gnu" ]; then
-        error "No prebuilt binary for Linux arm64 yet; build from source: cargo build --release -p dcode-ai-cli"
-    fi
-
+    # Release builds: Linux x86_64 and arm64, macOS x86_64 and arm64.
     echo "${arch}-${os}"
 }
 

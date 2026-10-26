@@ -1,7 +1,8 @@
 # Homebrew formula for dcode-ai. The release workflow fills in the version
-# and checksums and attaches the result (dcode-ai.rb) to each release; copy it
-# into a tap repository (e.g. Dhanuzh/homebrew-tap, Formula/dcode-ai.rb) and
-# users install with: brew install Dhanuzh/tap/dcode-ai
+# and checksums, attaches the result (dcode-ai.rb) to each release and commits
+# it to Formula/dcode-ai.rb, so this repository is its own tap:
+#   brew tap dhanuzh/dcode-ai https://github.com/Dhanuzh/dcode-ai
+#   brew install dcode-ai
 class DcodeAi < Formula
   desc "Rust terminal coding agent for Claude and GitHub Copilot"
   homepage "https://github.com/Dhanuzh/dcode-ai"
@@ -20,6 +21,10 @@ class DcodeAi < Formula
   end
 
   on_linux do
+    on_arm do
+      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v@VERSION@/dcode-ai-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA_LINUX_ARM@"
+    end
     on_intel do
       url "https://github.com/Dhanuzh/dcode-ai/releases/download/v@VERSION@/dcode-ai-x86_64-unknown-linux-gnu.tar.gz"
       sha256 "@SHA_LINUX_X86@"

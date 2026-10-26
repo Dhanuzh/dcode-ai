@@ -47,6 +47,22 @@ impl Repl {
             .collect()
     }
 
+    /// Save a server's on/off state for this folder and mirror it in the
+    /// live config.
+    fn remember_mcp_enabled(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        if let Some(s) = self
+            .runtime
+            .config_mut()
+            .mcp
+            .servers
+            .iter_mut()
+            .find(|s| s.name == name)
+        {
+            s.enabled = enabled;
+        }
+        dcode_ai_common::folders::set_mcp_enabled(self.runtime.workspace_root(), name, enabled)
+    }
+
     pub(super) async fn handle_mcp_action(
         &mut self,
         action: McpAction,
@@ -126,16 +142,26 @@ impl Repl {
             }
             McpAction::SetEnabled(name, false) => {
                 self.runtime.disconnect_mcp_server(&name).await;
+                let saved = self.remember_mcp_enabled(&name, false);
                 with_panel(st, |p| {
                     p.busy = None;
                     if let Some(row) = p.rows.iter_mut().find(|r| r.name == name) {
                         row.enabled = false;
                         row.tools = 0;
                     }
-                    p.status = Some((format!("`{name}` is off for this session."), false));
+                    p.status = Some(match saved {
+                        Ok(()) => (
+                            format!("`{name}` is off in this folder until you turn it on."),
+                            false,
+                        ),
+                        Err(e) => (format!("`{name}` is off for this session ({e})."), true),
+                    });
                 });
             }
             McpAction::SetEnabled(name, true) => {
+                if let Err(e) = self.remember_mcp_enabled(&name, true) {
+                    tracing::warn!("could not remember MCP `{name}` as on: {e}");
+                }
                 Box::pin(self.handle_mcp_action(McpAction::Reconnect(name), st, auth)).await;
             }
         }

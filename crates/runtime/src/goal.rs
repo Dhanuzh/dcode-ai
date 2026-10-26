@@ -46,7 +46,58 @@ pub struct Goal {
     pub announced: bool,
 }
 
+impl GoalStatus {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Blocked => "blocked",
+            Self::BudgetLimited => "budget_limited",
+            Self::Complete => "complete",
+        }
+    }
+
+    fn from_key(key: &str) -> Self {
+        match key {
+            "blocked" => Self::Blocked,
+            "budget_limited" => Self::BudgetLimited,
+            "complete" => Self::Complete,
+            "active" => Self::Active,
+            _ => Self::Paused,
+        }
+    }
+}
+
 impl Goal {
+    /// The goal as saved in the session file.
+    pub fn to_saved(&self) -> dcode_ai_common::session::SessionGoal {
+        dcode_ai_common::session::SessionGoal {
+            objective: self.objective.clone(),
+            status: self.status.key().to_string(),
+            budget: self.budget,
+            tokens_at_start: self.tokens_at_start,
+            turns: self.turns,
+        }
+    }
+
+    /// A saved goal, restored on resume. An active one comes back paused
+    /// so a resumed session doesn't start working on its own.
+    pub fn from_saved(saved: &dcode_ai_common::session::SessionGoal) -> Self {
+        let status = match GoalStatus::from_key(&saved.status) {
+            GoalStatus::Active => GoalStatus::Paused,
+            s => s,
+        };
+        Self {
+            objective: saved.objective.clone(),
+            status,
+            budget: saved.budget,
+            tokens_at_start: saved.tokens_at_start,
+            turns: saved.turns,
+            // Finished goals were already reported before.
+            announced: status != GoalStatus::Paused,
+        }
+    }
+
     pub fn new(objective: &str, budget: Option<u64>, tokens_now: u64) -> Self {
         Self {
             objective: objective.trim().to_string(),
@@ -289,5 +340,26 @@ mod tests {
         assert!(p.contains("make the tests pass"));
         assert!(p.contains("remaining 600"));
         assert!(p.contains("update_goal"));
+    }
+}
+
+#[cfg(test)]
+mod saved_goal_tests {
+    use super::*;
+
+    #[test]
+    fn an_active_goal_comes_back_paused() {
+        let mut g = Goal::new("ship the parser", Some(50_000), 1_000);
+        g.turns = 3;
+        let back = Goal::from_saved(&g.to_saved());
+        assert_eq!(back.objective, "ship the parser");
+        assert_eq!(back.status, GoalStatus::Paused);
+        assert_eq!(
+            (back.budget, back.tokens_at_start, back.turns),
+            (Some(50_000), 1_000, 3)
+        );
+
+        g.status = GoalStatus::Complete;
+        assert_eq!(Goal::from_saved(&g.to_saved()).status, GoalStatus::Complete);
     }
 }

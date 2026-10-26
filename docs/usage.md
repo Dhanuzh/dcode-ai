@@ -85,7 +85,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
 | `/permissions` | List rules; `allow`/`ask`/`deny`/`remove <rule>` to edit them; `mode` for the mode picker |
 | `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use |
-| `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept) |
+| `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept); the footer warns from 80% full |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation |
 | `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in) |
 | `/plan`, `/review`, `/fix`, `/test` | Switch agent profile |
@@ -227,7 +227,8 @@ objective and the budget used. The agent ends the goal itself with the
 `update_goal` tool once it has *verified* the objective (or marks it blocked
 when the same blocker stops it three turns running). A goal also stops at
 its token budget, after 50 automatic turns, or when you press Esc. The
-footer shows `◎ goal · turn N` while it runs.
+footer shows `◎ goal · turn N` while it runs. The goal is saved with the
+session: after `/resume` it comes back paused, and `/goal resume` carries on.
 
 ## Extra working folders
 
@@ -420,6 +421,10 @@ Instructions are merged in this order:
 4. `.dcode-ai/instructions.md` (personal, gitignored)
 5. available skills
 6. orchestration context from `DCODE_AI_ORCH_*`
+
+`AGENTS.md`, `CLAUDE.md` and `CLAUDE.local.md` in **subfolders** load the
+first time the agent reads or edits something under them, and apply to work
+in that folder (like Claude Code's nested `CLAUDE.md`).
 
 Memory has two scopes: notes about you in `~/.dcode-ai/memory.json` (recalled
 in every project) and notes about the project in `.dcode-ai/memory.json`. Add

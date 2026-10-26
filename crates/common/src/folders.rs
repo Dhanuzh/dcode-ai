@@ -11,6 +11,15 @@ pub struct FolderChoice {
     /// Startup permission choice: `manual`, `accept_edits` or `auto`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<String>,
+    /// MCP servers turned off in `/mcp` for this folder.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
+    pub disabled_mcp: std::collections::BTreeSet<String>,
+}
+
+impl FolderChoice {
+    fn is_empty(&self) -> bool {
+        self.permission.is_none() && self.disabled_mcp.is_empty()
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -82,11 +91,48 @@ pub fn forget_permission(folder: &Path) -> Result<bool, String> {
         .get_mut(&key(folder))
         .and_then(|c| c.permission.take())
         .is_some();
-    all.folders.retain(|_, c| c.permission.is_some());
+    all.folders.retain(|_, c| !c.is_empty());
     if had {
         all.save_to(&path)?;
     }
     Ok(had)
+}
+
+impl FolderChoices {
+    pub fn disabled_mcp_for(&self, folder: &Path) -> Vec<String> {
+        self.folders
+            .get(&key(folder))
+            .map(|c| c.disabled_mcp.iter().cloned().collect())
+            .unwrap_or_default()
+    }
+
+    pub fn set_mcp_enabled(&mut self, folder: &Path, server: &str, enabled: bool) {
+        let k = key(folder);
+        let entry = self.folders.entry(k.clone()).or_default();
+        if enabled {
+            entry.disabled_mcp.remove(server);
+        } else {
+            entry.disabled_mcp.insert(server.to_string());
+        }
+        if entry.is_empty() {
+            self.folders.remove(&k);
+        }
+    }
+}
+
+/// MCP servers turned off in `/mcp` for `folder`.
+pub fn disabled_mcp(folder: &Path) -> Vec<String> {
+    store_path()
+        .map(|p| FolderChoices::load_from(&p).disabled_mcp_for(folder))
+        .unwrap_or_default()
+}
+
+/// Remember an MCP server as on or off for `folder`.
+pub fn set_mcp_enabled(folder: &Path, server: &str, enabled: bool) -> Result<(), String> {
+    let path = store_path().ok_or("no home directory")?;
+    let mut all = FolderChoices::load_from(&path);
+    all.set_mcp_enabled(folder, server, enabled);
+    all.save_to(&path)
 }
 
 /// Every folder with a remembered startup choice: `(folder, choice)`.
@@ -118,5 +164,18 @@ mod tests {
         assert_eq!(back.permission_for(&a), Some("auto"));
         assert_eq!(back.permission_for(&a.join(".")), Some("auto"));
         assert_eq!(back.permission_for(&b), None);
+    }
+
+    #[test]
+    fn mcp_servers_can_be_turned_off_per_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a");
+        std::fs::create_dir_all(&a).unwrap();
+        let mut c = FolderChoices::default();
+        c.set_mcp_enabled(&a, "zoho", false);
+        assert_eq!(c.disabled_mcp_for(&a), vec!["zoho".to_string()]);
+        c.set_mcp_enabled(&a, "zoho", true);
+        assert!(c.disabled_mcp_for(&a).is_empty());
+        assert!(c.folders.is_empty(), "an empty entry is dropped");
     }
 }

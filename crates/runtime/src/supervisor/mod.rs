@@ -547,6 +547,12 @@ impl Supervisor {
 
         sup.session_id = loaded.meta.id.clone();
         sup.session_name = loaded.meta.session_name.clone();
+        // A goal comes back paused: the user says when to go on.
+        if let Some(saved) = &loaded.meta.goal
+            && let Ok(mut cell) = sup.goal.lock()
+        {
+            *cell = Some(crate::goal::Goal::from_saved(saved));
+        }
         sup.workspace_root = loaded.meta.workspace.clone();
         // Keep the session's model only when it belongs to the provider we
         // resumed on; an old session (no recorded provider) may name a model
@@ -1289,6 +1295,11 @@ impl Supervisor {
                 spawn_reason: self.spawn_reason.clone(),
                 session_summary: self.session_summary.clone(),
                 orchestration: self.orchestration.clone(),
+                goal: self
+                    .goal
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.as_ref().map(crate::goal::Goal::to_saved)),
             },
             messages: self.agent.messages.clone(),
             total_input_tokens: self.agent.cost_tracker.input_tokens,
@@ -2204,6 +2215,7 @@ mod tests {
                 spawn_reason: None,
                 session_summary: None,
                 orchestration: None,
+                goal: None,
             },
             messages: vec![Message::user("hello")],
             total_input_tokens: 0,
@@ -2327,6 +2339,7 @@ mod tests {
                 spawn_reason: None,
                 session_summary: None,
                 orchestration: None,
+                goal: None,
             },
             messages: vec![Message::system("You are dcode-ai")],
             total_input_tokens: 0,
@@ -2356,6 +2369,7 @@ mod tests {
                 spawn_reason: None,
                 session_summary: None,
                 orchestration: None,
+                goal: None,
             },
             messages: vec![Message::user("hello")],
             total_input_tokens: 0,
@@ -2385,6 +2399,7 @@ mod tests {
                 spawn_reason: None,
                 session_summary: None,
                 orchestration: None,
+                goal: None,
             },
             messages: vec![],
             total_input_tokens: 0,
@@ -2437,6 +2452,7 @@ mod tests {
                 spawn_reason: None,
                 session_summary: None,
                 orchestration: None,
+                goal: None,
             },
             messages: vec![
                 Message::system("You are dcode-ai"),
@@ -2520,6 +2536,7 @@ mod tests {
                 spawn_reason: None,
                 session_summary: None,
                 orchestration: None,
+                goal: None,
             },
             messages: vec![Message::system("You are dcode-ai")],
             total_input_tokens: 0,

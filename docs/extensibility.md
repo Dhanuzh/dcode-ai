@@ -83,8 +83,10 @@ dcode-ai mcp remove docs
 
 In the TUI, `/mcp` opens the server panel: each server's status
 (`✔ connected · N tools`, `! needs sign-in`, `✗ failed`, `○ disabled`). Enter
-on a server: **Authenticate**, **Reconnect**, **Sign out**, **Disable** (for
-this session). `/mcp test <name>` connects and lists its tools.
+on a server: **Authenticate**, **Reconnect**, **Sign out**, **Disable**
+(remembered for this folder until you enable it again). `/mcp test <name>`
+connects and lists its tools. Signed-in servers renew their tokens on their
+own, also when another dcode-ai window renewed them first.
 
 **Many tools:** when servers bring more than 15 tools
 (`[mcp] tool_search_threshold`, `0` = never), their schemas are not sent with

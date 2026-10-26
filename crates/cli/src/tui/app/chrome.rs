@@ -247,17 +247,25 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
 
     let mut right = g.model.clone();
     let win = dcode_ai_runtime::model_limits::detect_context_window(&g.model) as u64;
+    let mut context_warning = None;
     if let Some(custom) = g.statusline_text.as_deref() {
         // `[ui] statusline_command` replaces the built-in right side.
         right = custom.to_string();
-    } else if win > 0 && g.context_tokens > 0 {
-        let used = (g.context_tokens.min(win) * 100 / win) as u8;
-        if used >= 50 {
-            right.push_str(&format!(" · {}% context left", 100 - used));
+    } else if let Some((text, warn)) = context_note(g.context_tokens, win) {
+        if warn.is_none() {
+            right.push_str(&format!(" · {text}"));
+        } else {
+            context_warning = Some((text, warn));
         }
     }
     right.push_str("  ");
     let mut right_spans = Vec::new();
+    if let Some((text, Some(color))) = context_warning {
+        right_spans.push(Span::styled(
+            format!("{text} · "),
+            Style::default().fg(color),
+        ));
+    }
     if let Some((ready, total, failed)) = mcp_health(g) {
         // Only news is shown: servers still starting or failed.
         let color = if failed > 0 {
@@ -280,9 +288,42 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
     frame.render_widget(Paragraph::new(Line::from(left)), rect);
 }
 
+/// Context use for the footer: `N% context left` from half full, then a
+/// coloured `context N% used · /compact` warning from 80% (red from 95%).
+fn context_note(tokens: u64, window: u64) -> Option<(String, Option<ratatui::style::Color>)> {
+    if window == 0 || tokens == 0 {
+        return None;
+    }
+    let used = tokens.min(window) * 100 / window;
+    match used {
+        0..50 => None,
+        50..80 => Some((format!("{}% context left", 100 - used), None)),
+        80..95 => Some((
+            format!("context {used}% used · /compact"),
+            Some(theme::warn()),
+        )),
+        _ => Some((
+            format!("context {used}% used · /compact"),
+            Some(theme::error()),
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn context_note_warns_near_the_limit() {
+        assert_eq!(context_note(40, 100), None);
+        assert_eq!(
+            context_note(60, 100).map(|n| n.0),
+            Some("40% context left".into())
+        );
+        let warn = context_note(85, 100).unwrap();
+        assert_eq!(warn.0, "context 85% used · /compact");
+        assert!(warn.1.is_some());
+    }
 
     #[test]
     fn spinner_bounces_through_glyphs() {

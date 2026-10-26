@@ -65,6 +65,7 @@ impl DcodeAiConfig {
 
         config.add_mcp_json_servers(workspace_root);
         config.add_plugin_contributions(&crate::plugins::enabled_plugins());
+        config.apply_disabled_mcp(&crate::folders::disabled_mcp(workspace_root));
         for path in PolicyRules::paths(workspace_root) {
             config.permissions.policy.load_file(&path)?;
         }
@@ -104,6 +105,15 @@ impl DcodeAiConfig {
                 .extend(hooks.user_prompt_submit);
             self.hooks.stop.extend(hooks.stop);
             self.hooks.pre_compact.extend(hooks.pre_compact);
+        }
+    }
+
+    /// Turn off the servers switched off in `/mcp` for this folder.
+    pub fn apply_disabled_mcp(&mut self, names: &[String]) {
+        for server in &mut self.mcp.servers {
+            if names.contains(&server.name) {
+                server.enabled = false;
+            }
         }
     }
 

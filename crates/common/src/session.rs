@@ -50,6 +50,23 @@ pub struct SessionMeta {
     /// External orchestration metadata for headless worker runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub orchestration: Option<OrchestrationContext>,
+    /// The session's `/goal`, so it survives `/resume`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<SessionGoal>,
+}
+
+/// A saved `/goal` (see `dcode_ai_runtime::goal`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SessionGoal {
+    pub objective: String,
+    /// `active`, `paused`, `blocked`, `budget_limited` or `complete`.
+    pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget: Option<u64>,
+    #[serde(default)]
+    pub tokens_at_start: u64,
+    #[serde(default)]
+    pub turns: u32,
 }
 
 /// Full session state, including conversation history and cost tracking.

@@ -11,6 +11,7 @@ pub mod cost;
 pub mod harness;
 pub mod hooks;
 pub mod mcp_oauth;
+pub mod nested_instructions;
 pub mod plugin_installer;
 pub mod provider;
 pub mod repetition;

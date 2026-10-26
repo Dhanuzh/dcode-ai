@@ -1,12 +1,38 @@
 # Changelog
 
-## Unreleased
+## 1.0.21 — 2026-10-27
+
+### New
+- **Install with Homebrew**: `brew tap dhanuzh/dcode-ai
+  https://github.com/Dhanuzh/dcode-ai && brew install dcode-ai` (the
+  release keeps the formula up to date; `brew upgrade dcode-ai` updates).
+- **Linux ARM (aarch64) builds**: `install.sh`, `dcode-ai update` and
+  Homebrew pick them up.
+- **Resume hint on exit**: quitting prints `dcode-ai --resume <id>` for the
+  session, like Claude Code.
+- **Subfolder instructions**: `AGENTS.md` / `CLAUDE.md` / `CLAUDE.local.md`
+  in subfolders load when the agent first works there.
+- **Context warning**: from 80% full the footer shows
+  `context 85% used · /compact` (red from 95%).
 
 ### Changed
 - **Ctrl+C works like Claude Code**: it interrupts a running turn, else
   clears what you typed (↑ brings it back), else shows "Press Ctrl-C again
   to exit" in the footer; a second press within 2 s exits. Ctrl+D on an
   empty prompt does the same.
+- **Disabling an MCP server in `/mcp` is remembered** for the folder until
+  you enable it again.
+- **`/goal` survives `/resume`**: the goal is saved with the session and
+  comes back paused; `/goal resume` continues it.
+- **Cheaper file reads**: `read_file` takes `offset` / `limit`, and a big
+  file without a range returns its beginning with a note on how to read on,
+  so the agent reads only the part it needs.
+
+### Fixes
+- An MCP server signed in from two dcode-ai windows no longer drops to
+  "needs sign-in" when the other window renewed (and rotated) its token.
+- `dcode-ai update` on a Homebrew install points to `brew upgrade` instead
+  of replacing Homebrew's copy.
 
 ## 1.0.20 — 2026-10-26
 

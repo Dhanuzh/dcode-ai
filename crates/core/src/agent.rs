@@ -40,6 +40,8 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     steer: SteerInbox,
+    /// Subfolder instruction files already passed to the model.
+    nested_instructions: std::collections::HashSet<std::path::PathBuf>,
     hooks: Option<HookRunner>,
     undo: UndoManager,
     /// Effective input-token budget for mid-turn trimming. 0 disables it.
@@ -78,6 +80,7 @@ impl AgentLoop {
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             steer: SteerInbox::default(),
+            nested_instructions: Default::default(),
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
@@ -912,10 +915,28 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             }
 
             for mut result in final_results {
-                self.messages.push(Message::tool(
-                    result.call_id.clone(),
-                    format_tool_result(&result),
-                ));
+                let mut content = format_tool_result(&result);
+                // First touch of a subfolder brings its AGENTS.md / CLAUDE.md.
+                if result.success
+                    && let Some(path) =
+                        tool_calls
+                            .iter()
+                            .find(|c| c.id == result.call_id)
+                            .and_then(|c| {
+                                c.input["path"]
+                                    .as_str()
+                                    .or_else(|| c.input["file_path"].as_str())
+                            })
+                    && let Some(extra) = crate::nested_instructions::for_path(
+                        workspace_root,
+                        path,
+                        &mut self.nested_instructions,
+                    )
+                {
+                    content.push_str(&extra);
+                }
+                self.messages
+                    .push(Message::tool(result.call_id.clone(), content));
                 // The event log and UI get the same capped text the model
                 // sees: one 23 MB grep result made every resume crawl.
                 result.output = cap_tool_output(&result.output);

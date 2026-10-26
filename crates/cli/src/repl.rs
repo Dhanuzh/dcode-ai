@@ -59,8 +59,27 @@ pub(crate) fn sudo_message(p: &PendingSudo) -> String {
 fn goal_footer_label(cell: &dcode_ai_runtime::goal::GoalCell) -> Option<String> {
     let guard = cell.lock().ok()?;
     let goal = guard.as_ref()?;
-    (goal.status == dcode_ai_runtime::goal::GoalStatus::Active)
-        .then(|| format!("◎ goal · turn {}", goal.turns))
+    match goal.status {
+        dcode_ai_runtime::goal::GoalStatus::Active => Some(format!("◎ goal · turn {}", goal.turns)),
+        dcode_ai_runtime::goal::GoalStatus::Paused => Some("◎ goal paused".into()),
+        _ => None,
+    }
+}
+
+/// After a resume: say that the session's goal is back, paused.
+fn show_restored_goal(cell: &dcode_ai_runtime::goal::GoalCell, st: &Arc<Mutex<TuiSessionState>>) {
+    let goal = cell.lock().ok().and_then(|g| g.clone());
+    let Some(goal) = goal.filter(|g| g.status == dcode_ai_runtime::goal::GoalStatus::Paused) else {
+        return;
+    };
+    if let Ok(mut g) = st.lock() {
+        g.push_block(DisplayBlock::System(format!(
+            "◎ Goal paused: {} · /goal resume continues it, /goal clear drops it",
+            goal.objective
+        )));
+        g.goal_label = goal_footer_label(cell);
+        g.touch_transcript();
+    }
 }
 
 /// Which reviewer `run_review` sends over the change.
@@ -1252,6 +1271,7 @@ impl Repl {
         crate::tui::markdown::warm_up_highlighting();
         let log_path = self.runtime.event_log_path();
         replay_event_log_into_state(&log_path, &tui_state).await;
+        show_restored_goal(&self.runtime.goal_cell(), &tui_state);
 
         // Populate the git branch name immediately so it appears on first render.
         let workspace = self.runtime.workspace_root();
@@ -1957,6 +1977,7 @@ impl Repl {
                                     g.touch_transcript();
                                     g.set_busy(false);
                                 }
+                                show_restored_goal(&self.runtime.goal_cell(), &tui_state);
                             }
                             Err(e) => {
                                 if let Ok(mut g) = tui_state.lock() {
@@ -2370,7 +2391,7 @@ impl Repl {
                         && let Ok(mut g) = tui_state.lock()
                     {
                         g.push_block(DisplayBlock::System(note));
-                        g.goal_label = None;
+                        g.goal_label = goal_footer_label(&self.runtime.goal_cell());
                     }
                     if let Err(e) = turn
                         // The agent already reported a cancelled run.
@@ -2413,7 +2434,17 @@ impl Repl {
         }
 
         let _ = ui.await;
+        // Claude Code's parting line: how to get back to this conversation.
+        let worth_resuming = self
+            .runtime
+            .messages()
+            .iter()
+            .any(|m| m.role == dcode_ai_common::message::Role::User);
+        let session_id = self.runtime.session_id().to_string();
         self.runtime.finish(EndReason::UserExit).await;
+        if worth_resuming {
+            println!("\nResume this session with:\ndcode-ai --resume {session_id}");
+        }
         Ok(())
     }
 
