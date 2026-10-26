@@ -1,6 +1,6 @@
 # Changelog
 
-## 1.0.19 — 2026-10-23
+## 1.0.19 — 2026-10-26
 
 ### New
 - **`/mcp` panel with sign-in**: `/mcp` lists servers with their status
