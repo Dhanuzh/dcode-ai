@@ -11,6 +11,9 @@ pub(super) fn is_view_toggle(key: &KeyEvent) -> bool {
 /// Two Esc presses within this window open the rewind picker.
 const DOUBLE_ESC_WINDOW: std::time::Duration = std::time::Duration::from_millis(800);
 
+/// Time for the second Ctrl-C / Ctrl-D that exits.
+const EXIT_WINDOW: Duration = Duration::from_millis(2000);
+
 /// What the main loop should do after a key event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum KeyFlow {
@@ -241,36 +244,57 @@ pub(super) fn handle_key_event(
         return KeyFlow::Continue;
     }
 
-    // Ctrl+C behavior:
-    // 1) If a turn is active, cancel it.
-    // 2) If idle, require a second Ctrl+C within 1.5s to exit.
-    let is_ctrl_c = matches!(key.code, KeyCode::Char('c'))
-        && key.modifiers.contains(KeyModifiers::CONTROL)
-        && !key.modifiers.contains(KeyModifiers::ALT);
-    if is_ctrl_c {
-        if escape_cancels_active_turn(g) {
+    // Ctrl+C, like Claude Code:
+    // 1) a turn is running → interrupt it;
+    // 2) the /btw panel is open → close it;
+    // 3) the prompt has text → clear it (↑ brings it back);
+    // 4) otherwise "Press Ctrl-C again to exit" in the footer; a second
+    //    press within 2s exits. Ctrl+D on an empty prompt works the same.
+    let ctrl =
+        key.modifiers.contains(KeyModifiers::CONTROL) && !key.modifiers.contains(KeyModifiers::ALT);
+    let is_ctrl_c = ctrl && matches!(key.code, KeyCode::Char('c'));
+    let is_ctrl_d = ctrl
+        && matches!(key.code, KeyCode::Char('d'))
+        && g.input_buffer.is_empty()
+        && !escape_cancels_active_turn(g);
+    if is_ctrl_c || is_ctrl_d {
+        if is_ctrl_c && escape_cancels_active_turn(g) {
             request_turn_cancel(g, cancel_flag, cmd_tx);
+            *ctrl_c_armed_at = None;
+        } else if is_ctrl_c && g.btw.is_some() {
+            g.btw = None;
+            *ctrl_c_armed_at = None;
+        } else if is_ctrl_c && !g.input_buffer.is_empty() {
+            let text = g.take_input_text();
+            if !text.trim().is_empty() && composer_history.last() != Some(&text) {
+                composer_history.push(text);
+            }
+            *composer_history_index = None;
+            composer_history_draft.clear();
             *ctrl_c_armed_at = None;
         } else {
             let now = std::time::Instant::now();
-            let armed = ctrl_c_armed_at
-                .is_some_and(|t| now.duration_since(t) <= Duration::from_millis(1500));
+            let armed = ctrl_c_armed_at.is_some_and(|t| now.duration_since(t) <= EXIT_WINDOW);
             if armed {
                 g.should_exit = true;
                 let _ = cmd_tx.send(TuiCmd::Exit);
                 return KeyFlow::Exit;
             }
             *ctrl_c_armed_at = Some(now);
-            g.push_block(DisplayBlock::System(
-                "Press Ctrl+C again within 1.5s to exit.".into(),
+            g.exit_hint = Some((
+                now + EXIT_WINDOW,
+                if is_ctrl_c {
+                    "Press Ctrl-C again to exit"
+                } else {
+                    "Press Ctrl-D again to exit"
+                },
             ));
-            g.touch_transcript();
-            g.transcript_follow_tail = true;
-            g.notification_count = 0;
         }
+        g.touch_transcript();
         return KeyFlow::Continue;
     } else {
         *ctrl_c_armed_at = None;
+        g.exit_hint = None;
     }
 
     // Force-close modals that aren't rendered in the inline

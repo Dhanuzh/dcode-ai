@@ -120,6 +120,7 @@ impl TuiSessionState {
             current_busy_state: BusyState::Idle,
             busy_state_since: Instant::now(),
             should_exit: false,
+            exit_hint: None,
             slash_menu_index: 0,
             command_palette_open: false,
             command_palette_query: String::new(),

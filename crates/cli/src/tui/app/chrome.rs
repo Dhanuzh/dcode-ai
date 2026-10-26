@@ -202,7 +202,12 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
         };
         left.push(Span::styled(mode, Style::default().fg(theme::muted())));
     }
-    if g.pasting {
+    if let Some((_, hint)) = g
+        .exit_hint
+        .filter(|(until, _)| std::time::Instant::now() < *until)
+    {
+        left.push(Span::styled(hint, Style::default().fg(theme::muted())));
+    } else if g.pasting {
         left.push(Span::styled(
             "⧗ pasting image…",
             Style::default().fg(theme::accent()),

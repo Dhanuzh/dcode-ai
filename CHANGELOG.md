@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+- **Ctrl+C works like Claude Code**: it interrupts a running turn, else
+  clears what you typed (↑ brings it back), else shows "Press Ctrl-C again
+  to exit" in the footer; a second press within 2 s exits. Ctrl+D on an
+  empty prompt does the same.
+
 ## 1.0.20 — 2026-10-26
 
 ### New

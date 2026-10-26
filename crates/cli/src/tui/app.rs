@@ -1917,6 +1917,55 @@ mod approval_parse_tests {
         assert_eq!(state.unsent_count(), 0);
     }
 
+    #[test]
+    fn ctrl_c_clears_the_prompt_then_asks_before_exiting() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        let mut g = TuiSessionState::new(
+            "session".into(),
+            "model".into(),
+            "@build".into(),
+            "Default".into(),
+            PathBuf::from("."),
+            false,
+        );
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel::<TuiCmd>();
+        let mut cache = super::TranscriptRenderCache::default();
+        let mut scroll = crate::tui::scroll_buffer::ScrollBuffer::default();
+        let mut history: Vec<String> = Vec::new();
+        let mut history_index = None;
+        let mut draft = String::new();
+        let mut armed = None;
+        let mut press = |g: &mut TuiSessionState, armed: &mut Option<std::time::Instant>| {
+            super::handle_key_event(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                g,
+                None,
+                &[],
+                &[],
+                &mut cache,
+                &mut scroll,
+                3,
+                &mut history,
+                &mut history_index,
+                &mut draft,
+                armed,
+                &tx,
+                None,
+                None,
+                None,
+            )
+        };
+        g.set_input_text("half-typed idea");
+        assert_eq!(press(&mut g, &mut armed), super::KeyFlow::Continue);
+        assert!(g.input_buffer.is_empty());
+        assert!(g.exit_hint.is_none());
+        assert_eq!(press(&mut g, &mut armed), super::KeyFlow::Continue);
+        assert_eq!(g.exit_hint.map(|h| h.1), Some("Press Ctrl-C again to exit"));
+        assert!(g.blocks.is_empty(), "the hint lives in the footer");
+        assert_eq!(press(&mut g, &mut armed), super::KeyFlow::Exit);
+        assert_eq!(history, vec!["half-typed idea".to_string()]);
+    }
+
     // ── Snapshot tests (insta) ─────────────────────────────────────────
 
     fn lines_to_text(lines: &[ratatui::text::Line<'_>]) -> String {

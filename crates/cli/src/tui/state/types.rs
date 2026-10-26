@@ -278,6 +278,8 @@ pub struct TuiSessionState {
     /// When the current busy state started (for animation frame selection).
     pub busy_state_since: Instant,
     pub should_exit: bool,
+    /// "Press Ctrl-C again to exit" in the footer, until the instant.
+    pub exit_hint: Option<(Instant, &'static str)>,
     /// Selected row in slash-command popup (↑↓ or click).
     pub slash_menu_index: usize,
     /// Centered command palette opened via Ctrl+P.
