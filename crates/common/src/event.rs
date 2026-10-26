@@ -183,6 +183,19 @@ pub enum AgentEvent {
         child_session_id: String,
         status: String,
     },
+    /// A sub-agent left work on its own worktree branch; the UI asks
+    /// whether to merge it, keep the branch or discard it.
+    SubagentChanges {
+        child_session_id: String,
+        task: String,
+        branch: String,
+        base_branch: String,
+        worktree_path: PathBuf,
+        /// `M path` / `A path` lines.
+        files: Vec<String>,
+        insertions: usize,
+        deletions: usize,
+    },
     /// A sub-agent started in the background has settled; `output` is its
     /// final report (the parent is notified with it).
     BackgroundAgentFinished {
@@ -260,14 +273,17 @@ pub enum AgentEvent {
 }
 
 /// One selectable row shown for an interactive question.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct QuestionOption {
     pub id: String,
     pub label: String,
+    /// One short line under the label explaining the choice.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
 }
 
 /// Full question payload broadcast on the event bus and shown in the CLI.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InteractiveQuestionPayload {
     pub question_id: String,
     pub call_id: String,
@@ -277,6 +293,12 @@ pub struct InteractiveQuestionPayload {
     pub allow_custom: bool,
     /// Model-provided default; user can accept via suggested / `/auto-answer`.
     pub suggested_answer: String,
+    /// Short chip shown as the prompt's title (e.g. "Database").
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub header: Option<String>,
+    /// The user may pick several options (answered with `Options`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub multi_select: bool,
 }
 
 fn default_allow_custom() -> bool {
@@ -287,8 +309,16 @@ fn default_allow_custom() -> bool {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum QuestionSelection {
-    Option { option_id: String },
-    Custom { text: String },
+    Option {
+        option_id: String,
+    },
+    /// Several options picked in a multi-select question.
+    Options {
+        option_ids: Vec<String>,
+    },
+    Custom {
+        text: String,
+    },
     Suggested,
 }
 
@@ -361,14 +391,17 @@ mod interactive_question_serde_tests {
                 QuestionOption {
                     id: "a".into(),
                     label: "Alpha".into(),
+                    description: None,
                 },
                 QuestionOption {
                     id: "b".into(),
                     label: "Beta".into(),
+                    description: None,
                 },
             ],
             allow_custom: true,
             suggested_answer: "Alpha".into(),
+            ..Default::default()
         };
         let ev = AgentEvent::QuestionRequested {
             question: q.clone(),

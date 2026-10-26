@@ -785,7 +785,7 @@ pub async fn spawn_child_session(
     let event_rx = handle.take_event_rx();
     let log_path = handle.event_log_path.clone();
 
-    let parent_forward = event_tx.map(|tx| (child_id.clone(), tx));
+    let parent_forward = event_tx.clone().map(|tx| (child_id.clone(), tx));
     let fanout = event_rx.map(|rx| spawn_event_fanout(rx, log_path, None, None, parent_forward));
 
     let result = sup.run_turn(&context_prompt).await;
@@ -813,12 +813,40 @@ pub async fn spawn_child_session(
     if let (Some(path), Some(base)) = (sup.worktree_path.clone(), sup.base_branch.clone()) {
         let mgr = crate::worktree::WorktreeManager::new(&cfg.workspace_root);
         if mgr.has_work(&path, &base) {
+            // Commit it on the sub-agent's branch so nothing is lost and the
+            // user can merge it in one step.
+            let task_line: String = cfg
+                .task
+                .lines()
+                .next()
+                .unwrap_or("")
+                .chars()
+                .take(60)
+                .collect();
+            if let Err(e) = mgr.commit_pending(&path, &format!("dcode-ai sub-agent: {task_line}")) {
+                tracing::warn!("could not commit sub-agent work: {e}");
+            }
+            let (files, insertions, deletions) = mgr.branch_summary(&path, &base);
             output.push_str(&format!(
-                "\n\n[worktree] The changes are in {} on branch {}. Review them, then merge \
-                 with `dcode-ai worktrees merge {child_id}` (or discard with `dcode-ai worktrees prune`).",
-                path.display(),
+                "\n\n[worktree] The changes are on branch {} ({} file(s), +{insertions} -{deletions}); \
+                 the user is asked whether to merge them. Don't merge them yourself.",
                 branch.as_deref().unwrap_or("?"),
+                files.len(),
             ));
+            if let (Some(tx), Some(b)) = (&event_tx, branch.clone()) {
+                let _ = tx
+                    .send(AgentEvent::SubagentChanges {
+                        child_session_id: child_id.clone(),
+                        task: cfg.task.clone(),
+                        branch: b,
+                        base_branch: base.clone(),
+                        worktree_path: path.clone(),
+                        files,
+                        insertions,
+                        deletions,
+                    })
+                    .await;
+            }
         } else if mgr.remove_worktree(&child_id, true).is_ok() {
             wt_path = None;
             branch = None;

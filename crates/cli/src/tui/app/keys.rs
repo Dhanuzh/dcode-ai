@@ -513,6 +513,79 @@ pub(super) fn handle_key_event(
         return KeyFlow::Continue;
     }
 
+    // The `/btw` answer panel: Esc/Enter/Space close it, ↑↓ scroll; any
+    // other key closes it and goes on to the composer.
+    if let Some(view) = g.btw.as_mut() {
+        let consumed = match key.code {
+            KeyCode::Up => {
+                view.scroll = view.scroll.saturating_sub(1);
+                true
+            }
+            KeyCode::Down => {
+                view.scroll = view.scroll.saturating_add(1);
+                true
+            }
+            KeyCode::PageUp => {
+                view.scroll = view.scroll.saturating_sub(8);
+                true
+            }
+            KeyCode::PageDown => {
+                view.scroll = view.scroll.saturating_add(8);
+                true
+            }
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+                g.btw = None;
+                true
+            }
+            _ => {
+                g.btw = None;
+                false
+            }
+        };
+        g.touch_transcript();
+        if consumed {
+            return KeyFlow::Continue;
+        }
+    }
+
+    // A decision prompt (sub-agent merge, memory tidy) owns the keys while
+    // the composer is empty; typing a message dismisses nothing.
+    if g.input_buffer.is_empty()
+        && let Some(prompt) = g.active_choice_mut()
+    {
+        use crate::tui::choice::{ChoiceKey, ChoiceOutcome};
+        let mapped = match (key.code, key.modifiers) {
+            (KeyCode::Up, _) => Some(ChoiceKey::Up),
+            (KeyCode::Down, _) => Some(ChoiceKey::Down),
+            (KeyCode::Enter, _) => Some(ChoiceKey::Accept),
+            (KeyCode::Esc, _) => Some(ChoiceKey::Cancel),
+            (KeyCode::Char(c), m) if !m.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) => {
+                Some(ChoiceKey::Char(c))
+            }
+            _ => None,
+        };
+        // Any other letter starts a message instead (the prompt waits).
+        let outcome = mapped.map(|k| prompt.handle_key(k));
+        if let Some(outcome) = outcome
+            && !matches!(outcome, ChoiceOutcome::Key(c) if c != 'd')
+        {
+            match outcome {
+                ChoiceOutcome::Chosen(action, index) => {
+                    g.choice_prompts.pop_front();
+                    let _ = cmd_tx.send(TuiCmd::Choice(action, index));
+                }
+                ChoiceOutcome::Key(_) => {
+                    if let Some(p) = g.choice_prompts.front() {
+                        let _ = cmd_tx.send(TuiCmd::ChoiceDetail(p.action.clone()));
+                    }
+                }
+                ChoiceOutcome::Stay => {}
+            }
+            g.touch_transcript();
+            return KeyFlow::Continue;
+        }
+    }
+
     // Question modal keyboard handling.
     if g.question_modal_open {
         // The startup "approve all tools?" popup: Esc (or just starting to
@@ -525,7 +598,7 @@ pub(super) fn handle_key_event(
         let typing = matches!(key.code, KeyCode::Char(_))
             && !key.modifiers.contains(KeyModifiers::CONTROL)
             && !key.modifiers.contains(KeyModifiers::ALT)
-            && !matches!(key.code, KeyCode::Char('j' | 'k'));
+            && !matches!(key.code, KeyCode::Char('j' | 'k' | '1'..='9'));
         if startup_popup && (key.code == KeyCode::Esc || typing) {
             // Esc / typing = the safe choice (Manual).
             let decline = g
@@ -549,13 +622,15 @@ pub(super) fn handle_key_event(
         } else {
             let mapped = match (key.code, key.modifiers) {
                 (KeyCode::Esc, _) => Some(QuestionModalKey::Cancel),
-                (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
-                    Some(QuestionModalKey::Up)
-                }
-                (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
-                    Some(QuestionModalKey::Down)
-                }
+                (KeyCode::Up, _) | (KeyCode::BackTab, _) => Some(QuestionModalKey::Up),
+                (KeyCode::Down, _) | (KeyCode::Tab, _) => Some(QuestionModalKey::Down),
                 (KeyCode::Enter, _) => Some(QuestionModalKey::Accept),
+                (KeyCode::Backspace, _) => Some(QuestionModalKey::Backspace),
+                (KeyCode::Char(c), m)
+                    if !m.contains(KeyModifiers::CONTROL) && !m.contains(KeyModifiers::ALT) =>
+                {
+                    Some(QuestionModalKey::Char(c))
+                }
                 _ => None,
             };
             if let Some(k) = mapped
@@ -1418,6 +1493,24 @@ pub(super) fn handle_key_event(
                 *composer_history_index = None;
                 composer_history_draft.clear();
                 g.insert_input_char('\n');
+                return KeyFlow::Continue;
+            }
+            // `\` then Enter = newline, in any terminal (Claude Code's
+            // fallback where Shift+Enter can't be told apart).
+            if g.cursor_char_idx > 0
+                && g.input_buffer.chars().nth(g.cursor_char_idx - 1) == Some('\\')
+            {
+                g.backspace_input();
+                g.insert_input_char('\n');
+                return KeyFlow::Continue;
+            }
+            // `/btw <question>` is answered on the side, even mid-turn.
+            if let Some(rest) = g.input_buffer.trim_start().strip_prefix("/btw")
+                && (rest.is_empty() || rest.starts_with(char::is_whitespace))
+            {
+                let question = rest.to_string();
+                g.take_input_text();
+                g.ask_btw(&question);
                 return KeyFlow::Continue;
             }
             if let Some((buf, cidx)) = apply_selected_at_completion(

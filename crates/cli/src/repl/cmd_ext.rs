@@ -132,7 +132,7 @@ impl Repl {
                     }
                     lines.push(String::new());
                     lines.push(
-                        "/memory <text> saves a note · /memory forget <id> removes one".into(),
+                        "/memory <text> saves a note · /memory forget <id> removes one · /memory tidy drops duplicates".into(),
                     );
                     if let ReplOutput::Tui(st) = &out {
                         if let Ok(mut g) = st.lock() {
@@ -143,6 +143,8 @@ impl Repl {
                             out.println(l);
                         }
                     }
+                } else if arg == "tidy" || arg == "tidy apply" {
+                    self.memory_tidy(&out, arg == "tidy apply").await;
                 } else if let Some(v) = arg.strip_prefix("auto") {
                     let on = match v.trim() {
                         "on" => true,

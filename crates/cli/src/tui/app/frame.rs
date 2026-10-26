@@ -257,8 +257,6 @@ pub(super) fn draw_session_pane(
         );
     } else if g.info_modal_open {
         render_info_modal(frame, area, g);
-    } else if g.question_modal_open && g.active_question.is_some() {
-        render_question_modal(frame, area, g);
     }
 
     if g.toast.as_ref().is_some_and(|t| t.is_expired()) {

@@ -1,5 +1,40 @@
 # Changelog
 
+## 1.0.20 — 2026-10-26
+
+### New
+- **Questions look like Claude Code's**: when the agent asks you something,
+  the question takes the prompt's place with a title chip, numbered options
+  and a one-line description under each, the recommended one marked and
+  selected. Press a number to pick, or just start typing to answer in your
+  own words ("Type something."). Questions with several valid answers let
+  you tick more than one (Space) and Submit. Esc still lets you answer in
+  the prompt.
+- **`/btw <question>`**: ask a quick side question about the work, even
+  while the agent is busy. The answer appears in a panel above the prompt
+  and is never added to the conversation.
+- **Sub-agent merge prompt**: when a sub-agent finishes with changes on its
+  own branch, you're asked to merge them into your branch, keep the branch
+  for later, or discard it (`d` shows the diff). Its work is committed on
+  its branch first, so nothing uncommitted is lost (this also fixes
+  `dcode-ai worktrees merge`).
+- **`/memory tidy`** removes empty notes and exact or near-duplicate
+  memories, after showing you the list.
+- **`/terminal-setup`** makes Shift+Enter insert a newline: it adds the
+  binding to VS Code / Cursor / Windsurf (also from WSL), Windows Terminal or
+  Alacritty. In kitty, Ghostty, foot and WezTerm Shift+Enter now works as is,
+  and `\` then Enter adds a new line in any terminal.
+
+### Fixes
+- **Slow resume of long sessions**: tool results were saved whole in the
+  session log (one search result was 23 MB) and replayed on every resume.
+  They are now saved capped like the model sees them, old logs are trimmed
+  while loading, and only the newest 200 messages are printed (`/transcript`
+  has the rest). Syntax highlighting loads in the background at startup.
+- **Repeating replies are stopped**: if the model starts outputting the same
+  text over and over, dcode-ai stops the reply and keeps one copy, instead
+  of burning tokens.
+
 ## 1.0.19 — 2026-10-26
 
 ### New

@@ -189,6 +189,15 @@ pub struct TuiSessionState {
     pub plugin_browser: Option<Box<crate::tui::plugin_browser::PluginBrowser>>,
     /// `/mcp` panel, when open.
     pub mcp_panel: Option<Box<crate::tui::mcp_panel::McpPanel>>,
+    /// Decisions waiting for the agent to be idle (sub-agent merges,
+    /// `/memory tidy`); the front one is shown in place of the composer.
+    pub choice_prompts: std::collections::VecDeque<crate::tui::choice::ChoicePrompt>,
+    /// The `/btw` answer panel, when open.
+    pub btw: Option<crate::tui::btw::BtwView>,
+    /// Side questions go to this worker (set when the TUI starts).
+    pub btw_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Conversation snapshot side questions are answered from.
+    pub btw_ctx: crate::tui::btw::BtwHandle,
     /// A clipboard image paste to run off the UI thread; `true` falls back to
     /// clipboard text (image paths) when there is no image.
     pub paste_request: Option<bool>,
@@ -360,6 +369,10 @@ pub struct TuiSessionState {
     pub question_modal_open: bool,
     pub question_modal_index: usize,
     pub question_modal_scroll: usize,
+    /// Ticked options of a multi-select question (by option index).
+    pub question_checked: Vec<bool>,
+    /// Text typed into the question's "Type something." row.
+    pub question_custom: String,
     /// Command palette selection index (separate from slash_menu_index).
     pub palette_index: usize,
     /// Session picker popup (interactive list with resume).
@@ -560,6 +573,34 @@ pub enum BranchPickerKey {
     Char(char),
 }
 
+/// Row layout of a question prompt: the options, then "Type something."
+/// (when written answers are allowed), then "Submit" (multi-select).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QuestionRows {
+    pub custom: Option<usize>,
+    pub submit: Option<usize>,
+    pub total: usize,
+}
+
+impl QuestionRows {
+    pub fn of(q: &InteractiveQuestionPayload) -> Self {
+        let mut next = q.options.len();
+        let custom = q.allow_custom.then(|| {
+            next += 1;
+            next - 1
+        });
+        let submit = q.multi_select.then(|| {
+            next += 1;
+            next - 1
+        });
+        Self {
+            custom,
+            submit,
+            total: next.max(1),
+        }
+    }
+}
+
 /// A key event for the interactive-question modal (crossterm-decoupled).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QuestionModalKey {
@@ -567,6 +608,10 @@ pub enum QuestionModalKey {
     Up,
     Down,
     Accept,
+    Backspace,
+    /// A typed character: text for the "Type something." row, a digit picks
+    /// an option, Space ticks one in a multi-select question.
+    Char(char),
 }
 
 /// A key event for the command palette overlay (crossterm-decoupled).

@@ -29,6 +29,12 @@ fn prompt_question_stdio(q: &InteractiveQuestionPayload) -> io::Result<QuestionS
     writeln!(err, "  [0] suggested: {}", q.suggested_answer)?;
     for (i, o) in q.options.iter().enumerate() {
         writeln!(err, "  [{}] ({}) {}", i + 1, o.id, o.label)?;
+        if let Some(d) = &o.description {
+            writeln!(err, "        {d}")?;
+        }
+    }
+    if q.multi_select {
+        writeln!(err, "  (several allowed: e.g. 1,3)")?;
     }
     if q.allow_custom {
         writeln!(err, "  [c] custom text")?;
@@ -60,13 +66,8 @@ fn prompt_question_stdio(q: &InteractiveQuestionPayload) -> io::Result<QuestionS
         }
         return Ok(QuestionSelection::Custom { text: custom });
     }
-    if let Ok(n) = t.parse::<usize>()
-        && n >= 1
-        && n <= q.options.len()
-    {
-        return Ok(QuestionSelection::Option {
-            option_id: q.options[n - 1].id.clone(),
-        });
+    if let Some(sel) = crate::tui::answer_parse::parse_option_numbers(t, q) {
+        return Ok(sel);
     }
     Err(io::Error::new(
         io::ErrorKind::InvalidInput,
@@ -656,9 +657,11 @@ mod tests {
                 options: vec![QuestionOption {
                     id: "x".into(),
                     label: "X".into(),
+                    description: None,
                 }],
                 allow_custom: true,
                 suggested_answer: "X".into(),
+                ..Default::default()
             },
         };
         render_human_event(&ev);

@@ -11,7 +11,7 @@ use crate::tui::connect_modal::{
 use crate::tui::diff_hunk::extract_approval_hunks;
 use crate::tui::layout::centered_rect;
 use crate::tui::palette::{PaletteRow, filter_palette_rows, palette_selectable_indices};
-use crate::tui::render_helpers::{popup_block, truncate_chars, wrap_text};
+use crate::tui::render_helpers::{popup_block, truncate_chars};
 use crate::tui::slash_entries::SlashEntry;
 use crate::tui::state::{ApprovalRequest, TuiSessionState};
 use crate::tui::theme;
@@ -340,65 +340,6 @@ pub(crate) fn render_info_modal(frame: &mut ratatui::Frame<'_>, area: Rect, g: &
         Paragraph::new(Text::from(lines))
             .style(Style::default().bg(theme::surface()))
             .block(popup_block(g.info_modal_title.as_str()))
-            .wrap(Wrap { trim: false }),
-        popup,
-    );
-}
-
-pub(crate) fn render_question_modal(
-    frame: &mut ratatui::Frame<'_>,
-    area: Rect,
-    g: &TuiSessionState,
-) {
-    let Some(q) = &g.active_question else { return };
-    let suggested_label = q
-        .options
-        .iter()
-        .find(|o| o.id == q.suggested_answer)
-        .map(|o| o.label.clone())
-        .unwrap_or_else(|| q.suggested_answer.clone());
-    let mut items: Vec<String> = vec![format!("{suggested_label}  (recommended)")];
-    for o in &q.options {
-        if o.id == q.suggested_answer {
-            continue;
-        }
-        items.push(o.label.clone());
-    }
-
-    let mut lines: Vec<Line> = Vec::new();
-    for pl in wrap_text(&q.prompt, 60) {
-        lines.push(Line::from(Span::styled(
-            pl,
-            Style::default().fg(theme::text()),
-        )));
-    }
-    lines.push(Line::default());
-    for (i, label) in items.iter().enumerate() {
-        let sel = i == g.question_modal_index;
-        let style = if sel {
-            Style::default()
-                .fg(theme::on_accent())
-                .bg(theme::accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::text())
-        };
-        let marker = if sel { "› " } else { "  " };
-        lines.push(Line::from(Span::styled(format!("{marker}{label}"), style)));
-    }
-    lines.push(Line::default());
-    lines.push(Line::from(Span::styled(
-        "Enter select · ↑↓ move · Esc cancel",
-        Style::default().fg(theme::muted()),
-    )));
-
-    let h = (lines.len() as u16).saturating_add(2).clamp(6, 20);
-    let popup = centered_rect(area, 64, h);
-    frame.render_widget(ClearWidget, popup);
-    frame.render_widget(
-        Paragraph::new(Text::from(lines))
-            .style(Style::default().bg(theme::surface()))
-            .block(popup_block("approval"))
             .wrap(Wrap { trim: false }),
         popup,
     );

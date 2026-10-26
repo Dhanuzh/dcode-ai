@@ -971,7 +971,8 @@ fn render_block(
             );
         }
         DisplayBlock::Question(q) => {
-            let selected_answer = state.answered_questions.get(&q.question_id);
+            // Asked and answered, Claude-style: `⏺ question` / `⎿ answer`.
+            // The live choice is drawn in the prompt box, not here.
             push_transcript_line(lines, hits, Line::default(), None);
             for (i, text_line) in wrap_text(&q.prompt, w.saturating_sub(4))
                 .into_iter()
@@ -992,53 +993,19 @@ fn render_block(
                     None,
                 );
             }
-            if !state.question_modal_open {
-                let sug_sel = matches!(selected_answer, Some(QuestionSelection::Suggested));
-                let sug_style = if sug_sel {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(theme::success())
-                        .add_modifier(BOLD)
-                } else {
-                    Style::default().fg(theme::success())
-                };
+            if let Some(sel) = state.answered_questions.get(&q.question_id) {
                 push_transcript_line(
                     lines,
                     hits,
                     Line::from(vec![
-                        Span::styled("  [0] ", sug_style),
+                        Span::styled("  ⎿  ", dim()),
                         Span::styled(
-                            truncate_chars(&q.suggested_answer, w.saturating_sub(10)),
-                            sug_style,
+                            truncate_chars(&question_answer_label(q, sel), w.saturating_sub(8)),
+                            Style::default().fg(theme::text()).add_modifier(BOLD),
                         ),
                     ]),
-                    Some(LineClickHit::Question(QuestionSelection::Suggested)),
+                    None,
                 );
-                for (i, o) in q.options.iter().enumerate() {
-                    let opt_sel = matches!(
-                        selected_answer,
-                        Some(QuestionSelection::Option { option_id }) if option_id == &o.id
-                    );
-                    let style = if opt_sel {
-                        Style::default()
-                            .fg(Color::Black)
-                            .bg(theme::user())
-                            .add_modifier(BOLD)
-                    } else {
-                        Style::default().fg(theme::text())
-                    };
-                    push_transcript_line(
-                        lines,
-                        hits,
-                        Line::from(vec![
-                            Span::styled(format!("  [{}] ", i + 1), style),
-                            Span::styled(truncate_chars(&o.label, w.saturating_sub(10)), style),
-                        ]),
-                        Some(LineClickHit::Question(QuestionSelection::Option {
-                            option_id: o.id.clone(),
-                        })),
-                    );
-                }
             }
         }
         DisplayBlock::Thinking(content) => {
@@ -1170,6 +1137,31 @@ fn fmt_wall_time(epoch_secs: u64) -> Option<String> {
         secs_today / 3600,
         (secs_today % 3600) / 60
     ))
+}
+
+/// What the user picked, in words: the option label(s) or their own text.
+pub(crate) fn question_answer_label(
+    q: &dcode_ai_common::event::InteractiveQuestionPayload,
+    sel: &QuestionSelection,
+) -> String {
+    let label = |id: &str| {
+        q.options
+            .iter()
+            .find(|o| o.id == id)
+            .map(|o| o.label.clone())
+            .unwrap_or_else(|| id.to_string())
+    };
+    match sel {
+        QuestionSelection::Suggested => label(&q.suggested_answer),
+        QuestionSelection::Option { option_id } => label(option_id),
+        QuestionSelection::Options { option_ids } if option_ids.is_empty() => "(none)".into(),
+        QuestionSelection::Options { option_ids } => option_ids
+            .iter()
+            .map(|id| label(id))
+            .collect::<Vec<_>>()
+            .join(", "),
+        QuestionSelection::Custom { text } => text.clone(),
+    }
 }
 
 #[cfg(test)]

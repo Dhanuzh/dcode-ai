@@ -39,13 +39,8 @@ pub(crate) fn parse_tui_question_answer(
     if t.is_empty() || t == "0" || t.eq_ignore_ascii_case("s") {
         return Some(QuestionSelection::Suggested);
     }
-    if let Ok(n) = t.parse::<usize>()
-        && n >= 1
-        && n <= q.options.len()
-    {
-        return Some(QuestionSelection::Option {
-            option_id: q.options[n - 1].id.clone(),
-        });
+    if let Some(sel) = parse_option_numbers(t, q) {
+        return Some(sel);
     }
     if q.allow_custom && !t.is_empty() {
         return Some(QuestionSelection::Custom {
@@ -53,4 +48,35 @@ pub(crate) fn parse_tui_question_answer(
         });
     }
     None
+}
+
+/// `2` → that option; for a multi-select question also `1,3` / `1 3`.
+pub(crate) fn parse_option_numbers(
+    t: &str,
+    q: &dcode_ai_common::event::InteractiveQuestionPayload,
+) -> Option<QuestionSelection> {
+    let nums: Vec<usize> = t
+        .split([',', ' '])
+        .filter(|p| !p.is_empty())
+        .map(|p| p.trim().parse::<usize>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    if nums.is_empty() || nums.iter().any(|&n| n == 0 || n > q.options.len()) {
+        return None;
+    }
+    if q.multi_select {
+        let mut ids: Vec<String> = Vec::new();
+        for n in nums {
+            let id = q.options[n - 1].id.clone();
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+        return Some(QuestionSelection::Options { option_ids: ids });
+    }
+    match nums.as_slice() {
+        [n] => Some(QuestionSelection::Option {
+            option_id: q.options[n - 1].id.clone(),
+        }),
+        _ => None,
+    }
 }

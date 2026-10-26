@@ -13,21 +13,28 @@ use super::ToolExecutor;
 
 const WAIT_SECS: u64 = 300;
 
+/// The answer as the tool result: readable first (it is also what the
+/// transcript shows under the question), with option ids for the model.
 fn selection_summary(sel: &QuestionSelection, payload: &InteractiveQuestionPayload) -> String {
+    let label = |id: &str| {
+        payload
+            .options
+            .iter()
+            .find(|o| o.id == id || o.label == id)
+            .map(|o| format!("{} (`{}`)", o.label, o.id))
+            .unwrap_or_else(|| id.to_string())
+    };
     match sel {
-        QuestionSelection::Suggested => {
-            format!("Selected suggested answer: {}", payload.suggested_answer)
+        QuestionSelection::Suggested => format!("User chose {}", label(&payload.suggested_answer)),
+        QuestionSelection::Option { option_id } => format!("User chose {}", label(option_id)),
+        QuestionSelection::Options { option_ids } if option_ids.is_empty() => {
+            "User chose none of the options".to_string()
         }
-        QuestionSelection::Option { option_id } => {
-            let label = payload
-                .options
-                .iter()
-                .find(|o| o.id == *option_id)
-                .map(|o| o.label.as_str())
-                .unwrap_or(option_id.as_str());
-            format!("Selected option `{option_id}`: {label}")
+        QuestionSelection::Options { option_ids } => {
+            let labels: Vec<String> = option_ids.iter().map(|id| label(id)).collect();
+            format!("User chose {}", labels.join(", "))
         }
-        QuestionSelection::Custom { text } => format!("Custom answer: {text}"),
+        QuestionSelection::Custom { text } => format!("User answered: {text}"),
     }
 }
 
@@ -51,11 +58,13 @@ impl ToolExecutor for AskQuestionTool {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition {
             name: "ask_question".into(),
-            description: "Ask the user a structured question with multiple choices, an optional \
-                custom text answer, and a suggested default (always provide `suggested_answer`). \
-                The UI shows options and the suggestion; the user can pick one, type custom text, \
-                or accept the suggestion (e.g. `/auto-answer`). Use this instead of long numbered \
-                lists in plain assistant text when you need a fast, reliable answer."
+            description: "Ask the user a structured question with 2-4 choices, an optional \
+                custom text answer, and a suggested default (always provide `suggested_answer`, \
+                the id of the option you recommend). Give each option a short `description` of \
+                what it means, and a 1-2 word `header` for the question. Set `multi_select` when \
+                several options can apply. The user can pick, type their own answer, or accept the \
+                suggestion. Use this instead of long numbered lists in plain assistant text when \
+                you need a fast, reliable answer."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -64,17 +73,26 @@ impl ToolExecutor for AskQuestionTool {
                         "type": "string",
                         "description": "The question text shown to the user."
                     },
+                    "header": {
+                        "type": "string",
+                        "description": "Very short label for the question (max ~12 chars), e.g. \"Database\"."
+                    },
                     "options": {
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "id": { "type": "string", "description": "Stable id for this option (e.g. static_site)." },
-                                "label": { "type": "string", "description": "Human-readable label." }
+                                "label": { "type": "string", "description": "Human-readable label (1-5 words)." },
+                                "description": { "type": "string", "description": "One line explaining this choice or its trade-off." }
                             },
                             "required": ["id", "label"]
                         },
                         "description": "List of choices; each needs a unique id."
+                    },
+                    "multi_select": {
+                        "type": "boolean",
+                        "description": "If true, the user may pick several options. Default false."
                     },
                     "allow_custom": {
                         "type": "boolean",
@@ -151,7 +169,17 @@ impl ToolExecutor for AskQuestionTool {
                             error: Some("each option needs non-empty id and label".into()),
                         };
                     }
-                    out.push(QuestionOption { id, label });
+                    let description = v
+                        .get("description")
+                        .and_then(|x| x.as_str())
+                        .map(str::trim)
+                        .filter(|d| !d.is_empty())
+                        .map(str::to_string);
+                    out.push(QuestionOption {
+                        id,
+                        label,
+                        description,
+                    });
                 }
                 out
             }
@@ -182,6 +210,12 @@ impl ToolExecutor for AskQuestionTool {
             options,
             allow_custom,
             suggested_answer: suggested,
+            header: call.input["header"]
+                .as_str()
+                .map(str::trim)
+                .filter(|h| !h.is_empty())
+                .map(|h| h.chars().take(24).collect()),
+            multi_select: call.input["multi_select"].as_bool().unwrap_or(false),
         };
 
         let (tx, rx) = oneshot::channel();

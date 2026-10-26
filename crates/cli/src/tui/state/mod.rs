@@ -172,6 +172,8 @@ impl TuiSessionState {
             question_modal_open: false,
             question_modal_index: 0,
             question_modal_scroll: 0,
+            question_checked: Vec::new(),
+            question_custom: String::new(),
             palette_index: 0,
             session_picker_open: false,
             session_picker_search: String::new(),
@@ -246,6 +248,10 @@ impl TuiSessionState {
             statusline_command: None,
             plugin_browser: None,
             mcp_panel: None,
+            choice_prompts: Default::default(),
+            btw: None,
+            btw_tx: None,
+            btw_ctx: Default::default(),
             setup_picker: None,
             sudo_prompt: None,
             askpass_reply: None,
@@ -458,57 +464,116 @@ impl TuiSessionState {
         let Some(q) = self.active_question.clone() else {
             return QuestionModalOutcome::Stay;
         };
-        // Items: suggested (1, the "(recommended)" row) + the *other* options
-        // (the suggested one is excluded here so it isn't listed twice) +
-        // optional "chat about this" (allow_custom).
-        let others: Vec<_> = q
-            .options
-            .iter()
-            .filter(|o| o.id != q.suggested_answer)
-            .collect();
-        let total = 1 + others.len() + if q.allow_custom { 1 } else { 0 };
+        let rows = QuestionRows::of(&q);
+        if self.question_checked.len() != q.options.len() {
+            self.question_checked = vec![false; q.options.len()];
+        }
+        let idx = self.question_modal_index.min(rows.total - 1);
+        let on_custom = rows.custom == Some(idx);
+        let answer = |selection| QuestionModalOutcome::Answer {
+            question_id: q.question_id.clone(),
+            selection,
+        };
         match key {
             QuestionModalKey::Cancel => {
                 if q.allow_custom {
-                    // Fall back to inline text input; keep the question active.
+                    // Fall back to the composer; the question stays active.
                     self.close_question_modal();
-                    self.push_block(DisplayBlock::System(
-                        "Question still waiting — type your answer in the composer and press \
-                         Enter (or Esc did not cancel it; the agent is blocked until you reply)."
-                            .into(),
-                    ));
+                    let mut hint = String::from("Question still waiting — answer in the prompt: ");
+                    let picks: Vec<String> = q
+                        .options
+                        .iter()
+                        .enumerate()
+                        .map(|(i, o)| format!("{} {}", i + 1, o.label))
+                        .collect();
+                    hint.push_str(&picks.join(" · "));
+                    hint.push_str(", or type your own answer.");
+                    self.push_block(DisplayBlock::System(hint));
                     QuestionModalOutcome::CloseKeepActive
                 } else {
                     QuestionModalOutcome::Stay
                 }
             }
             QuestionModalKey::Up => {
-                self.question_modal_index = self.question_modal_index.saturating_sub(1);
+                self.question_modal_index = idx.saturating_sub(1);
                 QuestionModalOutcome::Stay
             }
             QuestionModalKey::Down => {
-                self.question_modal_index = (self.question_modal_index + 1).min(total - 1);
+                self.question_modal_index = (idx + 1).min(rows.total - 1);
+                QuestionModalOutcome::Stay
+            }
+            QuestionModalKey::Backspace => {
+                if on_custom {
+                    self.question_custom.pop();
+                }
+                QuestionModalOutcome::Stay
+            }
+            QuestionModalKey::Char(c) if on_custom => {
+                self.question_custom.push(c);
+                QuestionModalOutcome::Stay
+            }
+            QuestionModalKey::Char(c) => {
+                if let Some(n) = c.to_digit(10).map(|d| d as usize)
+                    && (1..=q.options.len()).contains(&n)
+                {
+                    self.question_modal_index = n - 1;
+                    if q.multi_select {
+                        self.question_checked[n - 1] ^= true;
+                        return QuestionModalOutcome::Stay;
+                    }
+                    self.close_question_modal();
+                    return answer(QuestionSelection::Option {
+                        option_id: q.options[n - 1].id.clone(),
+                    });
+                }
+                match c {
+                    ' ' if q.multi_select && idx < q.options.len() => {
+                        self.question_checked[idx] ^= true;
+                    }
+                    'k' => self.question_modal_index = idx.saturating_sub(1),
+                    'j' => self.question_modal_index = (idx + 1).min(rows.total - 1),
+                    // Typing anywhere else starts a written answer.
+                    c if rows.custom.is_some() && !c.is_control() => {
+                        self.question_modal_index = rows.custom.unwrap_or(idx);
+                        self.question_custom.push(c);
+                    }
+                    _ => {}
+                }
                 QuestionModalOutcome::Stay
             }
             QuestionModalKey::Accept => {
-                let idx = self.question_modal_index;
-                let selection = if idx == 0 {
-                    Some(QuestionSelection::Suggested)
-                } else if idx <= others.len() {
-                    Some(QuestionSelection::Option {
-                        option_id: others[idx - 1].id.clone(),
-                    })
-                } else {
-                    None // "Chat about this" → inline text input
-                };
-                self.close_question_modal();
-                match selection {
-                    Some(selection) => QuestionModalOutcome::Answer {
-                        question_id: q.question_id.clone(),
-                        selection,
-                    },
-                    None => QuestionModalOutcome::CloseKeepActive,
+                if on_custom {
+                    let text = self.question_custom.trim().to_string();
+                    if text.is_empty() {
+                        return QuestionModalOutcome::Stay;
+                    }
+                    self.close_question_modal();
+                    return answer(QuestionSelection::Custom { text });
                 }
+                if q.multi_select {
+                    if idx < q.options.len() {
+                        self.question_checked[idx] ^= true;
+                        return QuestionModalOutcome::Stay;
+                    }
+                    // The Submit row.
+                    let option_ids: Vec<String> = q
+                        .options
+                        .iter()
+                        .zip(&self.question_checked)
+                        .filter(|(_, on)| **on)
+                        .map(|(o, _)| o.id.clone())
+                        .collect();
+                    let custom = self.question_custom.trim().to_string();
+                    self.close_question_modal();
+                    if option_ids.is_empty() && !custom.is_empty() {
+                        return answer(QuestionSelection::Custom { text: custom });
+                    }
+                    return answer(QuestionSelection::Options { option_ids });
+                }
+                self.close_question_modal();
+                answer(QuestionSelection::Option {
+                    option_id: q.options[idx].id.clone(),
+                })
             }
         }
     }
@@ -1316,8 +1381,24 @@ impl TuiSessionState {
 
     pub fn open_question_modal(&mut self) {
         self.question_modal_open = true;
-        self.question_modal_index = 0;
+        // Start on the recommended option so Enter accepts it.
+        let (index, count) = self
+            .active_question
+            .as_ref()
+            .map(|q| {
+                (
+                    q.options
+                        .iter()
+                        .position(|o| o.id == q.suggested_answer || o.label == q.suggested_answer)
+                        .unwrap_or(0),
+                    q.options.len(),
+                )
+            })
+            .unwrap_or((0, 0));
+        self.question_modal_index = index;
         self.question_modal_scroll = 0;
+        self.question_checked = vec![false; count];
+        self.question_custom.clear();
         self.touch_transcript();
     }
 
@@ -1325,6 +1406,8 @@ impl TuiSessionState {
         self.question_modal_open = false;
         self.question_modal_index = 0;
         self.question_modal_scroll = 0;
+        self.question_checked.clear();
+        self.question_custom.clear();
         self.touch_transcript();
     }
 
@@ -1477,6 +1560,45 @@ impl TuiSessionState {
 
     pub fn set_busy(&mut self, busy: bool) {
         self.busy = busy;
+    }
+
+    /// Open the `/btw` panel and send the question to the worker.
+    pub fn ask_btw(&mut self, question: &str) {
+        let question = question.trim().to_string();
+        let mut view = crate::tui::btw::BtwView {
+            question: question.clone(),
+            ..Default::default()
+        };
+        if question.is_empty() {
+            view.error = Some("usage: /btw <question>".into());
+            view.done = true;
+        } else if let Some(tx) = &self.btw_tx {
+            if tx.send(question).is_err() {
+                view.error = Some("side questions are unavailable".into());
+                view.done = true;
+            }
+        } else {
+            view.error = Some("side questions need the interactive TUI".into());
+            view.done = true;
+        }
+        self.btw = Some(view);
+        self.touch_transcript();
+    }
+
+    /// The decision prompt to show now: only between turns and when no
+    /// approval or question is waiting.
+    pub fn active_choice(&self) -> Option<&crate::tui::choice::ChoicePrompt> {
+        if self.busy || self.active_approval.is_some() || self.active_question.is_some() {
+            return None;
+        }
+        self.choice_prompts.front()
+    }
+
+    pub fn active_choice_mut(&mut self) -> Option<&mut crate::tui::choice::ChoicePrompt> {
+        if self.busy || self.active_approval.is_some() || self.active_question.is_some() {
+            return None;
+        }
+        self.choice_prompts.front_mut()
     }
 
     /// Messages waiting for the agent's next step (sent with Enter).
@@ -1972,7 +2094,6 @@ impl TuiSessionState {
             }
             AgentEvent::QuestionRequested { question } => {
                 self.active_question = Some(question.clone());
-                self.push_block(DisplayBlock::Question(question.clone()));
                 // Bring the prompt into view when follow-tail is on (default).
                 self.transcript_follow_tail = true;
                 self.open_question_modal();
@@ -1985,12 +2106,16 @@ impl TuiSessionState {
             } => {
                 self.answered_questions
                     .insert(question_id.clone(), selection.clone());
-                self.active_question = None;
+                // The tool's result line under `Question(…)` shows the answer.
+                if let Some(q) = self
+                    .active_question
+                    .take()
+                    .filter(|q| q.question_id == *question_id)
+                {
+                    let answer = crate::tui::transcript::question_answer_label(&q, selection);
+                    self.set_process("input received", truncate(&answer, 96));
+                }
                 self.close_question_modal();
-                self.push_block(DisplayBlock::System(format!(
-                    "Answered question {question_id}: {selection:?}"
-                )));
-                self.set_process("input received", format!("{selection:?}"));
                 transcript_dirty = true;
             }
             AgentEvent::CostUpdated {
@@ -2030,6 +2155,33 @@ impl TuiSessionState {
                 }
                 self.push_block(DisplayBlock::System(format!("⟳ {message}")));
                 transcript_dirty = true;
+            }
+            AgentEvent::SubagentChanges {
+                child_session_id,
+                task,
+                branch,
+                base_branch,
+                worktree_path,
+                files,
+                insertions,
+                deletions,
+            } => {
+                // A replayed log may name a branch already merged or removed.
+                if !self.replaying && worktree_path.exists() {
+                    self.choice_prompts.push_back(
+                        crate::tui::choice::ChoicePrompt::subagent_changes(
+                            child_session_id.clone(),
+                            task.clone(),
+                            branch.clone(),
+                            base_branch.clone(),
+                            worktree_path.clone(),
+                            files,
+                            *insertions,
+                            *deletions,
+                        ),
+                    );
+                    transcript_dirty = true;
+                }
             }
             AgentEvent::BackgroundAgentFinished {
                 agent_id,
@@ -2410,14 +2562,17 @@ mod tests {
                 QuestionOption {
                     id: "opt-a".into(),
                     label: "A".into(),
+                    description: None,
                 },
                 QuestionOption {
                     id: "opt-b".into(),
                     label: "B".into(),
+                    description: None,
                 },
             ],
             allow_custom,
             suggested_answer: String::new(),
+            ..Default::default()
         });
         st.question_modal_open = true;
         st.question_modal_index = 0;
@@ -2425,19 +2580,8 @@ mod tests {
     }
 
     #[test]
-    fn question_modal_accept_suggested_and_option() {
+    fn question_modal_accepts_the_highlighted_option() {
         let mut st = question_state(false);
-        // index 0 → suggested
-        assert_eq!(
-            st.apply_question_modal_key(QuestionModalKey::Accept),
-            QuestionModalOutcome::Answer {
-                question_id: "q1".into(),
-                selection: QuestionSelection::Suggested,
-            }
-        );
-
-        let mut st = question_state(false);
-        st.question_modal_index = 1; // first option
         assert_eq!(
             st.apply_question_modal_key(QuestionModalKey::Accept),
             QuestionModalOutcome::Answer {
@@ -2447,23 +2591,85 @@ mod tests {
                 },
             }
         );
+
+        let mut st = question_state(false);
+        assert_eq!(
+            st.apply_question_modal_key(QuestionModalKey::Char('2')),
+            QuestionModalOutcome::Answer {
+                question_id: "q1".into(),
+                selection: QuestionSelection::Option {
+                    option_id: "opt-b".into()
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn question_modal_opens_on_the_recommended_option() {
+        let mut st = question_state(true);
+        if let Some(q) = st.active_question.as_mut() {
+            q.suggested_answer = "opt-b".into();
+        }
+        st.open_question_modal();
+        assert_eq!(st.question_modal_index, 1);
     }
 
     #[test]
     fn question_modal_down_clamps_to_total() {
-        let mut st = question_state(true); // total = 1 + 2 + 1 = 4 → max idx 3
+        let mut st = question_state(true); // 2 options + "Type something." → max idx 2
         for _ in 0..10 {
             st.apply_question_modal_key(QuestionModalKey::Down);
         }
-        assert_eq!(st.question_modal_index, 3);
+        assert_eq!(st.question_modal_index, 2);
     }
 
     #[test]
-    fn question_modal_chat_about_this_keeps_active() {
+    fn question_modal_typing_writes_a_custom_answer() {
         let mut st = question_state(true);
-        st.question_modal_index = 3; // the "chat about this" row
+        for c in "use redis".chars() {
+            st.apply_question_modal_key(QuestionModalKey::Char(c));
+        }
+        assert_eq!(st.question_modal_index, 2);
+        st.apply_question_modal_key(QuestionModalKey::Backspace);
         assert_eq!(
             st.apply_question_modal_key(QuestionModalKey::Accept),
+            QuestionModalOutcome::Answer {
+                question_id: "q1".into(),
+                selection: QuestionSelection::Custom {
+                    text: "use redi".into()
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn question_modal_multi_select_ticks_then_submits() {
+        let mut st = question_state(false);
+        if let Some(q) = st.active_question.as_mut() {
+            q.multi_select = true;
+        }
+        st.apply_question_modal_key(QuestionModalKey::Char(' '));
+        st.apply_question_modal_key(QuestionModalKey::Char('2'));
+        st.apply_question_modal_key(QuestionModalKey::Char('2'));
+        st.apply_question_modal_key(QuestionModalKey::Char('2'));
+        assert_eq!(st.question_checked, vec![true, true]);
+        st.apply_question_modal_key(QuestionModalKey::Down); // → Submit
+        assert_eq!(
+            st.apply_question_modal_key(QuestionModalKey::Accept),
+            QuestionModalOutcome::Answer {
+                question_id: "q1".into(),
+                selection: QuestionSelection::Options {
+                    option_ids: vec!["opt-a".into(), "opt-b".into()]
+                },
+            }
+        );
+    }
+
+    #[test]
+    fn question_modal_esc_keeps_the_question_for_the_composer() {
+        let mut st = question_state(true);
+        assert_eq!(
+            st.apply_question_modal_key(QuestionModalKey::Cancel),
             QuestionModalOutcome::CloseKeepActive
         );
         assert!(!st.question_modal_open);
@@ -2825,9 +3031,11 @@ mod tests {
             options: vec![QuestionOption {
                 id: "a".into(),
                 label: "A".into(),
+                description: None,
             }],
             allow_custom: true,
             suggested_answer: "A".into(),
+            ..Default::default()
         };
         st.apply_event(&AgentEvent::QuestionRequested {
             question: q.clone(),
@@ -2836,7 +3044,8 @@ mod tests {
             st.active_question.as_ref().map(|x| x.question_id.as_str()),
             Some("q-1")
         );
-        assert!(matches!(st.blocks.last(), Some(DisplayBlock::Question(_))));
+        // The live choice is the prompt box, not a transcript block.
+        assert!(!matches!(st.blocks.last(), Some(DisplayBlock::Question(_))));
 
         st.apply_event(&AgentEvent::QuestionResolved {
             question_id: "q-1".into(),
@@ -3101,6 +3310,7 @@ mod tests {
             options: vec![],
             allow_custom: true,
             suggested_answer: String::new(),
+            ..Default::default()
         });
 
         st.clear_replayed_interaction_state();
@@ -3151,9 +3361,11 @@ mod tests {
             options: vec![QuestionOption {
                 id: "a".into(),
                 label: "A".into(),
+                description: None,
             }],
             allow_custom: true,
             suggested_answer: "A".into(),
+            ..Default::default()
         };
         st.apply_event(&AgentEvent::QuestionRequested {
             question: q.clone(),

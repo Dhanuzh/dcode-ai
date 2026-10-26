@@ -591,6 +591,20 @@ impl Repl {
                     }
                 ));
             }
+            "/terminal-setup" => {
+                let lines = tokio::task::spawn_blocking(crate::terminal_setup::run)
+                    .await
+                    .unwrap_or_else(|e| vec![format!("[terminal-setup] {e}")]);
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("Terminal setup", lines);
+                    }
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
+                }
+            }
             "/sidebar" => {
                 let _ = rest;
                 out.println("[sidebar] removed in fullscreen TUI. Use /status, /config, /sessions, and /mcp for context.");

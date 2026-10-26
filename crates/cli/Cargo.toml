@@ -65,6 +65,7 @@ ratatui = { version = "0.30", default-features = false, features = ["crossterm",
 desktop-notify = ["notify-rust"]
 
 [dev-dependencies]
+toml = { workspace = true }
 dcode-ai-runtime = { workspace = true }
 tempfile = "3"
 assert_cmd = "2"

@@ -62,6 +62,8 @@ pub struct SessionRuntime {
     ipc_approval_pending: Option<ApprovalPendingMap>,
     /// Sub-agents launch in the background by default (the TUI turns it on).
     background_subagents: bool,
+    /// Conversation snapshot `/btw` answers from (shared with the TUI).
+    btw: Option<crate::tui::btw::BtwHandle>,
 }
 
 impl SessionRuntime {
@@ -74,7 +76,10 @@ impl SessionRuntime {
     }
 
     pub async fn run_turn(&mut self, prompt: &str) -> Result<String, ProviderError> {
-        self.supervisor.run_turn(prompt).await
+        self.snapshot_for_btw(Some(prompt));
+        let result = self.supervisor.run_turn(prompt).await;
+        self.snapshot_for_btw(None);
+        result
     }
 
     pub async fn run_turn_with_images(
@@ -82,9 +87,38 @@ impl SessionRuntime {
         prompt: &str,
         attachments: Vec<dcode_ai_common::message::ImageAttachment>,
     ) -> Result<String, ProviderError> {
-        self.supervisor
+        self.snapshot_for_btw(Some(prompt));
+        let result = self
+            .supervisor
             .run_turn_with_images(prompt, &attachments)
-            .await
+            .await;
+        self.snapshot_for_btw(None);
+        result
+    }
+
+    /// Share `/btw`'s snapshot slot with the TUI and fill it now.
+    pub fn set_btw_handle(&mut self, handle: crate::tui::btw::BtwHandle) {
+        self.btw = Some(handle);
+        self.snapshot_for_btw(None);
+    }
+
+    /// Refresh what `/btw` answers from; `pending` is a prompt about to run.
+    fn snapshot_for_btw(&self, pending: Option<&str>) {
+        let Some(handle) = &self.btw else {
+            return;
+        };
+        let mut messages = self.supervisor.snapshot_messages();
+        if let Some(p) = pending {
+            messages.push(dcode_ai_common::message::Message::user(p));
+        }
+        if let Ok(mut slot) = handle.lock() {
+            *slot = Some(crate::tui::btw::BtwContext {
+                config: self.config.clone(),
+                model: self.supervisor.model.clone(),
+                workspace: self.supervisor.workspace_root.clone(),
+                messages,
+            });
+        }
     }
 
     pub async fn finish(&mut self, reason: EndReason) {
@@ -667,6 +701,7 @@ pub async fn build_session_runtime(
         config,
         ipc_approval_pending: approval_pending,
         background_subagents: false,
+        btw: None,
     })
 }
 
@@ -697,5 +732,6 @@ pub async fn build_resumed_session_runtime(
         config,
         ipc_approval_pending: approval_pending,
         background_subagents: false,
+        btw: None,
     })
 }

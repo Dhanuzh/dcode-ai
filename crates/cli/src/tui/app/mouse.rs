@@ -16,7 +16,6 @@ pub(super) fn handle_mouse_event(
     scroll_buffer: &mut crate::tui::scroll_buffer::ScrollBuffer,
     scroll_speed: u16,
     cmd_tx: &UnboundedSender<TuiCmd>,
-    question_answer_tx: Option<&UnboundedSender<(String, QuestionSelection)>>,
 ) {
     let area = Rect::new(0, 0, sz.width, sz.height);
     let (main_area, _) = layout_with_sidebar(area, g.sidebar_open);
@@ -196,7 +195,7 @@ pub(super) fn handle_mouse_event(
                             None
                         };
                         if let Some(hit) = picked {
-                            activate_line_hit(hit, g, cmd_tx, question_answer_tx);
+                            activate_line_hit(hit, g);
                             return;
                         }
                     }
@@ -253,27 +252,8 @@ pub(super) fn handle_mouse_event(
 }
 
 /// Run the action behind a clicked transcript line.
-fn activate_line_hit(
-    hit: LineClickHit,
-    g: &mut TuiSessionState,
-    cmd_tx: &UnboundedSender<TuiCmd>,
-    question_answer_tx: Option<&UnboundedSender<(String, QuestionSelection)>>,
-) {
+fn activate_line_hit(hit: LineClickHit, g: &mut TuiSessionState) {
     match hit {
-        LineClickHit::Question(sel) => {
-            let qid = g.active_question.as_ref().map(|q| q.question_id.clone());
-            // The caller releases the state lock right after this
-            // returns; the sends below are non-blocking.
-            if let Some(qid) = qid {
-                if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
-                    let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
-                } else if let Some(tx) = question_answer_tx {
-                    let _ = tx.send((qid, sel));
-                } else {
-                    let _ = cmd_tx.send(TuiCmd::QuestionAnswer(sel));
-                }
-            }
-        }
         LineClickHit::CopyText(text) => match copy_to_clipboard(&text) {
             Ok(_) => g.show_toast(
                 "✓ Copied to clipboard",
@@ -313,8 +293,6 @@ pub(super) fn handle_dashboard_mouse(
     m: crossterm::event::MouseEvent,
     g: &mut TuiSessionState,
     transcript_cache: &mut TranscriptRenderCache,
-    cmd_tx: &UnboundedSender<TuiCmd>,
-    question_answer_tx: Option<&UnboundedSender<(String, QuestionSelection)>>,
 ) {
     use crate::tui::state::{DashTarget, RailTab};
 
@@ -366,7 +344,7 @@ pub(super) fn handle_dashboard_mouse(
                     let (_lines, hits, _) = transcript_cache.get_or_rebuild(g, inner_w);
                     let line = start + (m.row - tr.y) as usize;
                     if let Some(Some(hit)) = hits.get(line).cloned() {
-                        activate_line_hit(hit, g, cmd_tx, question_answer_tx);
+                        activate_line_hit(hit, g);
                     }
                 }
             }

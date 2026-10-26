@@ -16,7 +16,7 @@ use crate::tui::paste::{expand_paste_tokens, pasted_lines_token};
 use crate::tui::path_parse::{extract_embedded_path_fragments, parse_candidate_image_path};
 use crate::tui::render::modals::{
     render_at_panel, render_command_palette, render_connect_modal, render_info_modal,
-    render_question_modal, render_slash_panel,
+    render_slash_panel,
 };
 use crate::tui::slash_entries::{
     SLASH_PANEL_MAX_ROWS, SlashEntry, filter_slash_entries, load_slash_entries, slash_panel_height,
@@ -91,7 +91,6 @@ pub enum ApprovalAnswer {
 
 #[derive(Debug, Clone)]
 pub(crate) enum LineClickHit {
-    Question(QuestionSelection),
     CopyText(String),
     /// Toggle full vs preview rendering of thinking blocks.
     ToggleThinking,
@@ -130,6 +129,10 @@ pub enum TuiCmd {
     PluginAction(crate::tui::plugin_browser::BrowserAction),
     /// An action chosen in the `/mcp` panel.
     McpAction(crate::tui::mcp_panel::McpAction),
+    /// An option picked in a decision prompt (sub-agent merge, memory tidy).
+    Choice(crate::tui::choice::ChoiceAction, usize),
+    /// `d` in a decision prompt: show what it is about (the branch diff).
+    ChoiceDetail(crate::tui::choice::ChoiceAction),
     /// Leave plan mode and start building (`accept_edits` picks the mode).
     ExitPlan {
         accept_edits: bool,
@@ -688,6 +691,7 @@ pub fn run_blocking(
     scroll_speed: u16,
 ) -> anyhow::Result<()> {
     let mouse_capture = true;
+    crate::tui::markdown::warm_up_highlighting();
     let mut terminal = setup_terminal(mouse_capture)?;
 
     // Set terminal window title for tab identification.
@@ -849,6 +853,7 @@ pub fn run_blocking(
                     crossterm::terminal::EnterAlternateScreen,
                     crossterm::event::EnableMouseCapture
                 );
+                crate::tui::terminal::push_key_flags();
                 let _ = dt.clear();
             } else {
                 let _ = terminal.clear();
@@ -874,6 +879,7 @@ pub fn run_blocking(
                     crossterm::terminal::EnterAlternateScreen,
                     crossterm::event::EnableMouseCapture
                 );
+                crate::tui::terminal::push_key_flags();
                 match ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(stdout())) {
                     Ok(t) => dash_terminal = Some(t),
                     Err(e) => {
@@ -888,6 +894,7 @@ pub fn run_blocking(
                 }
                 transcript_cache.invalidate();
             } else if !want_dashboard && dash_terminal.take().is_some() {
+                crate::tui::terminal::pop_key_flags();
                 let _ = execute!(
                     stdout(),
                     crossterm::event::DisableMouseCapture,
@@ -1158,13 +1165,7 @@ pub fn run_blocking(
                     continue;
                 }
                 Event::Mouse(m) if g.view_mode == crate::tui::state::ViewMode::Dashboard => {
-                    handle_dashboard_mouse(
-                        m,
-                        &mut g,
-                        &mut transcript_cache,
-                        &cmd_tx,
-                        question_answer_tx.as_ref(),
-                    );
+                    handle_dashboard_mouse(m, &mut g, &mut transcript_cache);
                 }
                 Event::Mouse(m) => {
                     let Ok(sz) = terminal.size() else {
@@ -1180,7 +1181,6 @@ pub fn run_blocking(
                         &mut scroll_buffer,
                         scroll_speed,
                         &cmd_tx,
-                        question_answer_tx.as_ref(),
                     );
                 }
                 Event::Paste(pasted) => {
@@ -1255,6 +1255,7 @@ pub fn run_blocking(
     }
 
     if dash_terminal.take().is_some() {
+        crate::tui::terminal::pop_key_flags();
         let _ = execute!(
             stdout(),
             crossterm::event::DisableMouseCapture,

@@ -14,6 +14,7 @@ mod repl_helpers;
 mod runner;
 mod self_update;
 mod setup_cli;
+mod terminal_setup;
 mod web_server;
 
 // Shared with the library target; compiled once there.
@@ -1655,6 +1656,16 @@ fn merge_worktree(
         .map(|entry| entry.branch_name.clone())
         .unwrap_or_else(|| format!("dcode-ai/{session_id}"));
 
+    // Uncommitted sub-agent work would otherwise be left behind.
+    let worktree = workspace_root
+        .join(".dcode-ai")
+        .join("worktrees")
+        .join(session_id);
+    if worktree.exists() {
+        manager
+            .commit_pending(&worktree, &format!("dcode-ai sub-agent {session_id}"))
+            .map_err(anyhow::Error::msg)?;
+    }
     manager
         .merge_into_base(session_id, &base_branch)
         .map_err(anyhow::Error::msg)?;

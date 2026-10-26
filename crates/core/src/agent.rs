@@ -343,6 +343,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 let mut fatal = false;
                 let mut replay_blocks: Vec<serde_json::Value> = Vec::new();
                 let mut stop_reason: Option<StopReason> = None;
+                let mut next_loop_check = 0usize;
 
                 let mut cancel_poll = tokio::time::interval(Duration::from_millis(25));
                 cancel_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -378,6 +379,22 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                             }
                             assistant_text.push_str(&delta);
                             self.emit(AgentEvent::TokensStreamed { delta }).await;
+                            // A model stuck repeating itself would burn the
+                            // whole token budget: stop it, keep one copy.
+                            if assistant_text.len() >= next_loop_check {
+                                next_loop_check = assistant_text.len() + 256;
+                                if let Some(keep) = crate::repetition::looping_tail(&assistant_text)
+                                {
+                                    assistant_text.truncate(keep);
+                                    self.emit(AgentEvent::Notice {
+                                        message: "The model started repeating itself, so \
+                                                  dcode-ai stopped the reply."
+                                            .into(),
+                                    })
+                                    .await;
+                                    break;
+                                }
+                            }
                         }
                         StreamChunk::ToolUse(call) => {
                             self.emit(AgentEvent::ToolCallStarted {
@@ -894,11 +911,14 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 last_failed_tool.clear();
             }
 
-            for result in final_results {
+            for mut result in final_results {
                 self.messages.push(Message::tool(
                     result.call_id.clone(),
                     format_tool_result(&result),
                 ));
+                // The event log and UI get the same capped text the model
+                // sees: one 23 MB grep result made every resume crawl.
+                result.output = cap_tool_output(&result.output);
                 self.emit(AgentEvent::ToolCallCompleted {
                     call_id: result.call_id.clone(),
                     output: result,
@@ -1160,7 +1180,11 @@ fn cleanup_processed_attachments(
 /// middle-elided, keeping the informative head and tail.
 const MAX_TOOL_OUTPUT_CHARS: usize = 24_000;
 
-fn cap_tool_output(s: &str) -> String {
+pub fn cap_tool_output(s: &str) -> String {
+    // Byte length bounds the char count; skip counting for the common case.
+    if s.len() <= MAX_TOOL_OUTPUT_CHARS {
+        return s.to_string();
+    }
     let total = s.chars().count();
     if total <= MAX_TOOL_OUTPUT_CHARS {
         return s.to_string();
@@ -1388,6 +1412,40 @@ mod tests {
         assert_eq!(retry_notice_count, retry::DEFAULT_MAX_ATTEMPTS - 1);
         assert!(saw_error_event);
         assert!(!saw_token_event);
+    }
+
+    /// A reply stuck repeating one line is stopped and kept to one copy.
+    #[tokio::test]
+    async fn repeating_reply_is_stopped() {
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(1024);
+        let line = "Checking the config file once more to be sure.\n";
+        let mut chunks = vec![StreamChunk::TextDelta("Plan:\n".into())];
+        chunks.extend((0..200).map(|_| StreamChunk::TextDelta(line.into())));
+        chunks.push(StreamChunk::Done);
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(VecDeque::from([chunks])),
+        });
+        let mut agent = AgentLoop::new(
+            provider,
+            ToolRegistry::new(),
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "test-model".into(),
+            event_tx,
+            3,
+            3,
+            1,
+            None,
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let result = agent.run_turn("hello", temp.path(), &[]).await;
+        assert_eq!(result.unwrap(), format!("Plan:\n{line}"));
+        let mut noticed = false;
+        while let Ok(event) = event_rx.try_recv() {
+            if let AgentEvent::Notice { message } = event {
+                noticed |= message.contains("repeating itself");
+            }
+        }
+        assert!(noticed);
     }
 
     /// If a retried attempt succeeds, the turn completes normally — proving

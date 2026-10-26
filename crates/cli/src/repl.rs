@@ -29,6 +29,7 @@ use tokio::process::Command;
 const STARTUP_APPROVE_ALL_QUESTION_ID: &str = "startup-approve-all";
 
 // Slash commands, by area (each a method on `Repl`).
+mod cmd_choice;
 mod cmd_ext;
 mod cmd_info;
 mod cmd_mcp;
@@ -907,12 +908,32 @@ impl Repl {
             | "/config" | "/login" | "/connect" | "/logout" | "/auth" | "/sidebar" | "/quiet"
             | "/settings" | "/theme" | "/title" | "/raw" | "/mention" | "/output-style"
             | "/output-styles" | "/personality" | "/keymap" | "/statusline" | "/provider"
-            | "/apikey" | "/editor" | "/set-editor" | "/auto-answer" | "/thinking" | "/effort" => {
+            | "/apikey" | "/editor" | "/set-editor" | "/auto-answer" | "/thinking" | "/effort"
+            | "/terminal-setup" => {
                 return self.cmd_settings(input, command, rest, parts, out).await;
             }
             "/reload" | "/add-dir" | "/skills" | "/memory" | "/setup" | "/plugins" | "/plugin"
             | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
+            }
+            "/btw" => {
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.ask_btw(rest);
+                    }
+                } else if rest.is_empty() {
+                    out.eprintln("usage: /btw <question>");
+                } else {
+                    let prompt = crate::tui::btw::side_question_prompt(
+                        self.runtime.workspace_root(),
+                        self.runtime.messages(),
+                        rest,
+                    );
+                    match self.runtime.complete_text(&prompt).await {
+                        Ok(answer) => out.println(&format!("[btw] {answer}")),
+                        Err(e) => out.eprintln(&format!("[btw] {e}")),
+                    }
+                }
             }
             "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/goal"
             | "/plan" | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit" => {
@@ -1228,6 +1249,7 @@ impl Repl {
             crate::tui::statusline::spawn_poller(tui_state.clone());
         }
 
+        crate::tui::markdown::warm_up_highlighting();
         let log_path = self.runtime.event_log_path();
         replay_event_log_into_state(&log_path, &tui_state).await;
 
@@ -1266,18 +1288,23 @@ impl Repl {
                     QuestionOption {
                         id: "manual".into(),
                         label: "Manual — ask before edits and commands".into(),
+                        description: None,
                     },
                     QuestionOption {
                         id: "accept_edits".into(),
                         label: "Accept edits — edit files freely, ask before commands".into(),
+                        description: None,
                     },
                     QuestionOption {
                         id: "auto".into(),
                         label: "Auto — run without asking; risky actions (delete, push, sudo) still ask".into(),
+                        description: None,
                     },
                 ],
                 allow_custom: false,
                 suggested_answer: "manual".into(),
+                header: Some("Permissions".into()),
+                ..Default::default()
             });
             g.open_question_modal();
         }
@@ -1285,6 +1312,10 @@ impl Repl {
         // The pending approval / question maps belong to the session
         // runtime; `/resume` and `/project` swap it, so answers look the
         // current maps up here instead of keeping the first ones.
+        if let Ok(mut g) = tui_state.lock() {
+            let ctx = g.btw_ctx.clone();
+            g.btw_tx = Some(crate::tui::btw::spawn_btw_worker(ctx, tui_state.clone()));
+        }
         let live = LiveMaps::default();
         let bridge_handle: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>> = Arc::new(Mutex::new(
             Some(attach_runtime_to_tui(&mut self.runtime, &tui_state, &live)),
@@ -1626,6 +1657,12 @@ impl Repl {
                             g.touch_transcript();
                         }
                     }
+                }
+                TuiCmd::Choice(action, index) => {
+                    self.handle_choice(action, index, &tui_state).await;
+                }
+                TuiCmd::ChoiceDetail(action) => {
+                    self.show_choice_detail(action, &tui_state);
                 }
                 TuiCmd::McpAction(action) => {
                     self.handle_mcp_action(action, &tui_state, &mut mcp_auth)
@@ -2138,9 +2175,9 @@ impl Repl {
                         if qid == STARTUP_APPROVE_ALL_QUESTION_ID {
                             let choice = match selection {
                                 QuestionSelection::Option { option_id } => option_id,
-                                QuestionSelection::Suggested | QuestionSelection::Custom { .. } => {
-                                    "manual".to_string()
-                                }
+                                QuestionSelection::Suggested
+                                | QuestionSelection::Options { .. }
+                                | QuestionSelection::Custom { .. } => "manual".to_string(),
                             };
                             let note = self.apply_startup_permission(&choice);
                             if let Err(e) = dcode_ai_common::folders::remember_permission(
@@ -2572,6 +2609,9 @@ fn attach_runtime_to_tui(
     live: &LiveMaps,
 ) -> tokio::task::JoinHandle<()> {
     let log_path = runtime.event_log_path();
+    if let Ok(g) = tui_state.lock() {
+        runtime.set_btw_handle(g.btw_ctx.clone());
+    }
     let ipc = runtime.take_ipc_handle();
     let approval = runtime.take_ipc_approval_pending();
     let question = runtime.question_pending();

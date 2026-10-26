@@ -24,9 +24,10 @@ use ratatui::{
 use crate::tool_ui;
 use crate::tui::render::modals::approval_hunk_lines;
 use crate::tui::render::tool_detail::{approval_diff_preview, tool_input_path, tool_input_preview};
-use crate::tui::render_helpers::truncate_chars;
-use crate::tui::state::{ApprovalRequest, RewindScope, TuiSessionState};
+use crate::tui::render_helpers::{truncate_chars, wrap_text};
+use crate::tui::state::{ApprovalRequest, QuestionRows, RewindScope, TuiSessionState};
 use crate::tui::theme;
+use dcode_ai_common::event::InteractiveQuestionPayload;
 
 /// Options shown when a plan-mode turn finishes.
 pub(crate) const PLAN_EXIT_OPTIONS: [&str; 3] = [
@@ -46,8 +47,52 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
     if let Some(req) = &g.active_approval {
         return Some(approval_box(g, req, inner_w));
     }
+    if g.question_modal_open
+        && let Some(q) = &g.active_question
+    {
+        return Some(question_box(g, q, inner_w));
+    }
+    if let Some(v) = &g.btw {
+        return Some(btw_box(v, inner_w));
+    }
     if g.theme_picker_open {
         return Some(theme_box(g, inner_w));
+    }
+    if g.input_buffer.is_empty()
+        && let Some(c) = g.active_choice()
+    {
+        let mut lines: Vec<Line<'static>> = c
+            .body
+            .iter()
+            .enumerate()
+            .map(|(i, l)| {
+                let style = if i == 0 {
+                    Style::default()
+                        .fg(theme::text())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::muted())
+                };
+                Line::from(Span::styled(
+                    truncate_chars(l, inner_w.saturating_sub(1)),
+                    style,
+                ))
+            })
+            .collect();
+        lines.push(Line::default());
+        lines.extend(numbered_options(&c.options, c.index, inner_w));
+        lines.push(Line::default());
+        let mut hint = format!("Enter or 1-{} to choose", c.options.len());
+        if let Some(h) = &c.hint {
+            hint.push_str(" · ");
+            hint.push_str(h);
+        }
+        lines.push(muted(hint));
+        return Some(PromptBox {
+            title: c.title.clone(),
+            color: theme::accent(),
+            lines,
+        });
     }
     if let Some(pending) = &g.rewind_pending {
         let mut lines = vec![
@@ -119,6 +164,159 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
         });
     }
     None
+}
+
+/// `ask_question`, Claude-style: the question, numbered options with a
+/// one-line description each, then "Type something." for a written answer.
+fn question_box(g: &TuiSessionState, q: &InteractiveQuestionPayload, inner_w: usize) -> PromptBox {
+    let rows = QuestionRows::of(q);
+    let selected = g.question_modal_index.min(rows.total - 1);
+    let mut lines: Vec<Line<'static>> = wrap_text(&q.prompt, inner_w.saturating_sub(1))
+        .into_iter()
+        .map(|l| {
+            Line::from(Span::styled(
+                l,
+                Style::default()
+                    .fg(theme::text())
+                    .add_modifier(Modifier::BOLD),
+            ))
+        })
+        .collect();
+    lines.push(Line::default());
+    for (i, o) in q.options.iter().enumerate() {
+        let mut label = format!("{}. ", i + 1);
+        if q.multi_select {
+            let on = g.question_checked.get(i).copied().unwrap_or(false);
+            label.push_str(if on { "[✔] " } else { "[ ] " });
+        }
+        label.push_str(&o.label);
+        if o.id == q.suggested_answer || o.label == q.suggested_answer {
+            label.push_str(" (Recommended)");
+        }
+        lines.push(option_line(i == selected, &label, inner_w));
+        if let Some(d) = o.description.as_deref() {
+            let indent = if q.multi_select { 9 } else { 5 };
+            for dl in wrap_text(d, inner_w.saturating_sub(indent + 1))
+                .into_iter()
+                .take(2)
+            {
+                lines.push(muted(format!("{}{dl}", " ".repeat(indent))));
+            }
+        }
+    }
+    if let Some(row) = rows.custom {
+        let n = row + 1;
+        if row == selected {
+            let typed = &g.question_custom;
+            let shown = truncate_chars(typed, inner_w.saturating_sub(8));
+            lines.push(Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(theme::accent())),
+                Span::styled(
+                    format!("{n}. "),
+                    Style::default()
+                        .fg(theme::accent())
+                        .add_modifier(Modifier::BOLD),
+                ),
+                if typed.is_empty() {
+                    Span::styled("Type something.", Style::default().fg(theme::muted()))
+                } else {
+                    Span::styled(shown, Style::default().fg(theme::text()))
+                },
+                Span::styled("▏", Style::default().fg(theme::accent())),
+            ]));
+        } else if g.question_custom.is_empty() {
+            lines.push(option_line(
+                false,
+                &format!("{n}. Type something."),
+                inner_w,
+            ));
+        } else {
+            lines.push(option_line(
+                false,
+                &format!("{n}. {}", g.question_custom),
+                inner_w,
+            ));
+        }
+    }
+    if let Some(row) = rows.submit {
+        lines.push(option_line(row == selected, "Submit", inner_w));
+    }
+    lines.push(Line::default());
+    let pick = if q.multi_select {
+        "Space/Enter tick · ↑↓ move · Submit to send"
+    } else {
+        "Enter select · ↑↓ move · 1-9 pick"
+    };
+    let esc = if q.allow_custom {
+        " · Esc answer in chat"
+    } else {
+        ""
+    };
+    lines.push(muted(format!("{pick}{esc}")));
+    let title = match q.header.as_deref() {
+        Some(h) => format!("☐ {h}"),
+        None => "☐ Question".to_string(),
+    };
+    PromptBox {
+        title,
+        color: theme::accent(),
+        lines,
+    }
+}
+
+/// Rows of answer shown at once in the `/btw` panel.
+const BTW_ROWS: usize = 12;
+
+/// `/btw`: the side question and its (streaming) answer.
+fn btw_box(v: &crate::tui::btw::BtwView, inner_w: usize) -> PromptBox {
+    let mut lines = vec![Line::from(vec![
+        Span::styled("> ", Style::default().fg(theme::muted())),
+        Span::styled(
+            truncate_chars(&v.question, inner_w.saturating_sub(3)),
+            Style::default()
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    lines.push(Line::default());
+    let body: Vec<String> = if let Some(e) = &v.error {
+        vec![format!("✗ {e}")]
+    } else if v.answer.trim().is_empty() {
+        vec!["Thinking…".into()]
+    } else {
+        v.answer
+            .trim()
+            .lines()
+            .flat_map(|l| {
+                let w = wrap_text(l, inner_w.saturating_sub(1));
+                if w.is_empty() { vec![String::new()] } else { w }
+            })
+            .collect()
+    };
+    let start = v.scroll.min(body.len().saturating_sub(BTW_ROWS));
+    let style = if v.error.is_some() {
+        Style::default().fg(theme::error())
+    } else {
+        Style::default().fg(theme::text())
+    };
+    for l in body.iter().skip(start).take(BTW_ROWS) {
+        lines.push(Line::from(Span::styled(l.clone(), style)));
+    }
+    lines.push(Line::default());
+    let more = if body.len() > BTW_ROWS {
+        "↑↓ scroll · "
+    } else {
+        ""
+    };
+    let state = if v.done { "" } else { "answering… · " };
+    lines.push(muted(format!(
+        "{state}{more}Esc/Enter/Space close · not added to the conversation"
+    )));
+    PromptBox {
+        title: "btw".into(),
+        color: theme::accent(),
+        lines,
+    }
 }
 
 /// `/theme`: Claude-style list with a live preview of the selected theme.
@@ -448,6 +646,42 @@ mod tests {
             input: r#"{"url":"https://example.com"}"#.into(),
         });
         assert_eq!(active_prompt_box(&g, 70).unwrap().title, "Fetch");
+    }
+
+    #[test]
+    fn question_reads_like_claude() {
+        use dcode_ai_common::event::QuestionOption;
+        let mut g = state();
+        g.active_question = Some(InteractiveQuestionPayload {
+            question_id: "q1".into(),
+            call_id: "c1".into(),
+            prompt: "Which database?".into(),
+            options: vec![
+                QuestionOption {
+                    id: "pg".into(),
+                    label: "Postgres".into(),
+                    description: Some("Relational, strong consistency".into()),
+                },
+                QuestionOption {
+                    id: "sqlite".into(),
+                    label: "SQLite".into(),
+                    description: None,
+                },
+            ],
+            allow_custom: true,
+            suggested_answer: "pg".into(),
+            header: Some("Database".into()),
+            multi_select: false,
+        });
+        g.open_question_modal();
+        let pb = active_prompt_box(&g, 70).expect("question box");
+        let t = text(&pb);
+        assert_eq!(pb.title, "☐ Database");
+        assert!(t.contains("Which database?"), "{t}");
+        assert!(t.contains("❯ 1. Postgres (Recommended)"), "{t}");
+        assert!(t.contains("     Relational, strong consistency"), "{t}");
+        assert!(t.contains("  2. SQLite"), "{t}");
+        assert!(t.contains("3. Type something."), "{t}");
     }
 
     #[test]

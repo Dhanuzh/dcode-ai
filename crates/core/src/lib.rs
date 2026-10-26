@@ -13,6 +13,7 @@ pub mod hooks;
 pub mod mcp_oauth;
 pub mod plugin_installer;
 pub mod provider;
+pub mod repetition;
 pub mod skill_installer;
 pub mod skills;
 pub mod tools;

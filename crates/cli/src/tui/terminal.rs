@@ -35,6 +35,45 @@ pub fn inline_viewport_height() -> u16 {
     (rows / 2).clamp(12, 18)
 }
 
+/// Set when the terminal speaks the kitty keyboard protocol, so Shift+Enter
+/// (and Esc) arrive unambiguously.
+static KEY_FLAGS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Terminals known to support the kitty keyboard protocol. Detected from
+/// the environment: querying the terminal would delay startup.
+pub fn supports_kitty_keyboard() -> bool {
+    let var = |k: &str| std::env::var(k).unwrap_or_default().to_ascii_lowercase();
+    if std::env::var_os("KITTY_WINDOW_ID").is_some()
+        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
+    {
+        return true;
+    }
+    let program = var("TERM_PROGRAM");
+    let term = var("TERM");
+    matches!(program.as_str(), "ghostty" | "kitty" | "wezterm")
+        || term.contains("kitty")
+        || term.starts_with("foot")
+}
+
+/// Ask the terminal to report Shift+Enter and friends distinctly. Call after
+/// entering a screen (main and alternate screens keep separate settings).
+pub fn push_key_flags() {
+    if KEY_FLAGS.load(std::sync::atomic::Ordering::Relaxed) {
+        use crossterm::event::{KeyboardEnhancementFlags, PushKeyboardEnhancementFlags};
+        let _ = execute!(
+            stdout(),
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        );
+    }
+}
+
+/// Undo [`push_key_flags`] before leaving a screen.
+pub fn pop_key_flags() {
+    if KEY_FLAGS.load(std::sync::atomic::Ordering::Relaxed) {
+        let _ = execute!(stdout(), crossterm::event::PopKeyboardEnhancementFlags);
+    }
+}
+
 pub fn setup_terminal(_mouse_capture: bool) -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
     install_terminal_panic_hook();
     enable_raw_mode().map_err(|e| anyhow::anyhow!("enable_raw_mode: {e}"))?;
@@ -44,6 +83,10 @@ pub fn setup_terminal(_mouse_capture: bool) -> anyhow::Result<Terminal<Crossterm
         // Focus reporting lets us suppress completion notifications while the
         // terminal is focused (Codex parity).
         let _ = execute!(out, EnableFocusChange);
+        if supports_kitty_keyboard() {
+            KEY_FLAGS.store(true, std::sync::atomic::Ordering::Relaxed);
+            push_key_flags();
+        }
         use std::io::Write;
         let _ = out.flush();
         let height = inline_viewport_height();
@@ -63,6 +106,7 @@ pub fn setup_terminal(_mouse_capture: bool) -> anyhow::Result<Terminal<Crossterm
 }
 
 pub fn restore_terminal(_mouse_capture: bool) {
+    pop_key_flags();
     let mut out = stdout();
     // Harmless when not on the alternate screen; required when the dashboard
     // (or a panic inside it) exits while it is active.

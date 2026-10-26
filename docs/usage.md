@@ -22,7 +22,7 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 
 | Key | Action |
 | --- | --- |
-| `Enter` / `Shift+Enter` | Send / new line |
+| `Enter` / `Shift+Enter` | Send / new line (`\` then Enter or Ctrl+J also add a line; `/terminal-setup` makes Shift+Enter work in VS Code, Cursor, Windsurf, Windows Terminal and Alacritty) |
 | `Shift+Tab` | Cycle mode: default → ⏵⏵ accept edits → ⏸ plan |
 | `Esc` | Interrupt the running turn |
 | `Esc` `Esc` | Rewind: pick a message, then restore code and conversation, conversation only, or code only |
@@ -95,7 +95,9 @@ Type `/` to see them all with descriptions. The most used:
 | `/pr-comments [n]` | Fetch the PR's review comments with `gh` and summarize them by file |
 | `/agents`, `/skills`, `/plugins`, `/mcp`, `/reload` | Extensions |
 | `/hooks` | List hooks; `/hooks add <event> [--matcher <tool>] <command>`, `/hooks remove <event> <n>` |
-| `/memory` | Your notes and the project's; `/memory auto on\|off`, `/memory forget <id>` |
+| `/memory` | Your notes and the project's; `/memory auto on\|off`, `/memory forget <id>`, `/memory tidy` (drop duplicates) |
+| `/btw <question>` | Quick side question about the work, answered in a panel (also mid-turn) and never added to the conversation |
+| `/terminal-setup` | Make Shift+Enter insert a newline in this terminal |
 | `/init` | Create project instructions |
 | `/todos` | The agent's current task list |
 | `/release-notes` | What's new in this version |
@@ -250,8 +252,11 @@ The agent delegates with `spawn_subagent`. Each child:
   agent's id at once, keeps working, and receives a `<task-notification>`
   with the agent's report when it finishes (`agent_output` shows progress,
   `agent_kill` stops it). One-shot runs (`-p`, CI, editors) wait for it;
-- leaves no worktree behind when it changed nothing; otherwise you get the
-  merge command (`dcode-ai worktrees merge <id>`);
+- leaves no worktree behind when it changed nothing; otherwise its work is
+  committed on its branch and, once the turn ends, you're asked: **merge**
+  into your current branch, **keep** the branch for later (`dcode-ai
+  worktrees merge <id>`), or **discard** it (`d` shows the diff). A merge
+  that conflicts is aborted and the branch kept;
 - cannot start sub-agents of its own.
 
 Their live activity shows in place in the transcript and in the dashboard's
@@ -423,4 +428,6 @@ them with `# note` in the prompt, `/memory <text>` or `dcode-ai memory add "…"
 **Auto memory** (on by default, `[memory] auto = false` or `/memory auto off`
 to stop): the agent saves corrections, your preferences and non-obvious
 project facts on its own, one short sentence each, never secrets. `/memory`
-shows both scopes; `/memory forget <id>` removes a note.
+shows both scopes; `/memory forget <id>` removes a note; `/memory tidy`
+finds empty notes and exact or near duplicates (keeping the newest, fuller
+copy) and asks before removing them.

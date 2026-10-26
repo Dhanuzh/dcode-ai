@@ -40,6 +40,18 @@ enum MdListState {
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
+/// Load the syntax and theme sets on a background thread (~150 ms cold),
+/// so the first code block — or a resumed history — doesn't pay for it.
+pub fn warm_up_highlighting() {
+    static STARTED: std::sync::Once = std::sync::Once::new();
+    STARTED.call_once(|| {
+        std::thread::spawn(|| {
+            SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines);
+            THEME_SET.get_or_init(ThemeSet::load_defaults);
+        });
+    });
+}
+
 fn syntect_theme() -> &'static Theme {
     let ts = THEME_SET.get_or_init(ThemeSet::load_defaults);
     // Light terminals get a light syntax palette.

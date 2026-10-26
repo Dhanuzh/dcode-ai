@@ -15,6 +15,10 @@ pub struct WorktreeInfo {
     pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Pathspec for a sub-agent's own work: everything but dcode-ai's state
+/// folder (its generated `.gitignore`, sessions), which the session creates.
+const OWN_WORK: [&str; 2] = [".", ":(exclude).dcode-ai"];
+
 /// Manages git worktrees for isolated agent runs.
 pub struct WorktreeManager {
     repo_root: PathBuf,
@@ -223,7 +227,8 @@ impl WorktreeManager {
     /// or commits its base doesn't have.
     pub fn has_work(&self, worktree_path: &Path, base_branch: &str) -> bool {
         let dirty = Command::new("git")
-            .args(["status", "--porcelain", "--untracked-files=all"])
+            .args(["status", "--porcelain", "--untracked-files=all", "--"])
+            .args(OWN_WORK)
             .current_dir(worktree_path)
             .output()
             .map(|o| !o.status.success() || !o.stdout.trim_ascii().is_empty())
@@ -308,6 +313,150 @@ impl WorktreeManager {
         }
 
         Ok(())
+    }
+
+    /// Commit any uncommitted work in a worktree on its own branch, so a
+    /// merge carries it. Returns whether a commit was made.
+    pub fn commit_pending(
+        &self,
+        worktree_path: &Path,
+        message: &str,
+    ) -> Result<bool, WorktreeError> {
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(worktree_path)
+                .output()
+                .map_err(|e| WorktreeError::Io(e.to_string()))
+        };
+        let mut status_args = vec!["status", "--porcelain", "--untracked-files=all", "--"];
+        status_args.extend(OWN_WORK);
+        let status = git(&status_args)?;
+        if status.stdout.trim_ascii().is_empty() {
+            return Ok(false);
+        }
+        let mut add_args = vec!["add", "-A", "--"];
+        add_args.extend(OWN_WORK);
+        let add = git(&add_args)?;
+        if !add.status.success() {
+            return Err(WorktreeError::GitFailed(
+                String::from_utf8_lossy(&add.stderr).trim().to_string(),
+            ));
+        }
+        // Use the user's identity; fall back to a local one when git has none.
+        let has_identity = git(&["config", "user.email"])
+            .map(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
+            .unwrap_or(false);
+        let mut args: Vec<&str> = Vec::new();
+        if !has_identity {
+            args.extend([
+                "-c",
+                "user.name=dcode-ai",
+                "-c",
+                "user.email=dcode-ai@localhost",
+            ]);
+        }
+        args.extend(["commit", "--no-verify", "-q", "-m", message]);
+        let commit = git(&args)?;
+        if !commit.status.success() {
+            return Err(WorktreeError::GitFailed(
+                String::from_utf8_lossy(&commit.stderr).trim().to_string(),
+            ));
+        }
+        Ok(true)
+    }
+
+    /// Files changed on a worktree's branch since `base_branch` (as
+    /// `M path` lines) with total lines added and removed. Commit pending
+    /// work first to include it.
+    pub fn branch_summary(
+        &self,
+        worktree_path: &Path,
+        base_branch: &str,
+    ) -> (Vec<String>, usize, usize) {
+        let range = format!("{base_branch}...HEAD");
+        let run = |args: &[&str]| {
+            Command::new("git")
+                .args(args)
+                .current_dir(worktree_path)
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+                .unwrap_or_default()
+        };
+        let files = run(&["diff", "--name-status", &range])
+            .lines()
+            .filter_map(|l| {
+                let (status, path) = l.split_once('\t')?;
+                let path = path.rsplit('\t').next().unwrap_or(path);
+                Some(format!("{} {path}", status.chars().next().unwrap_or('M')))
+            })
+            .collect();
+        let (mut added, mut removed) = (0, 0);
+        for l in run(&["diff", "--numstat", &range]).lines() {
+            let mut parts = l.split('\t');
+            added += parts
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(0);
+            removed += parts
+                .next()
+                .and_then(|n| n.parse::<usize>().ok())
+                .unwrap_or(0);
+        }
+        (files, added, removed)
+    }
+
+    /// Full diff of a worktree's branch since `base_branch`.
+    pub fn branch_diff(&self, worktree_path: &Path, base_branch: &str) -> String {
+        Command::new("git")
+            .args(["diff", &format!("{base_branch}...HEAD")])
+            .current_dir(worktree_path)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).to_string())
+            .unwrap_or_default()
+    }
+
+    /// Merge a session's branch into whatever is checked out in the main
+    /// repo. A conflicting merge is aborted and reported; the branch stays.
+    pub fn merge_into_current(&self, session_id: &str, message: &str) -> Result<(), WorktreeError> {
+        let branch_name = format!("dcode-ai/{session_id}");
+        let output = Command::new("git")
+            .args(["merge", "--no-ff", "--no-edit", "-m", message, &branch_name])
+            .current_dir(&self.repo_root)
+            .output()
+            .map_err(|e| WorktreeError::Io(e.to_string()))?;
+        if output.status.success() {
+            return Ok(());
+        }
+        let mut why = format!(
+            "{} — branch {branch_name} kept",
+            String::from_utf8_lossy(&output.stderr)
+                .lines()
+                .filter(|l| !l.starts_with("Merge with strategy") && *l != "Aborting")
+                .collect::<Vec<_>>()
+                .join(" ")
+                .trim()
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        if stdout.contains("CONFLICT") {
+            let _ = Command::new("git")
+                .args(["merge", "--abort"])
+                .current_dir(&self.repo_root)
+                .output();
+            why = format!(
+                "the changes conflict with {}; merge aborted, branch {branch_name} kept",
+                stdout
+                    .lines()
+                    .filter_map(|l| l.rsplit(" in ").next().filter(|_| l.contains("CONFLICT")))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+        Err(WorktreeError::GitFailed(why))
     }
 
     /// Prune stale worktrees that no longer have active sessions.
