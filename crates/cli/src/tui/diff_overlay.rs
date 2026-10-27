@@ -310,6 +310,14 @@ pub(crate) fn run_diff_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyhow::R
                     _ => {}
                 },
                 Event::Key(key) if !matches!(key.kind, KeyEventKind::Release) => {
+                    // Your `/keymap` remaps apply here too.
+                    let Some(key) = (if g.key_bindings.is_empty() {
+                        Some(key)
+                    } else {
+                        crate::tui::keymap::translate_key(key, &g.key_bindings)
+                    }) else {
+                        continue;
+                    };
                     status = None;
                     let plain = !key.modifiers.contains(KeyModifiers::CONTROL);
                     match key.code {

@@ -325,6 +325,14 @@ impl SessionRuntime {
         self.supervisor.goal_cell()
     }
 
+    pub fn usage_breakdown(&self) -> (u64, u64, u64, u64, f64) {
+        self.supervisor.usage_breakdown()
+    }
+
+    pub fn tokens_processed(&self) -> u64 {
+        self.supervisor.tokens_processed()
+    }
+
     pub fn tokens_used(&self) -> u64 {
         self.supervisor.tokens_used()
     }

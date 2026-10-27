@@ -128,7 +128,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/side" => "start an ephemeral side conversation (/side end to return)",
         "/btw" => "ask a quick side question without adding it to the conversation",
         "/terminal-setup" => "make Shift+Enter insert a newline in this terminal",
-        "/browser" => "the agent's web browser: status, open [url], connect <port>, close",
+        "/browser" => {
+            "the agent's web browser: status, open [url], connect <port>, save [name] (recorded steps), close"
+        }
         "/project-config" => {
             "shared project settings (.dcode.toml): save the model or mode for the team"
         }

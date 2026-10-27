@@ -733,11 +733,143 @@ pub async fn run_action(input: &Value, workspace_root: &Path) -> Result<String, 
         }
         return Ok(out);
     }
+    if action == "replay" {
+        return replay(input, page, workspace_root).await;
+    }
+    if action == "steps" {
+        let steps = recorded_steps();
+        return Ok(if steps.is_empty() {
+            "No browser steps recorded yet.".into()
+        } else {
+            serde_json::to_string_pretty(&steps).unwrap_or_default()
+        });
+    }
+    // Clicks and typing are recorded by what the element is, not its number
+    // (numbers change between page loads), so a replay finds it again.
+    let target = if matches!(action, "click" | "type" | "fill") {
+        match input["ref"].as_u64() {
+            Some(r) => describe(page, r).await,
+            None => None,
+        }
+    } else {
+        None
+    };
     let result = run_page_action(action, input, page, workspace_root).await;
+    if result.is_ok() {
+        record(action, input, target);
+    }
     match (note, result) {
         (Some(n), Ok(text)) => Ok(format!("{n}\n\n{text}")),
         (_, r) => r,
     }
+}
+
+/// Browser actions done this session, for `steps` and `/browser save`.
+fn recording() -> &'static std::sync::Mutex<Vec<Value>> {
+    static STEPS: OnceLock<std::sync::Mutex<Vec<Value>>> = OnceLock::new();
+    STEPS.get_or_init(Default::default)
+}
+
+/// The steps recorded so far.
+pub fn recorded_steps() -> Vec<Value> {
+    recording().lock().map(|s| s.clone()).unwrap_or_default()
+}
+
+/// Remember an action that changes the page (reads are not recorded).
+fn record(action: &str, input: &Value, target: Option<String>) {
+    let mut step = match action {
+        "navigate" | "open" | "goto" => json!({"action": "navigate", "url": input["url"]}),
+        "click" => json!({"action": "click"}),
+        "type" | "fill" => {
+            json!({"action": "type", "text": input["text"], "submit": input["submit"]})
+        }
+        "press" | "key" => json!({"action": "press", "key": input["key"]}),
+        "scroll" => json!({"action": "scroll", "direction": input["direction"]}),
+        "back" => json!({"action": "back"}),
+        "wait_for" => json!({"action": "wait_for", "text": input["text"], "gone": input["gone"]}),
+        _ => return,
+    };
+    if let Some(t) = target {
+        step["target"] = json!(t);
+    }
+    if let Ok(mut s) = recording().lock() {
+        s.push(step);
+    }
+}
+
+/// `role "name"` of element `r`, as the snapshot lists it.
+async fn describe(page: &Page, r: u64) -> Option<String> {
+    let js = format!(
+        r#"(() => {{ const el = document.querySelector('[data-dcode-ref="{r}"]');
+  if (!el) return null;
+  const tag = el.tagName.toLowerCase();
+  const role = el.getAttribute('role') || (tag === 'a' ? 'link' : tag);
+  const name = (el.getAttribute('aria-label') || el.innerText || el.placeholder || el.title || el.getAttribute('name') || el.alt || '')
+    .replace(/\s+/g, ' ').trim().slice(0, 80);
+  return name ? `${{role}} "${{name}}"` : role; }})()"#
+    );
+    page.eval(&js).await.ok()?.as_str().map(str::to_string)
+}
+
+/// The current number of the element described as `target` (`role "name"`).
+async fn find_ref(page: &Page, target: &str) -> Result<u64, String> {
+    let js = SNAPSHOT_JS
+        .replace("MAX", &MAX_ELEMENTS.to_string())
+        .replace("TEXT", "0");
+    let raw = page.eval(&js).await?;
+    let v: Value = serde_json::from_str(raw.as_str().unwrap_or("{}")).map_err(|e| e.to_string())?;
+    v["elements"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .find_map(|line| {
+            let (num, rest) = line.strip_prefix('[')?.split_once("] ")?;
+            rest.starts_with(target).then(|| num.parse().ok()).flatten()
+        })
+        .ok_or_else(|| format!("could not find {target} on the page"))
+}
+
+/// Run saved steps (`/browser save`) again, one by one.
+async fn replay(input: &Value, page: &Page, workspace_root: &Path) -> Result<String, String> {
+    let file = input["file"].as_str().ok_or("replay needs `file`")?;
+    let path = workspace_root.join(file);
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let steps: Vec<Value> = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let mut log = Vec::new();
+    for (i, step) in steps.iter().enumerate() {
+        let mut step = step.clone();
+        let action = step["action"].as_str().unwrap_or("").to_string();
+        if let Some(target) = step["target"].as_str() {
+            match find_ref(page, target).await {
+                Ok(r) => step["ref"] = json!(r),
+                Err(e) => return Err(format!("step {}: {e}\n{}", i + 1, log.join("\n"))),
+            }
+        }
+        match run_page_action(&action, &step, page, workspace_root).await {
+            Ok(_) => log.push(format!(
+                "✓ {} {action}{}",
+                i + 1,
+                step["target"]
+                    .as_str()
+                    .map(|t| format!(" {t}"))
+                    .unwrap_or_default()
+            )),
+            Err(e) => {
+                return Err(format!(
+                    "step {} ({action}) failed: {e}\n{}",
+                    i + 1,
+                    log.join("\n")
+                ));
+            }
+        }
+    }
+    Ok(format!(
+        "Replayed {} steps.\n{}\n\n{}",
+        steps.len(),
+        log.join("\n"),
+        snapshot(page).await?
+    ))
 }
 
 /// `switch {tab}` and `new_tab {url}`.
@@ -879,6 +1011,31 @@ async fn run_page_action(
                 "Saved a screenshot to .dcode-ai/screenshots/{name}"
             ))
         }
+        "wait_for" | "wait" => {
+            let text = input["text"].as_str().ok_or("wait_for needs `text`")?;
+            let gone = input["gone"].as_bool().unwrap_or(false);
+            let timeout = input["timeout_ms"].as_u64().unwrap_or(10_000).min(60_000);
+            let probe = format!(
+                "(document.title + '\\n' + (document.body ? document.body.innerText : '')).includes({})",
+                serde_json::to_string(text).unwrap_or_default()
+            );
+            let start = std::time::Instant::now();
+            loop {
+                let there = page.eval(&probe).await?.as_bool().unwrap_or(false);
+                if there != gone {
+                    break;
+                }
+                if start.elapsed() >= Duration::from_millis(timeout) {
+                    return Err(format!(
+                        "after {}s the page {} {text:?}",
+                        timeout / 1000,
+                        if gone { "still shows" } else { "does not show" }
+                    ));
+                }
+                tokio::time::sleep(Duration::from_millis(250)).await;
+            }
+            snapshot(page).await
+        }
         "console" => {
             let lines = page.console_lines();
             if lines.is_empty() {
@@ -902,7 +1059,7 @@ async fn run_page_action(
             ))
         }
         other => Err(format!(
-            "unknown action `{other}` (navigate, snapshot, click, type, press, scroll, back, screenshot, console, eval, tabs, switch, new_tab)"
+            "unknown action `{other}` (navigate, snapshot, click, type, press, scroll, back, screenshot, console, eval, tabs, switch, new_tab, wait_for, steps, replay)"
         )),
     }
 }
@@ -937,7 +1094,9 @@ impl ToolExecutor for BrowserTool {
                 click {ref}; type {ref, text, submit?}; press {key} (Enter, Tab, Escape, \
                 ArrowDown…); scroll {direction: down|up}; back; screenshot (saves a PNG); \
                 console (log and errors); eval {expression} (run JavaScript); tabs (list open \
-                tabs); switch {tab}; new_tab {url}. navigate, click, press, scroll, back, switch \
+                tabs); switch {tab}; new_tab {url}; wait_for {text, gone?, timeout_ms?} (wait \
+                until text appears or disappears); steps (actions so far); replay {file} (run \
+                saved steps). navigate, click, press, scroll, back, switch \
                 and new_tab return the new snapshot. If the user opens a tab, the tool follows it. Element numbers change when the \
                 page changes — use the latest snapshot. Never type passwords: ask the user to \
                 sign in in the browser window."
@@ -947,9 +1106,12 @@ impl ToolExecutor for BrowserTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["navigate", "snapshot", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval", "tabs", "switch", "new_tab"]
+                        "enum": ["navigate", "snapshot", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval", "tabs", "switch", "new_tab", "wait_for", "steps", "replay"]
                     },
                     "tab": {"type": "integer", "description": "Tab number from `tabs` (for switch)"},
+                    "gone": {"type": "boolean", "description": "wait_for: wait until the text is gone"},
+                    "timeout_ms": {"type": "integer"},
+                    "file": {"type": "string", "description": "replay: steps file, e.g. .dcode-ai/browser-steps/login.json"},
                     "url": {"type": "string"},
                     "ref": {"type": "integer", "description": "Element number from the snapshot"},
                     "text": {"type": "string"},

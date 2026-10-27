@@ -239,6 +239,12 @@ fn repo_map_section(workspace_root: &Path) -> Option<String> {
     Some(section)
 }
 
+/// Characters of skill listings in the system prompt before the rest are
+/// listed by name only.
+const SKILLS_BUDGET: usize = 6_000;
+/// Longest description shown per skill.
+const SKILL_DESCRIPTION_CHARS: usize = 160;
+
 fn skills_section(
     workspace_root: &Path,
     skill_directories: &[std::path::PathBuf],
@@ -254,9 +260,19 @@ fn skills_section(
     }
 
     let mut section = String::from("Available Skills:\n");
+    let mut overflow: Vec<String> = Vec::new();
     for skill in skills {
-        section.push_str(&skill.manifest_summary());
+        // Sent with every request: one short line each, within a budget
+        // (Claude Code caps skill listings the same way); the rest by name.
+        if section.len() >= SKILLS_BUDGET {
+            overflow.push(format!("/{}", skill.command));
+            continue;
+        }
+        section.push_str(&skill.prompt_line(SKILL_DESCRIPTION_CHARS));
         section.push('\n');
+    }
+    if !overflow.is_empty() {
+        section.push_str(&format!("Also available: {}\n", overflow.join(", ")));
     }
     section.push_str(
         "\nUse the invoke_skill tool to load full instructions when a task matches a skill.",

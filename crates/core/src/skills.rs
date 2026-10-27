@@ -199,6 +199,34 @@ impl Skill {
         prompt
     }
 
+    /// One compact line for the system prompt: `- /name: description`, the
+    /// description cut to `max` chars, settings only when not the default.
+    pub fn prompt_line(&self, max: usize) -> String {
+        let description = self
+            .description
+            .as_deref()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        let description = if description.chars().count() > max {
+            format!(
+                "{}…",
+                description.chars().take(max).collect::<String>().trim_end()
+            )
+        } else {
+            description
+        };
+        let mut line = format!("- /{}: {description}", self.command);
+        if self.source == SkillSource::AgentsMd {
+            line.push_str(" [AGENTS.md]");
+        }
+        if let Some(model) = self.model.as_deref() {
+            line.push_str(&format!(" (model {model})"));
+        }
+        line
+    }
+
     pub fn manifest_summary(&self) -> String {
         let description = self
             .description

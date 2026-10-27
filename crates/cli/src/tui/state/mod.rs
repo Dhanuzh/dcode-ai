@@ -195,6 +195,8 @@ impl TuiSessionState {
             paste_counter: 0,
             mouse_capture_on: true,
             notifications_enabled: true,
+            working_style: "bar".into(),
+            shimmer: true,
             backtrack_open: false,
             backtrack_index: 0,
             theme_picker_open: false,

@@ -1277,6 +1277,8 @@ impl Repl {
         if let Ok(mut g) = tui_state.lock() {
             g.mouse_capture_on = effective_mouse_capture;
             g.notifications_enabled = self.runtime.config().ui.notifications;
+            g.working_style = self.runtime.config().ui.working_style.clone();
+            g.shimmer = self.runtime.config().ui.shimmer;
             g.mcp_server_count = self
                 .runtime
                 .config()
@@ -2425,7 +2427,7 @@ impl Repl {
                     };
                     let before = git_change_snapshot(self.runtime.workspace_root());
                     let turn_started = std::time::Instant::now();
-                    let tokens_at_start = self.runtime.tokens_used();
+                    let tokens_at_start = self.runtime.tokens_processed();
                     let turn = if attachments.is_empty() {
                         self.runtime.run_turn(&expanded).await
                     } else {
@@ -2477,7 +2479,10 @@ impl Repl {
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_busy(false);
                         let shells = g.background_shells.len();
-                        let tokens = self.runtime.tokens_used().saturating_sub(tokens_at_start);
+                        let tokens = self
+                            .runtime
+                            .tokens_processed()
+                            .saturating_sub(tokens_at_start);
                         if let Some(line) =
                             crate::tui::turn_summary(turn_started.elapsed(), shells, tokens)
                         {

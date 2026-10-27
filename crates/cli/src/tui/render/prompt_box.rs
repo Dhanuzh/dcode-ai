@@ -406,8 +406,21 @@ fn approval_box(g: &TuiSessionState, req: &ApprovalRequest, inner_w: usize) -> P
         };
     }
 
-    let diff = approval_diff_preview(&req.tool, &req.input, inner_w.saturating_sub(2));
-    if !diff.is_empty() {
+    let numbered = crate::tui::render::tool_detail::approval_numbered_diff(
+        &req.tool,
+        &req.input,
+        &g.workspace_root,
+        inner_w.saturating_sub(1),
+        16,
+    );
+    let diff = if numbered.is_some() {
+        Vec::new()
+    } else {
+        approval_diff_preview(&req.tool, &req.input, inner_w.saturating_sub(2))
+    };
+    if let Some(lines_with_numbers) = numbered {
+        lines.extend(lines_with_numbers);
+    } else if !diff.is_empty() {
         for l in diff {
             let mut spans = vec![Span::raw(" ")];
             spans.extend(l.spans);
@@ -583,6 +596,33 @@ mod tests {
         assert!(t.contains("Do you want to make this edit to a.txt?"), "{t}");
         assert!(t.contains("❯ 1. Yes"), "{t}");
         assert!(t.contains("3. No, and tell dcode-ai what to do differently (esc)"));
+    }
+
+    #[test]
+    fn edit_approval_shows_real_line_numbers() {
+        let dir = tempfile::tempdir().unwrap();
+        let body: String = (1..=20).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("a.txt"), body).unwrap();
+        let mut g = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "Default".into(),
+            dir.path().to_path_buf(),
+            false,
+        );
+        g.active_approval = Some(ApprovalRequest {
+            call_id: "c1".into(),
+            tool: "edit_file".into(),
+            description: String::new(),
+            input: r#"{"path":"a.txt","old_string":"line 15\n","new_string":"line FIFTEEN\n"}"#
+                .into(),
+        });
+        let t = text(&active_prompt_box(&g, 80).expect("prompt"));
+        assert!(t.contains("a.txt  +1 −1"), "{t}");
+        assert!(t.contains("   15       - line 15"), "{t}");
+        assert!(t.contains("         15 + line FIFTEEN"), "{t}");
+        assert!(t.contains("Do you want to make this edit to a.txt?"), "{t}");
     }
 
     #[test]

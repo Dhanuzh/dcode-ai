@@ -481,10 +481,13 @@ impl Repl {
                         let now = chrono::Utc::now();
                         let mut rows = Vec::new();
                         let (snapshots, _) = store.load_snapshots(ids.clone()).await;
+                        // Forks and sub-agent sessions are listed under their
+                        // parent (a tree), the parent's position deciding order.
+                        let mut children: std::collections::HashMap<String, Vec<DatedEntry>> =
+                            Default::default();
                         for snap in snapshots {
-                            // Sub-agent sessions live under their parent; the
-                            // session you are in is not one to resume.
-                            if snap.parent_session_id.is_some() || snap.id == current {
+                            // The session you are in is not one to resume.
+                            if snap.id == current {
                                 continue;
                             }
                             let first = session_first_prompt(&sessions_dir, &snap.id);
@@ -506,22 +509,36 @@ impl Repl {
                             );
                             let preview = session_event_preview(&sessions_dir, &snap.id, 3)
                                 .unwrap_or_default();
-                            rows.push((
-                                Some(snap.updated_at),
-                                SessionPickerEntry {
-                                    id: snap.id.clone(),
-                                    label: title,
-                                    meta,
-                                    search_text,
-                                    content: String::new(),
-                                    preview,
-                                },
-                            ));
+                            let entry = SessionPickerEntry {
+                                id: snap.id.clone(),
+                                label: title,
+                                meta,
+                                search_text,
+                                content: String::new(),
+                                preview,
+                            };
+                            match &snap.parent_session_id {
+                                Some(parent) => children
+                                    .entry(parent.clone())
+                                    .or_default()
+                                    .push((Some(snap.updated_at), entry)),
+                                None => rows.push((Some(snap.updated_at), entry)),
+                            }
                         }
-                        // Newest first.
+                        // Newest first; each session's forks and sub-agents
+                        // right below it, indented.
                         rows.sort_by_key(|r| std::cmp::Reverse(r.0));
-                        let entries: Vec<SessionPickerEntry> =
-                            rows.into_iter().map(|(_, e)| e).collect();
+                        let mut entries: Vec<SessionPickerEntry> = Vec::new();
+                        for (_, parent) in rows {
+                            let kids = children.remove(&parent.id).unwrap_or_default();
+                            entries.push(parent);
+                            entries.extend(nest_children(kids));
+                        }
+                        // Children whose parent is gone (or is this session)
+                        // still show, at the end.
+                        for (_, kids) in children {
+                            entries.extend(nest_children(kids));
+                        }
                         if let Ok(mut g) = st.lock() {
                             if entries.is_empty() {
                                 g.push_block(DisplayBlock::System(
@@ -963,4 +980,19 @@ fn session_search_text(messages: &[dcode_ai_common::message::Message]) -> String
         }
     }
     out
+}
+
+/// A picker row with the time its session was last updated.
+type DatedEntry = (Option<chrono::DateTime<chrono::Utc>>, SessionPickerEntry);
+
+/// Child sessions (forks, sub-agents) as indented picker rows, newest first.
+fn nest_children(mut kids: Vec<DatedEntry>) -> Vec<SessionPickerEntry> {
+    kids.sort_by_key(|k| std::cmp::Reverse(k.0));
+    kids.into_iter()
+        .map(|(_, mut e)| {
+            e.label = format!("  ↳ {}", e.label);
+            e.meta = format!("  {}", e.meta);
+            e
+        })
+        .collect()
 }

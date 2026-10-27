@@ -196,6 +196,8 @@ impl Supervisor {
         } else {
             ToolRegistry::with_default_full_tools(workspace_root.clone(), config.web.clone())
         };
+        // Rarely used tools load on demand: fewer schema tokens per request.
+        tools.defer_rarely_used();
         // Cross-session memory: the agent saves durable notes with this tool;
         // resolve_memory_path + the system-prompt section below recall them.
         tools.register(Box::new(
@@ -649,8 +651,28 @@ impl Supervisor {
     }
 
     /// Input + output tokens this session has used.
+    /// `(fresh input, output, cache reads, cache writes, estimated $)` for
+    /// the session so far.
+    pub fn usage_breakdown(&self) -> (u64, u64, u64, u64, f64) {
+        let c = &self.agent.cost_tracker;
+        (
+            c.input_tokens,
+            c.output_tokens,
+            c.cache_read_tokens,
+            c.cache_creation_tokens,
+            c.estimated_cost_usd(),
+        )
+    }
+
     pub fn tokens_used(&self) -> u64 {
         self.agent.cost_tracker.input_tokens + self.agent.cost_tracker.output_tokens
+    }
+
+    /// Every token the model processed: fresh and cached input (reads and
+    /// writes) plus output — what a turn really costs.
+    pub fn tokens_processed(&self) -> u64 {
+        let c = &self.agent.cost_tracker;
+        c.input_tokens + c.output_tokens + c.cache_read_tokens + c.cache_creation_tokens
     }
 
     /// Add tools from MCP servers that finished connecting after startup.
@@ -733,6 +755,20 @@ impl Supervisor {
 
         // Check context before running turn
         self.maybe_compact_context().await;
+
+        // Save after every tool step of this turn, not only at its end, so
+        // a crash or a closed terminal mid-turn loses nothing.
+        let store = self.session_store.clone();
+        let mut template = self.current_session_state(Utc::now());
+        template.messages.clear();
+        self.agent.checkpoint = Some(Arc::new(move |messages| {
+            let mut state = template.clone();
+            state.messages = messages.to_vec();
+            state.meta.updated_at = Utc::now();
+            if let Err(e) = store.save_sync(&state) {
+                tracing::warn!("session checkpoint failed: {e}");
+            }
+        }));
 
         let mut output = self
             .agent
@@ -1146,14 +1182,9 @@ impl Supervisor {
 
     /// Use AI to generate a summary of the conversation.
     async fn summarize_with_ai(&self, prompt: &str) -> Result<String, String> {
-        // `[model] compact_model` routes summaries to a cheaper model.
-        let summary_model = self
-            .config
-            .model
-            .compact_model
-            .as_deref()
-            .map(|m| self.config.model.resolve_alias(m))
-            .unwrap_or_else(|| self.model.clone());
+        // Summaries go to a cheap model: `[model] compact_model`, else Haiku
+        // on Claude, else the session's model.
+        let summary_model = utility_model(&self.config).unwrap_or_else(|| self.model.clone());
         self.complete_with_model(&summary_model, prompt).await
     }
 

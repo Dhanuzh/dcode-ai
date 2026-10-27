@@ -16,6 +16,7 @@ fn migrate_session_value(_value: &mut serde_json::Value, from_version: u32) {
 }
 
 /// Persists and loads session state to/from disk.
+#[derive(Clone)]
 pub struct SessionStore {
     sessions_dir: PathBuf,
 }
@@ -63,6 +64,26 @@ impl SessionStore {
             .map_err(|e| SessionStoreError::Io(e.to_string()))?;
 
         Ok(())
+    }
+
+    /// [`Self::save`] without async: used for the per-step checkpoint, which
+    /// must land before the next one (atomic temp file + rename).
+    pub fn save_sync(&self, session: &SessionState) -> Result<(), SessionStoreError> {
+        let path = self.sessions_dir.join(format!("{}.json", session.meta.id));
+        let tmp_path = self
+            .sessions_dir
+            .join(format!("{}.json.tmp", session.meta.id));
+        let mut value = serde_json::to_value(session)
+            .map_err(|e| SessionStoreError::Serialize(e.to_string()))?;
+        if let Some(obj) = value.as_object_mut() {
+            obj.insert("schema_version".into(), SESSION_SCHEMA_VERSION.into());
+        }
+        let json =
+            serde_json::to_vec(&value).map_err(|e| SessionStoreError::Serialize(e.to_string()))?;
+        std::fs::create_dir_all(&self.sessions_dir)
+            .map_err(|e| SessionStoreError::Io(e.to_string()))?;
+        std::fs::write(&tmp_path, &json).map_err(|e| SessionStoreError::Io(e.to_string()))?;
+        std::fs::rename(&tmp_path, &path).map_err(|e| SessionStoreError::Io(e.to_string()))
     }
 
     pub async fn load(&self, session_id: &str) -> Result<SessionState, SessionStoreError> {

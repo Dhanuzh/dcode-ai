@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.26 — 2026-10-28
+
+### Uses less of your plan
+- **System prompt halved**: the list of installed skills took 15k of its
+  20k characters on every request. Each skill is now one short line within
+  a budget (the rest listed by name) — about 2.4k fewer tokens per request.
+- **Rarely used tools load on demand** (browser, notebooks, binary
+  inspection, copy / move / rename, symbol queries), like MCP tools.
+- **Compaction starts at 70%** and runs on a cheap model (Haiku on Claude,
+  or `[model] compact_model`); summaries keep the files that were touched.
+- **`/usage` shows where tokens go**: fresh input, cache reads, cache
+  writes, output, the cache hit rate and how often the Claude process
+  restarted. The turn line now counts every token processed.
+
+### New
+- **Crash-safe sessions**: the session is saved after every step of a turn,
+  so a crash or a closed terminal loses nothing.
+- **Browser**: `wait_for` text to appear or go away; every click and typed
+  value is recorded — `/browser save [name]` stores the steps and the agent
+  can `replay` them later; screenshots are shown to models that can see
+  images (API backend, Copilot).
+- **Approvals show a line-numbered diff** of the real file for edits.
+- **`/resume` shows a tree**: forks and sub-agent sessions under their parent.
+- **Working line options**: `[ui] working_style = "bar" | "dots" | "plain"`
+  and `[ui] shimmer = false`.
+- `/keymap` remaps also apply in the full-screen diff view.
+
 ## 1.0.25 — 2026-10-27
 
 ### Changed

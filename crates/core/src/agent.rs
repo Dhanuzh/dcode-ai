@@ -24,6 +24,9 @@ use crate::undo::UndoManager;
 /// Messages the user sent while a turn runs. The agent adds them to the
 /// conversation at its next step (after tool results, or before it would end
 /// the turn), so the model sees them without waiting for the turn to finish.
+/// Saves the conversation mid-turn (see [`AgentLoop::checkpoint`]).
+pub type Checkpoint = Arc<dyn Fn(&[Message]) + Send + Sync>;
+
 pub type SteerInbox = Arc<std::sync::Mutex<Vec<String>>>;
 
 /// Drives the multi-turn conversation and tool-use loop.
@@ -40,6 +43,9 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     steer: SteerInbox,
+    /// Called with the conversation after every tool step, so a crash or a
+    /// closed terminal mid-turn loses nothing (the session saves itself).
+    pub checkpoint: Option<Checkpoint>,
     /// Cheap model for small side questions (auto mode's command check);
     /// `None` uses the session's model.
     pub utility_model: Option<String>,
@@ -85,6 +91,7 @@ impl AgentLoop {
             steer: SteerInbox::default(),
             nested_instructions: Default::default(),
             utility_model: None,
+            checkpoint: None,
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
@@ -925,7 +932,16 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 last_failed_tool.clear();
             }
 
+            let sees_images = self.provider.capabilities().supports_native_images;
+            let mut screenshots: Vec<String> = Vec::new();
             for mut result in final_results {
+                // A browser screenshot: let a model that can see images see it.
+                if sees_images
+                    && result.success
+                    && let Some(path) = result.output.strip_prefix("Saved a screenshot to ")
+                {
+                    screenshots.push(path.trim().to_string());
+                }
                 let mut content = format_tool_result(&result);
                 // First touch of a subfolder brings its AGENTS.md / CLAUDE.md.
                 if result.success
@@ -956,6 +972,22 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                     output: result,
                 })
                 .await;
+            }
+
+            for path in screenshots {
+                self.messages.push(Message::user_with_parts(vec![
+                    dcode_ai_common::message::ContentPart::Text {
+                        text: "The browser screenshot you just took:".into(),
+                    },
+                    dcode_ai_common::message::ContentPart::Image {
+                        media_type: "image/png".into(),
+                        path,
+                    },
+                ]));
+            }
+
+            if let Some(save) = &self.checkpoint {
+                save(&self.messages);
             }
 
             if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
@@ -1827,6 +1859,54 @@ mod tests {
         async fn resolve(&self, _call: &ToolCall, _description: &str) -> ApprovalVerdict {
             ApprovalVerdict::Denied
         }
+    }
+
+    /// The session is saved after each tool step, mid-turn.
+    #[tokio::test]
+    async fn checkpoint_runs_after_each_tool_step() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root =
+            dcode_ai_common::config::canonicalize_simplified(temp.path()).expect("canonical");
+        std::fs::write(root.join("a.txt"), "hi").unwrap();
+        let read = |id: &str| {
+            StreamChunk::ToolUse(ToolCall {
+                id: id.into(),
+                name: "read_file".into(),
+                input: serde_json::json!({"path": "a.txt"}),
+            })
+        };
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(VecDeque::from([
+                vec![read("r1"), StreamChunk::Done],
+                vec![read("r2"), StreamChunk::Done],
+                vec![StreamChunk::TextDelta("done".into()), StreamChunk::Done],
+            ])),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(crate::tools::filesystem::ReadFileTool::new(
+            root.clone(),
+        )));
+        let (event_tx, _rx) = tokio::sync::mpsc::channel(256);
+        let mut agent = AgentLoop::new(
+            provider,
+            tools,
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "test-model".into(),
+            event_tx,
+            3,
+            3,
+            0,
+            None,
+        );
+        let saved: Arc<std::sync::Mutex<Vec<usize>>> = Default::default();
+        let log = saved.clone();
+        agent.checkpoint = Some(Arc::new(move |m: &[Message]| {
+            log.lock().unwrap().push(m.len());
+        }));
+        agent.run_turn("go", &root, &[]).await.expect("turn");
+        let sizes = saved.lock().unwrap().clone();
+        assert_eq!(sizes.len(), 2, "one save per tool step: {sizes:?}");
+        assert!(sizes[1] > sizes[0]);
     }
 
     /// A write followed by a read of the same file in one batch runs in

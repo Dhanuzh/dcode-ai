@@ -347,28 +347,49 @@ impl Repl {
                 let model = self.runtime.model().to_string();
                 let window =
                     dcode_ai_runtime::model_limits::effective_context_window(&model) as u64;
-                let (tin, tout, cost, ctx) = if let ReplOutput::Tui(st) = &out {
-                    st.lock()
-                        .ok()
-                        .map(|g| {
-                            (
-                                g.input_tokens,
-                                g.output_tokens,
-                                g.cost_usd,
-                                g.context_tokens,
-                            )
-                        })
-                        .unwrap_or((0, 0, 0.0, 0))
-                } else {
-                    (0, 0, 0.0, 0)
+                let ctx = match &out {
+                    ReplOutput::Tui(st) => st.lock().map(|g| g.context_tokens).unwrap_or(0),
+                    _ => 0,
                 };
+                let (fresh, output, cache_read, cache_write, est) = self.runtime.usage_breakdown();
                 let mut lines = vec![
-                    format!("Model:    {model}"),
-                    format!("Input:    {} tokens", fmt_count(tin)),
-                    format!("Output:   {} tokens", fmt_count(tout)),
-                    format!("Total:    {} tokens", fmt_count(tin + tout)),
-                    format!("Cost:     ${cost:.4}"),
+                    format!("Model:        {model}"),
+                    String::new(),
+                    "Where this session's tokens went:".into(),
+                    format!("  fresh input   {:>9}  full price", fmt_count(fresh)),
+                    format!(
+                        "  cache reads   {:>9}  ~10% of input price",
+                        fmt_count(cache_read)
+                    ),
+                    format!(
+                        "  cache writes  {:>9}  ~125–200% of input price",
+                        fmt_count(cache_write)
+                    ),
+                    format!("  output        {:>9}  ~5× input price", fmt_count(output)),
+                    format!("  estimated     ${est:.4} at API list prices"),
                 ];
+                if let Some(hit) = (cache_read * 100).checked_div(fresh + cache_read + cache_write)
+                {
+                    lines.push(format!(
+                        "  cache hit     {hit:>8}%  of input came from the cache"
+                    ));
+                }
+                let starts = dcode_ai_core::provider::claude_code::SESSION_STARTS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                let one_shots = dcode_ai_core::provider::claude_code::ONE_SHOTS
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                if starts + one_shots > 0 {
+                    lines.push(String::new());
+                    lines.push(format!(
+                        "Claude Code: {starts} conversation process{} started ({} restart{}), {one_shots} one-off call{}",
+                        if starts == 1 { "" } else { "es" },
+                        starts.saturating_sub(1),
+                        if starts == 2 { "" } else { "s" },
+                        if one_shots == 1 { "" } else { "s" },
+                    ));
+                    lines.push("  every restart re-sends the conversation as cache writes".into());
+                }
+                lines.push(String::new());
                 if window > 0 {
                     let pct = ((ctx.min(window) as f64 / window as f64) * 100.0).round() as u64;
                     let filled = ((pct as usize * 16) / 100).min(16);

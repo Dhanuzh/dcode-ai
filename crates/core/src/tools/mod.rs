@@ -73,12 +73,36 @@ impl ToolRegistry {
         }
         self.deferred.extend(defs.iter().map(|d| d.name.clone()));
         let n = defs.len();
+        // One search covers everything deferred so far (built-ins and MCP).
+        let all: Vec<ToolDefinition> = self
+            .tools
+            .iter()
+            .map(|t| t.definition())
+            .filter(|d| self.deferred.contains(&d.name))
+            .collect();
         self.tools.retain(|t| t.definition().name != "tool_search");
         self.register(Box::new(tool_search::ToolSearchTool::new(
-            defs,
+            all,
             self.activated.clone(),
         )));
         n
+    }
+
+    /// Built-in tools used rarely enough to load only on demand: their
+    /// schemas would otherwise be sent with every request.
+    pub const RARELY_USED: [&'static str; 7] = [
+        "browser",
+        "notebook_edit",
+        "inspect_binary",
+        "copy_path",
+        "move_path",
+        "rename_path",
+        "query_symbols",
+    ];
+
+    /// Defer [`Self::RARELY_USED`] behind `tool_search`.
+    pub fn defer_rarely_used(&mut self) -> usize {
+        self.defer_behind_search(|name| Self::RARELY_USED.contains(&name))
     }
 
     pub fn register(&mut self, tool: Box<dyn ToolExecutor>) {

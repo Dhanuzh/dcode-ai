@@ -455,6 +455,10 @@ pub struct TuiSessionState {
     pub mouse_capture_on: bool,
     /// Desktop notifications (OSC 9 + bell) on turn-done/approval while unfocused.
     pub notifications_enabled: bool,
+    /// `[ui] working_style`: `bar`, `dots` or `plain`.
+    pub working_style: String,
+    /// `[ui] shimmer`.
+    pub shimmer: bool,
     /// Backtrack picker (Esc while idle): pick a past user message, edit it,
     /// and rewind the conversation to just before it.
     pub backtrack_open: bool,

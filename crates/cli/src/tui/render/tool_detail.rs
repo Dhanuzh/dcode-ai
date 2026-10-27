@@ -171,6 +171,98 @@ pub(crate) fn diff_change_counts(diff: &str) -> (usize, usize) {
 
 /// Build a compact colorized diff preview for file-write/edit tool approvals.
 /// Returns up to ~6 colored `Line`s showing +/- changes, or empty if not applicable.
+/// The proposed edit as a diff of the real file, with old/new line numbers
+/// (like the full-screen diff view). `None` when it can't be worked out
+/// (file missing, text not found, not an edit) — the plain preview is used.
+pub(crate) fn approval_numbered_diff(
+    tool: &str,
+    input_json: &str,
+    workspace_root: &std::path::Path,
+    width: usize,
+    max_lines: usize,
+) -> Option<Vec<Line<'static>>> {
+    let val: serde_json::Value = serde_json::from_str(input_json).ok()?;
+    let path = val
+        .get("path")
+        .or_else(|| val.get("file_path"))
+        .and_then(|v| v.as_str())?;
+    let full = workspace_root.join(path);
+    let old = std::fs::read_to_string(&full).ok();
+    let new = match tool {
+        "write_file" => val.get("content")?.as_str()?.to_string(),
+        "edit_file" | "replace_match" => {
+            let mut text = old.clone()?;
+            let edits: Vec<(String, String, bool)> =
+                match val.get("edits").and_then(|e| e.as_array()) {
+                    Some(list) => list
+                        .iter()
+                        .filter_map(|e| {
+                            Some((
+                                e.get("old_string")?.as_str()?.to_string(),
+                                e.get("new_string")?.as_str()?.to_string(),
+                                e.get("replace_all")
+                                    .and_then(|b| b.as_bool())
+                                    .unwrap_or(false),
+                            ))
+                        })
+                        .collect(),
+                    None => vec![(
+                        val.get("old_string")?.as_str()?.to_string(),
+                        val.get("new_string")?.as_str()?.to_string(),
+                        val.get("replace_all")
+                            .and_then(|b| b.as_bool())
+                            .unwrap_or(false),
+                    )],
+                };
+            for (from, to, all) in edits {
+                if from.is_empty() || !text.contains(&from) {
+                    return None;
+                }
+                text = if all {
+                    text.replace(&from, &to)
+                } else {
+                    text.replacen(&from, &to, 1)
+                };
+            }
+            text
+        }
+        _ => return None,
+    };
+    let old = old.unwrap_or_default();
+    let hunks = crate::tui::diff_hunk::parse_diff_hunks(&old, &new);
+    if hunks.is_empty() {
+        return None;
+    }
+    let (adds, dels) = hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .fold((0, 0), |(a, d), (s, _)| match s {
+            '+' => (a + 1, d),
+            '-' => (a, d + 1),
+            _ => (a, d),
+        });
+    let (body, _) = crate::tui::diff_overlay::diff_lines(&hunks, width);
+    let mut out = vec![Line::from(vec![
+        Span::styled(
+            truncate_chars(path, width.saturating_sub(16)),
+            Style::default()
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("  +{adds}"), Style::default().fg(theme::success())),
+        Span::styled(format!(" −{dels}"), Style::default().fg(theme::error())),
+    ])];
+    let total = body.len();
+    out.extend(body.into_iter().take(max_lines));
+    if total > max_lines {
+        out.push(Line::from(Span::styled(
+            format!("  … {} more lines (h reviews hunks)", total - max_lines),
+            Style::default().fg(theme::muted()),
+        )));
+    }
+    Some(out)
+}
+
 pub(crate) fn approval_diff_preview(
     tool: &str,
     input_json: &str,

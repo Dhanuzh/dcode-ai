@@ -24,6 +24,11 @@ fn working_bar(elapsed_ms: u128) -> String {
         .collect()
 }
 
+/// `●○○`, `○●○`, `○○●` — the `dots` working style.
+fn working_dots(elapsed_ms: u128) -> &'static str {
+    ["●○○", "○●○", "○○●", "○●○"][((elapsed_ms / 250) % 4) as usize]
+}
+
 /// What the agent is doing, in plain words: `thinking`, `writing`, or the
 /// running tool (`running bash`, `reading files`).
 fn working_label(g: &TuiSessionState) -> String {
@@ -86,11 +91,23 @@ pub(super) fn spinner_line(g: &TuiSessionState) -> Option<Line<'static>> {
     };
     let muted = Style::default().fg(theme::muted());
     let anim = now_ms as u128;
-    let mut spans = vec![
-        Span::styled(working_bar(anim), Style::default().fg(theme::accent())),
-        Span::raw(" "),
-    ];
-    spans.extend(shimmer(&working_label(g), anim));
+    let mut spans = match g.working_style.as_str() {
+        "plain" => vec![Span::styled("● ", Style::default().fg(theme::accent()))],
+        "dots" => vec![Span::styled(
+            format!("{} ", working_dots(anim)),
+            Style::default().fg(theme::accent()),
+        )],
+        _ => vec![
+            Span::styled(working_bar(anim), Style::default().fg(theme::accent())),
+            Span::raw(" "),
+        ],
+    };
+    let label = working_label(g);
+    if g.shimmer && g.working_style != "plain" {
+        spans.extend(shimmer(&label, anim));
+    } else {
+        spans.push(Span::styled(label, Style::default().fg(theme::accent())));
+    }
     let mut detail = format!(" · {took}");
     if g.turn_output_tokens > 0 {
         detail.push_str(&format!(

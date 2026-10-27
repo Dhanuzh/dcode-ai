@@ -59,6 +59,13 @@ pub struct ClaudeCodeProvider {
     session: Arc<tokio::sync::Mutex<Option<CcSession>>>,
 }
 
+/// `claude` processes started for conversations in this run (the first one
+/// and every restart; each restart re-sends the whole conversation).
+pub static SESSION_STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Short-lived `claude` processes for one-off calls (command checks,
+/// summaries, titles).
+pub static ONE_SHOTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 struct CcSession {
     child: Child,
     stdin: ChildStdin,
@@ -217,6 +224,7 @@ impl Provider for ClaudeCodeProvider {
                 )
                 .await?;
                 session.tools_sent = tool_hashes.clone();
+                SESSION_STARTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 (session, render_replay(conversation))
             }
         };
@@ -288,6 +296,7 @@ async fn one_shot(
             "nothing to send to Claude Code".into(),
         ));
     }
+    ONE_SHOTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut session = spawn_session(model, None, &system, 0, workspace_root).await?;
     let line = json!({
         "type": "user",

@@ -380,6 +380,17 @@ pub struct UiConfig {
     /// an approval is requested while the terminal is unfocused.
     #[serde(default = "default_notifications")]
     pub notifications: bool,
+    /// The "working…" line: `bar` (default), `dots` or `plain` (no animation).
+    #[serde(default = "default_working_style")]
+    pub working_style: String,
+    /// Sweep a highlight across the working label.
+    #[serde(default = "default_true")]
+    pub shimmer: bool,
+}
+
+/// Look of the "working…" line: `bar` (sweeping bar), `dots`, or `plain`.
+fn default_working_style() -> String {
+    "bar".into()
 }
 
 fn default_notifications() -> bool {
@@ -416,6 +427,8 @@ impl Default for UiConfig {
             statusline_command: None,
             keymap: BTreeMap::new(),
             notifications: default_notifications(),
+            working_style: default_working_style(),
+            shimmer: true,
         }
     }
 }
@@ -463,6 +476,12 @@ impl UiConfig {
         }
         if let Some(keymap) = partial.keymap {
             self.keymap = keymap;
+        }
+        if let Some(style) = partial.working_style {
+            self.working_style = style;
+        }
+        if let Some(shimmer) = partial.shimmer {
+            self.shimmer = shimmer;
         }
         if let Some(notifications) = partial.notifications {
             self.notifications = notifications;
@@ -1642,7 +1661,8 @@ impl Default for ContextConfig {
 }
 
 fn default_summarize_threshold() -> u8 {
-    75
+    // Compacting a little earlier keeps every later step cheaper.
+    70
 }
 
 fn default_max_retained_messages() -> usize {
@@ -1948,6 +1968,8 @@ struct PartialUiConfig {
     statusline_command: Option<String>,
     keymap: Option<BTreeMap<String, String>>,
     notifications: Option<bool>,
+    working_style: Option<String>,
+    shimmer: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

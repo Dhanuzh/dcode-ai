@@ -100,8 +100,35 @@ impl Repl {
                         None => Err("usage: /browser connect <port> — start your browser with --remote-debugging-port=<port>".into()),
                     },
                     Some("close") => browser::close().await,
+                    Some("save") => {
+                        let steps = browser::recorded_steps();
+                        let name = words
+                            .next()
+                            .map(|n| n.trim_end_matches(".json").to_string())
+                            .unwrap_or_else(|| chrono::Local::now().format("steps-%Y%m%d-%H%M%S").to_string());
+                        let rel = format!(".dcode-ai/browser-steps/{name}.json");
+                        let path = self.runtime.workspace_root().join(&rel);
+                        if steps.is_empty() {
+                            Err("no browser steps recorded yet".into())
+                        } else {
+                            std::fs::create_dir_all(path.parent().expect("has parent"))
+                                .and_then(|()| {
+                                    std::fs::write(
+                                        &path,
+                                        serde_json::to_string_pretty(&steps).unwrap_or_default(),
+                                    )
+                                })
+                                .map(|()| {
+                                    format!(
+                                        "saved {} step(s) to {rel} — ask the agent to replay it (browser action `replay`)",
+                                        steps.len()
+                                    )
+                                })
+                                .map_err(|e| e.to_string())
+                        }
+                    }
                     Some(other) => Err(format!(
-                        "unknown `/browser {other}` — /browser [status|open [url]|connect <port>|close]"
+                        "unknown `/browser {other}` — /browser [status|open [url]|connect <port>|save [name]|close]"
                     )),
                 };
                 match msg {

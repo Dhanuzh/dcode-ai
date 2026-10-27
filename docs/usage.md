@@ -86,7 +86,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/theme` | Theme picker with live preview |
 | `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
 | `/permissions` | List rules; `allow`/`ask`/`deny`/`remove <rule>` to edit them; `mode` for the mode picker |
-| `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use |
+| `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use (`/usage`: fresh input, cache reads / writes, output, cache hit rate, Claude process restarts) |
 | `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept); the footer warns from 80% full |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation (in git workspaces also files changed by shell commands) |
 | `/diff` | Full-screen diff of every changed file (↑↓ file · Tab · `n`/`p` hunk · `r r` revert hunk · `q` close); `/diff <args>` prints a git diff |
@@ -449,8 +449,12 @@ copy) and asks before removing them.
 The `browser` tool lets the agent use a real Chrome / Edge window: navigate,
 read the page (a text outline with numbered elements), click, type, press
 keys, scroll, go back, take a screenshot (`.dcode-ai/screenshots/`), read the
-console and run JavaScript, and work with tabs (`tabs`, `switch`,
-`new_tab`). When the tab it drives is closed or blank and you are on
+console and run JavaScript, work with tabs (`tabs`, `switch`, `new_tab`)
+and `wait_for` text to appear or disappear. Every page-changing action is
+recorded: `/browser save [name]` writes the steps to
+`.dcode-ai/browser-steps/<name>.json` and the agent can `replay` them (each
+element is found again by what it is, not its number). Screenshots are shown
+to models that can see images (API backend, Copilot). When the tab it drives is closed or blank and you are on
 another tab, it follows yours.
 
 Your everyday Chrome profile can't be driven: since Chrome 136 Chrome
@@ -469,4 +473,12 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 - Permissions: reading the page never asks; navigating, clicking and typing
   ask in default mode and run in accept-edits / auto mode; `eval` always
   asks. Password fields are never typed into.
+
+## Look of the working line
+
+```toml
+[ui]
+working_style = "bar"   # bar (default) · dots · plain (no animation)
+shimmer = true          # sweep a highlight across the label
+```
 

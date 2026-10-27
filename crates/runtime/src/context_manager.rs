@@ -398,7 +398,8 @@ The summary should:
 5. Be written so the assistant can continue without re-asking context
 
 Format requirements:
-- Use sections: Goals, Decisions, Important Artifacts, Open Work
+- Use sections: Goals, Decisions, Files (each path touched and what changed
+  or what it contains that matters), Important Artifacts, Open Work
 - Keep the summary under {} words
 - Prefer concise bullet points
 
@@ -831,6 +832,6 @@ mod tests {
         assert!(prompt.contains("Let's compact earlier history first."));
         assert!(prompt.contains("[1] User:"));
         assert!(prompt.contains("[2] Assistant:"));
-        assert!(prompt.contains("Goals, Decisions, Important Artifacts, Open Work"));
+        assert!(prompt.contains("Goals, Decisions, Files (each path touched"));
     }
 }
