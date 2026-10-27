@@ -449,7 +449,13 @@ copy) and asks before removing them.
 The `browser` tool lets the agent use a real Chrome / Edge window: navigate,
 read the page (a text outline with numbered elements), click, type, press
 keys, scroll, go back, take a screenshot (`.dcode-ai/screenshots/`), read the
-console and run JavaScript.
+console and run JavaScript, and work with tabs (`tabs`, `switch`,
+`new_tab`). When the tab it drives is closed or blank and you are on
+another tab, it follows yours.
+
+Your everyday Chrome profile can't be driven: since Chrome 136 Chrome
+ignores remote debugging on the default profile (protection against cookie
+theft). Sign in once in dcode-ai's browser instead — the logins stay.
 
 - The first use launches dcode-ai's own browser (separate profile in
   `~/.dcode-ai/browser-profile`, or `%LOCALAPPDATA%\dcode-ai` for the Windows

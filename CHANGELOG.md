@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.25 — 2026-10-27
+
+### Changed
+- **The browser follows your tabs**: if the tab dcode-ai drives is closed
+  or blank while you are on another tab, it moves to yours (and says so)
+  instead of reporting an empty page. New browser actions: `tabs` lists the
+  open tabs, `switch` moves to one, `new_tab` opens a page in a new tab.
+
 ## 1.0.24 — 2026-10-27
 
 ### New

@@ -42,3 +42,13 @@ over the Chrome DevTools Protocol (CDP).
 - `type` into a password field is refused: the user signs in themselves.
 - Page text, console output and eval results are tool output: secrets are
   redacted at the usual choke point.
+
+## Tabs (v1.0.25)
+
+The connection remembers its tab (CDP target id). Before each action, if
+that tab is gone or blank and another tab has content, it attaches to the
+most recent one (`/json/list` order) and notes the move in the result.
+`tabs` lists tabs; `switch {tab}` attaches to one and activates it;
+`new_tab {url}` opens one (`PUT /json/new`). The default Chrome profile
+can't be attached (Chrome 136+ ignores `--remote-debugging-port` there), so
+dcode-ai's own persistent profile is the way to stay signed in.

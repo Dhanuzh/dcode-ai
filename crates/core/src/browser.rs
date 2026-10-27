@@ -36,6 +36,8 @@ pub struct Page {
     console: Arc<std::sync::Mutex<VecDeque<String>>>,
     /// Debug port, for status and new tabs.
     pub port: u16,
+    /// The tab (CDP target) this connection drives.
+    pub target_id: String,
     alive: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -104,6 +106,7 @@ impl Page {
             next_id: AtomicU64::new(1),
             console,
             port,
+            target_id: ws_url.rsplit('/').next().unwrap_or_default().to_string(),
             alive,
         };
         for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {
@@ -370,8 +373,38 @@ pub async fn launch(port: u16, url: Option<&str>) -> Result<String, String> {
     ))
 }
 
-/// Attach to a page of the browser on `port` (opening one if none).
-pub async fn attach(port: u16) -> Result<Page, String> {
+/// One browser tab.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Tab {
+    pub id: String,
+    pub title: String,
+    pub url: String,
+    ws: String,
+}
+
+/// The browser's own pages (omnibox popup, devtools, settings).
+fn is_browser_ui(url: &str) -> bool {
+    [
+        "devtools://",
+        "chrome://",
+        "chrome-untrusted://",
+        "edge://",
+        "brave://",
+    ]
+    .iter()
+    .any(|s| url.starts_with(s))
+}
+
+/// A tab with nothing in it yet.
+fn is_blank(url: &str) -> bool {
+    url.is_empty()
+        || url == "about:blank"
+        || url.contains("://newtab")
+        || url.contains("new-tab-page")
+}
+
+/// Open tabs, most recently used first (the order the browser reports).
+pub async fn list_tabs(port: u16) -> Result<Vec<Tab>, String> {
     let list: Value = http()
         .get(format!("http://127.0.0.1:{port}/json/list"))
         .send()
@@ -380,57 +413,109 @@ pub async fn attach(port: u16) -> Result<Page, String> {
         .json()
         .await
         .map_err(|e| e.to_string())?;
-    let page_ws = list.as_array().and_then(|pages| {
-        pages
-            .iter()
-            .filter(|p| p["type"] == "page")
-            // Skip the browser's own UI pages (omnibox popup, devtools…).
-            .find(|p| {
-                let url = p["url"].as_str().unwrap_or("");
-                ![
-                    "devtools://",
-                    "chrome://",
-                    "chrome-untrusted://",
-                    "edge://",
-                    "brave://",
-                ]
-                .iter()
-                .any(|s| url.starts_with(s))
-            })
-            .and_then(|p| p["webSocketDebuggerUrl"].as_str().map(str::to_string))
-    });
-    let ws = match page_ws {
-        Some(ws) => ws,
-        None => {
-            let new: Value = http()
-                .put(format!("http://127.0.0.1:{port}/json/new?about:blank"))
-                .send()
-                .await
-                .map_err(|e| e.to_string())?
-                .json()
-                .await
-                .map_err(|e| e.to_string())?;
-            new["webSocketDebuggerUrl"]
-                .as_str()
-                .ok_or("the browser did not open a tab")?
-                .to_string()
-        }
-    };
-    Page::connect(&ws, port).await
+    Ok(tabs_from_list(&list))
 }
 
-/// The connected page, launching dcode-ai's browser first if needed.
-async fn ensure_page(slot: &mut Option<Page>) -> Result<&Page, String> {
+/// Tabs from the browser's `/json/list` answer.
+fn tabs_from_list(list: &Value) -> Vec<Tab> {
+    list.as_array()
+        .map(|pages| {
+            pages
+                .iter()
+                .filter(|p| p["type"] == "page")
+                .filter_map(|p| {
+                    let url = p["url"].as_str().unwrap_or("").to_string();
+                    // A new-tab page counts (it is where the user is); other
+                    // browser UI pages do not.
+                    if is_browser_ui(&url) && !is_blank(&url) {
+                        return None;
+                    }
+                    Some(Tab {
+                        id: p["id"].as_str()?.to_string(),
+                        title: p["title"].as_str().unwrap_or("").to_string(),
+                        url,
+                        ws: p["webSocketDebuggerUrl"].as_str()?.to_string(),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Connect to `tab` and bring it to the front.
+async fn attach_tab(port: u16, tab: &Tab) -> Result<Page, String> {
+    let _ = http()
+        .get(format!("http://127.0.0.1:{port}/json/activate/{}", tab.id))
+        .send()
+        .await;
+    Page::connect(&tab.ws, port).await
+}
+
+/// Open a new tab at `url` and connect to it.
+async fn open_tab(port: u16, url: &str) -> Result<Page, String> {
+    let new: Value = http()
+        .put(format!("http://127.0.0.1:{port}/json/new?{url}"))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let ws = new["webSocketDebuggerUrl"]
+        .as_str()
+        .ok_or("the browser did not open a tab")?;
+    Page::connect(ws, port).await
+}
+
+/// Attach to the browser on `port`: the most recent tab with something in
+/// it, else the most recent tab, else a new one.
+pub async fn attach(port: u16) -> Result<Page, String> {
+    let tabs = list_tabs(port).await?;
+    match tabs
+        .iter()
+        .find(|t| !is_blank(&t.url))
+        .or_else(|| tabs.first())
+    {
+        Some(tab) => Page::connect(&tab.ws, port).await,
+        None => open_tab(port, "about:blank").await,
+    }
+}
+
+/// The connected page, launching dcode-ai's browser first if needed. When
+/// the tab it drives was closed or left blank while the user opened
+/// another one, it follows the user's tab. Returns a note when it moved.
+async fn ensure_page(slot: &mut Option<Page>) -> Result<(&Page, Option<String>), String> {
     if slot.as_ref().is_some_and(|p| !p.is_alive()) {
         *slot = None;
     }
-    if slot.is_none() {
-        if !port_alive(DEFAULT_PORT).await {
-            launch(DEFAULT_PORT, None).await?;
+    let mut note = None;
+    match slot.as_ref() {
+        None => {
+            if !port_alive(DEFAULT_PORT).await {
+                launch(DEFAULT_PORT, None).await?;
+            }
+            *slot = Some(attach(DEFAULT_PORT).await?);
         }
-        *slot = Some(attach(DEFAULT_PORT).await?);
+        Some(page) => {
+            let port = page.port;
+            if let Ok(tabs) = list_tabs(port).await {
+                let ours = tabs.iter().find(|t| t.id == page.target_id);
+                let stale = ours.is_none_or(|t| is_blank(&t.url));
+                if stale
+                    && let Some(other) = tabs
+                        .iter()
+                        .find(|t| t.id != page.target_id && !is_blank(&t.url))
+                {
+                    note = Some(format!(
+                        "(Now on the tab the user is using: {} — {})",
+                        other.title, other.url
+                    ));
+                    *slot = Some(attach_tab(port, other).await?);
+                }
+            }
+        }
     }
-    Ok(slot.as_ref().expect("set above"))
+    Ok((slot.as_ref().expect("set above"), note))
 }
 
 /// Script that numbers the visible interactive elements (`data-dcode-ref`)
@@ -622,7 +707,73 @@ fn with_scheme(url: &str) -> String {
 pub async fn run_action(input: &Value, workspace_root: &Path) -> Result<String, String> {
     let action = input["action"].as_str().unwrap_or("snapshot");
     let mut slot = shared().lock().await;
-    let page = ensure_page(&mut slot).await?;
+    if matches!(action, "switch" | "switch_tab" | "new_tab") {
+        return tab_action(action, input, &mut slot).await;
+    }
+    let (page, note) = ensure_page(&mut slot).await?;
+    if action == "tabs" {
+        let tabs = list_tabs(page.port).await?;
+        let mut out = String::from("Open tabs (switch with {\"action\":\"switch\",\"tab\":N}):\n");
+        for (i, t) in tabs.iter().enumerate() {
+            out.push_str(&format!(
+                "[{}] {}{} — {}\n",
+                i + 1,
+                if t.id == page.target_id {
+                    "(current) "
+                } else {
+                    ""
+                },
+                if t.title.is_empty() {
+                    "untitled"
+                } else {
+                    &t.title
+                },
+                t.url
+            ));
+        }
+        return Ok(out);
+    }
+    let result = run_page_action(action, input, page, workspace_root).await;
+    match (note, result) {
+        (Some(n), Ok(text)) => Ok(format!("{n}\n\n{text}")),
+        (_, r) => r,
+    }
+}
+
+/// `switch {tab}` and `new_tab {url}`.
+async fn tab_action(
+    action: &str,
+    input: &Value,
+    slot: &mut Option<Page>,
+) -> Result<String, String> {
+    let (page, _) = ensure_page(slot).await?;
+    let port = page.port;
+    let next = if action == "new_tab" {
+        let url = with_scheme(input["url"].as_str().unwrap_or("about:blank").trim());
+        open_tab(port, &url).await?
+    } else {
+        let n = input["tab"]
+            .as_u64()
+            .or_else(|| input["ref"].as_u64())
+            .ok_or("switch needs `tab`, a number from the `tabs` list")? as usize;
+        let tabs = list_tabs(port).await?;
+        let tab = tabs
+            .get(n.saturating_sub(1))
+            .ok_or_else(|| format!("no tab {n}; there are {}", tabs.len()))?;
+        attach_tab(port, tab).await?
+    };
+    *slot = Some(next);
+    let page = slot.as_ref().expect("set above");
+    page.wait_loaded().await;
+    snapshot(page).await
+}
+
+async fn run_page_action(
+    action: &str,
+    input: &Value,
+    page: &Page,
+    workspace_root: &Path,
+) -> Result<String, String> {
     let r = || {
         input["ref"]
             .as_u64()
@@ -751,14 +902,17 @@ pub async fn run_action(input: &Value, workspace_root: &Path) -> Result<String, 
             ))
         }
         other => Err(format!(
-            "unknown action `{other}` (navigate, snapshot, click, type, press, scroll, back, screenshot, console, eval)"
+            "unknown action `{other}` (navigate, snapshot, click, type, press, scroll, back, screenshot, console, eval, tabs, switch, new_tab)"
         )),
     }
 }
 
 /// Actions that only read the page.
 pub fn is_read_only_action(action: &str) -> bool {
-    matches!(action, "snapshot" | "read" | "screenshot" | "console")
+    matches!(
+        action,
+        "snapshot" | "read" | "screenshot" | "console" | "tabs"
+    )
 }
 
 /// The `browser` tool.
@@ -782,8 +936,9 @@ impl ToolExecutor for BrowserTool {
                 Actions: navigate {url}; snapshot (the page as text with numbered elements); \
                 click {ref}; type {ref, text, submit?}; press {key} (Enter, Tab, Escape, \
                 ArrowDown…); scroll {direction: down|up}; back; screenshot (saves a PNG); \
-                console (log and errors); eval {expression} (run JavaScript). navigate, click, \
-                press, scroll and back return the new snapshot. Element numbers change when the \
+                console (log and errors); eval {expression} (run JavaScript); tabs (list open \
+                tabs); switch {tab}; new_tab {url}. navigate, click, press, scroll, back, switch \
+                and new_tab return the new snapshot. If the user opens a tab, the tool follows it. Element numbers change when the \
                 page changes — use the latest snapshot. Never type passwords: ask the user to \
                 sign in in the browser window."
                 .into(),
@@ -792,8 +947,9 @@ impl ToolExecutor for BrowserTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["navigate", "snapshot", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval"]
+                        "enum": ["navigate", "snapshot", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval", "tabs", "switch", "new_tab"]
                     },
+                    "tab": {"type": "integer", "description": "Tab number from `tabs` (for switch)"},
                     "url": {"type": "string"},
                     "ref": {"type": "integer", "description": "Element number from the snapshot"},
                     "text": {"type": "string"},
@@ -965,6 +1121,22 @@ mod tests {
         assert_eq!(with_scheme("http://a.b"), "http://a.b");
         assert_eq!(with_scheme("data:text/html,hi"), "data:text/html,hi");
         assert_eq!(with_scheme("file:///tmp/x.html"), "file:///tmp/x.html");
+    }
+
+    #[test]
+    fn tab_list_skips_browser_pages_but_keeps_new_tabs() {
+        let list = json!([
+            {"id": "A", "type": "page", "title": "YouTube", "url": "https://www.youtube.com/", "webSocketDebuggerUrl": "ws://x/devtools/page/A"},
+            {"id": "B", "type": "page", "title": "", "url": "chrome://omnibox-popup.top-chrome/", "webSocketDebuggerUrl": "ws://x/devtools/page/B"},
+            {"id": "C", "type": "page", "title": "New Tab", "url": "chrome://newtab/", "webSocketDebuggerUrl": "ws://x/devtools/page/C"},
+            {"id": "D", "type": "service_worker", "url": "https://a/sw.js", "webSocketDebuggerUrl": "ws://x/devtools/page/D"}
+        ]);
+        let tabs = tabs_from_list(&list);
+        let ids: Vec<&str> = tabs.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["A", "C"]);
+        assert!(is_blank("about:blank") && is_blank("chrome://newtab/"));
+        assert!(!is_blank("https://www.youtube.com/"));
+        assert!(is_read_only_action("tabs") && !is_read_only_action("switch"));
     }
 
     #[test]
