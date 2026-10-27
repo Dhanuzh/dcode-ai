@@ -126,9 +126,48 @@ pub struct SessionPickerEntry {
     /// `3h ago · model · branch · tokens`.
     pub meta: String,
     pub search_text: String,
+    /// What was said in the session (loaded after the picker opens), so
+    /// search finds "the session where we fixed OAuth".
+    #[doc(hidden)]
+    pub content: String,
     /// Last few messages as a preview (populated from event log).
     #[allow(dead_code)]
     pub preview: String,
+}
+
+impl SessionPickerEntry {
+    /// Does `query` (words, any order) match this session? `Some(None)` on
+    /// the title or id, `Some(Some(snippet))` inside the conversation.
+    pub fn search(&self, query: &str) -> Option<Option<String>> {
+        let words: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+        if words.is_empty() {
+            return Some(None);
+        }
+        let title = self.search_text.to_lowercase();
+        if words.iter().all(|w| title.contains(w.as_str())) {
+            return Some(None);
+        }
+        let body = self.content.to_lowercase();
+        if !words.iter().all(|w| body.contains(w.as_str())) {
+            return None;
+        }
+        // A snippet around the first word, on char boundaries.
+        let at = body.find(words[0].as_str()).unwrap_or(0);
+        let chars: Vec<char> = self.content.chars().collect();
+        let char_at = body[..at].chars().count().min(chars.len());
+        let from = char_at.saturating_sub(30);
+        let to = (char_at + 70).min(chars.len());
+        let snippet: String = chars[from..to]
+            .iter()
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(Some(format!(
+            "{}{snippet}…",
+            if from > 0 { "…" } else { "" }
+        )))
+    }
 }
 
 /// Hybrid UI: inline (terminal scrollback, default) or a full-screen

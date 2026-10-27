@@ -180,11 +180,11 @@ impl Repl {
                             lines.push(String::new());
                         }
                         lines.push(
-                            "/permissions allow|ask|deny <rule> [--user] · remove <rule> · mode · folders · forget"
+                            "/permissions allow|ask|deny <rule> [--user|--project] · remove <rule> · mode · folders · forget"
                                 .into(),
                         );
                         lines.push(
-                            "Rules look like `execute_bash:cargo *`, `edit_file`, `Bash(git:*)`; saved to .dcode-ai/config.local.toml (or ~/.dcode-ai/config.toml with --user)."
+                            "Rules look like `execute_bash:cargo *`, `edit_file`, `Bash(git:*)`; saved to .dcode-ai/config.local.toml (~/.dcode-ai/config.toml with --user, the shared .dcode.toml with --project)."
                                 .into(),
                         );
                         if let ReplOutput::Tui(st) = &out {
@@ -212,19 +212,24 @@ impl Repl {
                     }
                     "allow" | "ask" | "deny" | "remove" => {
                         let user = arg.split_whitespace().any(|w| w == "--user");
+                        let project = arg.split_whitespace().any(|w| w == "--project");
                         let rule = words
-                            .filter(|w| *w != "--user")
+                            .filter(|w| *w != "--user" && *w != "--project")
                             .collect::<Vec<_>>()
                             .join(" ");
                         if rule.is_empty() {
                             out.eprintln(
-                                "usage: /permissions allow|ask|deny|remove <rule> [--user]",
+                                "usage: /permissions allow|ask|deny|remove <rule> [--user|--project]",
                             );
                             return Ok(true);
                         }
                         // Claude Code names (`Bash(git:*)`, `Read`) map to dcode-ai rules.
                         let rules = crate::cli_tool_rules(std::slice::from_ref(&rule));
-                        let path = if user {
+                        let path = if project {
+                            dcode_ai_common::config::project_config_path(
+                                self.runtime.workspace_root(),
+                            )
+                        } else if user {
                             match dcode_ai_common::config::global_config_file() {
                                 Some(p) => p,
                                 None => {
@@ -590,6 +595,73 @@ impl Repl {
                         "not logged in"
                     }
                 ));
+            }
+            "/project-config" => {
+                let path =
+                    dcode_ai_common::config::project_config_path(self.runtime.workspace_root());
+                let what = rest.trim();
+                let saved = match what {
+                    "model" => Some(
+                        dcode_ai_common::config::set_toml_value(
+                            &path,
+                            "model",
+                            "default_model",
+                            toml::Value::String(self.runtime.model().to_string()),
+                        )
+                        .map(|()| format!("default model `{}`", self.runtime.model())),
+                    ),
+                    "mode" => {
+                        let mode = toml::Value::try_from(self.runtime.permission_mode())
+                            .map_err(|e| e.to_string());
+                        Some(mode.and_then(|mode| {
+                            let label = mode.as_str().unwrap_or("?").to_string();
+                            dcode_ai_common::config::set_toml_value(
+                                &path,
+                                "permissions",
+                                "mode",
+                                mode,
+                            )
+                            .map(|()| format!("permission mode `{label}`"))
+                        }))
+                    }
+                    _ => None,
+                };
+                let mut lines = Vec::new();
+                match saved {
+                    Some(Ok(what)) => lines.push(format!(
+                        "Saved the {what} to {} — commit it so teammates get it.",
+                        path.display()
+                    )),
+                    Some(Err(e)) => lines.push(format!("error: {e}")),
+                    None => {
+                        lines.push(format!(
+                            "Shared project settings live in {} (commit it); personal ones in \
+                             .dcode-ai/config.local.toml, which wins.",
+                            path.display()
+                        ));
+                        lines.push(String::new());
+                        match std::fs::read_to_string(&path) {
+                            Ok(t) if !t.trim().is_empty() => {
+                                lines.extend(t.lines().map(|l| format!("  {l}")))
+                            }
+                            _ => lines.push("  (none yet)".into()),
+                        }
+                        lines.push(String::new());
+                        lines.push(
+                            "/project-config model · /project-config mode · /permissions allow <rule> --project"
+                                .into(),
+                        );
+                    }
+                }
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("Project settings", lines);
+                    }
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
+                }
             }
             "/terminal-setup" => {
                 let lines = tokio::task::spawn_blocking(crate::terminal_setup::run)

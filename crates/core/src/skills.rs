@@ -434,6 +434,7 @@ pub fn allowed_tool_patterns(allowed: &[String]) -> Vec<String> {
         } else {
             let tools: &[&str] = match t {
                 "Edit" | "MultiEdit" => &["edit_file", "replace_match", "apply_patch"],
+                "NotebookEdit" => &["notebook_edit"],
                 "Write" => &["write_file", "create_directory"],
                 "Read" => &["read_file"],
                 "Grep" | "Glob" => &["search_code"],

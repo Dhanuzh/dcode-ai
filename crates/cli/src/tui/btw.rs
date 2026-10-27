@@ -168,6 +168,60 @@ async fn answer(ctx: BtwContext, question: String, state: Arc<Mutex<TuiSessionSt
     });
 }
 
+/// A cheap model for small jobs (session titles): `[model] compact_model`
+/// when set, else Haiku on Claude, else the session's model.
+pub fn small_model(ctx: &BtwContext) -> String {
+    if let Some(m) = ctx.config.model.compact_model.as_deref() {
+        return ctx.config.model.resolve_alias(m);
+    }
+    if ctx.config.provider.default == dcode_ai_common::config::ProviderKind::Anthropic {
+        return ctx.config.model.resolve_alias("haiku");
+    }
+    ctx.model.clone()
+}
+
+/// Clean a model's title reply: one line, no quotes or trailing period.
+pub fn clean_title(raw: &str) -> Option<String> {
+    let line = raw.lines().map(str::trim).find(|l| !l.is_empty())?;
+    let line = line
+        .trim_start_matches(|c: char| c == '#' || c == '*' || c.is_whitespace())
+        .trim_start_matches("Title:")
+        .trim()
+        .trim_matches(|c: char| c == '"' || c == '\'' || c == '`' || c == '*')
+        .trim_end_matches('.')
+        .trim();
+    let title: String = line.chars().take(60).collect();
+    (title.chars().count() >= 3).then_some(title)
+}
+
+/// A short title for the session so far, from a cheap model.
+pub async fn suggest_title(ctx: BtwContext) -> Result<String, String> {
+    let convo = conversation_text(&ctx.messages);
+    let convo: String = convo.chars().take(6_000).collect();
+    let prompt = format!(
+        "Write a title of 3 to 6 words for this coding session, like a good commit \
+         subject (e.g. \"Fix OAuth redirect in login\"). Reply with the title only.\n\n\
+         <conversation>\n{convo}\n</conversation>"
+    );
+    let model = small_model(&ctx);
+    let provider =
+        dcode_ai_core::provider::factory::build_provider(&ctx.config).map_err(|e| e.to_string())?;
+    let mut stream = provider
+        .chat(&[Message::user(prompt)], &[], &model, &ctx.workspace)
+        .await
+        .map_err(|e| e.to_string())?;
+    let mut text = String::new();
+    while let Some(chunk) = stream.recv().await {
+        match chunk {
+            StreamChunk::TextDelta(t) => text.push_str(&t),
+            StreamChunk::Error(e) | StreamChunk::FatalError(e) => return Err(e),
+            StreamChunk::Done => break,
+            _ => {}
+        }
+    }
+    clean_title(&text).ok_or_else(|| "the model gave no usable title".to_string())
+}
+
 /// Start the worker that answers side questions sent on the returned channel.
 pub fn spawn_btw_worker(
     handle: BtwHandle,
@@ -193,6 +247,19 @@ pub fn spawn_btw_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn titles_are_cleaned_up() {
+        assert_eq!(
+            clean_title("\"Fix OAuth redirect in login.\"\n").as_deref(),
+            Some("Fix OAuth redirect in login")
+        );
+        assert_eq!(
+            clean_title("Title: Add retries").as_deref(),
+            Some("Add retries")
+        );
+        assert_eq!(clean_title("  \n"), None);
+    }
 
     #[test]
     fn conversation_text_skips_system_and_keeps_order() {

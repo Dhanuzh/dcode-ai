@@ -412,6 +412,7 @@ impl Supervisor {
         // tool-heavy turn trims older tool outputs mid-turn instead of
         // ballooning the prompt (which slows every model call to a crawl).
         agent.set_context_token_limit(context_manager.config().context_window_target);
+        agent.utility_model = utility_model(&config);
 
         // Refresh the accurate context window from the provider API in the
         // background and persist it for the next launch — never on the startup
@@ -1479,8 +1480,10 @@ impl Supervisor {
         self.config = config;
         self.model = self.config.provider.active_model().to_string();
         let m = self.model.clone();
+        let utility = utility_model(&self.config);
         let agent = self.agent_mut();
         agent.model = m;
+        agent.utility_model = utility;
         agent.replace_provider(provider);
         self.rebuild_context_manager_sync();
         Ok(())
@@ -2147,6 +2150,16 @@ impl ApprovalHandler for AutoDenyHandler {
     ) -> ApprovalVerdict {
         ApprovalVerdict::Denied
     }
+}
+
+/// A cheap model for small side questions (auto mode's command check):
+/// `[model] compact_model` when set, Haiku on Claude, else the main model.
+fn utility_model(config: &DcodeAiConfig) -> Option<String> {
+    if let Some(m) = config.model.compact_model.as_deref() {
+        return Some(config.model.resolve_alias(m));
+    }
+    (config.provider.default == dcode_ai_common::config::ProviderKind::Anthropic)
+        .then(|| config.model.resolve_alias("haiku"))
 }
 
 /// Spawns a background task that consumes spawn requests from the sub-agent tool

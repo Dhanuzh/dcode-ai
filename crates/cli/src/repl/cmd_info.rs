@@ -440,34 +440,7 @@ impl Repl {
                 }
             }
             "/doctor" => {
-                let mut lines = Vec::new();
-                for provider in dcode_ai_common::config::ProviderKind::ALL {
-                    let configured = self.runtime.config().provider.api_key_present_for(provider);
-                    lines.push(format!(
-                        "{}{} API key {} ({})",
-                        provider.display_name(),
-                        if provider == self.runtime.config().provider.default {
-                            " [selected]"
-                        } else {
-                            ""
-                        },
-                        if configured {
-                            "✓ configured"
-                        } else {
-                            "✗ missing"
-                        },
-                        self.runtime.config().provider.api_key_env_for(provider)
-                    ));
-                }
-                if let ReplOutput::Tui(st) = &out {
-                    if let Ok(mut g) = st.lock() {
-                        g.open_info_modal("doctor", lines);
-                    }
-                } else {
-                    for l in &lines {
-                        out.println(l);
-                    }
-                }
+                self.doctor(&out).await;
             }
             // ── /map ──────────────────────────────────────────────────────────
             "/map" => {

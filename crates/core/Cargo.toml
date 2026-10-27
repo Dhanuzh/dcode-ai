@@ -7,6 +7,7 @@ publish = false
 description = "Agent loop, provider abstraction, tool protocol, and approval policy"
 
 [dependencies]
+pdf-extract = "0.12"
 dcode-ai-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

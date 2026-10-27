@@ -8,6 +8,7 @@ pub mod image_attach;
 pub mod ipc_pending;
 pub mod oauth_login;
 pub mod prompt;
+pub mod share;
 pub mod slash_commands;
 pub mod stream;
 pub mod tool_ui;

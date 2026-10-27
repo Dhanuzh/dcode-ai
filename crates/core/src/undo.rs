@@ -29,7 +29,20 @@ struct PendingTurn {
     touched: Vec<PathBuf>,
     before: HashMap<PathBuf, NodeSnapshot>,
     had_successful_mutation: bool,
+    /// Working tree before the shell commands of the current tool batch.
+    shell_before: Option<GitTree>,
 }
+
+/// A snapshot of a git working tree (tracked and untracked, not ignored)
+/// stored as a tree object, so shell commands can be undone.
+#[derive(Debug, Clone)]
+struct GitTree {
+    toplevel: PathBuf,
+    tree: String,
+}
+
+/// Most files one shell command may change and still be recorded.
+const MAX_SHELL_PATHS: usize = 2_000;
 
 #[derive(Debug, Default)]
 pub struct UndoManager {
@@ -105,6 +118,10 @@ impl UndoManager {
         let Some(pending) = self.pending.as_mut() else {
             return;
         };
+        // Shell commands can change any file: snapshot the tree first.
+        if is_shell_tool(&call.name) && pending.shell_before.is_none() {
+            pending.shell_before = git_tree_snapshot(workspace_root);
+        }
         for path in mutating_tool_paths(call, workspace_root) {
             if !path.starts_with(workspace_root) {
                 continue;
@@ -125,6 +142,9 @@ impl UndoManager {
         let Some(pending) = self.pending.as_mut() else {
             return;
         };
+        if let Some(before) = pending.shell_before.take() {
+            note_shell_changes(pending, &before);
+        }
         if pending.touched.is_empty() {
             return;
         }
@@ -202,11 +222,112 @@ impl UndoManager {
     }
 }
 
+fn is_shell_tool(name: &str) -> bool {
+    matches!(name, "execute_bash" | "run_validation")
+}
+
+fn git(dir: &Path, args: &[&str], index: Option<&Path>) -> Option<Vec<u8>> {
+    let mut cmd = std::process::Command::new("git");
+    cmd.arg("-C").arg(dir).args(args);
+    if let Some(index) = index {
+        cmd.env("GIT_INDEX_FILE", index);
+    }
+    let out = cmd.stderr(std::process::Stdio::null()).output().ok()?;
+    out.status.success().then_some(out.stdout)
+}
+
+fn git_line(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = git(dir, args, None)?;
+    let s = String::from_utf8_lossy(&out).trim().to_string();
+    (!s.is_empty()).then_some(s)
+}
+
+/// The workspace's files as a git tree, written through a throwaway index
+/// so the user's staging area is untouched. `None` outside git.
+fn git_tree_snapshot(workspace_root: &Path) -> Option<GitTree> {
+    let toplevel = PathBuf::from(git_line(workspace_root, &["rev-parse", "--show-toplevel"])?);
+    let index = PathBuf::from(git_line(
+        workspace_root,
+        &["rev-parse", "--git-path", "index"],
+    )?);
+    let index = if index.is_absolute() {
+        index
+    } else {
+        workspace_root.join(index)
+    };
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let tmp = std::env::temp_dir().join(format!("dcode-ai-index-{}-{nanos}", std::process::id()));
+    // Starting from the real index keeps `git add` to a stat check for
+    // unchanged files.
+    if index.exists() {
+        fs::copy(&index, &tmp).ok()?;
+    }
+    let tree = git(workspace_root, &["add", "-A", "--", "."], Some(&tmp))
+        .and_then(|_| git(workspace_root, &["write-tree"], Some(&tmp)))
+        .map(|out| String::from_utf8_lossy(&out).trim().to_string());
+    let _ = fs::remove_file(&tmp);
+    let tree = tree.filter(|t| !t.is_empty())?;
+    Some(GitTree { toplevel, tree })
+}
+
+/// Record files a shell command changed, with their content from before.
+fn note_shell_changes(pending: &mut PendingTurn, before: &GitTree) {
+    let Some(after) = git_tree_snapshot(&before.toplevel) else {
+        return;
+    };
+    if after.tree == before.tree {
+        return;
+    }
+    let Some(out) = git(
+        &before.toplevel,
+        &[
+            "diff-tree",
+            "-r",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &before.tree,
+            &after.tree,
+        ],
+        None,
+    ) else {
+        return;
+    };
+    let paths: Vec<&[u8]> = out.split(|b| *b == 0).filter(|p| !p.is_empty()).collect();
+    if paths.len() > MAX_SHELL_PATHS {
+        tracing::warn!(
+            "a shell command changed {} files; too many to record for undo",
+            paths.len()
+        );
+        return;
+    }
+    for raw in paths {
+        let rel = String::from_utf8_lossy(raw).to_string();
+        let abs = before.toplevel.join(&rel);
+        if !pending.before.contains_key(&abs) {
+            let old = git(
+                &before.toplevel,
+                &["cat-file", "blob", &format!("{}:{rel}", before.tree)],
+                None,
+            )
+            .map(NodeSnapshot::File)
+            .unwrap_or(NodeSnapshot::Absent);
+            pending.before.insert(abs.clone(), old);
+        }
+        insert_dedup_path(&mut pending.touched, abs);
+        pending.had_successful_mutation = true;
+    }
+}
+
 fn is_mutating_tool(name: &str) -> bool {
     matches!(
         name,
         "write_file"
             | "edit_file"
+            | "notebook_edit"
             | "replace_match"
             | "apply_patch"
             | "create_directory"
@@ -230,8 +351,8 @@ fn mutating_tool_paths(call: &ToolCall, workspace_root: &Path) -> Vec<PathBuf> {
     };
 
     match call.name.as_str() {
-        "write_file" | "edit_file" | "replace_match" | "apply_patch" | "create_directory"
-        | "delete_path" => {
+        "write_file" | "edit_file" | "notebook_edit" | "replace_match" | "apply_patch"
+        | "create_directory" | "delete_path" => {
             push(&mut out, path("path"));
         }
         "rename_path" | "move_path" => {
@@ -362,6 +483,61 @@ fn apply_state_map(states: &HashMap<PathBuf, NodeSnapshot>) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shell_changes_can_be_undone_in_a_git_repo() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let root = dir.path();
+        let git = |args: &[&str]| {
+            std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+                .args(args)
+                .current_dir(root)
+                .output()
+                .expect("git")
+        };
+        git(&["init", "-q"]);
+        std::fs::write(root.join("a.txt"), "old").unwrap();
+        std::fs::write(root.join("gone.txt"), "keep me").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+        std::fs::write(root.join("staged.txt"), "mine").unwrap();
+        git(&["add", "staged.txt"]);
+
+        let mut mgr = UndoManager::default();
+        mgr.begin_turn(0);
+        let call = ToolCall {
+            id: "c1".into(),
+            name: "execute_bash".into(),
+            input: serde_json::json!({"command": "sed -i …"}),
+        };
+        mgr.record_tool_call(&call, root);
+        // What the command did:
+        std::fs::write(root.join("a.txt"), "new").unwrap();
+        std::fs::remove_file(root.join("gone.txt")).unwrap();
+        std::fs::write(root.join("made.txt"), "x").unwrap();
+        mgr.note_results(
+            std::slice::from_ref(&call),
+            &[ToolResult {
+                call_id: "c1".into(),
+                success: true,
+                output: String::new(),
+                error: None,
+            }],
+        );
+        mgr.finalize_turn().unwrap();
+
+        assert!(mgr.undo_last().unwrap().is_some());
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "old");
+        assert_eq!(
+            std::fs::read_to_string(root.join("gone.txt")).unwrap(),
+            "keep me"
+        );
+        assert!(!root.join("made.txt").exists());
+        // The user's staging area was not touched.
+        let staged = git(&["diff", "--cached", "--name-only"]);
+        assert_eq!(String::from_utf8_lossy(&staged.stdout).trim(), "staged.txt");
+    }
 
     #[test]
     fn undo_redo_roundtrip_file_write() {

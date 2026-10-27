@@ -79,8 +79,8 @@ pub fn tool_kind(tool: &str) -> &'static str {
     match tool {
         "read_file" | "list_directory" | "git_status" | "git_diff" | "repo_map"
         | "inspect_binary" => "read",
-        "write_file" | "edit_file" | "replace_match" | "apply_patch" | "create_directory"
-        | "copy_path" | "rename_path" => "edit",
+        "write_file" | "edit_file" | "notebook_edit" | "replace_match" | "apply_patch"
+        | "create_directory" | "copy_path" | "rename_path" => "edit",
         "delete_path" => "delete",
         "move_path" => "move",
         "search_code" | "query_symbols" | "code_intel" | "tool_search" => "search",

@@ -129,6 +129,12 @@ pub enum TuiCmd {
     PluginAction(crate::tui::plugin_browser::BrowserAction),
     /// An action chosen in the `/mcp` panel.
     McpAction(crate::tui::mcp_panel::McpAction),
+    /// A generated session title arrived (auto-naming or `/rename`).
+    SessionTitle {
+        session_id: String,
+        title: String,
+        replace: bool,
+    },
     /// An option picked in a decision prompt (sub-agent merge, memory tidy).
     Choice(crate::tui::choice::ChoiceAction, usize),
     /// `d` in a decision prompt: show what it is about (the branch diff).
@@ -215,6 +221,27 @@ fn outdated_model_hint(model: &str) -> Option<&'static str> {
 
 /// Startup banner: a Claude-style welcome box (greeting, hints, cwd, model),
 /// flushed once to the terminal scrollback at session start.
+/// Whether this process shows the first-run tips: only until they have been
+/// shown once (`~/.dcode-ai/.tips-shown`), and then for the whole session.
+fn show_first_run_tips() -> bool {
+    static SHOW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *SHOW.get_or_init(|| {
+        if cfg!(test) {
+            return false;
+        }
+        let Some(home) = dcode_ai_common::config::dcode_ai_home_dir() else {
+            return false;
+        };
+        let marker = home.join(".tips-shown");
+        if marker.exists() {
+            return false;
+        }
+        let _ = std::fs::create_dir_all(&home);
+        let _ = std::fs::write(&marker, "");
+        true
+    })
+}
+
 pub fn banner_lines(model: &str, workspace: &str, width: u16) -> Vec<Line<'static>> {
     let version = env!("CARGO_PKG_VERSION");
     // Claude-style welcome box: accent border, greeting, hints, cwd, model.
@@ -273,22 +300,20 @@ pub fn banner_lines(model: &str, workspace: &str, width: u16) -> Vec<Line<'stati
             muted,
         )]),
         Line::from(Span::styled(format!("╰{}╯", "─".repeat(box_w - 2)), border)),
-        Line::default(),
-        Line::from(Span::styled(" Tips for getting started:", muted)),
-        Line::default(),
-        Line::from(Span::styled(
-            " 1. Ask dcode-ai to explain, fix or build something",
-            muted,
-        )),
-        Line::from(Span::styled(
-            " 2. Shift+Tab switches modes: accept edits, plan, auto",
-            muted,
-        )),
-        Line::from(Span::styled(
-            " 3. Esc twice rewinds code and conversation",
-            muted,
-        )),
     ];
+    // First run only: three tips, then a clean start every time after.
+    if show_first_run_tips() {
+        for tip in [
+            " Tips for getting started:",
+            "",
+            " 1. Shift+Tab switches modes: accept edits, plan, auto",
+            " 2. @ adds a file to your message · ! runs a shell command",
+            " 3. /btw asks a side question while dcode-ai works · Esc twice rewinds",
+        ] {
+            lines.push(Line::from(Span::styled(tip, muted)));
+        }
+        lines.insert(lines.len() - 5, Line::default());
+    }
     // A newer release, shown once per version, small, right under the box.
     if let Some(latest) = crate::update_check::take_pending_upgrade() {
         let under_box = lines
@@ -746,6 +771,7 @@ pub fn run_blocking(
     // finishes while the terminal is unfocused (Codex parity). Focus defaults to
     // true; terminals without focus reporting simply never suppress.
     let mut terminal_focused = true;
+    let mut had_active_question = false;
     // Full-screen dashboard terminal (alternate screen), present while
     // `view_mode == Dashboard`. The inline terminal keeps its state meanwhile.
     let mut dash_terminal: Option<
@@ -934,22 +960,30 @@ pub fn run_blocking(
             // terminals; terminals without focus reporting keep focused=true and
             // simply never trigger it.
             if g.notifications_enabled && !terminal_focused {
+                let where_ = g
+                    .workspace_root
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| g.workspace_display.clone());
                 let msg = if was_busy && !g.busy {
-                    Some("dcode-ai finished responding")
+                    Some(format!("Finished · {where_}"))
                 } else if !had_active_approval && g.active_approval.is_some() {
-                    Some("dcode-ai needs approval")
+                    let tool = g
+                        .active_approval
+                        .as_ref()
+                        .map(|a| crate::tool_ui::metadata(&a.tool).label)
+                        .unwrap_or_default();
+                    Some(format!("Needs your approval: {tool} · {where_}"))
+                } else if g.active_question.is_some() && !had_active_question {
+                    Some(format!("Has a question for you · {where_}"))
                 } else {
                     None
                 };
                 if let Some(msg) = msg {
-                    use std::io::Write;
-                    let mut so = std::io::stdout();
-                    // OSC 9 desktop notification + audible bell for terminals
-                    // that only support the latter.
-                    let _ = write!(so, "\x1b]9;{msg}\x07\x07");
-                    let _ = so.flush();
+                    crate::tui::notify::desktop_notify("dcode-ai", &msg);
                 }
             }
+            had_active_question = g.active_question.is_some();
             was_busy = g.busy;
             had_active_approval = g.active_approval.is_some();
 

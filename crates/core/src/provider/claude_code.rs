@@ -64,8 +64,15 @@ struct CcSession {
     stdin: ChildStdin,
     stdout: Lines<BufReader<ChildStdout>>,
     stderr_tail: Arc<std::sync::Mutex<String>>,
-    /// Model + system prompt (incl. tool schemas) this process was started with.
+    /// Model + system prompt (without tool schemas) + effort this process
+    /// was started with.
     key: u64,
+    /// Tool schemas Claude has: from the system prompt, plus ones announced
+    /// later in a message (tools loaded by `tool_search`, late MCP servers).
+    tools_sent: std::collections::HashMap<String, u64>,
+    /// The last reply was interrupted (Esc): Claude saw it finish, dcode-ai
+    /// did not use it. Said so in the next message.
+    interrupted: bool,
     /// Hashes of the conversation messages Claude already has in context.
     sent: Vec<u64>,
     /// Keeps the system-prompt file alive for the process lifetime.
@@ -110,6 +117,13 @@ impl Provider for ClaudeCodeProvider {
             model
         });
 
+        // One-off calls without tools (auto mode's command check, summaries,
+        // titles) get a throwaway process: reusing the session's would kill
+        // it, and the next real step would re-send the whole conversation.
+        if tools.is_empty() {
+            return one_shot(messages, &model, workspace_root).await;
+        }
+
         let system_len = messages
             .iter()
             .take_while(|m| m.role == Role::System)
@@ -122,26 +136,79 @@ impl Provider for ClaudeCodeProvider {
         let system_prompt = build_system_prompt(&base_system, tools);
         let conversation = &messages[system_len..];
         let hashes: Vec<u64> = conversation.iter().map(message_hash).collect();
-        let key = hash_of(&(&model, &system_prompt, &self.config.effort));
+        // Tools are not part of the key: a changed tool list must not restart
+        // the process, which would re-send (and re-cache) the whole history.
+        let key = hash_of(&(&model, &base_system, &self.config.effort));
+        let tool_hashes: std::collections::HashMap<String, u64> = tools
+            .iter()
+            .map(|t| (t.name.clone(), tool_hash(t)))
+            .collect();
 
         let mut slot = self.session.lock().await;
         let reusable = slot.as_mut().and_then(|s| {
-            if s.key != key || !matches!(s.child.try_wait(), Ok(None)) {
+            if s.key != key {
+                tracing::info!(
+                    tools = tools.len(),
+                    "claude-code: system prompt or tools changed; starting a new process"
+                );
                 return None;
             }
-            new_messages_since(conversation, &hashes, &s.sent)
+            if !matches!(s.child.try_wait(), Ok(None)) {
+                tracing::info!("claude-code: process ended; starting a new one");
+                return None;
+            }
+            // A tool whose schema changed can't be announced as "new".
+            if tool_hashes
+                .iter()
+                .any(|(n, h)| s.tools_sent.get(n).is_some_and(|old| old != h))
+            {
+                tracing::info!("claude-code: a tool's schema changed; starting a new process");
+                return None;
+            }
+            let new = new_messages_since(conversation, &hashes, &s.sent);
+            if new.is_none() {
+                let same = s
+                    .sent
+                    .iter()
+                    .zip(&hashes)
+                    .take_while(|(a, b)| a == b)
+                    .count();
+                tracing::info!(
+                    sent = s.sent.len(),
+                    now = hashes.len(),
+                    same_prefix = same,
+                    "claude-code: history changed; replaying it in a new process"
+                );
+            }
+            new
         });
 
         let (mut session, payload) = match reusable {
             Some(new_messages) => {
-                let session = slot.take().expect("checked above");
-                (session, render_new_messages(new_messages, conversation))
+                let mut session = slot.take().expect("checked above");
+                let added: Vec<&ToolDefinition> = tools
+                    .iter()
+                    .filter(|t| !session.tools_sent.contains_key(&t.name))
+                    .collect();
+                let mut payload = if session.interrupted {
+                    session.interrupted = false;
+                    "(The user interrupted your previous reply; any tool calls in it were not run.)\n\n"
+                        .to_string()
+                } else {
+                    String::new()
+                };
+                payload.push_str(&render_added_tools(&added));
+                payload.push_str(&render_new_messages(new_messages, conversation));
+                for t in added {
+                    session.tools_sent.insert(t.name.clone(), tool_hash(t));
+                }
+                (session, payload)
             }
             None => {
                 if let Some(mut old) = slot.take() {
                     let _ = old.child.start_kill();
                 }
-                let session = spawn_session(
+                let mut session = spawn_session(
                     &model,
                     self.config.effort.as_deref(),
                     &system_prompt,
@@ -149,6 +216,7 @@ impl Provider for ClaudeCodeProvider {
                     workspace_root,
                 )
                 .await?;
+                session.tools_sent = tool_hashes.clone();
                 (session, render_replay(conversation))
             }
         };
@@ -180,7 +248,14 @@ impl Provider for ClaudeCodeProvider {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let slot = self.session.clone();
         tokio::spawn(async move {
-            let finished = pump_turn(&mut session, &tx).await;
+            let mut finished = pump_turn(&mut session, &tx).await;
+            // Interrupted (the receiver went away): let Claude finish the
+            // reply unseen and keep the process, instead of re-sending the
+            // whole conversation to a new one.
+            if !finished && tx.is_closed() && drain_turn(&mut session).await {
+                session.interrupted = true;
+                finished = true;
+            }
             if finished {
                 // Turn completed cleanly: keep the process for the next turn.
                 *slot.lock().await = Some(session);
@@ -190,6 +265,49 @@ impl Provider for ClaudeCodeProvider {
         });
         Ok(rx)
     }
+}
+
+/// Run a tool-less conversation in its own short-lived `claude` process.
+async fn one_shot(
+    messages: &[Message],
+    model: &str,
+    workspace_root: &Path,
+) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError> {
+    let system_len = messages
+        .iter()
+        .take_while(|m| m.role == Role::System)
+        .count();
+    let system = messages[..system_len]
+        .iter()
+        .map(|m| m.content.to_summary_text())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    let payload = render_replay(&messages[system_len..]);
+    if payload.trim().is_empty() {
+        return Err(ProviderError::Other(
+            "nothing to send to Claude Code".into(),
+        ));
+    }
+    let mut session = spawn_session(model, None, &system, 0, workspace_root).await?;
+    let line = json!({
+        "type": "user",
+        "message": { "role": "user", "content": payload },
+    });
+    let mut bytes = serde_json::to_vec(&line).map_err(|e| ProviderError::Other(e.to_string()))?;
+    bytes.push(b'\n');
+    if let Err(err) = session.stdin.write_all(&bytes).await {
+        let _ = session.child.start_kill();
+        return Err(ProviderError::Transient(format!(
+            "Claude Code process closed its input: {err}"
+        )));
+    }
+    let _ = session.stdin.flush().await;
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    tokio::spawn(async move {
+        pump_turn(&mut session, &tx).await;
+        let _ = session.child.start_kill();
+    });
+    Ok(rx)
 }
 
 async fn spawn_session(
@@ -274,9 +392,28 @@ async fn spawn_session(
         stdout,
         stderr_tail,
         key,
+        tools_sent: Default::default(),
+        interrupted: false,
         sent: Vec::new(),
         _prompt_file: prompt_file,
     })
+}
+
+/// Read and drop the rest of an interrupted turn. `true` when it ended with
+/// a `result` event, so the process can be reused.
+async fn drain_turn(session: &mut CcSession) -> bool {
+    loop {
+        match tokio::time::timeout(LINE_TIMEOUT, session.stdout.next_line()).await {
+            Ok(Ok(Some(line))) => {
+                if serde_json::from_str::<Value>(&line)
+                    .is_ok_and(|e| e["type"].as_str() == Some("result"))
+                {
+                    return true;
+                }
+            }
+            _ => return false,
+        }
+    }
 }
 
 /// Stream one turn's events to `tx`. Returns `true` when the turn ended with a
@@ -911,6 +1048,39 @@ fn hash_of<T: Hash>(value: &T) -> u64 {
     h.finish()
 }
 
+fn tool_hash(tool: &ToolDefinition) -> u64 {
+    hash_of(&(
+        &tool.name,
+        &tool.description,
+        serde_json::to_string(&tool.parameters).unwrap_or_default(),
+    ))
+}
+
+fn render_tool(out: &mut String, tool: &ToolDefinition) {
+    out.push_str(&format!(
+        "\n### {}\n{}\nInput schema: {}\n",
+        tool.name,
+        tool.description.trim(),
+        serde_json::to_string(&tool.parameters).unwrap_or_else(|_| "{}".into())
+    ));
+}
+
+/// Tools that became available after the process started, announced at the
+/// top of the next message so the cached prefix stays the same.
+fn render_added_tools(added: &[&ToolDefinition]) -> String {
+    if added.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from(
+        "<new_tools>\nThese tools are now available too; call them with <tool_call> like the others.\n",
+    );
+    for tool in added {
+        render_tool(&mut out, tool);
+    }
+    out.push_str("</new_tools>\n\n");
+    out
+}
+
 fn build_system_prompt(base: &str, tools: &[ToolDefinition]) -> String {
     let mut out = String::new();
     if !base.trim().is_empty() {
@@ -935,12 +1105,7 @@ Rules:\n\
 ## Available tools\n",
     );
     for tool in tools {
-        out.push_str(&format!(
-            "\n### {}\n{}\nInput schema: {}\n",
-            tool.name,
-            tool.description.trim(),
-            serde_json::to_string(&tool.parameters).unwrap_or_else(|_| "{}".into())
-        ));
+        render_tool(&mut out, tool);
     }
     out
 }
@@ -1044,6 +1209,22 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn tools_added_later_are_announced_in_the_message() {
+        let tool = ToolDefinition {
+            name: "zoho_list".into(),
+            description: "List records".into(),
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        assert_eq!(render_added_tools(&[]), "");
+        let text = render_added_tools(&[&tool]);
+        assert!(text.starts_with("<new_tools>"), "{text}");
+        assert!(text.contains("### zoho_list\nList records\nInput schema: {\"type\":\"object\"}"));
+        let mut changed = tool.clone();
+        changed.description = "List records (v2)".into();
+        assert_ne!(tool_hash(&tool), tool_hash(&changed));
+    }
+
     use super::*;
     use dcode_ai_common::message::MessageToolCall;
 

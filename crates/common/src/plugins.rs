@@ -219,6 +219,7 @@ fn tool_name_for_matcher(name: &str) -> &str {
     match name {
         "Bash" => "execute_bash",
         "Edit" | "MultiEdit" => "edit_file",
+        "NotebookEdit" => "notebook_edit",
         "Write" => "write_file",
         "Read" => "read_file",
         "Grep" | "Glob" => "search_code",

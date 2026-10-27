@@ -30,6 +30,7 @@ const STARTUP_APPROVE_ALL_QUESTION_ID: &str = "startup-approve-all";
 
 // Slash commands, by area (each a method on `Repl`).
 mod cmd_choice;
+mod cmd_doctor;
 mod cmd_ext;
 mod cmd_info;
 mod cmd_mcp;
@@ -63,6 +64,33 @@ fn goal_footer_label(cell: &dcode_ai_runtime::goal::GoalCell) -> Option<String> 
         dcode_ai_runtime::goal::GoalStatus::Active => Some(format!("◎ goal · turn {}", goal.turns)),
         dcode_ai_runtime::goal::GoalStatus::Paused => Some("◎ goal paused".into()),
         _ => None,
+    }
+}
+
+impl Repl {
+    /// Ask a cheap model for a session title in the background; the answer
+    /// comes back as `TuiCmd::SessionTitle`. `replace` renames a named one.
+    fn spawn_session_title(&self, st: &Arc<Mutex<TuiSessionState>>, replace: bool) {
+        let ctx = st
+            .lock()
+            .ok()
+            .and_then(|g| g.btw_ctx.lock().ok().and_then(|c| c.clone()));
+        let (Some(ctx), Some(tx)) = (ctx, self.self_cmd_tx.clone()) else {
+            return;
+        };
+        let session_id = self.runtime.session_id().to_string();
+        tokio::spawn(async move {
+            match crate::tui::btw::suggest_title(ctx).await {
+                Ok(title) => {
+                    let _ = tx.send(TuiCmd::SessionTitle {
+                        session_id,
+                        title,
+                        replace,
+                    });
+                }
+                Err(e) => tracing::info!("session title: {e}"),
+            }
+        });
     }
 }
 
@@ -365,6 +393,8 @@ struct BackgroundJob {
 
 pub struct Repl {
     runtime: SessionRuntime,
+    /// Session whose title was already asked for (once per session).
+    titled_session: Option<String>,
     prompt: DcodeAiPrompt,
     run_mode: bool,
     safe_mode: bool,
@@ -398,6 +428,7 @@ impl Repl {
             next_job_id: 1,
             side_snapshots: Vec::new(),
             self_cmd_tx: None,
+            titled_session: None,
             pending_sudo: None,
         }
     }
@@ -915,7 +946,8 @@ impl Repl {
             "/stop" | "/run-bg" | "/bashes" | "/ps" | "/session-name" | "/rename" | "/rewind"
             | "/clear" | "/undo" | "/redo" | "/fork" | "/approve" | "/input" | "/side"
             | "/delete" | "/compact" | "/logs" | "/attach" | "/sessions" | "/sessions-clean"
-            | "/new" | "/export" | "/retry" | "/cd" | "/project" | "/import" | "/history" => {
+            | "/new" | "/export" | "/share" | "/retry" | "/cd" | "/project" | "/import"
+            | "/history" => {
                 return self.cmd_session(input, command, rest, parts, out).await;
             }
             "/help" | "/keymaps" | "/status" | "/context" | "/diff" | "/copy" | "/dashboard"
@@ -928,7 +960,7 @@ impl Repl {
             | "/settings" | "/theme" | "/title" | "/raw" | "/mention" | "/output-style"
             | "/output-styles" | "/personality" | "/keymap" | "/statusline" | "/provider"
             | "/apikey" | "/editor" | "/set-editor" | "/auto-answer" | "/thinking" | "/effort"
-            | "/terminal-setup" => {
+            | "/terminal-setup" | "/project-config" => {
                 return self.cmd_settings(input, command, rest, parts, out).await;
             }
             "/reload" | "/add-dir" | "/skills" | "/memory" | "/setup" | "/plugins" | "/plugin"
@@ -1678,6 +1710,23 @@ impl Repl {
                         }
                     }
                 }
+                TuiCmd::SessionTitle {
+                    session_id,
+                    title,
+                    replace,
+                } => {
+                    // The user may have moved to another session meanwhile.
+                    if session_id == self.runtime.session_id()
+                        && (replace || self.runtime.session_name().is_none())
+                    {
+                        self.runtime.set_session_name(Some(title.clone()));
+                        let _ = self.runtime.save().await;
+                        if replace && let Ok(mut g) = tui_state.lock() {
+                            g.push_block(DisplayBlock::System(format!("[session-name] {title}")));
+                            g.touch_transcript();
+                        }
+                    }
+                }
                 TuiCmd::Choice(action, index) => {
                     self.handle_choice(action, index, &tui_state).await;
                 }
@@ -2372,6 +2421,7 @@ impl Repl {
                     };
                     let before = git_change_snapshot(self.runtime.workspace_root());
                     let turn_started = std::time::Instant::now();
+                    let tokens_at_start = self.runtime.tokens_used();
                     let turn = if attachments.is_empty() {
                         self.runtime.run_turn(&expanded).await
                     } else {
@@ -2423,11 +2473,22 @@ impl Repl {
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_busy(false);
                         let shells = g.background_shells.len();
-                        if let Some(line) = crate::tui::turn_summary(turn_started.elapsed(), shells)
+                        let tokens = self.runtime.tokens_used().saturating_sub(tokens_at_start);
+                        if let Some(line) =
+                            crate::tui::turn_summary(turn_started.elapsed(), shells, tokens)
                         {
                             g.push_block(DisplayBlock::TurnSummary(line));
                             g.touch_transcript();
                         }
+                    }
+                    // Name an unnamed session after its first turn, so
+                    // `/resume` reads well.
+                    let sid = self.runtime.session_id().to_string();
+                    if self.runtime.session_name().is_none()
+                        && self.titled_session.as_deref() != Some(sid.as_str())
+                    {
+                        self.titled_session = Some(sid);
+                        self.spawn_session_title(&tui_state, false);
                     }
                 }
             }

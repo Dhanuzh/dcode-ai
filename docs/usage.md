@@ -86,8 +86,10 @@ Type `/` to see them all with descriptions. The most used:
 | `/permissions` | List rules; `allow`/`ask`/`deny`/`remove <rule>` to edit them; `mode` for the mode picker |
 | `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use |
 | `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept); the footer warns from 80% full |
-| `/rewind`, `/undo`, `/redo` | Step back through code and conversation |
-| `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in) |
+| `/rewind`, `/undo`, `/redo` | Step back through code and conversation (in git workspaces also files changed by shell commands) |
+| `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in; the picker searches titles and what was said; sessions name themselves after the first turn, bare `/rename` picks a new name) |
+| `/export [file\|copy]`, `/share` | The conversation as Markdown with secrets masked: to a file, the clipboard, or a secret GitHub gist (`gh`) |
+| `/project-config` | Shared `.dcode.toml`: `model` / `mode` save the current one for the team |
 | `/plan`, `/review`, `/fix`, `/test` | Switch agent profile |
 | `/verify` | Read-only review of the uncommitted diff |
 | `/second-opinion` | The same review by a model from a different family |
@@ -107,7 +109,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/goal` | Keep working across turns until an objective is done (`/goal <objective> [--budget N]`, `pause`, `resume`, `clear`) |
 | `/update` | Install the latest release from inside the session (`--check` to only look); asks for your sudo password in a masked popup when the binary is in a system folder |
 | `/setup` | Starter-pack picker (or `/setup <id>…` to install directly) |
-| `/doctor`, `/login`, `/logout`, `/auth` | Diagnostics and sign-in |
+| `/doctor`, `/login`, `/logout`, `/auth` | Check sign-in, git, ripgrep, config, MCP and disk, and fix what can be fixed; sign-in |
 
 ## Command line
 
@@ -350,6 +352,7 @@ project's checks, and hands real problems back to the main agent.
 | Web | `web_search`, `fetch_url` |
 | Binaries | `inspect_binary` — ELF / PE / Mach-O summary, sections, symbols, imports, strings, cargo-auditable crates, Go build info; never runs the file |
 | Agent | `spawn_subagent`, `ask_question`, `update_plan`, `invoke_skill` |
+| Notebooks | `notebook_edit` (replace / insert / delete a cell); `read_file` also reads PDFs page by page and `.ipynb` as cells |
 | MCP | `mcp__<server>__<tool>` from configured servers; with many, `tool_search` loads them on demand |
 
 ### sudo

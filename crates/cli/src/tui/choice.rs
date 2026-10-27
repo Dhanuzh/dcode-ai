@@ -13,11 +13,24 @@ pub enum ChoiceAction {
         worktree_path: PathBuf,
         base_branch: String,
     },
+    /// Options: apply the fixes · cancel.
+    DoctorFix { fixes: Vec<DoctorFix> },
     /// Options: remove the listed notes · cancel.
     MemoryTidy {
         /// (memory file, note id) pairs to remove.
         remove: Vec<(PathBuf, String)>,
     },
+}
+
+/// A repair `/doctor` can make.
+#[derive(Debug, Clone, PartialEq)]
+pub enum DoctorFix {
+    /// Run this `!` shell command (installs go through the sudo popup).
+    Shell(String),
+    /// Turn off an MCP server that fails to start, for this folder.
+    DisableMcp(String),
+    /// Delete empty and old sessions (`/sessions-clean`).
+    CleanSessions,
 }
 
 #[derive(Debug, Clone, PartialEq)]

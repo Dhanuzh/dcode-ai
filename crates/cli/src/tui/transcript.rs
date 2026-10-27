@@ -801,7 +801,17 @@ fn render_block(
                 return;
             }
 
-            let diff_idx = diff_body_line_index(detail);
+            // Reads can contain `---` lines (PDF page markers, Markdown); only
+            // tools that change files show a diff summary.
+            let reads = matches!(
+                name.as_str(),
+                "read_file" | "search_code" | "list_directory" | "fetch_url" | "web_search"
+            );
+            let diff_idx = if reads {
+                None
+            } else {
+                diff_body_line_index(detail)
+            };
             if let Some(di) = diff_idx {
                 let diff_body = detail.lines().skip(di).collect::<Vec<_>>().join("\n");
                 let (adds, dels) = crate::tui::render::tool_detail::diff_change_counts(&diff_body);

@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.0.22 — 2026-10-27
+
+### Uses less of your Claude plan
+The Claude Code backend keeps one `claude` process per session so the
+conversation stays in Claude's prompt cache. Several things restarted that
+process, and every restart re-sent the whole conversation at the (2×)
+cache-write price:
+- **Auto mode's command check** (55 times in one recent log) borrowed the
+  session's process: each check restarted it twice. It now runs in its own
+  short-lived process, on Haiku instead of your main model.
+- **Tools loaded later** (MCP tools found with `tool_search`, MCP servers that
+  finish connecting after the first message) changed the system prompt. New
+  tools are now announced in the next message instead.
+- **Esc** killed the process mid-reply. The reply now finishes unseen in the
+  background and the process is kept.
+- The command check's answers are reused when only an `export PATH=…`
+  prefix differs.
+
+### New
+- **`/resume` searches what was said**, not just titles: type "oauth
+  fixed" to find the session where that happened; matches show a snippet.
+- **Sessions name themselves** after the first turn (a short title from a
+  cheap model); bare `/rename` picks a new one.
+- **Desktop notifications** when a turn finishes, or an approval or a
+  question waits, while the terminal is in the background: a Windows toast
+  (also from WSL), macOS notification or `notify-send`.
+- **Shell commands can be undone**: in a git workspace, files changed by
+  commands the agent runs (`sed`, generators, formatters…) are restored by
+  `/undo` and `/rewind` too. Your staging area is never touched.
+- **PDFs and Jupyter notebooks**: `read_file` reads PDFs page by page and
+  notebooks as numbered cells with outputs; the new `notebook_edit` tool
+  replaces, inserts or deletes a cell.
+- **`/share`** posts the conversation as a secret GitHub gist with secrets
+  masked and copies the link.
+- **`/project-config`** saves the model or permission mode to the shared
+  `.dcode.toml`; `/permissions allow <rule> --project` adds team rules there.
+- **First-run tips**, shown once.
+- **Tokens per turn** in the "✻ Cooked for 12s · 48.3k tokens" line.
+
+### Changed
+- **`/doctor` checks what matters now** — sign-in, git, ripgrep, config
+  files, MCP servers, session disk use — and offers to fix it: install
+  ripgrep, turn off a failing MCP server, clean old sessions.
+
+### Fixes
+- **`/export` wrote an empty file.** It now saves the whole conversation as
+  Markdown (secrets masked); `/export copy` copies it.
+
 ## 1.0.21 — 2026-10-27
 
 ### New

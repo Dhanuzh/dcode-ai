@@ -85,6 +85,11 @@ impl Repl {
                 .unwrap_or_else(|e| format!("[merge] {e}"));
                 say(st, msg);
             }
+            ChoiceAction::DoctorFix { fixes } => {
+                if index == 0 {
+                    self.apply_doctor_fixes(fixes, st).await;
+                }
+            }
             ChoiceAction::MemoryTidy { remove } => {
                 if index != 0 {
                     say(st, "[memory] left as is".into());

@@ -15,6 +15,7 @@ pub mod invoke_skill;
 pub mod list_directory;
 pub mod mcp;
 pub mod move_path;
+pub mod notebook;
 pub mod rename_path;
 pub mod replace_match;
 pub mod repo_map;
@@ -158,6 +159,9 @@ impl ToolRegistry {
         registry.register(Box::new(replace_match::ReplaceMatchTool::with_freshness(
             workspace_root.clone(),
             fresh,
+        )));
+        registry.register(Box::new(notebook::NotebookEditTool::new(
+            workspace_root.clone(),
         )));
         registry.register(Box::new(rename_path::RenamePathTool::new(
             workspace_root.clone(),

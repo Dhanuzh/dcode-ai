@@ -51,7 +51,7 @@ impl DcodeAiConfig {
 
         // Project-level config: `.dcode.toml` at workspace root.
         // Intended to be committed to git so teammates share the same defaults.
-        let project_path = workspace_root.join(".dcode.toml");
+        let project_path = project_config_path(workspace_root);
         if project_path.exists() {
             let partial = load_partial(&project_path)?;
             config.merge(partial);
@@ -588,6 +588,34 @@ fn default_cleanup_period_days() -> u32 {
 /// Add (`add`) or remove a `[permissions]` rule (`kind` is `allow`, `ask` or
 /// `deny`) in one config file, keeping everything else in it. Returns
 /// whether the file changed.
+/// The project config teammates share (commit it): `.dcode.toml`.
+pub fn project_config_path(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".dcode.toml")
+}
+
+/// Set `[section] key = value` in a TOML file, creating it if needed.
+pub fn set_toml_value(
+    path: &Path,
+    section: &str,
+    key: &str,
+    value: toml::Value,
+) -> Result<(), String> {
+    let mut doc: toml::Table = match std::fs::read_to_string(path) {
+        Ok(raw) => toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?,
+        Err(_) => toml::Table::new(),
+    };
+    doc.entry(section)
+        .or_insert_with(|| toml::Value::Table(toml::Table::new()))
+        .as_table_mut()
+        .ok_or_else(|| format!("`{section}` is not a table"))?
+        .insert(key.to_string(), value);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    let text = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
 pub fn edit_permission_rule(
     path: &Path,
     kind: &str,

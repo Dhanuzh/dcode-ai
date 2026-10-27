@@ -21,6 +21,7 @@ pub mod markdown;
 pub mod mcp_panel;
 pub mod mouse;
 pub mod mouse_select;
+pub mod notify;
 pub mod oauth_status;
 pub mod onboarding;
 pub mod palette;

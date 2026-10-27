@@ -48,6 +48,7 @@ fn map_tool(name: &str) -> Vec<&str> {
         "Read" => vec!["read_file"],
         "Write" => vec!["write_file", "create_directory"],
         "Edit" | "MultiEdit" => vec!["edit_file", "replace_match", "apply_patch"],
+        "NotebookEdit" => vec!["notebook_edit"],
         "Bash" => vec!["execute_bash", "run_background", "run_validation"],
         "Grep" | "Glob" => vec!["search_code", "repo_map", "query_symbols"],
         "LS" => vec!["list_directory"],
@@ -55,7 +56,7 @@ fn map_tool(name: &str) -> Vec<&str> {
         "WebSearch" => vec!["web_search"],
         "TodoWrite" => vec!["update_plan"],
         "Task" => vec!["spawn_subagent"],
-        "NotebookEdit" | "NotebookRead" => vec![],
+        "NotebookRead" => vec!["read_file"],
         other => vec![other],
     }
 }

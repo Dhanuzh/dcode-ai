@@ -26,6 +26,7 @@ pub fn metadata(name: &str) -> ToolUi {
         "web_search" => ("W", "Web Search", "web"),
         "write_file" => ("W", "Write", "edit"),
         "edit_file" => ("E", "Update", "edit"),
+        "notebook_edit" => ("N", "Notebook", "edit"),
         "apply_patch" => ("P", "Patch", "edit"),
         "replace_match" => ("R", "Update", "edit"),
         "create_directory" => ("D", "Create", "file"),
@@ -175,9 +176,9 @@ fn preview_keys(tool: &str) -> &'static [&'static str] {
         "web_search" => &["query", "q"],
         "fetch_url" => &["url"],
         "search" | "search_code" => &["pattern", "query", "path"],
-        "read_file" | "list_directory" | "write_file" | "edit_file" | "replace_match"
-        | "create_directory" | "rename_path" | "move_path" | "copy_path" | "delete_path"
-        | "git_diff" => &[
+        "read_file" | "list_directory" | "write_file" | "edit_file" | "notebook_edit"
+        | "replace_match" | "create_directory" | "rename_path" | "move_path" | "copy_path"
+        | "delete_path" | "git_diff" => &[
             "file_path",
             "path",
             "target_file",

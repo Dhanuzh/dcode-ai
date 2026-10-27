@@ -19,7 +19,7 @@ mod web_server;
 
 // Shared with the library target; compiled once there.
 use dcode_ai_cli::{
-    approval_prompts, file_mentions, image_attach, ipc_pending, oauth_login, prompt,
+    approval_prompts, file_mentions, image_attach, ipc_pending, oauth_login, prompt, share,
     slash_commands, stream, tool_ui, tui, update_check,
 };
 

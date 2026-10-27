@@ -77,7 +77,7 @@ pub fn render_indicator(state: BusyState, state_since: Instant) -> String {
 
 /// Claude-style line after a turn: `Crunched for 1m 9s · 1 shell still
 /// running`. Quick turns without running shells get none.
-pub fn turn_summary(elapsed: std::time::Duration, shells: usize) -> Option<String> {
+pub fn turn_summary(elapsed: std::time::Duration, shells: usize, tokens: u64) -> Option<String> {
     const VERBS: [&str; 8] = [
         "Baked",
         "Brewed",
@@ -99,6 +99,12 @@ pub fn turn_summary(elapsed: std::time::Duration, shells: usize) -> Option<Strin
         format!("{secs}s")
     };
     let mut line = format!("{verb} for {took}");
+    // What the turn cost, so heavy turns are visible.
+    if tokens >= 1_000 {
+        line.push_str(&format!(" · {:.1}k tokens", tokens as f64 / 1_000.0));
+    } else if tokens > 0 {
+        line.push_str(&format!(" · {tokens} tokens"));
+    }
     match shells {
         0 => {}
         1 => line.push_str(" · 1 shell still running"),
@@ -110,6 +116,12 @@ pub fn turn_summary(elapsed: std::time::Duration, shells: usize) -> Option<Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn turn_summary_shows_tokens() {
+        let line = turn_summary(std::time::Duration::from_secs(12), 0, 48_300).unwrap();
+        assert!(line.ends_with("for 12s · 48.3k tokens"), "{line}");
+    }
 
     #[test]
     fn frame_cycles_through_thinking_frames() {
@@ -161,13 +173,13 @@ mod tests {
     #[test]
     fn turn_summary_reads_like_claude() {
         use std::time::Duration;
-        assert_eq!(super::turn_summary(Duration::from_secs(2), 0), None);
-        let line = super::turn_summary(Duration::from_secs(69), 1).unwrap();
+        assert_eq!(super::turn_summary(Duration::from_secs(2), 0, 0), None);
+        let line = super::turn_summary(Duration::from_secs(69), 1, 0).unwrap();
         assert!(
             line.ends_with(" for 1m 9s · 1 shell still running"),
             "{line}"
         );
-        let line = super::turn_summary(Duration::from_secs(1), 2).unwrap();
+        let line = super::turn_summary(Duration::from_secs(1), 2, 0).unwrap();
         assert!(line.ends_with(" for 1s · 2 shells still running"), "{line}");
     }
 }

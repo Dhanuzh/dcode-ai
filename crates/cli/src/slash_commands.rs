@@ -56,6 +56,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/release-notes",
     "/vim",
     "/terminal-setup",
+    "/project-config",
     "/second-opinion",
     "/add-dir",
     "/todos",
@@ -66,6 +67,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/feedback",
     "/new",
     "/export",
+    "/share",
     "/thinking",
     "/stop",
     "/run-bg",
@@ -125,6 +127,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/side" => "start an ephemeral side conversation (/side end to return)",
         "/btw" => "ask a quick side question without adding it to the conversation",
         "/terminal-setup" => "make Shift+Enter insert a newline in this terminal",
+        "/project-config" => {
+            "shared project settings (.dcode.toml): save the model or mode for the team"
+        }
         "/approve" => "allow the most recently requested tool for this session",
         "/agent" => "switch the active agent profile",
         "/plan" => "plan mode (read-only); /plan <task> plans that task",
@@ -176,7 +181,8 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/import" => "import Claude Code CLAUDE.md (or /import chats)",
         "/feedback" => "report a bug or request a feature",
         "/new" => "start a new chat",
-        "/export" => "export the conversation to a file",
+        "/export" => "save the conversation as Markdown (secrets masked); /export copy copies it",
+        "/share" => "share the conversation as a secret GitHub gist (secrets masked)",
         "/thinking" => "toggle extended thinking",
         "/stop" => "cancel the turn / stop a background job",
         "/run-bg" => "run a shell command in the background",

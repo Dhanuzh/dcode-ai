@@ -151,11 +151,12 @@ pub(crate) fn project_picker_labels(g: &TuiSessionState) -> Vec<String> {
 }
 
 /// Session picker entries that match the search, in order.
-fn session_picker_matches(g: &TuiSessionState) -> Vec<&crate::tui::state::SessionPickerEntry> {
-    let filter = g.session_picker_search.to_ascii_lowercase();
+fn session_picker_matches(
+    g: &TuiSessionState,
+) -> Vec<(&crate::tui::state::SessionPickerEntry, Option<String>)> {
     g.session_picker_entries
         .iter()
-        .filter(|e| filter.is_empty() || e.search_text.to_ascii_lowercase().contains(&filter))
+        .filter_map(|e| e.search(&g.session_picker_search).map(|snip| (e, snip)))
         .collect()
 }
 
@@ -205,7 +206,7 @@ pub(crate) fn render_session_picker(
         Line::from(vec![
             Span::styled(" ⌕ ", muted),
             if g.session_picker_search.is_empty() {
-                Span::styled("type to search", muted)
+                Span::styled("type to search titles and what was said", muted)
             } else {
                 Span::styled(
                     format!("{}▏", g.session_picker_search),
@@ -220,7 +221,7 @@ pub(crate) fn render_session_picker(
     if matches.is_empty() {
         lines.push(Line::from(Span::styled("   no sessions match", muted)));
     }
-    for (i, entry) in matches.iter().enumerate().skip(start).take(slots) {
+    for (i, (entry, snippet)) in matches.iter().enumerate().skip(start).take(slots) {
         let sel = i == selected;
         let title_style = if sel {
             Style::default()
@@ -233,9 +234,15 @@ pub(crate) fn render_session_picker(
             Span::styled(if sel { " ❯ " } else { "   " }, title_style),
             Span::styled(truncate_chars(&entry.label, width), title_style),
         ]));
+        // A match inside the conversation shows where it matched.
+        let second = snippet.as_deref().unwrap_or(&entry.meta);
         lines.push(Line::from(Span::styled(
-            format!("   {}", truncate_chars(&entry.meta, width)),
-            muted,
+            format!("   {}", truncate_chars(second, width)),
+            if snippet.is_some() {
+                Style::default().fg(theme::accent())
+            } else {
+                muted
+            },
         )));
     }
     // The hint sits on the last row whatever the list length.

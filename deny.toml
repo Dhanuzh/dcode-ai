@@ -5,6 +5,10 @@
 # RustSec advisory DB: fail the build on known-vulnerable or yanked crates.
 yanked = "deny"
 ignore = [
+    # ttf-parser is unmaintained (no vulnerability); pulled by lopdf through
+    # pdf-extract, which read_file uses for PDF text. Extraction runs on a
+    # blocking thread with panics caught; replace when lopdf drops it.
+    "RUSTSEC-2026-0192",
     # bincode 1.x is unmaintained; pulled only by syntect's binary asset
     # loading (syntax-highlighting themes). No untrusted input flows there.
     "RUSTSEC-2025-0141",

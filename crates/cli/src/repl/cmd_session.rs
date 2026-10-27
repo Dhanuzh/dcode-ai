@@ -144,6 +144,16 @@ impl Repl {
             }
             "/session-name" | "/rename" => {
                 let raw = rest.trim();
+                // Bare `/rename` in the TUI: name it from the conversation.
+                if raw.is_empty()
+                    && command == "/rename"
+                    && let ReplOutput::Tui(st) = &out
+                    && self.runtime.messages().len() > 1
+                {
+                    out.println("[session-name] naming this session…");
+                    self.spawn_session_title(st, true);
+                    return Ok(true);
+                }
                 if raw.is_empty() {
                     if let Some(name) = self.runtime.session_name() {
                         out.println(&format!(
@@ -503,6 +513,7 @@ impl Repl {
                                     label: title,
                                     meta,
                                     search_text,
+                                    content: String::new(),
                                     preview,
                                 },
                             ));
@@ -518,7 +529,14 @@ impl Repl {
                                 ));
                                 g.touch_transcript();
                             } else {
+                                let ids: Vec<String> =
+                                    entries.iter().map(|e| e.id.clone()).collect();
                                 g.open_session_picker(entries, &current);
+                                spawn_session_text_loader(
+                                    Arc::clone(st),
+                                    sessions_dir.clone(),
+                                    ids,
+                                );
                             }
                         }
                     } else {
@@ -597,57 +615,86 @@ impl Repl {
                 }
                 out.println(&format!("new session started: {new_id}"));
             }
-            "/export" => {
+            "/export" | "/share" => {
                 let snapshot = self.runtime.snapshot();
-                let events = self.runtime.event_log_path();
-                let md = match tokio::fs::read_to_string(&events).await {
-                    Ok(raw) => {
-                        let mut md_lines =
-                            vec![format!("# Session {}", snapshot.id), String::new()];
-                        for line in raw.lines() {
-                            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line)
-                                && let Some(kind) = val.get("kind").and_then(|v| v.as_str())
-                            {
-                                match kind {
-                                    "MessageReceived" => {
-                                        let role =
-                                            val.get("role").and_then(|v| v.as_str()).unwrap_or("?");
-                                        let content = val
-                                            .get("content")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("");
-                                        md_lines.push(format!("## {role}"));
-                                        md_lines.push(String::new());
-                                        md_lines.push(content.to_string());
-                                        md_lines.push(String::new());
-                                    }
-                                    "ToolCallStarted" => {
-                                        let tool =
-                                            val.get("tool").and_then(|v| v.as_str()).unwrap_or("?");
-                                        md_lines.push(format!("### tool: {tool}"));
-                                        md_lines.push(String::new());
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
-                        md_lines.join("\n")
-                    }
-                    Err(e) => {
-                        out.eprintln(&format!("[export] failed to read event log: {e}"));
-                        return Ok(true);
-                    }
-                };
-                let export_path = self
+                let title = self
                     .runtime
-                    .workspace_root()
-                    .join(format!(".dcode-ai/export-{}.md", snapshot.id));
-                if let Some(parent) = export_path.parent() {
+                    .session_name()
+                    .map(str::to_string)
+                    .or_else(|| {
+                        self.runtime
+                            .messages()
+                            .iter()
+                            .find(|m| m.role == dcode_ai_common::message::Role::User)
+                            .map(|m| {
+                                m.content
+                                    .to_summary_text()
+                                    .lines()
+                                    .next()
+                                    .unwrap_or("")
+                                    .chars()
+                                    .take(70)
+                                    .collect()
+                            })
+                    })
+                    .unwrap_or_else(|| "dcode-ai session".into());
+                let meta = format!(
+                    "dcode-ai session {} · {} · {}",
+                    snapshot.id,
+                    snapshot.model,
+                    snapshot.updated_at.format("%Y-%m-%d")
+                );
+                let md = crate::share::markdown(&title, &meta, self.runtime.messages());
+                let arg = rest.trim();
+                // `/export <file>` writes there; otherwise into .dcode-ai/.
+                let path = if command == "/export" && !arg.is_empty() && arg != "copy" {
+                    self.runtime.workspace_root().join(arg)
+                } else {
+                    self.runtime
+                        .workspace_root()
+                        .join(format!(".dcode-ai/export-{}.md", snapshot.id))
+                };
+                if let Some(parent) = path.parent() {
                     let _ = tokio::fs::create_dir_all(parent).await;
                 }
-                match tokio::fs::write(&export_path, &md).await {
-                    Ok(()) => out.println(&format!("exported to {}", export_path.display())),
-                    Err(e) => out.eprintln(&format!("[export] {e}")),
+                if let Err(e) = tokio::fs::write(&path, &md).await {
+                    out.eprintln(&format!("[{}] {e}", &command[1..]));
+                    return Ok(true);
+                }
+                if command == "/export" {
+                    if arg == "copy" {
+                        match crate::tui::clipboard::copy_to_clipboard(&md) {
+                            Ok(_) => {
+                                out.println("[export] copied the conversation (secrets masked)")
+                            }
+                            Err(e) => out.eprintln(&format!("[export] {e}")),
+                        }
+                    } else {
+                        out.println(&format!(
+                            "[export] saved to {} (secrets masked)",
+                            path.display()
+                        ));
+                    }
+                    return Ok(true);
+                }
+                out.println("[share] uploading a secret gist (secrets masked)…");
+                let desc = format!("dcode-ai: {title}");
+                let file = path.clone();
+                match tokio::task::spawn_blocking(move || crate::share::gist(&file, &desc))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()))
+                {
+                    Ok(url) => {
+                        let copied = crate::tui::clipboard::copy_to_clipboard(&url).is_ok();
+                        out.println(&format!(
+                            "[share] {url}{} — anyone with the link can read it; delete it with `gh gist delete`",
+                            if copied { " (copied)" } else { "" }
+                        ));
+                    }
+                    Err(e) => out.eprintln(&format!(
+                        "[share] {e} · the Markdown is at {}",
+                        path.display()
+                    )),
                 }
             }
             // ── /retry ────────────────────────────────────────────────────────
@@ -861,4 +908,59 @@ then switch).",
         }
         Ok(true)
     }
+}
+
+/// Fill the `/resume` picker's search text with what each session said,
+/// read in the background so the picker opens at once.
+fn spawn_session_text_loader(
+    st: Arc<Mutex<TuiSessionState>>,
+    sessions_dir: std::path::PathBuf,
+    ids: Vec<String>,
+) {
+    tokio::spawn(async move {
+        let texts = tokio::task::spawn_blocking(move || {
+            ids.into_iter()
+                .filter_map(|id| {
+                    let raw =
+                        std::fs::read_to_string(sessions_dir.join(format!("{id}.json"))).ok()?;
+                    let state: dcode_ai_common::session::SessionState =
+                        serde_json::from_str(&raw).ok()?;
+                    Some((id, session_search_text(&state.messages)))
+                })
+                .collect::<Vec<_>>()
+        })
+        .await
+        .unwrap_or_default();
+        if let Ok(mut g) = st.lock() {
+            for (id, text) in texts {
+                if let Some(e) = g.session_picker_entries.iter_mut().find(|e| e.id == id) {
+                    e.content = text;
+                }
+            }
+            g.touch_transcript();
+        }
+    });
+}
+
+/// The words of a conversation worth searching: user and assistant text,
+/// capped so a huge session stays cheap to match.
+fn session_search_text(messages: &[dcode_ai_common::message::Message]) -> String {
+    use dcode_ai_common::message::Role;
+    const CAP: usize = 200_000;
+    let mut out = String::new();
+    for m in messages {
+        if !matches!(m.role, Role::User | Role::Assistant) {
+            continue;
+        }
+        let text = m.content.to_summary_text();
+        if text.trim().is_empty() {
+            continue;
+        }
+        out.push_str(text.trim());
+        out.push('\n');
+        if out.len() > CAP {
+            break;
+        }
+    }
+    out
 }

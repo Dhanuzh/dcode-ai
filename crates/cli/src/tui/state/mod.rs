@@ -781,10 +781,8 @@ impl TuiSessionState {
     /// Apply one key to the open session picker. On Accept, returns the session
     /// id to resume; nav/search mutate in place.
     pub fn apply_session_picker_key(&mut self, key: SessionPickerKey) -> Option<String> {
-        let filter = self.session_picker_search.to_ascii_lowercase();
-        let is_match = |e: &SessionPickerEntry| {
-            filter.is_empty() || e.search_text.to_ascii_lowercase().contains(&filter)
-        };
+        let filter = self.session_picker_search.clone();
+        let is_match = |e: &SessionPickerEntry| e.search(&filter).is_some();
         let count = self
             .session_picker_entries
             .iter()
@@ -2850,6 +2848,7 @@ mod tests {
                 label: "fix auth".into(),
                 meta: String::new(),
                 search_text: "fix auth".into(),
+                content: String::new(),
                 preview: String::new(),
             },
             SessionPickerEntry {
@@ -2857,6 +2856,7 @@ mod tests {
                 label: "add tests".into(),
                 meta: String::new(),
                 search_text: "add tests".into(),
+                content: String::new(),
                 preview: String::new(),
             },
         ];
@@ -2865,6 +2865,25 @@ mod tests {
         let id = st.apply_session_picker_key(SessionPickerKey::Accept);
         assert_eq!(id.as_deref(), Some("sess-2"));
         assert!(!st.session_picker_open);
+    }
+
+    #[test]
+    fn session_search_finds_words_said_in_the_conversation() {
+        let e = SessionPickerEntry {
+            id: "s1".into(),
+            label: "sharepoint sync".into(),
+            meta: String::new(),
+            search_text: "sharepoint sync s1".into(),
+            content: "User: the login keeps failing\nAssistant: The OAuth redirect URI was wrong; fixed it in auth.rs".into(),
+            preview: String::new(),
+        };
+        assert_eq!(e.search("sharepoint"), Some(None));
+        let hit = e
+            .search("oauth fixed")
+            .expect("content match")
+            .expect("snippet");
+        assert!(hit.contains("OAuth redirect"), "{hit}");
+        assert_eq!(e.search("oauth kubernetes"), None);
     }
 
     #[test]
