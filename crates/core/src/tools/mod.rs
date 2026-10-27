@@ -163,6 +163,9 @@ impl ToolRegistry {
         registry.register(Box::new(notebook::NotebookEditTool::new(
             workspace_root.clone(),
         )));
+        registry.register(Box::new(crate::browser::BrowserTool::new(
+            workspace_root.clone(),
+        )));
         registry.register(Box::new(rename_path::RenamePathTool::new(
             workspace_root.clone(),
         )));

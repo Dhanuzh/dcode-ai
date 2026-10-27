@@ -1944,6 +1944,10 @@ pub fn spawn_event_fanout(
             None => (None, None),
         };
 
+        // The sessions folder may not exist yet in a fresh workspace.
+        if let Some(dir) = log_path.parent() {
+            let _ = tokio::fs::create_dir_all(dir).await;
+        }
         let mut log_file = OpenOptions::new()
             .create(true)
             .append(true)

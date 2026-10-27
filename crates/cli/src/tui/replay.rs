@@ -123,6 +123,110 @@ pub async fn replay_event_log_into_state(log_path: &Path, state: &Arc<Mutex<TuiS
     tracing::debug!(path = %log_path.display(), events_applied = applied, "replayed event log into TUI");
 }
 
+/// Rebuild the transcript from a session's saved messages (Claude Code
+/// resumes from its transcript the same way): your messages, the replies,
+/// and each tool call with its result.
+pub fn replay_messages_into_state(
+    messages: &[dcode_ai_common::message::Message],
+    state: &Arc<Mutex<TuiSessionState>>,
+) {
+    use dcode_ai_common::message::Role;
+    let results: std::collections::HashMap<&str, String> = messages
+        .iter()
+        .filter(|m| m.role == Role::Tool)
+        .filter_map(|m| {
+            m.tool_call_id
+                .as_deref()
+                .map(|id| (id, m.content.to_summary_text()))
+        })
+        .collect();
+    let Ok(mut g) = state.lock() else {
+        return;
+    };
+    let first_block = g.blocks.len();
+    g.replaying = true;
+    for m in messages {
+        let text = m.content.to_summary_text();
+        match m.role {
+            Role::System | Role::Tool => {}
+            Role::User => {
+                if !text.trim().is_empty() {
+                    g.apply_event(&AgentEvent::MessageReceived {
+                        role: "user".into(),
+                        content: text,
+                    });
+                }
+            }
+            Role::Assistant => {
+                if !text.trim().is_empty() {
+                    g.apply_event(&AgentEvent::MessageReceived {
+                        role: "assistant".into(),
+                        content: text,
+                    });
+                }
+                for call in m.tool_calls.iter().flatten() {
+                    g.apply_event(&AgentEvent::ToolCallStarted {
+                        call_id: call.id.clone(),
+                        tool: call.name.clone(),
+                        input: call.arguments.clone(),
+                    });
+                    let output = results.get(call.id.as_str()).cloned().unwrap_or_default();
+                    g.apply_event(&AgentEvent::ToolCallCompleted {
+                        call_id: call.id.clone(),
+                        output: dcode_ai_common::tool::ToolResult {
+                            call_id: call.id.clone(),
+                            success: !output.starts_with("Error"),
+                            output: dcode_ai_core::agent::cap_tool_output(&output),
+                            error: None,
+                        },
+                    });
+                }
+            }
+        }
+    }
+    g.replaying = false;
+    g.streaming_assistant = None;
+    g.clear_replayed_interaction_state();
+    hide_old_blocks(&mut g, first_block);
+}
+
+/// Restore a resumed session's transcript: from its event log, or — when
+/// the log is missing or holds far fewer of your messages than the session
+/// (logs written before 1.0.24 could land in another session's file) —
+/// from the saved messages.
+pub async fn restore_transcript(
+    log_path: &Path,
+    messages: &[dcode_ai_common::message::Message],
+    state: &Arc<Mutex<TuiSessionState>>,
+) {
+    let first_block = state.lock().map(|g| g.blocks.len()).unwrap_or(0);
+    replay_event_log_into_state(log_path, state).await;
+    let saved_users = messages
+        .iter()
+        .filter(|m| m.role == dcode_ai_common::message::Role::User)
+        .filter(|m| !m.content.to_summary_text().trim().is_empty())
+        .count();
+    let shown_users = state
+        .lock()
+        .map(|g| {
+            g.blocks[first_block.min(g.blocks.len())..]
+                .iter()
+                .filter(|b| matches!(b, crate::tui::state::DisplayBlock::User(_)))
+                .count()
+        })
+        .unwrap_or(0);
+    // Some user messages are hidden on purpose (goal continuations, task
+    // notifications), so only a log that clearly lacks the conversation
+    // is replaced.
+    if saved_users > 0 && (shown_users == 0 || shown_users * 2 < saved_users) {
+        if let Ok(mut g) = state.lock() {
+            g.blocks.truncate(first_block);
+            g.flushed_block_count = g.flushed_block_count.min(first_block);
+        }
+        replay_messages_into_state(messages, state);
+    }
+}
+
 /// Print only the newest blocks of a long history: the rest are marked
 /// as already flushed, behind a one-line note.
 fn hide_old_blocks(g: &mut TuiSessionState, first_block: usize) {
@@ -176,6 +280,94 @@ mod tests {
         assert!(events_on_line(delta).is_empty());
         let msg = r#"{"schema_version":1,"id":4,"ts":"2026-10-23T11:18:22Z","event":{"type":"MessageReceived","role":"user","content":"hi"}}"#;
         assert_eq!(events_on_line(msg).len(), 1);
+    }
+
+    fn fresh_state() -> Arc<Mutex<TuiSessionState>> {
+        Arc::new(Mutex::new(TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "Default".into(),
+            std::path::PathBuf::from("/tmp"),
+            false,
+        )))
+    }
+
+    fn convo() -> Vec<dcode_ai_common::message::Message> {
+        use dcode_ai_common::message::{Message, MessageToolCall};
+        vec![
+            Message::system("system prompt"),
+            Message::user("fix the login page"),
+            Message::assistant_with_tool_calls(
+                "Reading it.",
+                vec![MessageToolCall {
+                    id: "c1".into(),
+                    name: "read_file".into(),
+                    arguments: serde_json::json!({"path": "login.ts"}),
+                }],
+            ),
+            Message::tool("c1", "export const x = 1;"),
+            Message::assistant("Fixed the redirect."),
+        ]
+    }
+
+    #[tokio::test]
+    async fn a_missing_log_is_rebuilt_from_the_saved_messages() {
+        let st = fresh_state();
+        let dir = tempfile::tempdir().unwrap();
+        restore_transcript(&dir.path().join("none.events.jsonl"), &convo(), &st).await;
+        let g = st.lock().unwrap();
+        use crate::tui::state::DisplayBlock as B;
+        assert!(
+            g.blocks
+                .iter()
+                .any(|b| matches!(b, B::User(t) if t == "fix the login page"))
+        );
+        assert!(
+            g.blocks
+                .iter()
+                .any(|b| matches!(b, B::Assistant(t) if t.contains("Fixed the redirect")))
+        );
+        assert!(
+            g.blocks
+                .iter()
+                .any(|b| matches!(b, B::ToolDone { name, .. } if name == "read_file"))
+        );
+        assert!(
+            !g.blocks
+                .iter()
+                .any(|b| matches!(b, B::System(t) if t.contains("system prompt")))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_complete_log_is_kept() {
+        let st = fresh_state();
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("s.events.jsonl");
+        std::fs::write(
+            &log,
+            concat!(
+                r#"{"schema_version":1,"id":1,"ts":"2026-10-27T10:00:00Z","event":{"type":"MessageReceived","role":"user","content":"fix the login page"}}"#,
+                "\n",
+                r#"{"schema_version":1,"id":2,"ts":"2026-10-27T10:00:01Z","event":{"type":"MessageReceived","role":"assistant","content":"from the log"}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+        restore_transcript(&log, &convo(), &st).await;
+        let g = st.lock().unwrap();
+        use crate::tui::state::DisplayBlock as B;
+        assert!(
+            g.blocks
+                .iter()
+                .any(|b| matches!(b, B::Assistant(t) if t == "from the log"))
+        );
+        assert!(
+            !g.blocks
+                .iter()
+                .any(|b| matches!(b, B::Assistant(t) if t.contains("Fixed")))
+        );
     }
 
     #[test]

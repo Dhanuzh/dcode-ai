@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod agent_defs;
 pub mod approval;
+pub mod browser;
 pub mod code_intel;
 pub mod code_map;
 pub mod command_safety;

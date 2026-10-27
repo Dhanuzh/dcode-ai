@@ -89,6 +89,26 @@ impl Repl {
                     }
                 }
             }
+            "/browser" => {
+                use dcode_ai_core::browser;
+                let mut words = rest.split_whitespace();
+                let msg = match words.next() {
+                    None | Some("status") => Ok(browser::status().await),
+                    Some("open") => browser::open(words.next()).await,
+                    Some("connect") => match words.next().and_then(|p| p.parse::<u16>().ok()) {
+                        Some(port) => browser::connect(port).await,
+                        None => Err("usage: /browser connect <port> — start your browser with --remote-debugging-port=<port>".into()),
+                    },
+                    Some("close") => browser::close().await,
+                    Some(other) => Err(format!(
+                        "unknown `/browser {other}` — /browser [status|open [url]|connect <port>|close]"
+                    )),
+                };
+                match msg {
+                    Ok(m) => out.println(&format!("[browser] {m}")),
+                    Err(e) => out.eprintln(&format!("[browser] {e}")),
+                }
+            }
             "/memory" => {
                 let user_path = dcode_ai_runtime::memory_tool::user_memory_path();
                 let project_path = self.runtime.memory_store_path();

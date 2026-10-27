@@ -1,5 +1,26 @@
 # Changelog
 
+## 1.0.24 — 2026-10-27
+
+### New
+- **Browser control**: the agent can drive a real Chrome or Edge window —
+  open pages, read them, click, type, press keys, scroll, take screenshots,
+  read the console and run JavaScript — to test your web app or work through
+  a site. It opens its own browser profile (logins you make there are kept);
+  on WSL it uses your Windows Chrome. `/browser` shows the status;
+  `/browser open [url]`, `/browser connect <port>` (attach to a Chrome you
+  started with `--remote-debugging-port`), `/browser close`. Reading a page
+  never asks; clicking and typing follow your permission mode; running
+  JavaScript always asks. It never types into password fields.
+
+### Fixes
+- **Resumed sessions came back empty ("0 messages restored")**: after
+  `/new`, `/fork` or a resume, events kept going to the first session's log,
+  and in a folder without a sessions folder yet nothing was logged at all.
+  Each session now writes its own log, and resuming a session whose log is
+  missing or incomplete rebuilds the conversation from its saved messages —
+  which also brings back sessions affected before this release.
+
 ## 1.0.23 — 2026-10-27
 
 ### New

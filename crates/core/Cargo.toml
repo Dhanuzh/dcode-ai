@@ -8,6 +8,8 @@ description = "Agent loop, provider abstraction, tool protocol, and approval pol
 
 [dependencies]
 pdf-extract = "0.12"
+# Browser control over the Chrome DevTools Protocol (ws://localhost only, no TLS).
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect"] }
 dcode-ai-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

@@ -10,8 +10,7 @@ use crate::tui::app::ApprovalAnswer;
 use crate::tui::state::RewindScope;
 use crate::tui::{
     DisplayBlock, SessionPickerEntry, TuiCmd, TuiSessionState, git_create_branch,
-    git_current_branch, git_list_branches, git_switch_branch, replay_event_log_into_state,
-    run_blocking, spawn_tui_bridge,
+    git_current_branch, git_list_branches, git_switch_branch, run_blocking, spawn_tui_bridge,
 };
 use dcode_ai_common::config::{PermissionMode, ProviderKind};
 use dcode_ai_common::event::{
@@ -963,8 +962,8 @@ impl Repl {
             | "/terminal-setup" | "/project-config" => {
                 return self.cmd_settings(input, command, rest, parts, out).await;
             }
-            "/reload" | "/add-dir" | "/skills" | "/memory" | "/setup" | "/plugins" | "/plugin"
-            | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
+            "/reload" | "/add-dir" | "/skills" | "/memory" | "/browser" | "/setup" | "/plugins"
+            | "/plugin" | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
             "/btw" => {
@@ -1302,7 +1301,8 @@ impl Repl {
 
         crate::tui::markdown::warm_up_highlighting();
         let log_path = self.runtime.event_log_path();
-        replay_event_log_into_state(&log_path, &tui_state).await;
+        let saved = self.runtime.messages().to_vec();
+        crate::tui::replay::restore_transcript(&log_path, &saved, &tui_state).await;
         show_restored_goal(&self.runtime.goal_cell(), &tui_state);
 
         // Populate the git branch name immediately so it appears on first render.
@@ -2016,7 +2016,11 @@ impl Repl {
                                     g.model = self.runtime.model().to_string();
                                     g.touch_transcript();
                                 }
-                                replay_event_log_into_state(&new_log, &tui_state).await;
+                                let saved = self.runtime.messages().to_vec();
+                                crate::tui::replay::restore_transcript(
+                                    &new_log, &saved, &tui_state,
+                                )
+                                .await;
                                 if let Ok(mut g) = tui_state.lock() {
                                     let restored = g.blocks.len();
                                     g.push_block(DisplayBlock::System(format!(

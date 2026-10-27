@@ -143,6 +143,7 @@ Press `?` on an empty prompt for every shortcut.
 
 - **Sub-agents** run in their own git worktrees with parent/child lineage; when one finishes with changes you choose merge, keep or discard. Define your own in `agents/*.md`.
 - **`/btw`** answers a side question mid-turn without adding it to the conversation.
+- **Browser control** — the agent drives a real Chrome/Edge window to test web apps (`/browser`).
 - **`/verify`** sends a read-only reviewer over your uncommitted diff and hands real problems back.
 - **Headless**: `--json`, `--stream ndjson`, Unix-socket IPC for detached sessions, stable exit codes.
 - **CI**: `dcode-ai ci` prints a JSON result, writes a GitHub step summary, and exits 0 / 1 / 2 (budget). Also a GitHub Action.

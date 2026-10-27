@@ -268,6 +268,22 @@ impl ApprovalPolicy {
                 | "spawn_subagent"
         );
         let destructive = matches!(tool_name, "delete_path");
+        // The browser tool is tiered by action: reading the page is like a
+        // read tool, acting on it like an edit, running JavaScript always asks.
+        let browser_action = (tool_name == "browser").then(|| {
+            serde_json::from_str::<serde_json::Value>(description)
+                .ok()
+                .and_then(|v| v["action"].as_str().map(str::to_string))
+                .unwrap_or_default()
+        });
+        let readonly = readonly
+            || browser_action
+                .as_deref()
+                .is_some_and(crate::browser::is_read_only_action);
+        let file_edit = file_edit || browser_action.is_some();
+        let destructive = destructive
+            || matches!(browser_action.as_deref(), Some("eval" | "evaluate"))
+                && !explicitly_allowed;
 
         // Structured shell classification (execpolicy-style): parse the
         // command with quoting rules instead of substring-matching it.
@@ -600,6 +616,41 @@ pub fn auto_mode_risky(command: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn browser_actions_are_tiered() {
+        let policy = |mode| {
+            ApprovalPolicy::new(PermissionConfig {
+                mode,
+                ..PermissionConfig::default()
+            })
+        };
+        let input = |a: &str| serde_json::json!({ "action": a }).to_string();
+        let default = policy(PermissionMode::Default);
+        assert_eq!(
+            default.check("browser", &input("snapshot")),
+            PermissionTier::Allowed
+        );
+        assert_eq!(
+            default.check("browser", &input("click")),
+            PermissionTier::Ask
+        );
+        let auto = policy(PermissionMode::Auto);
+        assert_eq!(
+            auto.check("browser", &input("click")),
+            PermissionTier::Allowed
+        );
+        assert_eq!(auto.check("browser", &input("eval")), PermissionTier::Ask);
+        let plan = policy(PermissionMode::Plan);
+        assert_eq!(
+            plan.check("browser", &input("screenshot")),
+            PermissionTier::Allowed
+        );
+        assert_eq!(
+            plan.check("browser", &input("navigate")),
+            PermissionTier::Denied
+        );
+    }
 
     #[test]
     fn shared_mode_cell_follows_set_mode() {

@@ -92,6 +92,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/diff` | Full-screen diff of every changed file (↑↓ file · Tab · `n`/`p` hunk · `r r` revert hunk · `q` close); `/diff <args>` prints a git diff |
 | `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in; the picker searches titles and what was said; sessions name themselves after the first turn, bare `/rename` picks a new name) |
 | `/export [file\|copy]`, `/share` | The conversation as Markdown with secrets masked: to a file, the clipboard, or a secret GitHub gist (`gh`) |
+| `/browser` | The agent's web browser: `open [url]`, `connect <port>`, `close` (see *Browser control*) |
 | `/project-config` | Shared `.dcode.toml`: `model` / `mode` save the current one for the team |
 | `/plan`, `/review`, `/fix`, `/test` | Switch agent profile |
 | `/verify` | Read-only review of the uncommitted diff |
@@ -442,3 +443,24 @@ project facts on its own, one short sentence each, never secrets. `/memory`
 shows both scopes; `/memory forget <id>` removes a note; `/memory tidy`
 finds empty notes and exact or near duplicates (keeping the newest, fuller
 copy) and asks before removing them.
+
+## Browser control
+
+The `browser` tool lets the agent use a real Chrome / Edge window: navigate,
+read the page (a text outline with numbered elements), click, type, press
+keys, scroll, go back, take a screenshot (`.dcode-ai/screenshots/`), read the
+console and run JavaScript.
+
+- The first use launches dcode-ai's own browser (separate profile in
+  `~/.dcode-ai/browser-profile`, or `%LOCALAPPDATA%\dcode-ai` for the Windows
+  browser from WSL) on debug port 9333. Sign in to sites there yourself;
+  the logins stay for later sessions.
+- To use your own browser profile, start Chrome with
+  `--remote-debugging-port=9222` and run `/browser connect 9222`.
+- `DCODE_AI_BROWSER` picks the executable. On WSL this needs
+  `networkingMode=mirrored` (the Windows browser's port must be on
+  localhost).
+- Permissions: reading the page never asks; navigating, clicking and typing
+  ask in default mode and run in accept-edits / auto mode; `eval` always
+  asks. Password fields are never typed into.
+

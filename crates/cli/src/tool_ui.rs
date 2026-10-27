@@ -27,6 +27,7 @@ pub fn metadata(name: &str) -> ToolUi {
         "write_file" => ("W", "Write", "edit"),
         "edit_file" => ("E", "Update", "edit"),
         "notebook_edit" => ("N", "Notebook", "edit"),
+        "browser" => ("◎", "Browser", "web"),
         "apply_patch" => ("P", "Patch", "edit"),
         "replace_match" => ("R", "Update", "edit"),
         "create_directory" => ("D", "Create", "file"),
@@ -174,6 +175,7 @@ fn preview_keys(tool: &str) -> &'static [&'static str] {
         "bash" | "execute_bash" | "shell" | "run_shell" | "run_validation" => &["command", "cmd"],
         "run_background" => &["command", "action"],
         "web_search" => &["query", "q"],
+        "browser" => &["url", "action", "expression", "key"],
         "fetch_url" => &["url"],
         "search" | "search_code" => &["pattern", "query", "path"],
         "read_file" | "list_directory" | "write_file" | "edit_file" | "notebook_edit"

@@ -43,8 +43,32 @@ pub fn spawn_tui_bridge(
             .await
             .ok();
 
+        // The log follows the session: `/new`, `/fork` and the like change
+        // the session id on the same event stream, and each session's
+        // events belong in its own `<id>.events.jsonl` (resume replays it).
+        let sessions_dir = log_path.parent().map(std::path::Path::to_path_buf);
+        let mut logging_for = log_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .and_then(|n| n.strip_suffix(".events.jsonl"))
+            .map(str::to_string);
         let mut event_id: u64 = 0;
         while let Some(event) = rx.recv().await {
+            let current = state.lock().ok().map(|g| g.session_id.clone());
+            // (Re)open when the session changed, or when the first open
+            // failed because the sessions folder did not exist yet.
+            if let (Some(dir), Some(id)) = (&sessions_dir, current.filter(|i| !i.is_empty()))
+                && (logging_for.as_deref() != Some(id.as_str()) || log_file.is_none())
+            {
+                let _ = tokio::fs::create_dir_all(dir).await;
+                log_file = OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join(format!("{id}.events.jsonl")))
+                    .await
+                    .ok();
+                logging_for = Some(id);
+            }
             event_id += 1;
             let envelope = EventEnvelope::new(event_id, event.clone());
 
