@@ -263,6 +263,8 @@ impl TuiSessionState {
             theme_picker_original: None,
             statusline_text: None,
             transcript_overlay_scroll: 0,
+            diff_overlay_open: false,
+            diff_overlay_scroll: 0,
             transcript_overlay_raw: false,
             mcp_server_statuses: HashMap::new(),
         }

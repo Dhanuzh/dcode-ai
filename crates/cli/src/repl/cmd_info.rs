@@ -98,7 +98,8 @@ impl Repl {
                     .iter()
                     .filter(|s| s.enabled)
                     .count();
-                let window = dcode_ai_runtime::model_limits::detect_context_window(&model) as u64;
+                let window =
+                    dcode_ai_runtime::model_limits::effective_context_window(&model) as u64;
 
                 // Live token/cost/context come from the TUI state (CostUpdated).
                 let (tin, tout, cost, ctx, projects) = if let ReplOutput::Tui(st) = &out {
@@ -191,7 +192,7 @@ impl Repl {
                 let lines = context_usage_lines(
                     self.runtime.model(),
                     self.runtime.context_breakdown(),
-                    dcode_ai_runtime::model_limits::detect_context_window(self.runtime.model())
+                    dcode_ai_runtime::model_limits::effective_context_window(self.runtime.model())
                         as u64,
                     self.runtime.messages().len(),
                 );
@@ -203,6 +204,14 @@ impl Repl {
                     for l in &lines {
                         out.println(l);
                     }
+                }
+            }
+            // In the TUI, bare `/diff` opens the full-screen diff view.
+            "/diff" if rest.trim().is_empty() && matches!(out, ReplOutput::Tui(_)) => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.diff_overlay_open = true;
                 }
             }
             "/diff" => {
@@ -336,7 +345,8 @@ impl Repl {
             }
             "/cost" | "/usage" => {
                 let model = self.runtime.model().to_string();
-                let window = dcode_ai_runtime::model_limits::detect_context_window(&model) as u64;
+                let window =
+                    dcode_ai_runtime::model_limits::effective_context_window(&model) as u64;
                 let (tin, tout, cost, ctx) = if let ReplOutput::Tui(st) = &out {
                     st.lock()
                         .ok()

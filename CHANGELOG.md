@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.23 — 2026-10-27
+
+### New
+- **Full-screen diff view**: Enter or click on a file in the dashboard's
+  changes tab, or `/diff`, opens every changed file with its diff side by
+  side — line numbers, colours, `n`/`p` between hunks, `r r` to revert a
+  hunk, `q` to close. The changes tab itself is now a compact file list.
+- **`@` file search like Claude Code**: fuzzy (`@gitint` finds
+  `git_integration.rs`), folders included (`@src/tui/` lists what's inside),
+  `.gitignore` respected, new files show up, matched letters highlighted.
+- **Shell mode looks like Claude Code's**: typing `!` turns the prompt into
+  a pink `!` with "! for shell mode" below.
+
+### Changed
+- **dcode-ai's own working line**: a sweeping bar with what the agent is
+  actually doing — `▰▰▱▱▱▱ writing · 12s · ↓ 1.2k tokens · esc to stop` —
+  and `✓ done in 12s` when a turn ends.
+- **Context is kept within 200k tokens** (like Claude Code) unless you pick
+  a `[1m]` model. Models that report a 1M window let the conversation grow
+  far longer before compacting, so every step re-read much more and used
+  more of your plan.
+
 ## 1.0.22 — 2026-10-27
 
 ### Uses less of your Claude plan

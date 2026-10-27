@@ -79,38 +79,59 @@ pub(crate) fn render_slash_panel(
     );
 }
 
+/// The `@` file list under the prompt, Claude Code style: no box, `❯` on
+/// the selected row, the folder part dim, the letters that matched bold.
 pub(crate) fn render_at_panel(
     frame: &mut ratatui::Frame<'_>,
     area: Rect,
     matches: &[String],
     selected: usize,
+    query: &str,
 ) {
-    frame.render_widget(
-        Block::default().style(Style::default().bg(theme::surface())),
-        area,
-    );
-    let inner_h = area.height.saturating_sub(2) as usize;
+    frame.render_widget(ClearWidget, area);
+    let rows = area.height as usize;
     let start = selected
-        .saturating_sub(inner_h.saturating_sub(1))
-        .min(matches.len().saturating_sub(inner_h));
+        .saturating_sub(rows.saturating_sub(1))
+        .min(matches.len().saturating_sub(rows));
+    let width = area.width.saturating_sub(4) as usize;
+    // Highlight against what was typed after the last `/`.
+    let typed = query.rsplit('/').next().unwrap_or(query);
     let mut lines: Vec<Line> = Vec::new();
-    for (i, m) in matches.iter().enumerate().skip(start).take(inner_h) {
+    for (i, m) in matches.iter().enumerate().skip(start).take(rows) {
         let sel = i == selected;
-        let style = if sel {
-            Style::default()
-                .fg(theme::on_accent())
-                .bg(theme::accent())
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(theme::text())
-        };
-        let marker = if sel { "› " } else { "  " };
-        lines.push(Line::from(Span::styled(format!("{marker}{m}"), style)));
+        let shown = truncate_chars(m, width);
+        let hits = crate::file_mentions::fuzzy_score(typed, &shown)
+            .map(|(_, p)| p)
+            .unwrap_or_default();
+        let trimmed = shown.trim_end_matches('/');
+        let name_start = trimmed
+            .rfind('/')
+            .map_or(0, |i| trimmed[..=i].chars().count());
+        let mut spans = vec![Span::styled(
+            if sel { "❯ " } else { "  " },
+            Style::default().fg(theme::accent()),
+        )];
+        for (ci, ch) in shown.chars().enumerate() {
+            let mut style = if ci < name_start {
+                Style::default().fg(theme::muted())
+            } else {
+                Style::default().fg(theme::text())
+            };
+            if sel {
+                style = style.fg(theme::accent());
+            }
+            if hits.contains(&ci) {
+                style = style.add_modifier(Modifier::BOLD).fg(if sel {
+                    theme::accent()
+                } else {
+                    theme::text()
+                });
+            }
+            spans.push(Span::styled(ch.to_string(), style));
+        }
+        lines.push(Line::from(spans));
     }
-    frame.render_widget(
-        Paragraph::new(Text::from(lines)).block(popup_block("files")),
-        area,
-    );
+    frame.render_widget(Paragraph::new(Text::from(lines)), area);
 }
 
 pub(crate) fn render_command_palette(

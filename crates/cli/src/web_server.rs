@@ -780,7 +780,7 @@ async fn build_current_info(state: &AppState) -> String {
         let context_window =
             dcode_ai_runtime::model_limits_api::cached_context_window(&cfg, &current_model)
                 .unwrap_or_else(|| {
-                    dcode_ai_runtime::model_limits::detect_context_window(&current_model)
+                    dcode_ai_runtime::model_limits::effective_context_window(&current_model)
                 });
 
         if let Some(obj) = info.as_object_mut() {

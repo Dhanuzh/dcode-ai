@@ -552,6 +552,9 @@ pub struct TuiSessionState {
     pub transcript_overlay_open: bool,
     /// Scroll offset (from top, in lines) for the transcript overlay.
     pub transcript_overlay_scroll: usize,
+    /// Full-screen diff view (changes tab Enter / `/diff`).
+    pub diff_overlay_open: bool,
+    pub diff_overlay_scroll: usize,
     /// When true, the overlay renders plain unstyled text for copy-friendly
     /// terminal selection.
     pub transcript_overlay_raw: bool,

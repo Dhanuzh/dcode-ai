@@ -9,7 +9,7 @@ use ratatui::text::{Line, Span};
 
 use crate::file_mentions;
 use crate::tui::slash_entries::{
-    SLASH_PANEL_MAX_ROWS, SlashEntry, filter_slash_entries, slash_panel_height, slash_panel_visible,
+    SlashEntry, filter_slash_entries, slash_panel_height, slash_panel_visible,
 };
 use crate::tui::state::TuiSessionState;
 use crate::tui::theme;
@@ -25,7 +25,18 @@ pub(crate) fn at_panel_height(n: usize) -> u16 {
     if n == 0 {
         return 0;
     }
-    (n.min(SLASH_PANEL_MAX_ROWS) as u16).saturating_add(2)
+    n.min(AT_PANEL_ROWS) as u16
+}
+
+/// Rows the `@` file list shows at once (no border, like Claude Code).
+pub(crate) const AT_PANEL_ROWS: usize = 8;
+
+/// What was typed after the `@` before the cursor.
+pub(crate) fn at_query(buffer: &str, cursor_char_idx: usize) -> String {
+    let b = cursor_byte_index(buffer, cursor_char_idx);
+    file_mentions::at_token_before_cursor(buffer, b)
+        .map(|(_, q)| q)
+        .unwrap_or_default()
 }
 
 pub(crate) fn at_completion_active(buffer: &str, cursor_char_idx: usize) -> bool {
@@ -168,7 +179,8 @@ pub(crate) fn apply_selected_at_completion(
     let (mut new_buf, mut new_cursor_char_idx) =
         apply_at_completion(buffer, cursor_char_idx, choice);
 
-    if append_space {
+    // A folder keeps the list open on its contents; a file ends the mention.
+    if append_space && !choice.ends_with('/') {
         let insert_at = cursor_byte_index(&new_buf, new_cursor_char_idx);
         new_buf.insert(insert_at, ' ');
         new_cursor_char_idx += 1;
@@ -356,10 +368,28 @@ pub(crate) fn composer_cursor_row(buffer: &str, cursor_char_idx: usize, width: u
 }
 
 pub(crate) fn composer_line(buffer: &str, cursor_char_idx: usize) -> Line<'static> {
+    // Shell mode, Claude Code style: the leading `!` becomes the pink prompt.
+    if let Some(rest) = buffer.strip_prefix('!') {
+        let prompt = Span::styled(
+            "! ",
+            Style::default()
+                .fg(theme::bash_border())
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        );
+        return composer_line_with_prompt(rest, cursor_char_idx.saturating_sub(1), prompt);
+    }
     let prompt = Span::styled(
         "> ",
         Style::default().add_modifier(ratatui::style::Modifier::BOLD),
     );
+    composer_line_with_prompt(buffer, cursor_char_idx, prompt)
+}
+
+fn composer_line_with_prompt(
+    buffer: &str,
+    cursor_char_idx: usize,
+    prompt: Span<'static>,
+) -> Line<'static> {
     if buffer.is_empty() {
         // An empty prompt is just the cursor.
         return Line::from(vec![

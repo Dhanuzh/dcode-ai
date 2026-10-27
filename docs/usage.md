@@ -28,6 +28,8 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 | `Esc` `Esc` | Rewind: pick a message, then restore code and conversation, conversation only, or code only |
 | `1` / `2` / `3` | Answer a permission prompt: yes · yes, don't ask again · no |
 | `Tab` | Complete `@file` or `/command`; otherwise cycle the agent profile |
+| `@` | Fuzzy file and folder search (`@gitint`, `@src/tui/`); `.gitignore` respected |
+| `!` | Shell mode: the line runs as a shell command (pink `!` prompt) |
 | `F2` / `Shift+F2` | Next / previous model |
 | `Ctrl+P` | Command palette |
 | `/vim` | Vim keys in the prompt: Esc → NORMAL (`h l w b 0 $ x dd dw cw cc D C u p`), `i a A I o O` → INSERT |
@@ -87,6 +89,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use |
 | `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept); the footer warns from 80% full |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation (in git workspaces also files changed by shell commands) |
+| `/diff` | Full-screen diff of every changed file (↑↓ file · Tab · `n`/`p` hunk · `r r` revert hunk · `q` close); `/diff <args>` prints a git diff |
 | `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in; the picker searches titles and what was said; sessions name themselves after the first turn, bare `/rename` picks a new name) |
 | `/export [file\|copy]`, `/share` | The conversation as Markdown with secrets masked: to a file, the clipboard, or a secret GitHub gist (`gh`) |
 | `/project-config` | Shared `.dcode.toml`: `model` / `mode` save the current one for the team |

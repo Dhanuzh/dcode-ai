@@ -512,8 +512,9 @@ mod tests {
             input: serde_json::json!({"command": "sed -i …"}),
         };
         mgr.record_tool_call(&call, root);
-        // What the command did:
-        std::fs::write(root.join("a.txt"), "new").unwrap();
+        // What the command did. (A same-size rewrite within the same second
+        // can look unchanged to git's stat check; real edits rarely are.)
+        std::fs::write(root.join("a.txt"), "brand new").unwrap();
         std::fs::remove_file(root.join("gone.txt")).unwrap();
         std::fs::write(root.join("made.txt"), "x").unwrap();
         mgr.note_results(

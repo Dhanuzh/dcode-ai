@@ -744,15 +744,19 @@ pub fn run_blocking(
     let mut slash_entries = load_slash_entries(&workspace_root, &skill_dirs);
     // Discover workspace files in a background thread so the TUI is responsive
     // immediately on large repos. Completion uses an empty list until ready.
-    let workspace_files_rx = {
+    // Rescanned while the `@` list is open, so new files show up.
+    let (files_tx, workspace_files_rx) = std::sync::mpsc::channel::<Vec<String>>();
+    let scan_files = {
         let root = workspace_root.clone();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let files = file_mentions::discover_workspace_files(&root);
-            let _ = tx.send(files);
-        });
-        rx
+        move |tx: std::sync::mpsc::Sender<Vec<String>>| {
+            let root = root.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(file_mentions::discover_workspace_files(&root));
+            });
+        }
     };
+    scan_files(files_tx.clone());
+    let mut files_scanned_at = std::time::Instant::now();
     let mut workspace_files: Vec<String> = Vec::new();
     let mut transcript_cache = TranscriptRenderCache::default();
     let mut scroll_buffer = crate::tui::scroll_buffer::ScrollBuffer::default();
@@ -837,10 +841,16 @@ pub fn run_blocking(
         }
 
         // Pick up async workspace file discovery when it completes.
-        if workspace_files.is_empty()
-            && let Ok(files) = workspace_files_rx.try_recv()
-        {
+        if let Ok(files) = workspace_files_rx.try_recv() {
             workspace_files = files;
+        }
+        if files_scanned_at.elapsed() >= Duration::from_secs(10)
+            && state.lock().is_ok_and(|g| {
+                crate::tui::composer_input::at_completion_active(&g.input_buffer, g.cursor_char_idx)
+            })
+        {
+            files_scanned_at = std::time::Instant::now();
+            scan_files(files_tx.clone());
         }
 
         // Debounced resize: once the drag has been quiet for ~120ms, do a single
@@ -866,12 +876,16 @@ pub fn run_blocking(
 
         // Full-screen transcript overlay (Codex `/transcript`). Runs its own
         // alt-screen loop; on return we force a full redraw of the inline pane.
-        let overlay_requested = state
+        let (overlay_requested, diff_requested) = state
             .lock()
-            .map(|g| g.transcript_overlay_open)
-            .unwrap_or(false);
-        if overlay_requested {
-            let _ = run_transcript_overlay(&state);
+            .map(|g| (g.transcript_overlay_open, g.diff_overlay_open))
+            .unwrap_or((false, false));
+        if overlay_requested || diff_requested {
+            if diff_requested {
+                let _ = crate::tui::diff_overlay::run_diff_overlay(&state);
+            } else {
+                let _ = run_transcript_overlay(&state);
+            }
             if let Some(dt) = dash_terminal.as_mut() {
                 // The overlay left the alternate screen; return to it.
                 let _ = execute!(

@@ -304,8 +304,8 @@ pub(super) fn handle_dashboard_mouse(
             .transcript
             .is_none_or(|(tr, _)| !rect_contains(tr, m.column, m.row));
     match m.kind {
-        MouseEventKind::ScrollUp if over_changes => g.diff_review.move_by(-1),
-        MouseEventKind::ScrollDown if over_changes => g.diff_review.move_by(1),
+        MouseEventKind::ScrollUp if over_changes => g.diff_review.move_file(-1),
+        MouseEventKind::ScrollDown if over_changes => g.diff_review.move_file(1),
         MouseEventKind::ScrollUp => {
             g.transcript_follow_tail = false;
             g.scroll_lines = g.scroll_lines.saturating_sub(3);
@@ -323,9 +323,11 @@ pub(super) fn handle_dashboard_mouse(
             match target {
                 Some(DashTarget::Tab(tab)) => g.select_rail_tab(tab),
                 Some(DashTarget::ReviewItem(item)) => {
+                    // Click a change: open the full diff at it.
                     g.rail_focus = true;
                     g.diff_review.cursor = item;
                     g.diff_review.confirm_revert = false;
+                    g.diff_overlay_open = true;
                 }
                 Some(DashTarget::Subagent(idx)) => {
                     g.open_subagent_modal();

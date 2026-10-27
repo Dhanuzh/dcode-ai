@@ -64,7 +64,7 @@ pub(super) fn draw_session_pane(
     } else if slash_panel_visible(&g.input_buffer) && !slash_filtered.is_empty() {
         slash_panel_height(slash_filtered.len())
     } else if !at_matches.is_empty() {
-        (at_matches.len().min(8) as u16) + 2
+        crate::tui::composer_input::at_panel_height(at_matches.len())
     } else {
         0
     };
@@ -199,7 +199,8 @@ pub(super) fn draw_session_pane(
         if slash_panel_visible(&g.input_buffer) && !slash_filtered.is_empty() {
             render_slash_panel(frame, panel_r, slash_filtered, g.slash_menu_index);
         } else if !at_matches.is_empty() {
-            render_at_panel(frame, panel_r, at_matches, g.at_menu_index);
+            let query = crate::tui::composer_input::at_query(&g.input_buffer, g.cursor_char_idx);
+            render_at_panel(frame, panel_r, at_matches, g.at_menu_index, &query);
         }
     }
 

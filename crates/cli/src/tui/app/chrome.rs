@@ -3,41 +3,60 @@
 
 use super::*;
 
-/// Spinner glyphs, played forward then back.
-const SPINNER: [&str; 6] = ["·", "✢", "✳", "✶", "✻", "✽"];
-const SPINNER_FRAME_MS: u128 = 120;
+/// dcode-ai's working bar: a lit block sweeping back and forth.
+const BAR_CELLS: usize = 6;
+const BAR_LIT: usize = 2;
+const BAR_FRAME_MS: u128 = 110;
 
-/// Verbs for the working line; one is picked per turn.
-const VERBS: [&str; 16] = [
-    "Thinking",
-    "Pondering",
-    "Crafting",
-    "Brewing",
-    "Computing",
-    "Musing",
-    "Working",
-    "Cooking",
-    "Forging",
-    "Tinkering",
-    "Mulling",
-    "Reasoning",
-    "Weaving",
-    "Sketching",
-    "Assembling",
-    "Considering",
-];
-
-fn spinner_glyph(elapsed_ms: u128) -> &'static str {
-    let n = SPINNER.len() as u128;
-    let step = (elapsed_ms / SPINNER_FRAME_MS) % (2 * n - 2);
-    let idx = if step < n { step } else { 2 * n - 2 - step };
-    SPINNER[idx as usize]
+/// `▰▰▱▱▱▱` with the lit block at the frame for `elapsed_ms`.
+fn working_bar(elapsed_ms: u128) -> String {
+    let span = (BAR_CELLS - BAR_LIT) as u128;
+    let step = (elapsed_ms / BAR_FRAME_MS) % (2 * span);
+    let at = if step <= span { step } else { 2 * span - step } as usize;
+    (0..BAR_CELLS)
+        .map(|i| {
+            if (at..at + BAR_LIT).contains(&i) {
+                '▰'
+            } else {
+                '▱'
+            }
+        })
+        .collect()
 }
 
-/// The verb for the turn that started at `turn_started_ms` (stable per turn).
-pub(super) fn turn_verb(turn_started_ms: Option<u64>) -> &'static str {
-    let seed = turn_started_ms.unwrap_or(0) / 7;
-    VERBS[(seed % VERBS.len() as u64) as usize]
+/// What the agent is doing, in plain words: `thinking`, `writing`, or the
+/// running tool (`running bash`, `reading files`).
+fn working_label(g: &TuiSessionState) -> String {
+    match g.current_busy_state {
+        BusyState::Streaming => "writing".into(),
+        BusyState::ToolRunning if !g.process_title.trim().is_empty() => {
+            g.process_title.trim().to_lowercase()
+        }
+        BusyState::ToolRunning => "running a tool".into(),
+        _ => "thinking".into(),
+    }
+}
+
+/// The label with a soft highlight sweeping across it.
+fn shimmer(label: &str, elapsed_ms: u128) -> Vec<Span<'static>> {
+    let chars: Vec<char> = label.chars().collect();
+    let n = chars.len().max(1) as u128;
+    // Sweep, then rest a moment before the next pass.
+    let at = ((elapsed_ms / 70) % (n + 6)) as usize;
+    chars
+        .iter()
+        .enumerate()
+        .map(|(i, c)| {
+            let style = if i + 1 >= at && i <= at + 1 {
+                Style::default()
+                    .fg(theme::text())
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme::accent())
+            };
+            Span::styled(c.to_string(), style)
+        })
+        .collect()
 }
 
 fn compact_count(n: u64) -> String {
@@ -48,7 +67,7 @@ fn compact_count(n: u64) -> String {
     }
 }
 
-/// `✶ Pondering… (12s · ↓ 1.2k tokens · esc to interrupt)` while a turn runs.
+/// `▰▰▱▱▱▱ writing · 12s · ↓ 1.2k tokens · esc to stop` while a turn runs.
 pub(super) fn spinner_line(g: &TuiSessionState) -> Option<Line<'static>> {
     let busy = g.busy || g.current_busy_state.is_active();
     if !busy || g.active_approval.is_some() {
@@ -60,37 +79,28 @@ pub(super) fn spinner_line(g: &TuiSessionState) -> Option<Line<'static>> {
         .as_millis() as u64;
     let started = g.turn_started_at.unwrap_or(now_ms);
     let secs = now_ms.saturating_sub(started) / 1000;
-    let accent = Style::default().fg(theme::accent());
-    let verb = if g.current_busy_state == BusyState::ToolRunning && !g.process_title.is_empty() {
-        // Name the running tool when one is active ("Running bash…").
-        let t = g.process_title.trim();
-        let mut c = t.chars();
-        match c.next() {
-            Some(f) => format!("{}{}", f.to_uppercase(), c.as_str()),
-            None => turn_verb(g.turn_started_at).to_string(),
-        }
+    let took = if secs >= 60 {
+        format!("{}m {}s", secs / 60, secs % 60)
     } else {
-        turn_verb(g.turn_started_at).to_string()
+        format!("{secs}s")
     };
-    let mut detail = format!("({secs}s");
+    let muted = Style::default().fg(theme::muted());
+    let anim = now_ms as u128;
+    let mut spans = vec![
+        Span::styled(working_bar(anim), Style::default().fg(theme::accent())),
+        Span::raw(" "),
+    ];
+    spans.extend(shimmer(&working_label(g), anim));
+    let mut detail = format!(" · {took}");
     if g.turn_output_tokens > 0 {
         detail.push_str(&format!(
             " · ↓ {} tokens",
             compact_count(g.turn_output_tokens)
         ));
     }
-    detail.push_str(" · esc to interrupt)");
-    Some(Line::from(vec![
-        Span::styled(
-            format!(
-                "{} ",
-                spinner_glyph(g.busy_state_since.elapsed().as_millis())
-            ),
-            accent,
-        ),
-        Span::styled(format!("{verb}… "), accent),
-        Span::styled(detail, Style::default().fg(theme::muted())),
-    ]))
+    detail.push_str(" · esc to stop");
+    spans.push(Span::styled(detail, muted));
+    Some(Line::from(spans))
 }
 
 /// Permission-mode indicator for the footer, `None` in the default mode.
@@ -207,6 +217,11 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
         .filter(|(until, _)| std::time::Instant::now() < *until)
     {
         left.push(Span::styled(hint, Style::default().fg(theme::muted())));
+    } else if g.input_buffer.starts_with('!') {
+        left.push(Span::styled(
+            "! for shell mode",
+            Style::default().fg(theme::bash_border()),
+        ));
     } else if g.pasting {
         left.push(Span::styled(
             "⧗ pasting image…",
@@ -246,7 +261,7 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
     }
 
     let mut right = g.model.clone();
-    let win = dcode_ai_runtime::model_limits::detect_context_window(&g.model) as u64;
+    let win = dcode_ai_runtime::model_limits::effective_context_window(&g.model) as u64;
     let mut context_warning = None;
     if let Some(custom) = g.statusline_text.as_deref() {
         // `[ui] statusline_command` replaces the built-in right side.
@@ -326,11 +341,11 @@ mod tests {
     }
 
     #[test]
-    fn spinner_bounces_through_glyphs() {
-        let frames: Vec<&str> = (0..10)
-            .map(|i| spinner_glyph(i * SPINNER_FRAME_MS))
-            .collect();
-        assert_eq!(frames, ["·", "✢", "✳", "✶", "✻", "✽", "✻", "✶", "✳", "✢"]);
+    fn working_bar_sweeps_back_and_forth() {
+        let frames: Vec<String> = (0..9).map(|i| working_bar(i * BAR_FRAME_MS)).collect();
+        assert_eq!(frames[0], "▰▰▱▱▱▱");
+        assert_eq!(frames[4], "▱▱▱▱▰▰");
+        assert_eq!(frames[8], "▰▰▱▱▱▱");
     }
 
     #[test]
@@ -380,7 +395,21 @@ mod tests {
     }
 
     #[test]
-    fn verb_is_stable_within_a_turn() {
-        assert_eq!(turn_verb(Some(1_000)), turn_verb(Some(1_000)));
+    fn working_label_says_what_is_happening() {
+        let mut g = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "Default".into(),
+            std::path::PathBuf::from("."),
+            false,
+        );
+        g.current_busy_state = BusyState::Streaming;
+        assert_eq!(working_label(&g), "writing");
+        g.current_busy_state = BusyState::ToolRunning;
+        g.process_title = "Running bash".into();
+        assert_eq!(working_label(&g), "running bash");
+        g.current_busy_state = BusyState::Thinking;
+        assert_eq!(working_label(&g), "thinking");
     }
 }

@@ -974,7 +974,7 @@ fn render_block(
                 lines,
                 hits,
                 Line::from(vec![
-                    Span::styled("✻ ", dim()),
+                    Span::styled("✓ ", Style::default().fg(theme::success())),
                     Span::styled(truncate_chars(text, w.saturating_sub(4)), dim()),
                 ]),
                 None,

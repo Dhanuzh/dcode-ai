@@ -72,9 +72,27 @@ impl DiffReview {
         None
     }
 
-    pub fn move_by(&mut self, delta: isize) {
-        let max = self.item_count().saturating_sub(1) as isize;
-        self.cursor = (self.cursor as isize + delta).clamp(0, max.max(0)) as usize;
+    /// Index of the file the selection is in.
+    pub fn selected_file(&self) -> usize {
+        self.selected().map_or(0, |(fi, _)| fi)
+    }
+
+    /// First review item (hunk) of file `fi`.
+    pub fn first_item_of(&self, fi: usize) -> usize {
+        self.files[..fi.min(self.files.len())]
+            .iter()
+            .map(|f| f.hunks.len().max(1))
+            .sum()
+    }
+
+    /// Move the selection to the next / previous file.
+    pub fn move_file(&mut self, delta: isize) {
+        if self.files.is_empty() {
+            return;
+        }
+        let max = self.files.len() as isize - 1;
+        let fi = (self.selected_file() as isize + delta).clamp(0, max) as usize;
+        self.cursor = self.first_item_of(fi);
         self.confirm_revert = false;
     }
 

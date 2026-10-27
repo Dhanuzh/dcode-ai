@@ -384,6 +384,26 @@ pub fn detect_context_window(model: &str) -> usize {
     128_000
 }
 
+/// Context Claude Code works within by default; 1M only for `…[1m]` models.
+pub const DEFAULT_WORKING_WINDOW: usize = 200_000;
+
+/// The window to work within: the model's, capped at 200k unless the model
+/// id asks for more (`claude-sonnet-5[1m]`). A huge window lets every step
+/// re-read a huge context, which is what uses up a plan; Claude Code caps it
+/// the same way.
+pub fn working_context_window(model: &str, detected: usize) -> usize {
+    if model.to_ascii_lowercase().contains("[1m]") {
+        detected
+    } else {
+        detected.min(DEFAULT_WORKING_WINDOW)
+    }
+}
+
+/// [`working_context_window`] for a model name (UI gauges, `/context`).
+pub fn effective_context_window(model: &str) -> usize {
+    working_context_window(model, detect_context_window(model))
+}
+
 /// Detect the max output tokens for a given model name.
 pub fn detect_max_output_tokens(model: &str) -> usize {
     best_limit(model).map_or(4096, |limit| limit.max_output_tokens)
@@ -519,5 +539,23 @@ mod tests {
         let limits = ModelLimits::for_model("claude-sonnet-4-6");
         assert_eq!(limits.context_window, 1_000_000);
         assert_eq!(limits.max_output_tokens, 128_000);
+    }
+}
+
+#[cfg(test)]
+mod working_window_tests {
+    use super::*;
+
+    #[test]
+    fn big_windows_are_capped_unless_asked_for() {
+        assert_eq!(
+            working_context_window("claude-sonnet-5", 1_000_000),
+            200_000
+        );
+        assert_eq!(
+            working_context_window("claude-sonnet-5[1m]", 1_000_000),
+            1_000_000
+        );
+        assert_eq!(working_context_window("gpt-4o", 128_000), 128_000);
     }
 }

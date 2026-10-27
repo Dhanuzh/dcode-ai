@@ -869,8 +869,11 @@ impl Supervisor {
         let raw_window = if config.memory.context.auto_detect_context_window {
             let window = model_limits_api::cached_context_window(config, model)
                 .unwrap_or_else(|| crate::model_limits::detect_context_window(model));
-            tracing::info!("Context window for {model}: {window} tokens (cached/static)");
-            window
+            let working = crate::model_limits::working_context_window(model, window);
+            tracing::info!(
+                "Context window for {model}: {window} tokens (cached/static), working within {working}"
+            );
+            working
         } else {
             config.memory.context.context_window_target
         };

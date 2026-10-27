@@ -1,10 +1,9 @@
 ---
 source: crates/cli/src/tui/app/dashboard.rs
-assertion_line: 742
 expression: text
 ---
 ╭ session ───────────────╮                                                                      ╭ context │ changes │ agents ────╮
-│ ✻ claude-sonnet-5-5    │ > fix the expiry check                                               │ plan                           │
+│ ◆ claude-sonnet-5-5    │ > fix the expiry check                                               │ plan                           │
 │ @build · default mode  │                                                                      │ 1. read auth.rs                │
 │ session 1              │ ● Fixed the off-by-one in token expiry.                              │ 2. fix comparison              │
 │                        │                                                                      │                                │

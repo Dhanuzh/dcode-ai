@@ -1545,6 +1545,7 @@ pub(super) fn handle_key_event(
                 true,
             ) {
                 g.set_input_text_with_cursor(buf, cidx);
+                g.at_menu_index = 0;
                 return KeyFlow::Continue;
             }
             // Slash completion (Codex-style): if the slash panel is
@@ -2026,6 +2027,8 @@ pub(super) fn handle_key_event(
             *composer_history_index = None;
             composer_history_draft.clear();
             g.insert_input_char(c);
+            // The `@` list is ranked again: start from the best match.
+            g.at_menu_index = 0;
             if slash_panel_visible(&g.input_buffer) {
                 let f = filter_slash_entries(slash_entries, &g.input_buffer);
                 if !f.is_empty() {
@@ -2043,8 +2046,8 @@ pub(super) fn handle_key_event(
 fn handle_changes_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
     let plain = key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT;
     match key.code {
-        KeyCode::Down | KeyCode::Char('j') if plain => g.diff_review.move_by(1),
-        KeyCode::Up | KeyCode::Char('k') if plain => g.diff_review.move_by(-1),
+        KeyCode::Down | KeyCode::Char('j') if plain => g.diff_review.move_file(1),
+        KeyCode::Up | KeyCode::Char('k') if plain => g.diff_review.move_file(-1),
         KeyCode::Char('r') if plain => {
             let ws = g.workspace_root.clone();
             if let Some(msg) = g.diff_review.press_revert(&ws) {
@@ -2062,6 +2065,8 @@ fn handle_changes_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
             let ws = g.workspace_root.clone();
             g.diff_review.refresh(&ws);
         }
+        // The full-screen diff, opened on the selected file.
+        KeyCode::Enter => g.diff_overlay_open = true,
         // Move between the rail tabs; focus stays on the rail.
         KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h')
             if plain || key.code == KeyCode::BackTab =>

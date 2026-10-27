@@ -256,7 +256,7 @@ fn format_tokens(n: u64) -> String {
 }
 
 pub fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> {
-    let window = dcode_ai_runtime::model_limits::detect_context_window(model) as u64;
+    let window = dcode_ai_runtime::model_limits::effective_context_window(model) as u64;
     if window == 0 {
         return Vec::new();
     }

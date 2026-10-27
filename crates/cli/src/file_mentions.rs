@@ -19,8 +19,151 @@ fn skip_dir_name(name: &str) -> bool {
     )
 }
 
-/// Walk workspace (bounded) and collect relative file paths for `@` completion.
+/// Most paths `git ls-files` may contribute (huge monorepos stay responsive).
+const GIT_MAX_FILES: usize = 50_000;
+
+/// Files for `@` completion, plus their folders (with a trailing `/`). In a
+/// git repo this is `git ls-files` — tracked and new files, `.gitignore`
+/// respected; elsewhere a bounded walk.
 pub fn discover_workspace_files(workspace: &Path) -> Vec<String> {
+    let files = git_files(workspace).unwrap_or_else(|| walk_files(workspace));
+    with_folders(files)
+}
+
+/// Tracked plus untracked-but-not-ignored files, relative to `workspace`.
+fn git_files(workspace: &Path) -> Option<Vec<String>> {
+    let out = std::process::Command::new("git")
+        .args([
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ])
+        .current_dir(workspace)
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut files: Vec<String> = out
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|p| !p.is_empty())
+        .take(GIT_MAX_FILES)
+        .map(|p| String::from_utf8_lossy(p).to_string())
+        .filter(|p| !p.starts_with(".dcode-ai/"))
+        .collect();
+    files.sort();
+    files.dedup();
+    Some(files)
+}
+
+/// Add each file's parent folders as `dir/` entries.
+fn with_folders(files: Vec<String>) -> Vec<String> {
+    let mut dirs: std::collections::BTreeSet<String> = Default::default();
+    for f in &files {
+        let mut end = 0;
+        while let Some(i) = f[end..].find('/') {
+            end += i + 1;
+            dirs.insert(f[..end].to_string());
+        }
+    }
+    let mut out = files;
+    out.extend(dirs);
+    out
+}
+
+/// Fuzzy match of `query` against `path` (case-insensitive subsequence).
+/// Higher is better; `None` when not every query char appears in order.
+/// Favours matches in the file name, at word starts and in a row, and
+/// shorter paths — like Claude Code's `@` picker. Also returns the matched
+/// char positions for highlighting.
+pub fn fuzzy_score(query: &str, path: &str) -> Option<(i64, Vec<usize>)> {
+    let q: Vec<char> = query.to_lowercase().chars().collect();
+    if q.is_empty() {
+        return Some((0, Vec::new()));
+    }
+    let p: Vec<char> = path.chars().collect();
+    let lower: Vec<char> = p.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let trimmed = path.trim_end_matches('/');
+    let name_start = trimmed
+        .rfind('/')
+        .map_or(0, |i| trimmed[..=i].chars().count());
+    let attempt = |from: usize| -> Option<Vec<usize>> {
+        let mut pos = Vec::with_capacity(q.len());
+        let mut i = from;
+        for qc in &q {
+            while i < lower.len() && lower[i] != *qc {
+                i += 1;
+            }
+            if i == lower.len() {
+                return None;
+            }
+            pos.push(i);
+            i += 1;
+        }
+        Some(pos)
+    };
+    // Prefer a match that lies entirely in the file name.
+    let positions = attempt(name_start).or_else(|| attempt(0))?;
+    let mut score: i64 = 0;
+    let mut prev: Option<usize> = None;
+    for &i in &positions {
+        score += 10;
+        if i >= name_start {
+            score += 8;
+        }
+        let boundary = i == 0 || matches!(p[i - 1], '/' | '_' | '-' | '.' | ' ');
+        if boundary || (p[i].is_uppercase() && p[i - 1].is_lowercase()) {
+            score += 12;
+        }
+        if prev.is_some_and(|pv| pv + 1 == i) {
+            score += 15;
+        }
+        prev = Some(i);
+    }
+    let name: String = lower[name_start..].iter().collect();
+    let name = name.trim_end_matches('/');
+    let ql: String = q.iter().collect();
+    if name.starts_with(&ql) {
+        score += 40;
+    }
+    if name == ql || name.split('.').next() == Some(ql.as_str()) {
+        score += 60;
+    }
+    score -= p.len() as i64 / 4;
+    score -= path.matches('/').count() as i64 * 2;
+    Some((score, positions))
+}
+
+/// The best matches for `query`, best first. With no query: shallow paths
+/// first, files before folders.
+pub fn rank_paths(paths: &[String], query: &str, limit: usize) -> Vec<String> {
+    let q = query.trim();
+    if q.is_empty() {
+        let mut v: Vec<&String> = paths.iter().collect();
+        v.sort_by_key(|p| {
+            let depth = p.trim_end_matches('/').matches('/').count();
+            (depth, p.ends_with('/'), p.len())
+        });
+        return v.into_iter().take(limit).cloned().collect();
+    }
+    let mut scored: Vec<(i64, &String)> = paths
+        .iter()
+        .filter_map(|p| fuzzy_score(q, p).map(|(s, _)| (s, p)))
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.len().cmp(&b.1.len())));
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, p)| p.clone())
+        .collect()
+}
+
+/// Bounded walk for folders that are not git repos.
+fn walk_files(workspace: &Path) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     let mut stack: Vec<(PathBuf, usize)> = vec![(workspace.to_path_buf(), 0)];
 
@@ -67,28 +210,46 @@ pub fn discover_workspace_files(workspace: &Path) -> Vec<String> {
 
 /// Paths whose relative path (unix-style) starts with `prefix` (case-sensitive on Unix).
 pub fn filter_paths_prefix(paths: &[String], prefix: &str) -> Vec<String> {
-    let p = prefix.trim();
-    if p.is_empty() {
-        return paths.iter().take(200).cloned().collect();
-    }
-    let mut v: Vec<String> = paths
-        .iter()
-        .filter(|s| s.starts_with(p))
-        .take(200)
-        .cloned()
-        .collect();
-    if v.len() < 50 {
-        let pl = p.to_ascii_lowercase();
-        for s in paths {
-            if v.len() >= 200 {
-                break;
-            }
-            if s.to_ascii_lowercase().starts_with(&pl) && !v.iter().any(|x| x == s) {
-                v.push(s.clone());
-            }
+    // Typing a folder path (`src/tui/`) lists what is inside it.
+    if let Some((dir, rest)) = prefix.rsplit_once('/') {
+        let dir = format!("{dir}/");
+        // Ranked by the part after the folder, so `src/t` prefers `tui/…`.
+        let inside: Vec<String> = paths
+            .iter()
+            .filter(|p| p.starts_with(&dir) && p.len() > dir.len())
+            // Direct children only while nothing is typed after the `/`.
+            .filter(|p| !rest.is_empty() || !p[dir.len()..].trim_end_matches('/').contains('/'))
+            .map(|p| p[dir.len()..].to_string())
+            .collect();
+        let ranked = rank_paths(&inside, rest, AT_MATCH_LIMIT);
+        if !ranked.is_empty() {
+            return ranked.into_iter().map(|r| format!("{dir}{r}")).collect();
         }
     }
-    v
+    cached_rank(paths, prefix)
+}
+
+/// Rows the `@` list keeps (eight show at once).
+pub const AT_MATCH_LIMIT: usize = 50;
+
+/// `rank_paths` for the `@` list, remembered for the last query: the list is
+/// ranked again on every frame and key press otherwise.
+fn cached_rank(paths: &[String], query: &str) -> Vec<String> {
+    type Memo = Option<(usize, usize, String, Vec<String>)>;
+    static MEMO: std::sync::Mutex<Memo> = std::sync::Mutex::new(None);
+    let key = (paths.as_ptr() as usize, paths.len());
+    if let Ok(m) = MEMO.lock()
+        && let Some((p, n, q, v)) = m.as_ref()
+        && (*p, *n) == key
+        && q == query
+    {
+        return v.clone();
+    }
+    let ranked = rank_paths(paths, query, AT_MATCH_LIMIT);
+    if let Ok(mut m) = MEMO.lock() {
+        *m = Some((key.0, key.1, query.to_string(), ranked.clone()));
+    }
+    ranked
 }
 
 /// Quick symbol search: grep for `fn|struct|enum|trait|type|const|impl` lines
@@ -195,6 +356,40 @@ mod tests {
         assert_eq!(m.len(), 2);
         assert_eq!(m[0], (4, 18, "crates/foo.rs".into()));
         assert_eq!(m[1], (23, 33, "README.md".into()));
+    }
+
+    #[test]
+    fn fuzzy_finds_files_by_name_anywhere_in_the_tree() {
+        let paths: Vec<String> = [
+            "Cargo.toml",
+            "crates/autoresearch/src/git_integration.rs",
+            "crates/cli/src/tui/git.rs",
+            "crates/cli/src/tui/",
+            "docs/plans/gitignore-notes.md",
+            "README.md",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        let r = rank_paths(&paths, "git", 10);
+        assert_eq!(r[0], "crates/cli/src/tui/git.rs", "{r:?}");
+        assert!(r.contains(&"crates/autoresearch/src/git_integration.rs".to_string()));
+        let r = rank_paths(&paths, "gitint", 10);
+        assert_eq!(r[0], "crates/autoresearch/src/git_integration.rs");
+        assert!(rank_paths(&paths, "zzz", 10).is_empty());
+        // Empty query: shallow first.
+        assert_eq!(rank_paths(&paths, "", 2), vec!["README.md", "Cargo.toml"]);
+        // A folder path lists its children.
+        let r = filter_paths_prefix(&paths, "crates/cli/src/tui/");
+        assert_eq!(r, vec!["crates/cli/src/tui/git.rs"]);
+        let (_, pos) = fuzzy_score("gr", "crates/cli/src/tui/git.rs").unwrap();
+        assert_eq!(pos, vec![19, 23]);
+    }
+
+    #[test]
+    fn folders_are_listed_with_a_trailing_slash() {
+        let out = with_folders(vec!["a/b/c.rs".into(), "a/d.rs".into()]);
+        assert!(out.contains(&"a/".to_string()) && out.contains(&"a/b/".to_string()));
     }
 
     #[test]

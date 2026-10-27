@@ -143,7 +143,7 @@ fn session_rail_layout(
     let mut agent_rows = Vec::new();
     let mut lines = vec![
         Line::from(vec![
-            Span::styled("✻ ", Style::default().fg(theme::accent())),
+            Span::styled("◆ ", Style::default().fg(theme::accent())),
             Span::styled(
                 g.model.clone(),
                 Style::default()
@@ -235,7 +235,7 @@ pub(super) fn context_rail_lines(g: &TuiSessionState, width: usize) -> Vec<Line<
     )));
     lines.push(plain(format!("cost ${:.4} (est.)", g.cost_usd)));
 
-    let window = dcode_ai_runtime::model_limits::detect_context_window(&g.model) as u64;
+    let window = dcode_ai_runtime::model_limits::effective_context_window(&g.model) as u64;
     if window > 0 && g.context_tokens > 0 {
         let pct = (g.context_tokens.saturating_mul(100) / window).min(100);
         let filled = (pct as usize * 10 / 100).min(10);
@@ -454,11 +454,10 @@ pub(super) fn agents_lines(
     lines
 }
 
-/// Max diff lines shown under the selected hunk.
-const HUNK_PREVIEW_LINES: usize = 14;
-
-/// Lines for the changes tab, scrolled so the selected item is visible, plus
-/// `(line index, review item)` for each clickable row (relative to the body).
+/// Lines for the changes tab — a summary, then one row per file — scrolled
+/// so the selected file is visible, plus `(line index, review item)` for
+/// each clickable row (relative to the body). The diff itself opens full
+/// screen (Enter / click).
 pub(super) fn changes_lines(
     review: &DiffReview,
     width: usize,
@@ -466,13 +465,12 @@ pub(super) fn changes_lines(
     focused: bool,
 ) -> (Vec<Line<'static>>, Vec<(usize, usize)>) {
     let footer = if focused {
-        "j/k hunk · r revert · g refresh"
+        "Enter full diff · j/k file · Esc"
     } else {
-        "Ctrl+D review changes"
+        "click a file · Ctrl+D focus"
     };
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut rows: Vec<(usize, usize)> = Vec::new();
-    let mut selected_line = 0usize;
 
     if let Some(err) = &review.error {
         lines.extend(wrapped(err, width, Style::default().fg(theme::error())));
@@ -480,98 +478,80 @@ pub(super) fn changes_lines(
         lines.push(muted("no unstaged changes"));
     } else if !review.loaded {
         lines.push(muted("press Ctrl+D to load"));
-    }
-
-    let mut item = 0usize;
-    for file in &review.files {
-        let mut header = vec![Span::styled(
-            truncate_chars(&file.path, width.saturating_sub(12)),
-            Style::default()
-                .fg(theme::text())
-                .add_modifier(Modifier::BOLD),
-        )];
-        if file.untracked {
-            header.push(Span::styled(" new", Style::default().fg(theme::muted())));
-        }
-        header.push(Span::styled(
-            format!(" +{}", file.added),
-            Style::default().fg(theme::success()),
-        ));
-        if file.removed > 0 {
-            header.push(Span::styled(
-                format!(" −{}", file.removed),
-                Style::default().fg(theme::error()),
-            ));
-        }
-        lines.push(Line::from(header));
-
-        let n = file.hunks.len().max(1);
-        for hi in 0..n {
-            let selected = item == review.cursor;
-            let label = file
-                .hunks
-                .get(hi)
-                .map(|h| h.header.clone())
-                .unwrap_or_else(|| "untracked file".into());
-            let (marker, style) = if selected && focused {
-                (
-                    "› ",
-                    Style::default()
-                        .fg(theme::on_accent())
-                        .bg(theme::accent())
-                        .add_modifier(Modifier::BOLD),
-                )
-            } else if selected {
-                ("› ", Style::default().fg(theme::accent()))
-            } else {
-                ("  ", Style::default().fg(theme::muted()))
-            };
-            if selected {
-                selected_line = lines.len();
-            }
-            rows.push((lines.len(), item));
-            lines.push(Line::from(Span::styled(
-                truncate_chars(&format!("{marker}{label}"), width),
-                style,
-            )));
-            if selected && review.confirm_revert {
-                lines.push(Line::from(Span::styled(
-                    "  press r again to revert",
-                    Style::default().fg(theme::warn()),
-                )));
-            }
-            if selected && let Some(hunk) = file.hunks.get(hi) {
-                let changed: Vec<_> = hunk.lines.iter().filter(|(s, _)| *s != ' ').collect();
-                for (sigil, text) in changed.iter().take(HUNK_PREVIEW_LINES) {
-                    let color = if *sigil == '+' {
-                        theme::success()
-                    } else {
-                        theme::error()
-                    };
-                    lines.push(Line::from(Span::styled(
-                        truncate_chars(&format!("  {sigil} {text}"), width),
-                        Style::default().fg(color),
-                    )));
-                }
-                if changed.len() > HUNK_PREVIEW_LINES {
-                    lines.push(muted(format!(
-                        "  … {} more",
-                        changed.len() - HUNK_PREVIEW_LINES
-                    )));
-                }
-            }
-            item += 1;
-        }
-    }
-
-    // Keep the selected hunk (and its preview) on screen; the footer
-    // takes the last two rows.
-    let avail = height.saturating_sub(2).max(1);
-    let offset = if selected_line + HUNK_PREVIEW_LINES / 2 >= avail {
-        (selected_line + HUNK_PREVIEW_LINES / 2 + 1 - avail).min(selected_line)
     } else {
-        0
-    };
+        let added: usize = review.files.iter().map(|f| f.added).sum();
+        let removed: usize = review.files.iter().map(|f| f.removed).sum();
+        let n = review.files.len();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{n} file{} ", if n == 1 { "" } else { "s" }),
+                Style::default()
+                    .fg(theme::text())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(format!("+{added}"), Style::default().fg(theme::success())),
+            Span::styled(format!(" −{removed}"), Style::default().fg(theme::error())),
+        ]));
+        lines.push(Line::default());
+    }
+
+    let header_rows = lines.len();
+    let selected = review.selected_file();
+    for (fi, file) in review.files.iter().enumerate() {
+        let sel = fi == selected;
+        let counts = if file.removed > 0 {
+            format!("+{} −{}", file.added, file.removed)
+        } else {
+            format!("+{}", file.added)
+        };
+        // File name first (it says the most), its folder dimmed after.
+        let (dir, name) = match file.path.rsplit_once('/') {
+            Some((d, n)) => (format!(" {d}/"), n.to_string()),
+            None => (String::new(), file.path.clone()),
+        };
+        let room = width.saturating_sub(counts.chars().count() + 3);
+        let name = truncate_chars(&name, room);
+        let dir = truncate_chars(&dir, room.saturating_sub(name.chars().count()));
+        let pad = width.saturating_sub(
+            2 + name.chars().count() + dir.chars().count() + counts.chars().count(),
+        );
+        let name_style = if sel && focused {
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD)
+        } else if sel {
+            Style::default().fg(theme::accent())
+        } else {
+            Style::default().fg(theme::text())
+        };
+        rows.push((lines.len(), review.first_item_of(fi)));
+        lines.push(Line::from(vec![
+            Span::styled(
+                if sel { "❯ " } else { "  " },
+                Style::default().fg(theme::accent()),
+            ),
+            Span::styled(name, name_style),
+            Span::styled(dir, Style::default().fg(theme::muted())),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(
+                format!("+{}", file.added),
+                Style::default().fg(theme::success()),
+            ),
+            Span::styled(
+                if file.removed > 0 {
+                    format!(" −{}", file.removed)
+                } else {
+                    String::new()
+                },
+                Style::default().fg(theme::error()),
+            ),
+        ]));
+    }
+
+    // Keep the selected file on screen; the footer takes the last two rows.
+    let avail = height.saturating_sub(2).max(1);
+    let selected_line = header_rows + selected;
+    let offset = (selected_line + 1).saturating_sub(avail);
     let mut visible: Vec<Line<'static>> = lines.into_iter().skip(offset).take(avail).collect();
     let rows = rows
         .into_iter()
@@ -743,7 +723,7 @@ mod tests {
     }
 
     #[test]
-    fn changes_tab_lists_hunks_and_records_click_targets() {
+    fn changes_tab_lists_files_and_records_click_targets() {
         use crate::tui::diff_hunk::parse_diff_hunks;
         use crate::tui::diff_review::FileChange;
         let mut review = DiffReview {
@@ -770,11 +750,15 @@ mod tests {
 
         let (lines, rows) = changes_lines(&review, 30, 20, true);
         let text = text_of(&lines);
-        assert!(text.contains("src/auth.rs +2 −2"));
-        assert!(text.contains("+ twenty-eight"), "{text}");
-        assert!(!text.contains("+ two\n"));
-        assert!(text.contains("r revert"));
-        assert_eq!(rows.iter().map(|(_, i)| *i).collect::<Vec<_>>(), vec![0, 1]);
+        assert!(text.contains("1 file +2 −2"), "{text}");
+        assert!(text.contains("❯ auth.rs src/"), "{text}");
+        assert!(
+            !text.contains("twenty-eight"),
+            "no hunk previews in the rail"
+        );
+        assert!(text.contains("Enter full diff"));
+        // One click target per file, at its first hunk.
+        assert_eq!(rows.iter().map(|(_, i)| *i).collect::<Vec<_>>(), vec![0]);
 
         // Tabs and the selected hunk row become click targets.
         let mut g = TuiSessionState::new(
@@ -797,7 +781,7 @@ mod tests {
         let targets: Vec<_> = g.dash_hits.targets.iter().map(|(_, t)| *t).collect();
         assert!(targets.contains(&DashTarget::Tab(RailTab::Context)));
         assert!(targets.contains(&DashTarget::Tab(RailTab::Changes)));
-        assert!(targets.contains(&DashTarget::ReviewItem(1)));
+        assert!(targets.contains(&DashTarget::ReviewItem(0)));
         assert!(g.dash_hits.transcript.is_some());
     }
 

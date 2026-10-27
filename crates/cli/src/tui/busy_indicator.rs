@@ -78,27 +78,16 @@ pub fn render_indicator(state: BusyState, state_since: Instant) -> String {
 /// Claude-style line after a turn: `Crunched for 1m 9s · 1 shell still
 /// running`. Quick turns without running shells get none.
 pub fn turn_summary(elapsed: std::time::Duration, shells: usize, tokens: u64) -> Option<String> {
-    const VERBS: [&str; 8] = [
-        "Baked",
-        "Brewed",
-        "Churned",
-        "Cogitated",
-        "Cooked",
-        "Crunched",
-        "Sautéed",
-        "Worked",
-    ];
     let secs = elapsed.as_secs();
     if secs < 5 && shells == 0 {
         return None;
     }
-    let verb = VERBS[(elapsed.as_millis() as usize / 7) % VERBS.len()];
     let took = if secs >= 60 {
         format!("{}m {}s", secs / 60, secs % 60)
     } else {
         format!("{secs}s")
     };
-    let mut line = format!("{verb} for {took}");
+    let mut line = format!("done in {took}");
     // What the turn cost, so heavy turns are visible.
     if tokens >= 1_000 {
         line.push_str(&format!(" · {:.1}k tokens", tokens as f64 / 1_000.0));
@@ -120,7 +109,7 @@ mod tests {
     #[test]
     fn turn_summary_shows_tokens() {
         let line = turn_summary(std::time::Duration::from_secs(12), 0, 48_300).unwrap();
-        assert!(line.ends_with("for 12s · 48.3k tokens"), "{line}");
+        assert_eq!(line, "done in 12s · 48.3k tokens");
     }
 
     #[test]
@@ -171,15 +160,12 @@ mod tests {
     }
 
     #[test]
-    fn turn_summary_reads_like_claude() {
+    fn turn_summary_says_how_long_and_what_runs_on() {
         use std::time::Duration;
         assert_eq!(super::turn_summary(Duration::from_secs(2), 0, 0), None);
         let line = super::turn_summary(Duration::from_secs(69), 1, 0).unwrap();
-        assert!(
-            line.ends_with(" for 1m 9s · 1 shell still running"),
-            "{line}"
-        );
+        assert!(line == "done in 1m 9s · 1 shell still running", "{line}");
         let line = super::turn_summary(Duration::from_secs(1), 2, 0).unwrap();
-        assert!(line.ends_with(" for 1s · 2 shells still running"), "{line}");
+        assert_eq!(line, "done in 1s · 2 shells still running");
     }
 }

@@ -13,6 +13,7 @@ pub mod composer_input;
 pub mod connect_modal;
 #[allow(dead_code)]
 pub mod diff_hunk;
+pub(crate) mod diff_overlay;
 pub(crate) mod diff_review;
 pub mod git;
 pub mod keymap;
