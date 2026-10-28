@@ -29,6 +29,28 @@ pub type Checkpoint = Arc<dyn Fn(&[Message]) + Send + Sync>;
 
 pub type SteerInbox = Arc<std::sync::Mutex<Vec<String>>>;
 
+/// Builds a summary request from the history (see [`Compactor::prompt`]).
+pub type SummaryPrompt = Arc<dyn Fn(&[Message]) -> Option<String> + Send + Sync>;
+/// Replaces older history with a summary (see [`Compactor::apply`]).
+pub type ApplySummary = Arc<dyn Fn(&[Message], &str) -> Vec<Message> + Send + Sync>;
+
+/// Summarizes the conversation mid-turn when it fills up, like Claude Code's
+/// auto-compact (see [`AgentLoop::compactor`]). The supervisor builds it from
+/// its context manager each turn.
+#[derive(Clone)]
+pub struct Compactor {
+    /// Compact once the prompt reaches this many tokens.
+    pub trigger_tokens: usize,
+    /// Model that writes the summary (a cheap one where possible).
+    pub model: String,
+    /// The summary request for the older part of the history; `None` when
+    /// there is nothing old enough to summarize.
+    pub prompt: SummaryPrompt,
+    /// The history with its older part replaced by `summary` (an empty
+    /// summary means the model gave none: build one from the messages).
+    pub apply: ApplySummary,
+}
+
 /// Drives the multi-turn conversation and tool-use loop.
 pub struct AgentLoop {
     pub provider: Box<dyn Provider>,
@@ -46,6 +68,12 @@ pub struct AgentLoop {
     /// Called with the conversation after every tool step, so a crash or a
     /// closed terminal mid-turn loses nothing (the session saves itself).
     pub checkpoint: Option<Checkpoint>,
+    /// Summarizes the history between tool steps once it fills up.
+    pub compactor: Option<Compactor>,
+    /// Prompt size of the last model request as the provider counted it
+    /// (input + cache reads + cache writes). 0 until a request reports usage
+    /// and after the history is compacted.
+    last_prompt_tokens: u64,
     /// Cheap model for small side questions (auto mode's command check);
     /// `None` uses the session's model.
     pub utility_model: Option<String>,
@@ -92,6 +120,8 @@ impl AgentLoop {
             nested_instructions: Default::default(),
             utility_model: None,
             checkpoint: None,
+            compactor: None,
+            last_prompt_tokens: 0,
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
@@ -206,6 +236,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         // Compaction rewrites history, so every replayed provider block now
         // sits on a changed prefix and would be rejected or ignored.
         strip_provider_blocks_from(&mut self.messages, 0);
+        self.last_prompt_tokens = 0;
         let new_count = self.messages.len();
         tracing::debug!(
             "context compacted: {} messages → {} messages",
@@ -306,7 +337,11 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 turn,
             })
             .await;
-            // Keep the prompt from ballooning during a long tool-heavy turn.
+            // Keep the prompt from ballooning during a long tool-heavy turn:
+            // summarize first, then trim old tool output if still too big.
+            if turn > 1 {
+                self.maybe_compact(workspace_root).await;
+            }
             self.maybe_trim_context().await;
             self.provider
                 .prepare_messages_for_request(&mut self.messages, workspace_root)
@@ -327,6 +362,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             let mut next_fallback = 0usize;
             let (assistant_text, assistant_reasoning, tool_calls, got_usage, replay_blocks) = loop {
                 stream_attempt += 1;
+                self.last_prompt_tokens = 0;
                 let mut stream = match self
                     .provider
                     .chat(
@@ -432,7 +468,8 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                         } => {
                             got_usage = true;
                             self.cost_tracker.add(input_tokens, output_tokens);
-                            let context_tokens = self.estimated_context_tokens();
+                            self.last_prompt_tokens += input_tokens;
+                            let context_tokens = self.context_tokens();
                             self.emit(AgentEvent::CostUpdated {
                                 input_tokens: self.cost_tracker.total_input_tokens(),
                                 output_tokens: self.cost_tracker.output_tokens,
@@ -446,6 +483,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                             creation_tokens,
                         } => {
                             self.cost_tracker.add_cache(read_tokens, creation_tokens);
+                            self.last_prompt_tokens += read_tokens + creation_tokens;
                         }
                         StreamChunk::ReplayBlock(block) => replay_blocks.push(block),
                         StreamChunk::Stop(reason) => stop_reason = Some(reason),
@@ -1012,7 +1050,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 / 4) as u64;
             let estimated_output = (final_text.len() / 4) as u64;
             self.cost_tracker.add(estimated_input, estimated_output);
-            let context_tokens = self.estimated_context_tokens();
+            let context_tokens = self.context_tokens();
             self.emit(AgentEvent::CostUpdated {
                 input_tokens: self.cost_tracker.total_input_tokens(),
                 output_tokens: self.cost_tracker.output_tokens,
@@ -1030,6 +1068,71 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             tracing::warn!("undo finalize failed: {error}");
         }
         Ok(final_text)
+    }
+
+    /// How full the context is: the provider's count for the last request
+    /// (it includes the system prompt and tool list) or the estimate,
+    /// whichever is larger.
+    pub fn context_tokens(&self) -> u64 {
+        self.estimated_context_tokens().max(self.last_prompt_tokens)
+    }
+
+    /// Summarize older history mid-turn once the prompt reaches the
+    /// compactor's trigger, so a long tool-heavy turn keeps going instead of
+    /// hitting the context limit. Any failure leaves the history as it was.
+    async fn maybe_compact(&mut self, workspace_root: &Path) {
+        let Some(c) = self.compactor.clone() else {
+            return;
+        };
+        let before = self.context_tokens();
+        if c.trigger_tokens == 0 || (before as usize) < c.trigger_tokens {
+            return;
+        }
+        let Some(prompt) = (c.prompt)(&self.messages) else {
+            return;
+        };
+        self.emit(AgentEvent::ContextCompaction {
+            phase: "starting".into(),
+            message: "Compacting conversation…".into(),
+            context_tokens: before,
+        })
+        .await;
+        let summary = match self
+            .provider
+            .chat(&[Message::user(prompt)], &[], &c.model, workspace_root)
+            .await
+        {
+            Ok(mut stream) => {
+                let mut text = String::new();
+                while let Some(chunk) = stream.recv().await {
+                    match chunk {
+                        StreamChunk::TextDelta(d) => text.push_str(&d),
+                        StreamChunk::Done | StreamChunk::Error(_) | StreamChunk::FatalError(_) => {
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+                text
+            }
+            Err(e) => {
+                tracing::warn!("mid-turn compaction summary failed: {e}");
+                String::new()
+            }
+        };
+        let compacted = (c.apply)(&self.messages, &summary);
+        if compacted.len() >= self.messages.len() {
+            return;
+        }
+        let old = self.messages.len();
+        let new = self.compact_messages(compacted);
+        let after = self.estimated_context_tokens();
+        self.emit(AgentEvent::ContextCompaction {
+            phase: "completed".into(),
+            message: format!("Conversation compacted: {old} messages → {new} (~{after} tokens)"),
+            context_tokens: after,
+        })
+        .await;
     }
 
     /// Rough token estimate of the live conversation (current context-window
@@ -1907,6 +2010,80 @@ mod tests {
         let sizes = saved.lock().unwrap().clone();
         assert_eq!(sizes.len(), 2, "one save per tool step: {sizes:?}");
         assert!(sizes[1] > sizes[0]);
+    }
+
+    /// Once the provider reports a prompt past the compactor's trigger, the
+    /// next step summarizes older history before calling the model again.
+    #[tokio::test]
+    async fn compacts_mid_turn_when_the_prompt_fills_up() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root =
+            dcode_ai_common::config::canonicalize_simplified(temp.path()).expect("canonical");
+        std::fs::write(root.join("a.txt"), "hi").unwrap();
+        let read = StreamChunk::ToolUse(ToolCall {
+            id: "r1".into(),
+            name: "read_file".into(),
+            input: serde_json::json!({"path": "a.txt"}),
+        });
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(VecDeque::from([
+                vec![
+                    read,
+                    StreamChunk::Usage {
+                        input_tokens: 9_000,
+                        output_tokens: 10,
+                    },
+                    StreamChunk::Done,
+                ],
+                // The summary request.
+                vec![StreamChunk::TextDelta("SUMMARY".into()), StreamChunk::Done],
+                vec![StreamChunk::TextDelta("done".into()), StreamChunk::Done],
+            ])),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(crate::tools::filesystem::ReadFileTool::new(
+            root.clone(),
+        )));
+        let (event_tx, _rx) = tokio::sync::mpsc::channel(256);
+        let mut agent = AgentLoop::new(
+            provider,
+            tools,
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "test-model".into(),
+            event_tx,
+            5,
+            5,
+            0,
+            None,
+        );
+        agent.messages = vec![
+            Message::system("sys"),
+            Message::user("old question"),
+            Message::assistant("old answer"),
+        ];
+        let summaries: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
+        let seen = summaries.clone();
+        agent.compactor = Some(Compactor {
+            trigger_tokens: 8_000,
+            model: "cheap".into(),
+            prompt: Arc::new(|_m: &[Message]| Some("summarize".into())),
+            apply: Arc::new(move |m: &[Message], summary: &str| {
+                seen.lock().unwrap().push(summary.to_string());
+                let mut out = vec![m[0].clone(), Message::system(summary)];
+                out.extend_from_slice(&m[3..]);
+                out
+            }),
+        });
+        let reply = agent.run_turn("go", &root, &[]).await.expect("turn");
+        assert_eq!(reply, "done");
+        assert_eq!(summaries.lock().unwrap().as_slice(), ["SUMMARY"]);
+        assert!(
+            !agent
+                .messages
+                .iter()
+                .any(|m| m.content.to_summary_text().contains("old answer"))
+        );
+        assert_eq!(agent.last_prompt_tokens, 0, "reset by compaction");
     }
 
     /// A write followed by a read of the same file in one batch runs in

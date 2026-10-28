@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use dcode_ai_common::auth::AuthStore;
 use dcode_ai_common::config::{CopilotConfig, DcodeAiConfig};
-use dcode_ai_common::message::{ContentPart, Message, MessageContent};
+use dcode_ai_common::message::{ContentPart, Message, MessageContent, Role};
 use dcode_ai_common::tool::ToolDefinition;
 use serde_json::Value;
 
@@ -315,9 +315,13 @@ impl Provider for CopilotProvider {
             matches!(&m.content, MessageContent::Parts(parts)
                 if parts.iter().any(|p| matches!(p, ContentPart::Image { .. })))
         });
+        let initiator = initiator(messages);
         let model = model.as_str();
         let response = retry::with_retry(retry::DEFAULT_MAX_ATTEMPTS, || async {
-            let mut req = self.auth.apply_headers(self.client.post(&url));
+            let mut req = self
+                .auth
+                .apply_headers(self.client.post(&url))
+                .header("X-Initiator", initiator);
             if vision {
                 req = req.header("Copilot-Vision-Request", "true");
             }
@@ -340,6 +344,26 @@ impl Provider for CopilotProvider {
             CopilotApi::Responses => spawn_openai_responses_stream(response, "copilot"),
             CopilotApi::Messages => spawn_anthropic_stream(response, "copilot"),
         })
+    }
+}
+
+/// Who started this request, for Copilot's premium-request billing: `user`
+/// when the person just typed something, `agent` for the follow-up calls
+/// the agent makes after its own tool results (those are not billed as new
+/// premium requests). A user message that only carries a screenshot after
+/// tool output is the agent's too.
+fn initiator(messages: &[Message]) -> &'static str {
+    let mut turn = messages.iter().rev().filter(|m| m.role != Role::System);
+    match (turn.next(), turn.next()) {
+        (Some(last), prev) if last.role == Role::User => {
+            if prev.is_some_and(|p| p.role == Role::Tool) {
+                "agent"
+            } else {
+                "user"
+            }
+        }
+        (None, _) => "user",
+        _ => "agent",
     }
 }
 
@@ -436,6 +460,31 @@ fn chat_model_ids(value: &Value) -> Vec<String> {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn only_typed_prompts_count_as_user_requests() {
+        let typed = [Message::system("s"), Message::user("fix it")];
+        assert_eq!(initiator(&typed), "user");
+        let follow_up = [
+            Message::system("s"),
+            Message::user("fix it"),
+            Message::assistant("calling"),
+            Message::tool("t1", "ok"),
+        ];
+        assert_eq!(initiator(&follow_up), "agent");
+        let screenshot = [
+            Message::user("look"),
+            Message::tool("t1", "Saved a screenshot to x.png"),
+            Message::user_with_parts(vec![]),
+        ];
+        assert_eq!(initiator(&screenshot), "agent");
+        let next_turn = [
+            Message::user("a"),
+            Message::assistant("done"),
+            Message::user("b"),
+        ];
+        assert_eq!(initiator(&next_turn), "user");
+    }
 
     #[test]
     fn unknown_claude_ids_map_to_copilots_newest_in_family() {

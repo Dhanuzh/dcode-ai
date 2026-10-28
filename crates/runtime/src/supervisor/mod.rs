@@ -770,6 +770,8 @@ impl Supervisor {
             }
         }));
 
+        self.agent.compactor = self.mid_turn_compactor();
+
         let mut output = self
             .agent
             .run_turn(prompt, self.workspace_root.as_path(), attachments)
@@ -949,16 +951,18 @@ impl Supervisor {
             return;
         }
 
-        let stats = self.context_manager.stats(&self.agent.messages);
+        let stats = self.measured_stats();
+        let compact = stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens);
 
-        // Emit warning at 80% threshold
+        // Warn only when the context is full and won't be compacted now.
         if stats.needs_attention
+            && !compact
             && let Some(tx) = self.agent.event_sender()
         {
             let _ = tx
                 .send(AgentEvent::ContextWarning {
                     message: format!(
-                        "Context window at {}% ({} tokens). Consider summarizing.",
+                        "Context window at {}% ({} tokens). /compact summarizes it now.",
                         stats.usage_percent, stats.estimated_tokens
                     ),
                 })
@@ -966,14 +970,14 @@ impl Supervisor {
         }
 
         // Proactively compact before the turn if we should summarize
-        if stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens) {
+        if compact {
             if let Some(tx) = self.agent.event_sender() {
                 let _ = tx
                     .send(AgentEvent::ContextCompaction {
                         phase: "starting".to_string(),
                         message: format!(
-                            "Proactive compaction before turn ({}% full, {} tokens)",
-                            stats.usage_percent, stats.estimated_tokens
+                            "Compacting conversation… ({}% of context used)",
+                            stats.usage_percent
                         ),
                         context_tokens: stats.estimated_tokens as u64,
                     })
@@ -1004,7 +1008,7 @@ impl Supervisor {
             return;
         }
 
-        let stats = self.context_manager.stats(&self.agent.messages);
+        let stats = self.measured_stats();
 
         // Only compact if we missed it before the turn (e.g., context grew during turn)
         if stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens) {
@@ -1013,8 +1017,8 @@ impl Supervisor {
                     .send(AgentEvent::ContextCompaction {
                         phase: "starting".to_string(),
                         message: format!(
-                            "Post-turn compaction ({}% full, {} tokens)",
-                            stats.usage_percent, stats.estimated_tokens
+                            "Compacting conversation… ({}% of context used)",
+                            stats.usage_percent
                         ),
                         context_tokens: stats.estimated_tokens as u64,
                     })
@@ -1095,7 +1099,7 @@ impl Supervisor {
                 .send(AgentEvent::ContextCompaction {
                     phase: "completed".to_string(),
                     message: format!(
-                        "Context summarized: {} messages → {} messages (~{} tokens)",
+                        "Conversation compacted: {} messages → {} (~{} tokens)",
                         old_count, new_count, new_stats.estimated_tokens
                     ),
                     context_tokens: new_stats.estimated_tokens as u64,
@@ -1166,6 +1170,44 @@ impl Supervisor {
         }
         let _ = self.save().await;
         Ok((before, after, summary))
+    }
+
+    /// Context stats counting the provider's real prompt size when it is
+    /// bigger than the estimate.
+    fn measured_stats(&self) -> crate::context_manager::ContextStats {
+        self.context_manager
+            .stats_measured(&self.agent.messages, self.agent.context_tokens() as usize)
+    }
+
+    /// Mid-turn auto-compaction (Claude Code's auto-compact): once a long
+    /// turn's prompt passes the threshold (at least 85% of the window, so it
+    /// rarely runs mid-turn), the agent summarizes the older history with
+    /// the cheap model and keeps going.
+    fn mid_turn_compactor(&self) -> Option<dcode_ai_core::agent::Compactor> {
+        let config = self.context_manager.config();
+        if !config.enable_auto_summarize {
+            return None;
+        }
+        let pct = config.auto_summarize_threshold.max(85) as usize;
+        let trigger_tokens = config.context_window_target * pct / 100;
+        let cm = self.context_manager.clone();
+        let cm2 = cm.clone();
+        Some(dcode_ai_core::agent::Compactor {
+            trigger_tokens,
+            model: utility_model(&self.config).unwrap_or_else(|| self.model.clone()),
+            prompt: Arc::new(move |messages| {
+                let old = cm.get_messages_to_summarize(messages);
+                (!old.is_empty()).then(|| cm.summary_prompt(&old))
+            }),
+            apply: Arc::new(move |messages, summary| {
+                if summary.trim().is_empty() {
+                    let old = cm2.get_messages_to_summarize(messages);
+                    cm2.apply_summary(messages, &build_compaction_fallback_summary(&old))
+                } else {
+                    cm2.apply_summary(messages, summary)
+                }
+            }),
+        })
     }
 
     fn summary_rearm_ready(&mut self, current_tokens: usize) -> bool {

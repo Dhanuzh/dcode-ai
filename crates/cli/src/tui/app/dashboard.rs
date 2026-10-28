@@ -14,19 +14,30 @@ const BOTH_RAILS_MIN_W: u16 = 120;
 /// Below this only the centre pane is shown.
 const RIGHT_RAIL_MIN_W: u16 = 90;
 
+/// Narrowest a dragged rail can get, and the centre pane's minimum.
+pub(super) const RAIL_MIN_W: u16 = 16;
+pub(super) const CENTRE_MIN_W: u16 = 40;
+
 /// Split the screen into (session rail, centre pane, context rail).
-pub(super) fn dashboard_columns(area: Rect) -> (Option<Rect>, Rect, Option<Rect>) {
-    if area.width >= BOTH_RAILS_MIN_W {
+/// `left_w` / `right_w` are the widths the user dragged to (0 = default).
+pub(super) fn dashboard_columns(
+    area: Rect,
+    left_w: u16,
+    right_w: u16,
+) -> (Option<Rect>, Rect, Option<Rect>) {
+    let right_w = if right_w == 0 { RIGHT_W } else { right_w };
+    let left_w = if left_w == 0 { LEFT_W } else { left_w };
+    if area.width >= BOTH_RAILS_MIN_W.max(left_w + right_w + CENTRE_MIN_W) {
         let cols = Layout::horizontal([
-            Constraint::Length(LEFT_W),
-            Constraint::Min(40),
-            Constraint::Length(RIGHT_W),
+            Constraint::Length(left_w),
+            Constraint::Min(CENTRE_MIN_W),
+            Constraint::Length(right_w),
         ])
         .split(area);
         (Some(cols[0]), cols[1], Some(cols[2]))
-    } else if area.width >= RIGHT_RAIL_MIN_W {
-        let cols =
-            Layout::horizontal([Constraint::Min(40), Constraint::Length(RIGHT_W)]).split(area);
+    } else if area.width >= RIGHT_RAIL_MIN_W.max(right_w + CENTRE_MIN_W) {
+        let cols = Layout::horizontal([Constraint::Min(CENTRE_MIN_W), Constraint::Length(right_w)])
+            .split(area);
         (None, cols[0], Some(cols[1]))
     } else {
         (None, area, None)
@@ -50,9 +61,11 @@ pub(super) fn draw_dashboard_frame(
         area,
     );
 
-    let (left, centre, right) = dashboard_columns(area);
+    let (left, centre, right) = dashboard_columns(area, g.dash_hits.left_w, g.dash_hits.right_w);
     g.dash_hits.targets.clear();
     g.dash_hits.transcript = None;
+    g.dash_hits.left_rail = left;
+    g.dash_hits.right_rail = right;
     if let Some(rect) = left {
         render_session_rail(frame, rect, g);
     }
@@ -591,16 +604,20 @@ mod tests {
 
     #[test]
     fn columns_adapt_to_width() {
-        let (l, c, r) = dashboard_columns(Rect::new(0, 0, 160, 40));
+        let (l, c, r) = dashboard_columns(Rect::new(0, 0, 160, 40), 0, 0);
         assert!(l.is_some() && r.is_some());
         assert_eq!(c.width, 160 - LEFT_W - RIGHT_W);
 
-        let (l, _, r) = dashboard_columns(Rect::new(0, 0, 100, 40));
+        let (l, _, r) = dashboard_columns(Rect::new(0, 0, 100, 40), 0, 0);
         assert!(l.is_none() && r.is_some());
 
-        let (l, c, r) = dashboard_columns(Rect::new(0, 0, 70, 40));
+        let (l, c, r) = dashboard_columns(Rect::new(0, 0, 70, 40), 0, 0);
         assert!(l.is_none() && r.is_none());
         assert_eq!(c.width, 70);
+
+        // Dragged widths are used as given.
+        let (l, c, r) = dashboard_columns(Rect::new(0, 0, 160, 40), 20, 50);
+        assert_eq!((l.unwrap().width, c.width, r.unwrap().width), (20, 90, 50));
     }
 
     #[test]

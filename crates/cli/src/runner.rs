@@ -597,6 +597,7 @@ impl SessionRuntime {
         // Preserve session-scoped allow patterns (e.g. startup-approve-all `*`)
         // so they survive across session resume boundaries.
         let old_allow = self.supervisor.agent().approval.session_allow.clone();
+        let mode = self.permission_mode();
 
         let _ = self.supervisor.save().await;
         self.supervisor.finish(EndReason::Completed).await;
@@ -615,6 +616,10 @@ impl SessionRuntime {
         for pattern in old_allow {
             new_runtime.add_session_allow_pattern(pattern);
         }
+        // Keep the permission mode the user chose (the footer shows it):
+        // a fresh runtime would start in the config's default and ask again.
+        new_runtime.set_permission_mode(mode);
+        new_runtime.set_background_subagents(self.background_subagents);
 
         // Refresh the approval-pending map reference so the new supervisor's
         // pending approvals can be resolved on cancel.
@@ -639,6 +644,7 @@ impl SessionRuntime {
     ) -> Result<(), ProviderError> {
         // Preserve session-scoped allow patterns across the reroot.
         let old_allow = self.supervisor.agent().approval.session_allow.clone();
+        let mode = self.permission_mode();
 
         let _ = self.supervisor.save().await;
         self.supervisor.finish(EndReason::Completed).await;
@@ -664,6 +670,7 @@ impl SessionRuntime {
         for pattern in old_allow {
             new_runtime.add_session_allow_pattern(pattern);
         }
+        new_runtime.set_permission_mode(mode);
         new_runtime.set_background_subagents(self.background_subagents);
 
         // Refresh the approval-pending map reference for cancel.

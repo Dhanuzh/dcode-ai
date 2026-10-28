@@ -68,6 +68,7 @@ pub struct ContextStats {
 /// - A sliding window of recent user/assistant messages
 /// - Preservation of system messages (always at start)
 /// - Track tool messages that follow the relevant turns
+#[derive(Clone)]
 pub struct ContextManager {
     config: ContextManagerConfig,
     model: String,
@@ -128,6 +129,22 @@ impl ContextManager {
             needs_attention,
             should_summarize,
         }
+    }
+
+    /// [`Self::stats`], but counting `measured` tokens when the provider
+    /// reported a bigger prompt than the estimate (the estimate leaves out
+    /// the system prompt and tool list).
+    pub fn stats_measured(&self, messages: &[Message], measured: usize) -> ContextStats {
+        let mut stats = self.stats(messages);
+        if measured > stats.estimated_tokens {
+            let pct = ((measured as f64 / stats.context_window as f64) * 100.0).min(100.0) as u8;
+            stats.estimated_tokens = measured;
+            stats.usage_percent = pct;
+            stats.needs_attention = pct >= 80;
+            stats.should_summarize =
+                self.config.enable_auto_summarize && pct >= self.config.auto_summarize_threshold;
+        }
+        stats
     }
 
     /// Find the contiguous leading system-message prefix.

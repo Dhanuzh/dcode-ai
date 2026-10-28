@@ -289,6 +289,130 @@ fn activate_line_hit(hit: LineClickHit, g: &mut TuiSessionState) {
 /// Dashboard mouse: wheel scrolls the transcript (or the changes list when
 /// the pointer is over it); left clicks hit rail targets recorded by the
 /// last draw, then transcript click targets.
+/// Drag a dashboard rail's inner edge to resize it. Returns true while the
+/// event belongs to a resize.
+fn dashboard_rail_resize(m: crossterm::event::MouseEvent, g: &mut TuiSessionState) -> bool {
+    use super::dashboard::{CENTRE_MIN_W, RAIL_MIN_W};
+    let hits = &mut g.dash_hits;
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let on_left = hits.left_rail.is_some_and(|r| {
+                m.column + 1 == r.x + r.width && rect_contains(r, m.column, m.row)
+            });
+            let on_right = hits
+                .right_rail
+                .is_some_and(|r| m.column == r.x && rect_contains(r, m.column, m.row));
+            hits.resizing = if on_left {
+                Some(true)
+            } else if on_right {
+                Some(false)
+            } else {
+                None
+            };
+            hits.resizing.is_some()
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            let Some(left) = hits.resizing else {
+                return false;
+            };
+            let Ok((cols, _)) = crossterm::terminal::size() else {
+                return true;
+            };
+            let other = |r: Option<Rect>| r.map_or(0, |r| r.width);
+            if left {
+                let room = cols.saturating_sub(other(hits.right_rail) + CENTRE_MIN_W);
+                hits.left_w = (m.column + 1).clamp(RAIL_MIN_W, room.max(RAIL_MIN_W));
+            } else {
+                let room = cols.saturating_sub(other(hits.left_rail) + CENTRE_MIN_W);
+                hits.right_w = cols
+                    .saturating_sub(m.column)
+                    .clamp(RAIL_MIN_W, room.max(RAIL_MIN_W));
+            }
+            g.touch_transcript();
+            true
+        }
+        MouseEventKind::Up(MouseButton::Left) => hits.resizing.take().is_some(),
+        _ => false,
+    }
+}
+
+/// Drag-select in the dashboard's conversation pane. Positions are buffer
+/// rows (`start` + screen row) like the inline selection, so the frame's
+/// highlight applies as is. Returns true when the event was a drag or a
+/// copying release (a plain click falls through to click targets).
+fn dashboard_selection(
+    m: crossterm::event::MouseEvent,
+    g: &mut TuiSessionState,
+    transcript_cache: &mut TranscriptRenderCache,
+) -> bool {
+    use crate::tui::mouse_select::{Selection, VisualPos};
+    let Some((tr, start)) = g.dash_hits.transcript else {
+        return false;
+    };
+    // One column of padding on the left (see the frame).
+    let text_x = tr.x.saturating_add(1);
+    let pos = |column: u16, row: u16| {
+        let row = row.clamp(tr.y, tr.y + tr.height.saturating_sub(1));
+        VisualPos {
+            row: (start + (row - tr.y) as usize).min(u16::MAX as usize) as u16,
+            col: column.saturating_sub(text_x),
+        }
+    };
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) if rect_contains(tr, m.column, m.row) => {
+            let at = pos(m.column, m.row);
+            g.mouse_selection = Some(Selection {
+                anchor: at,
+                cursor: at,
+                scroll_from_top: start.min(u16::MAX as usize) as u16,
+            });
+            false
+        }
+        MouseEventKind::Drag(MouseButton::Left) if g.mouse_selection.is_some() => {
+            // Dragging past the top or bottom edge scrolls the pane.
+            if m.row < tr.y {
+                g.transcript_follow_tail = false;
+                g.scroll_lines = g.scroll_lines.saturating_sub(1);
+            } else if m.row >= tr.y + tr.height {
+                g.scroll_lines = g.scroll_lines.saturating_add(1);
+            }
+            let at = pos(m.column, m.row);
+            if let Some(sel) = g.mouse_selection.as_mut() {
+                sel.cursor = at;
+            }
+            g.touch_transcript();
+            true
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            let Some(sel) = g.mouse_selection.take() else {
+                return false;
+            };
+            if sel.anchor == sel.cursor || is_click_jitter(&sel) {
+                g.touch_transcript();
+                return false;
+            }
+            let inner_w = tr.width.saturating_sub(2).max(10);
+            let (lines, _hits, _) = transcript_cache.get_or_rebuild(g, inner_w);
+            let gutters = vec![0u16; lines.len()];
+            let (rows, gutters) =
+                crate::tui::mouse_select::build_all_visual_rows(lines, &gutters, inner_w as usize);
+            let text = crate::tui::mouse_select::extract_selected_text(&rows, &gutters, &sel);
+            if !text.trim().is_empty() {
+                match crate::tui::mouse_select::copy_to_clipboard(&text) {
+                    Ok(_) => g.show_toast(
+                        "✓ Copied to clipboard",
+                        crate::tui::state::ToastKind::Success,
+                    ),
+                    Err(e) => g.push_error(format!("Clipboard copy failed: {e}")),
+                }
+            }
+            g.touch_transcript();
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(super) fn handle_dashboard_mouse(
     m: crossterm::event::MouseEvent,
     g: &mut TuiSessionState,
@@ -303,6 +427,14 @@ pub(super) fn handle_dashboard_mouse(
         && g.dash_hits
             .transcript
             .is_none_or(|(tr, _)| !rect_contains(tr, m.column, m.row));
+    if dashboard_rail_resize(m, g) {
+        return;
+    }
+    // The dashboard captures the mouse, so the terminal can't select text:
+    // drag over the conversation to select it, release to copy.
+    if dashboard_selection(m, g, transcript_cache) {
+        return;
+    }
     match m.kind {
         MouseEventKind::ScrollUp if over_changes => g.diff_review.move_file(-1),
         MouseEventKind::ScrollDown if over_changes => g.diff_review.move_file(1),

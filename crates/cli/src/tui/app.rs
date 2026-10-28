@@ -62,6 +62,7 @@ mod dashboard;
 mod frame;
 mod keys;
 mod mouse;
+mod paste_burst;
 mod vim;
 
 use dashboard::draw_dashboard_frame;
@@ -767,6 +768,8 @@ pub fn run_blocking(
     // Debounce terminal resizes: reflow once after the drag settles (~120ms of
     // quiet) instead of purge+reflushing on every intermediate resize event.
     let mut pending_resize_at: Option<std::time::Instant> = None;
+    // Events read ahead while checking for a paste burst.
+    let mut pending_events: std::collections::VecDeque<Event> = Default::default();
     // Last terminal width we reflowed at. A resize only needs a full purge +
     // re-flush when the *width* changes (wrapped scrollback becomes stale);
     // height-only changes keep the same wrapping, so we skip the flicker.
@@ -1159,10 +1162,14 @@ pub fn run_blocking(
             Duration::from_millis(80)
         };
 
-        if poll(poll_timeout)? {
-            let ev = match read().ok() {
+        if !pending_events.is_empty() || poll(poll_timeout)? {
+            let ev = match pending_events.pop_front() {
                 Some(ev) => ev,
-                None => continue,
+                None => match read().ok() {
+                    // Without bracketed paste a paste is a key burst.
+                    Some(ev) => paste_burst::coalesce(ev, &mut pending_events),
+                    None => continue,
+                },
             };
             let mut g = match state.lock() {
                 Ok(g) => g,

@@ -246,7 +246,7 @@ fn keymaps_help_lines() -> Vec<String> {
         "  Ctrl+K       Pin latest message".into(),
         "  Ctrl+O       Pinned notes list".into(),
         "  Ctrl+G       Sub-agent dashboard".into(),
-        "  Ctrl+V       Paste image / stage image".into(),
+        "  Ctrl+V       Paste image (Alt+V on Windows/WSL)".into(),
         "  Ctrl+L       Clear screen".into(),
         "  Ctrl+C       Cancel current turn".into(),
         String::new(),

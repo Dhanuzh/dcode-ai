@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.27 — 2026-10-28
+
+### Fixed
+- **Auto mode kept asking for edits** after `/resume` or switching project:
+  the new session started in the config's mode while the footer still said
+  auto. The mode now carries over; auto asks only for deletions and risky
+  commands.
+- **Pasted paragraphs were sent on their own** where the terminal has no
+  bracketed paste (Windows console): keys that arrive together are now
+  treated as one paste, so line breaks stay in the prompt until you press
+  Enter.
+- **Image paste on Windows / WSL**: `Alt+V` reads the Windows clipboard
+  first under WSL, and an image file copied in Explorer is attached too.
+
+### Uses less of your plan
+- **Copilot**: follow-up requests the agent makes after its own tool
+  results are marked as agent-initiated (`X-Initiator`), so only your
+  prompts count as premium requests.
+
+### Better
+- **Automatic compaction like Claude Code**: it now measures the real
+  prompt size the provider reports (system prompt and tools included), and
+  a long turn compacts itself mid-way (from 85%) instead of running into
+  the limit. Shown as "Compacting conversation…".
+- **Dashboard**: drag over the transcript to select and copy text; drag a
+  rail's edge to resize it.
+
 ## 1.0.26 — 2026-10-28
 
 ### Uses less of your plan

@@ -101,46 +101,70 @@ pub fn paste_clipboard_image(
     workspace: &Path,
     session_id: &str,
 ) -> Result<ImageAttachment, String> {
+    // Under WSL the Windows clipboard is the one the user copied to; the
+    // Linux one (WSLg) may hold an older image.
+    if is_wsl() {
+        return paste_clipboard_image_powershell(workspace, session_id, true).or_else(|ps_err| {
+            clipboard_image_via_arboard(workspace, session_id).map_err(|_| ps_err)
+        });
+    }
     match clipboard_image_via_arboard(workspace, session_id) {
         Ok(attachment) => Ok(attachment),
-        Err(native_err) => {
-            if is_wsl() {
-                paste_clipboard_image_wsl(workspace, session_id)
-            } else if cfg!(windows) {
-                // Some clipboard formats (DIB screenshots) trip arboard on
-                // Windows; System.Windows.Forms handles them all.
-                paste_clipboard_image_powershell(workspace, session_id)
-                    .map_err(|ps_err| format!("{native_err}; {ps_err}"))
-            } else {
-                Err(native_err)
-            }
+        // Some clipboard formats (DIB screenshots) trip arboard on Windows,
+        // and a file copied in Explorer is no bitmap at all;
+        // System.Windows.Forms handles both.
+        Err(native_err) if cfg!(windows) => {
+            paste_clipboard_image_powershell(workspace, session_id, false)
+                .map_err(|ps_err| format!("{native_err}; {ps_err}"))
         }
+        Err(native_err) => Err(native_err),
     }
 }
 
-/// Native-Windows fallback: save the clipboard image via PowerShell
-/// (GetImage needs an STA apartment).
+/// Save the Windows clipboard image via PowerShell (GetImage needs an STA
+/// apartment), from native Windows or WSL (`powershell.exe`, Windows paths).
+/// When the clipboard holds image *files* (copied in Explorer), the first
+/// one is imported instead.
 fn paste_clipboard_image_powershell(
     workspace: &Path,
     session_id: &str,
+    wsl: bool,
 ) -> Result<ImageAttachment, String> {
     let filename = nanos_name("paste", "png");
     let dir = session_attachments_dir(workspace, session_id);
     std::fs::create_dir_all(&dir).map_err(|e| format!("create attachments dir: {e}"))?;
     let dest = dir.join(&filename);
+    let ps_dest = if wsl {
+        wsl_windows_path(&dest)?
+    } else {
+        dest.display().to_string()
+    };
 
     let script = format!(
         "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
          $img=[System.Windows.Forms.Clipboard]::GetImage(); \
-         if($img -eq $null){{exit 2}}; \
-         $img.Save('{}',[System.Drawing.Imaging.ImageFormat]::Png); exit 0",
-        dest.display().to_string().replace('\'', "''")
+         if($img -ne $null){{$img.Save('{}',[System.Drawing.Imaging.ImageFormat]::Png); exit 0}}; \
+         foreach($f in [System.Windows.Forms.Clipboard]::GetFileDropList()){{ \
+           if($f -match '\\.(png|jpe?g|gif|webp|bmp)$'){{[Console]::Out.Write($f); exit 3}} }}; \
+         exit 2",
+        ps_dest.replace('\'', "''")
     );
-    let out = std::process::Command::new("powershell")
+    let exe = if wsl { "powershell.exe" } else { "powershell" };
+    let out = std::process::Command::new(exe)
         .args(["-NoProfile", "-STA", "-Command", &script])
         .output()
-        .map_err(|e| format!("powershell unavailable: {e}"))?;
+        .map_err(|e| format!("{exe} unavailable for the clipboard: {e}"))?;
 
+    if out.status.code() == Some(3) {
+        let _ = std::fs::remove_file(&dest);
+        let win_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        let src = if wsl {
+            wsl_linux_path(&win_path)?
+        } else {
+            PathBuf::from(win_path)
+        };
+        return import_image_file(workspace, session_id, &src);
+    }
     if dest.is_file()
         && std::fs::metadata(&dest)
             .map(|m| m.len() > 0)
@@ -156,7 +180,7 @@ fn paste_clipboard_image_powershell(
         Err("clipboard has no image — copy an image first, or use /image <path>".into())
     } else {
         Err(format!(
-            "powershell clipboard read failed: {}",
+            "clipboard read failed: {}",
             String::from_utf8_lossy(&out.stderr).trim()
         ))
     }
@@ -187,51 +211,18 @@ fn wsl_windows_path(linux_path: &Path) -> Result<String, String> {
     Ok(path)
 }
 
-/// WSL fallback: save the *Windows* clipboard image to the session directory via
-/// `powershell.exe` (GetImage needs an STA apartment).
-fn paste_clipboard_image_wsl(
-    workspace: &Path,
-    session_id: &str,
-) -> Result<ImageAttachment, String> {
-    let filename = nanos_name("paste", "png");
-    let dir = session_attachments_dir(workspace, session_id);
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create attachments dir: {e}"))?;
-    let dest = dir.join(&filename);
-    let win_path = wsl_windows_path(&dest)?;
-
-    let script = format!(
-        "Add-Type -AssemblyName System.Windows.Forms,System.Drawing; \
-         $img=[System.Windows.Forms.Clipboard]::GetImage(); \
-         if($img -eq $null){{exit 2}}; \
-         $img.Save('{}',[System.Drawing.Imaging.ImageFormat]::Png); exit 0",
-        win_path.replace('\'', "''")
-    );
-
-    let out = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-STA", "-Command", &script])
+/// Translate a Windows path to its WSL form via `wslpath -u`.
+fn wsl_linux_path(windows_path: &str) -> Result<PathBuf, String> {
+    let out = std::process::Command::new("wslpath")
+        .arg("-u")
+        .arg(windows_path)
         .output()
-        .map_err(|e| format!("powershell.exe unavailable for WSL clipboard bridge: {e}"))?;
-
-    if dest.is_file()
-        && std::fs::metadata(&dest)
-            .map(|m| m.len() > 0)
-            .unwrap_or(false)
-    {
-        return Ok(ImageAttachment {
-            media_type: "image/png".into(),
-            path: relative_attachment_path(session_id, &filename),
-        });
+        .map_err(|e| format!("wslpath unavailable: {e}"))?;
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if !out.status.success() || path.is_empty() {
+        return Err("wslpath could not convert the clipboard file path".into());
     }
-
-    let _ = std::fs::remove_file(&dest);
-    if out.status.code() == Some(2) {
-        Err("clipboard has no image — copy an image first, or use /image <path>".into())
-    } else {
-        Err(format!(
-            "WSL clipboard bridge failed: {}",
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
-    }
+    Ok(PathBuf::from(path))
 }
 
 fn clipboard_image_via_arboard(

@@ -63,7 +63,8 @@ Backspace; deleting an image chip removes that image from the message.
 
 `Ctrl+\` (or `/dashboard`) switches to a full-screen view with sessions and
 sub-agents on the left, the transcript in the middle and a tabbed rail on the
-right.
+right. Drag over the transcript to select text (it is copied when you let
+go), and drag a rail's inner edge to make it wider or narrower.
 
 | Key | Action |
 | --- | --- |
@@ -87,7 +88,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
 | `/permissions` | List rules; `allow`/`ask`/`deny`/`remove <rule>` to edit them; `mode` for the mode picker |
 | `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use (`/usage`: fresh input, cache reads / writes, output, cache hit rate, Claude process restarts) |
-| `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept); the footer warns from 80% full |
+| `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept). It also happens on its own: before a turn once the context is 70% full, and in the middle of a long turn from 85% |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation (in git workspaces also files changed by shell commands) |
 | `/diff` | Full-screen diff of every changed file (↑↓ file · Tab · `n`/`p` hunk · `r r` revert hunk · `q` close); `/diff <args>` prints a git diff |
 | `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in; the picker searches titles and what was said; sessions name themselves after the first turn, bare `/rename` picks a new name) |

@@ -205,6 +205,14 @@ pub struct DashHits {
     /// Transcript area and the transcript line drawn on its first row.
     pub transcript: Option<(ratatui::layout::Rect, usize)>,
     pub targets: Vec<(ratatui::layout::Rect, DashTarget)>,
+    /// Rails as last drawn (for dragging their edges).
+    pub left_rail: Option<ratatui::layout::Rect>,
+    pub right_rail: Option<ratatui::layout::Rect>,
+    /// Rail widths the user dragged to; 0 keeps the default.
+    pub left_w: u16,
+    pub right_w: u16,
+    /// The rail edge being dragged: `Some(true)` left, `Some(false)` right.
+    pub resizing: Option<bool>,
 }
 
 pub struct TuiSessionState {
