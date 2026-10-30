@@ -2,88 +2,98 @@
 
 # ✻ dcode-ai
 
-**A Rust-native coding agent for your terminal.**
-One binary. Your Claude or GitHub Copilot sign-in. No API keys, no Electron, no Node.
+### The Rust-native coding agent for your terminal
 
-[![Release](https://img.shields.io/github/v/release/Dhanuzh/dcode-ai?style=flat-square&color=c96442)](https://github.com/Dhanuzh/dcode-ai/releases)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](#license)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
-![Platforms](https://img.shields.io/badge/platform-linux%20%7C%20macOS%20%7C%20windows-lightgrey?style=flat-square)
+One binary · your Claude or GitHub Copilot sign-in · no API keys, no Electron, no Node
 
-[Install](#install) · [Quick start](#quick-start) · [Features](#features) · [Docs](#documentation) · [Changelog](CHANGELOG.md)
+[![Release](https://img.shields.io/github/v/release/Dhanuzh/dcode-ai?style=for-the-badge&color=d97757&labelColor=211d1b)](https://github.com/Dhanuzh/dcode-ai/releases)
+[![CI](https://img.shields.io/github/actions/workflow/status/Dhanuzh/dcode-ai/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=211d1b)](https://github.com/Dhanuzh/dcode-ai/actions)
+[![Rust](https://img.shields.io/badge/rust-1.88%2B-e8e2dc?style=for-the-badge&logo=rust&logoColor=white&labelColor=211d1b)](https://www.rust-lang.org)
+[![License: MIT](https://img.shields.io/badge/license-MIT-7fbf7f?style=for-the-badge&labelColor=211d1b)](#license)
+
+**[Install](#-install)** · **[Quick start](#-quick-start)** · **[Features](#-features)** · **[Configuration](#%EF%B8%8F-configuration)** · **[Docs](#-documentation)** · **[Changelog](CHANGELOG.md)**
+
+<br>
+
+<img src="docs/assets/hero.svg" alt="dcode-ai in a terminal: it reads a file, shows a diff of its edit and reports that the tests pass" width="860">
 
 </div>
 
-```text
-╭──────────────────────────────────────────────╮
-│ ✻ Welcome to dcode-ai!                       │
-│                                              │
-│   /help for help, /model to switch model     │
-│   cwd: ~/code/my-app                         │
-│   model: claude-sonnet-5-5 · v1.0.0          │
-╰──────────────────────────────────────────────╯
+<br>
 
-> fix the off-by-one in token expiry [Image #1]
+## ✨ Why dcode-ai
 
-● Read(src/auth.rs)
-  ⎿  Read 84 lines
+<table>
+<tr>
+<td width="50%" valign="top">
 
-● Update(src/auth.rs)
-  ⎿  Updated src/auth.rs with 1 addition and 1 removal
-       41 -     if now > expiry {
-       41 +     if now >= expiry {
+### 💳 Uses what you already pay for
+Your **Claude plan** (through your own signed-in `claude`) or your **GitHub Copilot** subscription. OAuth sign-in only, no API keys to paste.
 
-● Tokens now expire at the exact expiry instant. Tests pass.
-──────────────────────────────────────────────────────────────
-> Try "explain this codebase"
-──────────────────────────────────────────────────────────────
-  ⏵⏵ accept edits on (shift+tab to cycle)    claude-sonnet-5-5
-```
+</td>
+<td width="50%" valign="top">
 
-## Why dcode-ai
+### 🧩 Speaks the Claude Code ecosystem
+Plugins, marketplaces, `.mcp.json`, skills, commands, agents and hooks work unchanged, with about 2,700 plugins a keystroke away.
 
-- **Uses what you already pay for** — your Claude plan (through your own signed-in `claude`) or your GitHub Copilot subscription.
-- **Speaks the ecosystem** — Claude Code plugins, marketplaces, `.mcp.json`, skills, commands, agents and hooks work unchanged.
-- **Built to spawn work** — detached sessions, sub-agents in isolated git worktrees, NDJSON streams, IPC, a CI mode and a GitHub Action.
-- **Small and fast** — one static Rust binary, instant start, everything local except the model call.
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
 
-## Install
+### 🚀 Built to spawn work
+Detached sessions, sub-agents in isolated git worktrees, background agents, `/goal` loops, NDJSON streams, Unix-socket IPC and a CI mode.
 
-**Linux / macOS**
+</td>
+<td width="50%" valign="top">
+
+### ⚡ Small, fast, careful with credit
+One Rust binary that starts instantly. Lean prompts, tools loaded on demand, prompt caching, automatic compaction, and `/usage` shows where every token goes.
+
+</td>
+</tr>
+</table>
+
+## 📦 Install
+
+<table>
+<tr><th>Linux / macOS</th><th>Homebrew</th><th>Windows (PowerShell)</th></tr>
+<tr>
+<td>
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | bash
 ```
 
-**Homebrew (macOS / Linux)**
+</td>
+<td>
 
 ```bash
 brew tap dhanuzh/dcode-ai https://github.com/Dhanuzh/dcode-ai
-brew install dcode-ai          # update: brew upgrade dcode-ai
+brew install dcode-ai
 ```
 
-**Windows (PowerShell)**
+</td>
+<td>
 
 ```powershell
 irm https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.ps1 | iex
 ```
 
-**Update** an installed copy in place (checksum-verified), or type `/update`
-inside a session:
+</td>
+</tr>
+</table>
 
-```bash
-dcode-ai update          # or: dcode-ai update --check
-```
+Prebuilt for **Linux** (x86_64, arm64), **macOS** (Intel, Apple silicon) and **Windows** (x86_64). Every archive ships a `.sha256` checksum, and the installer verifies it.
 
-The installer offers `~/.local/bin` when `/usr/local/bin` needs sudo, so
-updates never need sudo.
+**Staying current:** run `/update` inside a session, or `dcode-ai update` (`--check` only looks). When `/usr/local/bin` needs sudo, the installer offers `~/.local/bin` instead, so updates never need sudo. If you do pick a system folder, `/update` asks for the password in a masked popup.
 
 <details>
-<summary>Pin a version, install without sudo, or build from source</summary>
+<summary><b>Pin a version, install without sudo, or build from source</b></summary>
 
 ```bash
 # a specific release
-curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | DCODE_AI_VERSION=v1.0.0 bash
+curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | DCODE_AI_VERSION=v1.0.28 bash
 
 # user-local, no sudo
 curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | DCODE_AI_INSTALL_DIR="$HOME/.local/bin" bash
@@ -93,13 +103,11 @@ cargo build --release
 sudo cp target/release/dcode-ai /usr/local/bin/
 ```
 
-Prebuilt for Linux x86_64 and arm64, macOS (Intel and Apple silicon) and
-Windows x86_64. Release archives ship `.sha256` checksums, which the installer verifies. On Windows,
-`search_code` uses ripgrep: `winget install BurntSushi.ripgrep.MSVC`.
+On Windows, `search_code` uses ripgrep: `winget install BurntSushi.ripgrep.MSVC`.
 
 </details>
 
-## Quick start
+## 🏁 Quick start
 
 ```bash
 cd my-project
@@ -110,72 +118,83 @@ The first launch asks you to sign in:
 
 | Provider | Sign in | How it works |
 | --- | --- | --- |
-| **Claude** | `dcode-ai login anthropic` | Runs your own signed-in `claude` as the model; usage counts against your Claude plan. dcode-ai's tools do the work. |
-| **GitHub Copilot** | `dcode-ai login copilot` | GitHub device login. `/models` lists everything on your plan (Claude, GPT, Gemini, …). |
+| **Claude** | `dcode-ai login anthropic` | Runs your own signed-in `claude` as the model, so usage counts against your Claude plan. dcode-ai's own tools do the work. |
+| **GitHub Copilot** | `dcode-ai login copilot` | GitHub device login. `/models` lists everything on your plan (Claude, GPT, Gemini, …). Only your own prompts count as premium requests. |
 
-Switch any time with `/provider` and `/model` (Claude aliases: `opus`, `sonnet`, `haiku`, `fable`).
-Prefer API billing? Set `[provider.anthropic] backend = "api"` and sign in with Anthropic's `ant` CLI —
-see [configuration](docs/configuration.md).
+Switch any time with `/provider` and `/model` (Claude aliases: `opus`, `sonnet`, `haiku`, `fable`). Prefer API billing? Set `[provider.anthropic] backend = "api"` and sign in with Anthropic's `ant` CLI. See [configuration](docs/configuration.md).
 
 ```bash
-dcode-ai -p "explain the architecture of this project"   # one-shot
+dcode-ai -p "explain the architecture of this project"   # one-shot answer
 dcode-ai -c                                              # continue the last session
-dcode-ai spawn --prompt "refactor the auth module"       # detached, attach later
+dcode-ai -r                                              # pick a session to resume
+dcode-ai spawn --prompt "refactor the auth module"       # detached; attach later
 ```
 
-## Features
+> [!TIP]
+> Press `?` on an empty prompt for every shortcut, and type `/` to browse all slash commands.
 
-### In the terminal
+## 🧰 Features
+
+### ⌨️ In the terminal
 
 | | |
 | --- | --- |
-| **Modes** | `Shift+Tab` cycles default → ⏵⏵ accept edits → ⏸ plan. Plan turns end with *Ready to code?* |
-| **Rewind** | `Esc` `Esc` restores code, conversation, or both to any earlier message |
-| **Context** | `@file` mentions, `[Image #N]` paste (`Ctrl+V`, `Alt+V` on Windows/WSL), `!cmd` shell, `# note` memory |
-| **Dashboard** | `Ctrl+\` opens a full-screen view: sessions and agents, transcript, and context · changes · agents tabs (`Alt+1/2/3`) with per-hunk review and revert |
-| **Insight** | `/context` usage grid, `/cost`, `/effort`, `Ctrl+T` thinking, `Ctrl+O` fold tool output |
-| **Themes** | Claude's dark, light, colorblind-friendly and ANSI-only themes with a live `/theme` preview, plus `tokyonight`, `catppuccin`, `gruvbox`, `dracula`, `nord` … |
-| **Accessible** | `--plain` output for screen readers and dumb terminals |
+| **Permission modes** | `Shift+Tab` cycles default → ⏵⏵ accept edits → ⏸ plan → ⏵⏵ **auto** (auto runs everything except deletions and risky commands) |
+| **Talk while it works** | `Enter` steers the running turn, and `Tab` queues a message for after it |
+| **Rewind** | `Esc` `Esc` restores code, conversation or both to any earlier message |
+| **Context** | `@` fuzzy file search, `[Image #N]` paste (`Ctrl+V`, or `Alt+V` on Windows/WSL), `!` shell mode, `# note` memory |
+| **Dashboard** | `Ctrl+\` opens a full-screen view with sessions and agents, the transcript, and context · changes · agents tabs. Review and revert per hunk, drag to select and copy, resize the rails |
+| **Diffs** | Approvals show a line-numbered diff, and `/diff` opens a full-screen viewer with hunk revert |
+| **Insight** | `/context` grid, `/usage` token breakdown (fresh, cached, output, cache hit rate), `/cost`, `/effort`, `Ctrl+T` thinking |
+| **Looks** | Claude's dark, light, colorblind-friendly and ANSI themes with live `/theme` preview, plus `tokyonight`, `catppuccin`, `gruvbox`, `dracula`, `nord` … |
+| **Comfort** | Desktop notifications, `c` copies links, `/terminal-setup` for Shift+Enter, `/vim` keys, `--plain` for screen readers |
 
-Press `?` on an empty prompt for every shortcut.
+### 🗂️ Sessions that last
 
-### Agents and automation
+- **Crash-safe:** the session saves after every step of a turn, so a crash or a closed terminal loses nothing.
+- **`/resume` picker:** a tree of sessions with their forks and sub-agents, a search over titles *and* what was said, and auto-generated titles.
+- **Automatic compaction**, like Claude Code: older history is summarized by a cheap model when the context fills up, including in the middle of a long turn.
+- **`/export` / `/share`** the conversation as Markdown with secrets masked, to a file, the clipboard or a secret gist.
 
-- **Sub-agents** run in their own git worktrees with parent/child lineage; when one finishes with changes you choose merge, keep or discard. Define your own in `agents/*.md`.
+### 🤖 Agents and automation
+
+- **Sub-agents** run in their own git worktrees with parent/child lineage. When one finishes with changes, you choose to merge, keep or discard them. They can also run in the background while you keep chatting.
+- **`/goal <objective>`** keeps working across turns until the objective is done, within a budget you set.
+- **Fallback models** take over when the main one is overloaded.
 - **`/btw`** answers a side question mid-turn without adding it to the conversation.
-- **Browser control** — the agent drives a real Chrome/Edge window to test web apps (`/browser`).
-- **`/verify`** sends a read-only reviewer over your uncommitted diff and hands real problems back.
-- **Headless**: `--json`, `--stream ndjson`, Unix-socket IPC for detached sessions, stable exit codes.
-- **CI**: `dcode-ai ci` prints a JSON result, writes a GitHub step summary, and exits 0 / 1 / 2 (budget). Also a GitHub Action.
-- **Editors**: `dcode-ai acp` speaks the Agent Client Protocol (Zed and others), including reopening sessions and image prompts.
+- **Browser control:** the agent drives a real Chrome or Edge window. It follows your tabs, waits for text to appear, takes screenshots it can see, and records steps you can replay with `/browser save`.
+- **Reviews:** `/verify` (read-only reviewer over your diff), `/second-opinion` (a model from another family), `/security-review`, `/pr-comments`.
+- **Headless:** `--json`, `--stream ndjson`, Unix-socket IPC for detached sessions, and stable exit codes.
+- **CI:** `dcode-ai ci` prints a JSON result, writes a GitHub step summary and exits 0 / 1 / 2 (budget). It also ships as a GitHub Action.
+- **Editors:** `dcode-ai acp` speaks the Agent Client Protocol (Zed and others).
 
-### Extensible the Claude Code way
+### 🧩 Extensible the Claude Code way
 
-- **Starter packs** — `dcode-ai setup` installs plugins for your role (Backend, UI/UX, DevOps, Automation, Data, Security) and languages; optional, shareable as a team file.
-- **Plugins and marketplaces** — `/plugins` browser; Anthropic's official, community and knowledge-work marketplaces are added for you (~2,700 plugins).
-- **MCP** — `/mcp` panel with server status, in-session OAuth sign-in (`c` copies the URL), reconnect and sign out.
-- **MCP** — `.mcp.json` (local, project, user), `dcode-ai mcp add|list|get|remove`, and `dcode-ai mcp serve` to expose dcode-ai's tools to other agents.
-- **Skills, commands, agents, hooks** — `SKILL.md`, `commands/**/*.md`, `agents/*.md`, `hooks.json`, a status-line command.
-- **Language servers** — picked per project (rust-analyzer, typescript, pyright, gopls, clangd) or from `.lsp.json` / plugin `lspServers`.
+- **Starter packs:** `dcode-ai setup` installs plugins for your role (Backend, UI/UX, DevOps, Automation, Data, Security) and your languages. It's optional and can be shared as a team file.
+- **Plugins and marketplaces:** the `/plugins` browser comes with Anthropic's official, community and knowledge-work marketplaces already added.
+- **MCP:** `.mcp.json` (local, project, user scopes) and a `/mcp` panel with status, in-session OAuth sign-in, token refresh, reconnect and per-folder on/off. `dcode-ai mcp serve` exposes dcode-ai's own tools to other agents.
+- **Skills, commands, agents, hooks:** `SKILL.md`, `commands/**/*.md`, `agents/*.md`, `hooks.json` and a status-line command.
+- **Language servers:** picked per project (rust-analyzer, typescript, pyright, gopls, clangd) or configured in `.lsp.json`.
 
-### Safe by default
+### 🛡️ Safe by default
 
-- Permission modes from *plan* (read-only) to *bypass*; edits and unknown commands ask first.
-- Shell commands are parsed, not substring-matched: read-only commands just run, destructive ones are refused.
-- `policy.toml` allow / ask / deny rules, checked with `dcode-ai policy test execute_bash "git push"`.
-- Optional sandbox for shell commands: Landlock on Linux, Seatbelt on macOS.
-- Spending cap: `[session] max_cost_usd`.
+- Permission modes from *plan* (read-only) to *bypass*. Edits and unfamiliar commands ask first.
+- Shell commands are parsed, not substring-matched: read-only ones just run and destructive ones are refused.
+- `policy.toml` allow / ask / deny rules, testable with `dcode-ai policy test execute_bash "git push"`.
+- Optional shell sandbox: Landlock on Linux, Seatbelt on macOS.
+- Secrets are masked in tool output and exports. A spending cap is available via `[session] max_cost_usd`.
 
-### Built-in tools
+### 🔧 Built-in tools
 
-Files (`read_file`, `edit_file`, `apply_patch`, `write_file`, …) · search (`search_code`, `code_intel`, `repo_map`) ·
-shell (`execute_bash`, `run_background`, `run_validation`) · git · web (`web_search`, `fetch_url`) ·
-`inspect_binary` (static look inside ELF / PE / Mach-O files) · `spawn_subagent`, `ask_question`, `update_plan`, `invoke_skill`.
+**Files:** `read_file` (with line ranges, PDF and notebooks), `edit_file`, `apply_patch`, `write_file`, `notebook_edit` …
+**Search:** `search_code`, `code_intel`, `repo_map` · **Shell:** `execute_bash`, `run_background`, `run_validation`
+**Git** · **Web:** `web_search`, `fetch_url`, `browser` · **Agents:** `spawn_subagent`, `ask_question`, `update_plan`, `invoke_skill`
+Rarely used tools load on demand through `tool_search`, which keeps every request small.
 
-## Configuration
+## ⚙️ Configuration
 
 ```toml
-# ~/.dcode-ai/config.toml   (per project: .dcode-ai/config.local.toml)
+# ~/.dcode-ai/config.toml     (per project: .dcode.toml, shared · .dcode-ai/config.local.toml, yours)
 [provider]
 default = "anthropic"          # anthropic | copilot
 
@@ -184,39 +203,50 @@ backend = "claude-code"        # your Claude account; "api" = Console OAuth via 
 model = "claude-sonnet-5-5"
 
 [permissions]
-mode = "default"               # plan | default | accept-edits | dont-ask | bypass-permissions
+mode = "default"               # plan | default | accept-edits | auto | dont-ask | bypass-permissions
 sandbox_bash = true
 
 [ui]
 theme = "claude"
+working_style = "bar"          # bar | dots | plain
 ```
 
-Every option is in [docs/configuration.md](docs/configuration.md).
+Every option is documented in [docs/configuration.md](docs/configuration.md).
 
-## Documentation
+## 📚 Documentation
 
 | Guide | What's inside |
 | --- | --- |
-| [Usage](docs/usage.md) | Keys, slash commands, CLI, sessions, sub-agents, permissions, tools, automation |
-| [Extensibility](docs/extensibility.md) | MCP, plugins, skills, commands, custom agents, hooks, language servers, ACP, CI |
-| [Configuration](docs/configuration.md) | Every config key, providers and sign-in |
-| [IPC & NDJSON](docs/ipc-ndjson.md) | Event envelopes and socket commands for orchestration |
-| [Architecture](docs/architecture.md) | Crates, the turn loop, token accounting |
-| [Benchmarks](docs/benchmarks.md) | Measuring performance before and after a change |
-| [Changelog](CHANGELOG.md) | What changed in each release |
+| [**Usage**](docs/usage.md) | Keys, slash commands, CLI, sessions, sub-agents, permissions, tools, browser, automation |
+| [**Extensibility**](docs/extensibility.md) | MCP, plugins, skills, commands, custom agents, hooks, language servers, ACP, CI |
+| [**Configuration**](docs/configuration.md) | Every config key, providers and sign-in |
+| [**IPC & NDJSON**](docs/ipc-ndjson.md) | Event envelopes and socket commands for orchestration |
+| [**Architecture**](docs/architecture.md) | Crates, the turn loop, token accounting |
+| [**Benchmarks**](docs/benchmarks.md) | Measuring performance before and after a change |
+| [**Changelog**](CHANGELOG.md) | What changed in each release |
 
-## Development
+## 🛠️ Development
 
 ```bash
-cargo build                 # debug build
-cargo test --workspace      # all tests
-cargo clippy -- -D warnings
+cargo build                                   # debug build
+cargo test --workspace                        # all tests
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The workspace has five crates: `common` (shared types), `core` (agent loop, providers, tools),
-`runtime` (sessions, IPC, supervision), `cli` (terminal UX) and `autoresearch`.
+| Crate | Role |
+| --- | --- |
+| `common` | Shared types, config, events |
+| `core` | Agent loop, providers, tools |
+| `runtime` | Sessions, compaction, IPC, supervision |
+| `cli` | The `dcode-ai` binary and terminal UX |
+| `autoresearch` | Experiment loops |
+
 New work starts as a plan in [`docs/plans/`](docs/plans/).
 
 ## License
 
 MIT © Dhanush
+
+<div align="center">
+<sub>Built in Rust · made for people who live in the terminal</sub>
+</div>

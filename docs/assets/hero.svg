@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" width="880" height="520" viewBox="0 0 880 520" role="img" aria-label="dcode-ai running in a terminal: it reads a file, edits it with a diff, and reports that tests pass">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#211d1b"/>
+      <stop offset="1" stop-color="#181513"/>
+    </linearGradient>
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="115%">
+      <feDropShadow dx="0" dy="10" stdDeviation="12" flood-color="#000" flood-opacity="0.35"/>
+    </filter>
+    <style>
+      text { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 14px; fill: #e8e2dc; }
+      .dim { fill: #8a817a; }
+      .accent { fill: #d97757; }
+      .ok { fill: #7fbf7f; }
+      .del { fill: #e06c75; }
+      .add { fill: #98c379; }
+      .bold { font-weight: 700; }
+      .small { font-size: 12.5px; }
+    </style>
+  </defs>
+
+  <rect x="16" y="12" width="848" height="492" rx="12" fill="url(#bg)" filter="url(#shadow)"/>
+  <rect x="16" y="12" width="848" height="36" rx="12" fill="#2a2522"/>
+  <rect x="16" y="36" width="848" height="12" fill="#2a2522"/>
+  <circle cx="40" cy="30" r="6" fill="#ff5f57"/>
+  <circle cx="60" cy="30" r="6" fill="#febc2e"/>
+  <circle cx="80" cy="30" r="6" fill="#28c840"/>
+  <text x="440" y="35" text-anchor="middle" class="dim small">~/code/my-app — dcode-ai</text>
+
+  <!-- welcome box -->
+  <rect x="40" y="66" width="430" height="92" rx="8" fill="none" stroke="#d97757" stroke-width="1.2"/>
+  <text x="58" y="92"><tspan class="accent bold">✻</tspan> <tspan class="bold">Welcome to dcode-ai!</tspan></text>
+  <text x="58" y="116" class="dim">/help for help · /model to switch model</text>
+  <text x="58" y="136" class="dim">cwd: ~/code/my-app</text>
+  <text x="58" y="152" class="dim small">claude-sonnet · Claude plan · v1.0.28</text>
+
+  <!-- prompt -->
+  <text x="40" y="192"><tspan class="accent bold">&gt;</tspan> fix the off-by-one in token expiry <tspan class="accent">[Image #1]</tspan></text>
+
+  <!-- read -->
+  <text x="40" y="226"><tspan class="ok">⏺</tspan> <tspan class="bold">Read</tspan>(src/auth.rs)</text>
+  <text x="58" y="246" class="dim">⎿  Read 84 lines</text>
+
+  <!-- edit -->
+  <text x="40" y="278"><tspan class="ok">⏺</tspan> <tspan class="bold">Update</tspan>(src/auth.rs)</text>
+  <text x="58" y="298" class="dim">⎿  Updated src/auth.rs with 1 addition and 1 removal</text>
+  <rect x="82" y="306" width="420" height="20" fill="#3a2226"/>
+  <rect x="82" y="326" width="420" height="20" fill="#24331f"/>
+  <text x="88" y="321"><tspan class="dim">41</tspan> <tspan class="del">-     if now &gt; expiry {</tspan></text>
+  <text x="88" y="341"><tspan class="dim">41</tspan> <tspan class="add">+     if now &gt;= expiry {</tspan></text>
+
+  <!-- answer -->
+  <text x="40" y="378"><tspan class="ok">⏺</tspan> Tokens now expire at the exact expiry instant. Tests pass.</text>
+
+  <!-- working line -->
+  <text x="40" y="412"><tspan class="accent">▰▰▰▱▱▱</tspan> <tspan class="accent">verifying</tspan><tspan class="dim"> · 12s · ↓ 1.4k tokens · esc to stop</tspan></text>
+
+  <!-- composer -->
+  <line x1="40" y1="430" x2="840" y2="430" stroke="#3b3430"/>
+  <text x="40" y="454"><tspan class="accent bold">&gt;</tspan> <tspan class="dim">▍</tspan></text>
+  <line x1="40" y1="468" x2="840" y2="468" stroke="#3b3430"/>
+  <text x="40" y="490" class="small"><tspan class="accent">⏵⏵ auto mode on</tspan><tspan class="dim"> (shift+tab to cycle) · context 18% · claude-sonnet</tspan></text>
+</svg>
