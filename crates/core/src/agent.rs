@@ -39,8 +39,14 @@ pub type ApplySummary = Arc<dyn Fn(&[Message], &str) -> Vec<Message> + Send + Sy
 /// its context manager each turn.
 #[derive(Clone)]
 pub struct Compactor {
-    /// Compact once the prompt reaches this many tokens.
+    /// Compact once the prompt (less `overhead_tokens`) reaches this many
+    /// tokens…
     pub trigger_tokens: usize,
+    /// …and the conversation itself is at least this big (compaction can't
+    /// shrink the system prompt or tool list).
+    pub min_conversation_tokens: usize,
+    /// Prompt tokens outside the conversation (system prompt, tools).
+    pub overhead_tokens: usize,
     /// Model that writes the summary (a cheap one where possible).
     pub model: String,
     /// The summary request for the older part of the history; `None` when
@@ -74,6 +80,8 @@ pub struct AgentLoop {
     /// (input + cache reads + cache writes). 0 until a request reports usage
     /// and after the history is compacted.
     last_prompt_tokens: u64,
+    /// A mid-turn compaction already ran this turn.
+    compacted_this_turn: bool,
     /// Cheap model for small side questions (auto mode's command check);
     /// `None` uses the session's model.
     pub utility_model: Option<String>,
@@ -122,6 +130,7 @@ impl AgentLoop {
             checkpoint: None,
             compactor: None,
             last_prompt_tokens: 0,
+            compacted_this_turn: false,
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
@@ -255,6 +264,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         attachments: &[ImageAttachment],
     ) -> Result<String, ProviderError> {
         self.cancel_flag.store(false, Ordering::SeqCst);
+        self.compacted_this_turn = false;
         // The user message is pushed next, at this history index.
         self.undo.begin_turn(self.messages.len());
         let user_msg = if attachments.is_empty() {
@@ -1084,10 +1094,23 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         let Some(c) = self.compactor.clone() else {
             return;
         };
-        let before = self.context_tokens();
-        if c.trigger_tokens == 0 || (before as usize) < c.trigger_tokens {
+        let conversation = self.estimated_context_tokens() as usize;
+        // After one compaction this turn, only the conversation's own growth
+        // counts: the measured prompt still carries the fixed overhead.
+        let size = if self.compacted_this_turn {
+            conversation
+        } else {
+            (self.last_prompt_tokens as usize)
+                .saturating_sub(c.overhead_tokens)
+                .max(conversation)
+        };
+        if c.trigger_tokens == 0
+            || size < c.trigger_tokens
+            || conversation < c.min_conversation_tokens
+        {
             return;
         }
+        let before = self.context_tokens();
         let Some(prompt) = (c.prompt)(&self.messages) else {
             return;
         };
@@ -1120,6 +1143,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 String::new()
             }
         };
+        self.compacted_this_turn = true;
         let compacted = (c.apply)(&self.messages, &summary);
         if compacted.len() >= self.messages.len() {
             return;
@@ -2065,6 +2089,8 @@ mod tests {
         let seen = summaries.clone();
         agent.compactor = Some(Compactor {
             trigger_tokens: 8_000,
+            min_conversation_tokens: 0,
+            overhead_tokens: 0,
             model: "cheap".into(),
             prompt: Arc::new(|_m: &[Message]| Some("summarize".into())),
             apply: Arc::new(move |m: &[Message], summary: &str| {
@@ -2084,6 +2110,82 @@ mod tests {
                 .any(|m| m.content.to_summary_text().contains("old answer"))
         );
         assert_eq!(agent.last_prompt_tokens, 0, "reset by compaction");
+    }
+
+    /// Every step reports a prompt past the trigger (fixed overhead), but
+    /// the turn compacts at most once, and not at all when the
+    /// conversation is too small for compaction to help.
+    #[tokio::test]
+    async fn mid_turn_compaction_runs_at_most_once_per_turn() {
+        for (min_conversation, expected) in [(usize::MAX, 0usize), (0, 1)] {
+            let temp = tempfile::tempdir().expect("tempdir");
+            let root =
+                dcode_ai_common::config::canonicalize_simplified(temp.path()).expect("canonical");
+            std::fs::write(root.join("a.txt"), "hi").unwrap();
+            let step = |i: usize| {
+                vec![
+                    StreamChunk::ToolUse(ToolCall {
+                        id: format!("r{i}"),
+                        name: "read_file".into(),
+                        input: serde_json::json!({"path": "a.txt"}),
+                    }),
+                    StreamChunk::Usage {
+                        input_tokens: 90_000,
+                        output_tokens: 10,
+                    },
+                    StreamChunk::Done,
+                ]
+            };
+            let mut script: VecDeque<Vec<StreamChunk>> = VecDeque::new();
+            script.push_back(step(0));
+            for i in 1..6 {
+                if expected == 1 && i == 1 {
+                    // The one summary request.
+                    script.push_back(vec![StreamChunk::TextDelta("S".into()), StreamChunk::Done]);
+                }
+                script.push_back(step(i));
+            }
+            script.push_back(vec![
+                StreamChunk::TextDelta("done".into()),
+                StreamChunk::Done,
+            ]);
+            let provider = Box::new(ChunkProvider {
+                chunks: Mutex::new(script),
+            });
+            let mut tools = ToolRegistry::new();
+            tools.register(Box::new(crate::tools::filesystem::ReadFileTool::new(
+                root.clone(),
+            )));
+            let (event_tx, _rx) = tokio::sync::mpsc::channel(512);
+            let mut agent = AgentLoop::new(
+                provider,
+                tools,
+                ApprovalPolicy::new(PermissionConfig::default()),
+                "test-model".into(),
+                event_tx,
+                20,
+                20,
+                0,
+                None,
+            );
+            agent.messages = vec![Message::system("sys")];
+            let calls: Arc<std::sync::Mutex<usize>> = Default::default();
+            let seen = calls.clone();
+            agent.compactor = Some(Compactor {
+                trigger_tokens: 50_000,
+                min_conversation_tokens: min_conversation,
+                overhead_tokens: 0,
+                model: "cheap".into(),
+                prompt: Arc::new(|_m: &[Message]| Some("summarize".into())),
+                apply: Arc::new(move |m: &[Message], _s: &str| {
+                    *seen.lock().unwrap() += 1;
+                    m[..m.len() - 1].to_vec()
+                }),
+            });
+            let reply = agent.run_turn("go", &root, &[]).await.expect("turn");
+            assert_eq!(reply, "done");
+            assert_eq!(*calls.lock().unwrap(), expected, "min {min_conversation}");
+        }
     }
 
     /// A write followed by a read of the same file in one batch runs in

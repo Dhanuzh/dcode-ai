@@ -575,6 +575,10 @@ impl Supervisor {
         sup.status = loaded.meta.status;
         sup.pid = Some(std::process::id());
         sup.agent.messages = loaded.messages;
+        // Sessions saved by 1.0.27 may carry stacked summaries.
+        if let Some(merged) = crate::context_manager::merge_stacked_summaries(&sup.agent.messages) {
+            sup.agent.compact_messages(merged);
+        }
         sup.session_store = store;
         sup.worktree_path = loaded.meta.worktree_path;
         sup.branch = loaded.meta.branch;
@@ -941,12 +945,19 @@ impl Supervisor {
             enable_auto_summarize: config.memory.context.enable_auto_summarize,
             max_message_chars_for_summary: 10000,
         };
-        ContextManager::new(context_config, model.to_string())
+        let mut manager = ContextManager::new(context_config, model.to_string());
+        manager.set_prompt_overhead(overhead_reserve);
+        manager
     }
 
     /// Check context and compact proactively before running a model request.
     /// This is called BEFORE each turn to prevent context-window errors.
     async fn maybe_compact_context(&mut self) {
+        // Invariant: at most one summary in the conversation.
+        if let Some(merged) = crate::context_manager::merge_stacked_summaries(&self.agent.messages)
+        {
+            self.agent.compact_messages(merged);
+        }
         if !self.context_manager.config().enable_auto_summarize {
             return;
         }
@@ -1119,12 +1130,8 @@ impl Supervisor {
         focus: Option<&str>,
     ) -> Result<(usize, usize, String), String> {
         use dcode_ai_common::message::Message;
-        let prefix = self
-            .agent
-            .messages
-            .iter()
-            .take_while(|m| m.role == Role::System)
-            .count();
+        // Earlier summaries are folded into this one.
+        let prefix = ContextManager::leading_system_prefix_len(&self.agent.messages);
         let conversation: Vec<Message> = self.agent.messages[prefix..].to_vec();
         if !conversation.iter().any(|m| m.role != Role::System) {
             return Err("nothing to compact yet".into());
@@ -1150,7 +1157,8 @@ impl Supervisor {
         };
         let mut messages: Vec<Message> = self.agent.messages[..prefix].to_vec();
         messages.push(Message::system(format!(
-            "## Conversation Summary (Earlier Context)\n\n{summary}"
+            "{}\n\n{summary}",
+            crate::context_manager::SUMMARY_HEADER
         )));
         self.agent.compact_messages(messages);
         self.session_summary = Some(summary.clone());
@@ -1190,10 +1198,14 @@ impl Supervisor {
         }
         let pct = config.auto_summarize_threshold.max(85) as usize;
         let trigger_tokens = config.context_window_target * pct / 100;
+        let min_conversation_tokens =
+            config.context_window_target * ContextManager::MIN_COMPACT_PERCENT / 100;
         let cm = self.context_manager.clone();
         let cm2 = cm.clone();
         Some(dcode_ai_core::agent::Compactor {
             trigger_tokens,
+            min_conversation_tokens,
+            overhead_tokens: self.context_manager.prompt_overhead(),
             model: utility_model(&self.config).unwrap_or_else(|| self.model.clone()),
             prompt: Arc::new(move |messages| {
                 let old = cm.get_messages_to_summarize(messages);

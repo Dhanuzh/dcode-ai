@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.28 — 2026-10-30
+
+### Fixed
+- **Compaction ran on every step and burned credit** (1.0.27): on the
+  Claude Code backend the real prompt includes a large fixed part (system
+  prompt, tools, MCP tools) that compaction can't shrink, so it triggered
+  again after every tool call — each time a summary call plus a restarted
+  Claude process. It now subtracts that fixed part, only compacts when the
+  conversation itself is big (45% of the window), and at most once mid-turn.
+- **Summaries piled up**: each compaction added a summary next to the
+  older ones, which were never summarized again, and the real conversation
+  was slowly replaced by hundreds of summaries. The newest summary now
+  folds the earlier ones in; a session with stacked summaries merges them
+  at its next compaction.
+- Compaction keeps the recent messages that fit ~30% of the window instead
+  of a fixed 50 messages, so one compaction frees real room.
+- **Safety net**: a conversation never holds more than one summary —
+  stacked ones are merged without a model call when a session is resumed
+  and before every turn. Tests now replay a 300-step session with a large
+  fixed prompt and check it compacts rarely, never on nearby steps, and
+  always keeps the recent conversation.
+
 ## 1.0.27 — 2026-10-28
 
 ### Fixed

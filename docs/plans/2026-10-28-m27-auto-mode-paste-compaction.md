@@ -46,3 +46,20 @@ image files (Explorer copy), the first one is imported.
 
 - Drag-select in the transcript pane with highlight; release copies.
 - Drag a rail's inner edge to resize it (min 16 columns, centre ≥ 40).
+
+## Follow-up (v1.0.28): compaction loop
+
+In 1.0.27 the measured prompt (Claude Code backend: ~60k of system prompt,
+tools and MCP tools on top of a ~30k conversation) kept the mid-turn
+trigger armed, so every step compacted. Each compaction pushed a new
+summary into the protected system prefix, so summaries stacked (a real
+session ended with 292) and the conversation was eaten.
+
+- Summaries are no longer part of the protected prefix
+  (`leading_system_prefix_len` stops at `SUMMARY_HEADER`); the next
+  compaction folds them into one. `/compact` does the same.
+- Retention by tokens: recent messages up to ~30% of the window (and at
+  most `max_retained_messages`).
+- Triggers subtract the reserved overhead from the measured size and need
+  the conversation itself at ≥45% of the window; mid-turn compaction runs
+  at most once per turn on the measured size, after that on the estimate.

@@ -62,6 +62,64 @@ pub struct ContextStats {
     pub should_summarize: bool,
 }
 
+/// First line of a compaction summary message.
+pub const SUMMARY_HEADER: &str = "## Conversation Summary (Earlier Context)";
+
+/// A system message holding an earlier compaction summary.
+pub fn is_summary(message: &Message) -> bool {
+    message.role == Role::System
+        && matches!(&message.content, MessageContent::Text(t) if t.starts_with(SUMMARY_HEADER))
+}
+
+/// Longest a merged summary may get (characters, newest part kept).
+const MERGED_SUMMARY_MAX_CHARS: usize = 16_000;
+
+/// Safety net: a conversation never carries more than one compaction
+/// summary. Several (from an older version, or anything else) are merged
+/// into one, without a model call: their texts in order, keeping the newest
+/// part when too long. Returns `None` when there was nothing to merge.
+pub fn merge_stacked_summaries(messages: &[Message]) -> Option<Vec<Message>> {
+    let positions: Vec<usize> = messages
+        .iter()
+        .enumerate()
+        .filter(|(_, m)| is_summary(m))
+        .map(|(i, _)| i)
+        .collect();
+    if positions.len() < 2 {
+        return None;
+    }
+    let bodies: Vec<String> = positions
+        .iter()
+        .map(|&i| {
+            let text = messages[i].content.to_summary_text();
+            text.strip_prefix(SUMMARY_HEADER)
+                .unwrap_or(&text)
+                .trim()
+                .to_string()
+        })
+        .collect();
+    let joined = bodies.join("\n\n---\n\n");
+    let total = joined.chars().count();
+    let body: String = if total > MERGED_SUMMARY_MAX_CHARS {
+        let tail: String = joined
+            .chars()
+            .skip(total - MERGED_SUMMARY_MAX_CHARS)
+            .collect();
+        format!("(older summaries shortened)\n…{tail}")
+    } else {
+        joined
+    };
+    let mut out = Vec::with_capacity(messages.len() - positions.len() + 1);
+    for (i, m) in messages.iter().enumerate() {
+        if i == positions[0] {
+            out.push(Message::system(format!("{SUMMARY_HEADER}\n\n{body}")));
+        } else if !positions.contains(&i) {
+            out.push(m.clone());
+        }
+    }
+    Some(out)
+}
+
 /// Manages conversation context to prevent token overflow.
 ///
 /// The context manager maintains:
@@ -72,11 +130,18 @@ pub struct ContextStats {
 pub struct ContextManager {
     config: ContextManagerConfig,
     model: String,
+    /// Prompt tokens outside the conversation (system prompt, tool list)
+    /// already reserved out of `context_window_target`.
+    prompt_overhead: usize,
 }
 
 impl ContextManager {
     pub fn new(config: ContextManagerConfig, model: String) -> Self {
-        Self { config, model }
+        Self {
+            config,
+            model,
+            prompt_overhead: 0,
+        }
     }
 
     pub fn with_default_config(model: String) -> Self {
@@ -131,11 +196,30 @@ impl ContextManager {
         }
     }
 
-    /// [`Self::stats`], but counting `measured` tokens when the provider
-    /// reported a bigger prompt than the estimate (the estimate leaves out
-    /// the system prompt and tool list).
+    /// Tokens of every request outside the conversation that the window
+    /// target already leaves room for.
+    pub fn set_prompt_overhead(&mut self, tokens: usize) {
+        self.prompt_overhead = tokens;
+    }
+
+    pub fn prompt_overhead(&self) -> usize {
+        self.prompt_overhead
+    }
+
+    /// The conversation must reach this share of the window before a
+    /// compaction is worth it: compaction keeps ~30%, so below this it would
+    /// free little and run again soon (each run is a model call and, on the
+    /// Claude Code backend, a restarted process).
+    pub const MIN_COMPACT_PERCENT: usize = 45;
+
+    /// [`Self::stats`], but counting the provider's `measured` prompt size
+    /// (minus the reserved overhead) when it is bigger than the estimate.
+    /// Compaction is only suggested when the conversation itself is large:
+    /// it can't shrink the system prompt or tool list.
     pub fn stats_measured(&self, messages: &[Message], measured: usize) -> ContextStats {
         let mut stats = self.stats(messages);
+        let conversation = stats.estimated_tokens;
+        let measured = measured.saturating_sub(self.prompt_overhead);
         if measured > stats.estimated_tokens {
             let pct = ((measured as f64 / stats.context_window as f64) * 100.0).min(100.0) as u8;
             stats.estimated_tokens = measured;
@@ -144,15 +228,19 @@ impl ContextManager {
             stats.should_summarize =
                 self.config.enable_auto_summarize && pct >= self.config.auto_summarize_threshold;
         }
+        stats.should_summarize &=
+            conversation >= stats.context_window * Self::MIN_COMPACT_PERCENT / 100;
         stats
     }
 
-    /// Find the contiguous leading system-message prefix.
-    /// These messages are preserved during compaction.
-    fn leading_system_prefix_len(messages: &[Message]) -> usize {
+    /// Find the contiguous leading system-message prefix (the system
+    /// prompt). These messages are preserved during compaction; earlier
+    /// compaction summaries are not part of it — the next compaction folds
+    /// them into its own summary instead of stacking another one.
+    pub fn leading_system_prefix_len(messages: &[Message]) -> usize {
         messages
             .iter()
-            .take_while(|m| m.role == Role::System)
+            .take_while(|m| m.role == Role::System && !is_summary(m))
             .count()
     }
 
@@ -209,32 +297,45 @@ impl ContextManager {
     /// 3. Mark older messages for summarization
     pub fn get_compaction_plan(&self, messages: &[Message]) -> CompactionPlan {
         let prefix_len = Self::leading_system_prefix_len(messages);
-        let non_system_count = messages[prefix_len..]
-            .iter()
-            .filter(|m| m.role != Role::System)
-            .count();
+        let keep_all = || CompactionPlan {
+            keep_indices: (0..messages.len()).collect(),
+            summarize_range: None,
+            preserve_system: true,
+        };
 
-        if non_system_count <= self.config.max_retained_messages {
-            return CompactionPlan {
-                keep_indices: (0..messages.len()).collect(),
-                summarize_range: None,
-                preserve_system: true,
-            };
+        // Keep the recent messages that fit in ~30% of the window (and at
+        // most `max_retained_messages`), never a summary: everything older
+        // is summarized. Counting tokens, not messages, means one compaction
+        // frees real room even when a few tool outputs are huge.
+        let budget = self.config.context_window_target * 3 / 10;
+        let mut kept = 0usize;
+        let mut kept_tokens = 0usize;
+        let mut recent_start = messages.len();
+        for idx in (prefix_len..messages.len()).rev() {
+            let m = &messages[idx];
+            if is_summary(m) {
+                break;
+            }
+            let tokens = Self::estimate_tokens(m);
+            if m.role != Role::System {
+                if kept >= self.config.max_retained_messages
+                    || (kept > 0 && kept_tokens + tokens > budget)
+                {
+                    break;
+                }
+                kept += 1;
+            }
+            kept_tokens += tokens;
+            recent_start = idx;
         }
-
-        let recent_start = Self::recent_start_by_non_system(
-            messages,
-            prefix_len,
-            self.config.max_retained_messages,
-        );
         let recent_start = Self::adjust_cutoff_for_tool_groups(messages, recent_start, prefix_len);
 
-        if recent_start <= prefix_len {
-            return CompactionPlan {
-                keep_indices: (0..messages.len()).collect(),
-                summarize_range: None,
-                preserve_system: true,
-            };
+        // Worth doing only when it removes conversation or merges summaries.
+        let older = &messages[prefix_len..recent_start];
+        let conversation = older.iter().filter(|m| !is_summary(m)).count();
+        let summaries = older.len() - conversation;
+        if conversation == 0 && summaries < 2 {
+            return keep_all();
         }
 
         let mut keep_indices: Vec<usize> = (0..prefix_len).collect();
@@ -292,10 +393,7 @@ impl ContextManager {
         if !summary.trim().is_empty() {
             result.push(Message {
                 role: Role::System,
-                content: MessageContent::Text(format!(
-                    "## Conversation Summary (Earlier Context)\n\n{}",
-                    summary
-                )),
+                content: MessageContent::Text(format!("{SUMMARY_HEADER}\n\n{summary}")),
                 tool_call_id: None,
                 tool_calls: None,
                 reasoning_content: None,
@@ -332,6 +430,14 @@ impl ContextManager {
         let cutoff = Self::adjust_cutoff_for_tool_groups(messages, cutoff, prefix_len);
 
         let mut result: Vec<Message> = messages[..prefix_len].to_vec();
+        // Keep the latest summary of what is dropped.
+        if let Some(summary) = messages[prefix_len..cutoff]
+            .iter()
+            .rev()
+            .find(|m| is_summary(m))
+        {
+            result.push(summary.clone());
+        }
         result.extend_from_slice(&messages[cutoff..]);
 
         result
@@ -484,10 +590,12 @@ fn render_summary_conversation(messages: &[Message]) -> String {
             };
             let raw = message.content.to_summary_text();
             let trimmed = raw.trim();
+            // Earlier summaries carry the whole history so far.
+            let room = if is_summary(message) { 8000 } else { 2000 };
             let content = if trimmed.is_empty() {
                 "<empty>".to_string()
             } else {
-                trimmed.chars().take(2000).collect::<String>()
+                trimmed.chars().take(room).collect::<String>()
             };
             format!("[{}] {}:\n{}", idx + 1, role, content)
         })
@@ -553,6 +661,120 @@ mod tests {
             }
             _ => panic!("expected text content"),
         }
+    }
+
+    fn compacting_manager() -> ContextManager {
+        ContextManager::new(
+            ContextManagerConfig {
+                context_window_target: 10_000,
+                max_retained_messages: 50,
+                auto_summarize_threshold: 70,
+                enable_auto_summarize: true,
+                max_message_chars_for_summary: 10_000,
+            },
+            "test-model".to_string(),
+        )
+    }
+
+    /// Repeated compactions leave one summary (the newest folds the older
+    /// ones in) and keep only what fits the recent budget.
+    #[test]
+    fn compactions_fold_earlier_summaries() {
+        let manager = compacting_manager();
+        let mut messages = vec![make_message(Role::System, "system prompt")];
+        for round in 0..5 {
+            for i in 0..20 {
+                let text = format!("round {round} message {i} {}", "word ".repeat(150));
+                messages.push(make_message(Role::User, &text));
+                messages.push(make_message(Role::Assistant, &text));
+            }
+            let older = manager.get_messages_to_summarize(&messages);
+            assert!(!older.is_empty(), "round {round} had nothing to summarize");
+            messages = manager.apply_summary(&messages, &format!("summary {round}"));
+        }
+        let summaries: Vec<_> = messages.iter().filter(|m| is_summary(m)).collect();
+        assert_eq!(summaries.len(), 1);
+        assert!(summaries[0].content.to_summary_text().contains("summary 4"));
+        assert_eq!(messages[0].content.to_summary_text(), "system prompt");
+        let kept = ContextManager::estimate_tokens_for_slice(&messages[2..]);
+        assert!(kept <= 3_000 + 400, "recent part stays near 30%: {kept}");
+    }
+
+    /// A long tool-heavy session where every request carries a big fixed
+    /// part (Claude Code backend: system prompt, tools, MCP tools): it
+    /// compacts now and then, never on back-to-back steps, never holds more
+    /// than one summary, and always keeps the recent conversation.
+    #[test]
+    fn long_session_with_big_overhead_compacts_rarely() {
+        let mut manager = ContextManager::new(
+            ContextManagerConfig {
+                context_window_target: 100_000,
+                max_retained_messages: 50,
+                auto_summarize_threshold: 70,
+                enable_auto_summarize: true,
+                max_message_chars_for_summary: 10_000,
+            },
+            "test-model".to_string(),
+        );
+        manager.set_prompt_overhead(40_000);
+        let overhead = 65_000; // more than reserved, like many MCP tools
+        let mut messages = vec![make_message(Role::System, "system prompt")];
+        let mut compactions = Vec::new();
+        for step in 0..300 {
+            let out = format!("step {step} {}", "output ".repeat(1_200));
+            messages.push(make_message(Role::Assistant, &format!("step {step}")));
+            messages.push(make_message(Role::Tool, &out));
+            let measured = ContextManager::estimate_tokens_for_slice(&messages) + overhead;
+            if manager.stats_measured(&messages, measured).should_summarize {
+                messages = manager.apply_summary(&messages, &format!("summary at {step}"));
+                compactions.push(step);
+            }
+            assert!(messages.iter().filter(|m| is_summary(m)).count() <= 1);
+            assert!(
+                messages.iter().any(|m| m.role == Role::Tool),
+                "conversation kept"
+            );
+        }
+        assert!(!compactions.is_empty(), "it does compact");
+        assert!(
+            compactions.windows(2).all(|w| w[1] - w[0] >= 10),
+            "never compacts on nearby steps: {compactions:?}"
+        );
+        assert!(compactions.len() <= 300 / 10, "{compactions:?}");
+    }
+
+    #[test]
+    fn stacked_summaries_merge_into_one() {
+        let mut messages = vec![make_message(Role::System, "system prompt")];
+        for i in 0..292 {
+            messages.push(make_message(
+                Role::System,
+                &format!("{SUMMARY_HEADER}\n\nsummary {i} {}", "x".repeat(200)),
+            ));
+        }
+        messages.push(make_message(Role::User, "latest"));
+        let merged = merge_stacked_summaries(&messages).expect("merged");
+        assert_eq!(merged.len(), 3);
+        assert!(is_summary(&merged[1]));
+        let text = merged[1].content.to_summary_text();
+        assert!(text.contains("summary 291"), "newest part kept");
+        assert!(text.chars().count() <= MERGED_SUMMARY_MAX_CHARS + 200);
+        assert!(merge_stacked_summaries(&merged).is_none());
+    }
+
+    /// A big measured prompt with a small conversation (system prompt and
+    /// tools dominate) doesn't trigger compaction: it couldn't help.
+    #[test]
+    fn fixed_overhead_alone_does_not_trigger_compaction() {
+        let mut manager = compacting_manager();
+        manager.set_prompt_overhead(2_000);
+        let messages = vec![
+            make_message(Role::System, "system prompt"),
+            make_message(Role::User, "hello"),
+        ];
+        let stats = manager.stats_measured(&messages, 9_500);
+        assert!(stats.usage_percent >= 70);
+        assert!(!stats.should_summarize);
     }
 
     #[test]
