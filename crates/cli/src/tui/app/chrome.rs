@@ -283,7 +283,11 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
     if let Some(custom) = g.statusline_text.as_deref() {
         // `[ui] statusline_command` replaces the built-in right side.
         right = custom.to_string();
-    } else if let Some((text, warn)) = context_note(g.context_tokens, win) {
+    } else if let Some((text, warn)) = context_note(
+        g.context_tokens,
+        win,
+        dcode_ai_runtime::context_manager::auto_compact_percent(&g.model) as u64,
+    ) {
         if warn.is_none() {
             right.push_str(&format!(" · {text}"));
         } else {
@@ -320,25 +324,29 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
     frame.render_widget(Paragraph::new(Line::from(left)), rect);
 }
 
-/// Context use for the footer: `N% context left` from half full, then a
-/// coloured `context N% used · /compact` warning from 80% (red from 95%).
-fn context_note(tokens: u64, window: u64) -> Option<(String, Option<ratatui::style::Color>)> {
+/// Context use for the footer, like Claude Code: nothing below half full,
+/// then how far automatic compaction is (`compact_at` = its point as % of
+/// the window); amber in the last 10 points before it. Compaction runs on
+/// its own, so there is no "/compact" nag.
+fn context_note(
+    tokens: u64,
+    window: u64,
+    compact_at: u64,
+) -> Option<(String, Option<ratatui::style::Color>)> {
     if window == 0 || tokens == 0 {
         return None;
     }
     let used = tokens.min(window) * 100 / window;
-    match used {
-        0..50 => None,
-        50..80 => Some((format!("{}% context left", 100 - used), None)),
-        80..95 => Some((
-            format!("context {used}% used · /compact"),
-            Some(theme::warn()),
-        )),
-        _ => Some((
-            format!("context {used}% used · /compact"),
-            Some(theme::error()),
-        )),
+    let compact_at = compact_at.clamp(10, 100);
+    if used < 50 {
+        return None;
     }
+    if used >= compact_at {
+        return Some(("compacting soon".into(), Some(theme::warn())));
+    }
+    let left = compact_at - used;
+    let text = format!("{left}% until auto-compact");
+    Some((text, (left <= 10).then(theme::warn)))
 }
 
 #[cfg(test)]
@@ -347,14 +355,14 @@ mod tests {
 
     #[test]
     fn context_note_warns_near_the_limit() {
-        assert_eq!(context_note(40, 100), None);
-        assert_eq!(
-            context_note(60, 100).map(|n| n.0),
-            Some("40% context left".into())
-        );
-        let warn = context_note(85, 100).unwrap();
-        assert_eq!(warn.0, "context 85% used · /compact");
-        assert!(warn.1.is_some());
+        assert_eq!(context_note(40, 100, 77), None);
+        let calm = context_note(60, 100, 77).unwrap();
+        assert_eq!(calm.0, "17% until auto-compact");
+        assert!(calm.1.is_none());
+        let near = context_note(70, 100, 77).unwrap();
+        assert!(near.1.is_some(), "amber close to the point");
+        assert_eq!(context_note(80, 100, 77).unwrap().0, "compacting soon");
+        assert!(!context_note(95, 100, 77).unwrap().0.contains("/compact"));
     }
 
     #[test]

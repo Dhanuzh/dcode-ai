@@ -120,6 +120,205 @@ pub fn merge_stacked_summaries(messages: &[Message]) -> Option<Vec<Message>> {
     Some(out)
 }
 
+/// Where the context stages happen in the model's window (M31): prune old
+/// tool output, then compact. One window for the footer, `/context` and the
+/// triggers, compared with the provider's measured prompt size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextBudget {
+    /// The model's input window (200k working window, or 1M for `[1m]`).
+    pub window: usize,
+    /// Room kept for the reply.
+    pub output_reserve: usize,
+    /// Room kept for the summary request itself.
+    pub buffer: usize,
+    /// `[memory.context] auto_compact_at` (% of the window); `None` = automatic.
+    pub compact_at_percent: Option<u8>,
+}
+
+impl ContextBudget {
+    pub fn new(window: usize, max_output: usize, compact_at_percent: Option<u8>) -> Self {
+        let window = window.max(8_000);
+        Self {
+            window,
+            output_reserve: max_output.min(32_000).min(window / 4),
+            buffer: (window * 75 / 1000).clamp(13_000.min(window / 5), window / 5),
+            compact_at_percent: compact_at_percent.filter(|p| (10..=95).contains(p)),
+        }
+    }
+
+    /// Compact once the prompt reaches this: the window minus the reply and
+    /// the summary request, kept between 60% and 90% of the window.
+    pub fn compact_at(&self) -> usize {
+        match self.compact_at_percent {
+            Some(p) => self.window * p as usize / 100,
+            None => (self.window - self.output_reserve - self.buffer)
+                .clamp(self.window * 60 / 100, self.window * 90 / 100),
+        }
+    }
+
+    /// Clear old tool output (no model call) from here.
+    pub fn prune_at(&self) -> usize {
+        self.compact_at().saturating_sub(self.window / 10)
+    }
+
+    /// Hard ceiling for the agent's last-resort trimming: the window minus
+    /// the reply.
+    pub fn hard_limit(&self) -> usize {
+        self.window - self.output_reserve
+    }
+
+    /// What a compaction aims to leave.
+    pub fn target_after(&self) -> usize {
+        self.window * 35 / 100
+    }
+
+    pub fn percent(&self, tokens: usize) -> u8 {
+        (tokens.min(self.window) * 100 / self.window) as u8
+    }
+}
+
+/// The session's auto-compact point as % of the window, for the footer
+/// (0 = not set yet: the UI works it out from the model).
+static AUTO_COMPACT_PERCENT: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+pub fn set_auto_compact_percent(p: u8) {
+    AUTO_COMPACT_PERCENT.store(p, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Where automatic compaction happens for `model`, as % of its window.
+pub fn auto_compact_percent(model: &str) -> u8 {
+    match AUTO_COMPACT_PERCENT.load(std::sync::atomic::Ordering::Relaxed) {
+        0 => {
+            let b = ContextBudget::new(
+                crate::model_limits::effective_context_window(model),
+                crate::model_limits::detect_max_output_tokens(model),
+                None,
+            );
+            b.percent(b.compact_at())
+        }
+        p => p,
+    }
+}
+
+/// Start of a cleared tool output.
+pub const PRUNED_MARK: &str = "[output cleared to save context";
+/// Newest tool output kept when pruning (tokens).
+pub const PRUNE_KEEP_TOKENS: usize = 40_000;
+/// Pruning is only worth it when it frees this much.
+pub const PRUNE_MIN_FREE: usize = 20_000;
+
+/// Replace old tool outputs with a one-line stub, keeping the newest
+/// `keep_tokens` of tool output and every message from `protect_from` on.
+/// Returns the new history and the tokens freed, or `None` when it would
+/// free less than `min_free` (opencode's prune; Claude Code's micro-compact).
+pub fn prune_tool_outputs(
+    messages: &[Message],
+    protect_from: usize,
+    keep_tokens: usize,
+    min_free: usize,
+) -> Option<(Vec<Message>, usize)> {
+    let names: std::collections::HashMap<&str, &str> = messages
+        .iter()
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+        .map(|c| (c.id.as_str(), c.name.as_str()))
+        .collect();
+    let mut out = messages.to_vec();
+    let mut kept = 0usize;
+    let mut freed = 0usize;
+    for i in (0..messages.len()).rev() {
+        let m = &messages[i];
+        if m.role != Role::Tool {
+            continue;
+        }
+        let text = m.content.to_summary_text();
+        if text.starts_with(PRUNED_MARK) {
+            continue;
+        }
+        let tokens = ContextManager::estimate_tokens(m);
+        if i >= protect_from || kept + tokens <= keep_tokens || tokens < 200 {
+            kept += tokens;
+            continue;
+        }
+        let tool = m
+            .tool_call_id
+            .as_deref()
+            .and_then(|id| names.get(id))
+            .copied()
+            .unwrap_or("tool");
+        let stub = format!(
+            "{PRUNED_MARK}: {tool} output, {} lines. Run it again if you need it.]",
+            text.lines().count()
+        );
+        out[i].content = MessageContent::Text(stub);
+        out[i].provider_blocks = None;
+        freed += tokens.saturating_sub(ContextManager::estimate_tokens(&out[i]));
+    }
+    (freed >= min_free).then_some((out, freed))
+}
+
+/// Paths changed by tool calls in `messages` (for the summary's file list).
+fn changed_paths(messages: &[Message]) -> Vec<String> {
+    const WRITERS: [&str; 7] = [
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "notebook_edit",
+        "delete_path",
+        "move_path",
+        "rename_path",
+    ];
+    let mut paths: Vec<String> = Vec::new();
+    for call in messages
+        .iter()
+        .filter_map(|m| m.tool_calls.as_ref())
+        .flatten()
+    {
+        if !WRITERS.contains(&call.name.as_str()) {
+            continue;
+        }
+        let args = &call.arguments;
+        let path = ["path", "file_path", "from", "source"]
+            .iter()
+            .find_map(|k| args[*k].as_str());
+        if let Some(p) = path
+            && !paths.iter().any(|x| x == p)
+        {
+            paths.push(p.to_string());
+        }
+    }
+    paths
+}
+
+/// Most of the user's own words carried into a compaction (tokens).
+pub const KEEP_USER_MESSAGES_TOKENS: usize = 20_000;
+
+/// The user's own messages in `messages`, newest first, up to `budget`
+/// tokens, returned in their original order (Codex keeps these verbatim).
+fn recent_user_messages(messages: &[Message], budget: usize) -> Vec<String> {
+    let mut picked = Vec::new();
+    let mut used = 0usize;
+    for m in messages.iter().rev() {
+        if m.role != Role::User {
+            continue;
+        }
+        let text = m.content.to_summary_text();
+        let text = text.trim();
+        // Skip tool-output carriers and app notes.
+        if text.is_empty() || text.starts_with('<') || text.starts_with("The browser screenshot") {
+            continue;
+        }
+        let tokens = crate::token_count::count_tokens(text);
+        if used + tokens > budget {
+            break;
+        }
+        used += tokens;
+        picked.push(text.to_string());
+    }
+    picked.reverse();
+    picked
+}
+
 /// Manages conversation context to prevent token overflow.
 ///
 /// The context manager maintains:
@@ -133,15 +332,27 @@ pub struct ContextManager {
     /// Prompt tokens outside the conversation (system prompt, tool list)
     /// already reserved out of `context_window_target`.
     prompt_overhead: usize,
+    budget: ContextBudget,
 }
 
 impl ContextManager {
     pub fn new(config: ContextManagerConfig, model: String) -> Self {
+        let budget = ContextBudget::new(config.context_window_target, 8_000, None);
         Self {
             config,
             model,
             prompt_overhead: 0,
+            budget,
         }
+    }
+
+    /// Where pruning and compaction happen; set by the supervisor.
+    pub fn set_budget(&mut self, budget: ContextBudget) {
+        self.budget = budget;
+    }
+
+    pub fn budget(&self) -> ContextBudget {
+        self.budget
     }
 
     pub fn with_default_config(model: String) -> Self {
@@ -204,33 +415,6 @@ impl ContextManager {
 
     pub fn prompt_overhead(&self) -> usize {
         self.prompt_overhead
-    }
-
-    /// The conversation must reach this share of the window before a
-    /// compaction is worth it: compaction keeps ~20%, so below this it would
-    /// free little and run again soon (each run is a model call and, on the
-    /// Claude Code backend, a restarted process).
-    pub const MIN_COMPACT_PERCENT: usize = 45;
-
-    /// [`Self::stats`], but counting the provider's `measured` prompt size
-    /// (minus the reserved overhead) when it is bigger than the estimate.
-    /// Compaction is only suggested when the conversation itself is large:
-    /// it can't shrink the system prompt or tool list.
-    pub fn stats_measured(&self, messages: &[Message], measured: usize) -> ContextStats {
-        let mut stats = self.stats(messages);
-        let conversation = stats.estimated_tokens;
-        let measured = measured.saturating_sub(self.prompt_overhead);
-        if measured > stats.estimated_tokens {
-            let pct = ((measured as f64 / stats.context_window as f64) * 100.0).min(100.0) as u8;
-            stats.estimated_tokens = measured;
-            stats.usage_percent = pct;
-            stats.needs_attention = pct >= 80;
-            stats.should_summarize =
-                self.config.enable_auto_summarize && pct >= self.config.auto_summarize_threshold;
-        }
-        stats.should_summarize &=
-            conversation >= stats.context_window * Self::MIN_COMPACT_PERCENT / 100;
-        stats
     }
 
     /// Find the contiguous leading system-message prefix (the system
@@ -308,7 +492,7 @@ impl ContextManager {
         // is summarized. Counting tokens, not messages, means one compaction
         // frees real room even when a few tool outputs are huge; with the
         // 45% trigger each compaction frees about a quarter of the window.
-        let budget = self.config.context_window_target / 5;
+        let budget = self.config.context_window_target * 15 / 100;
         let mut kept = 0usize;
         let mut kept_tokens = 0usize;
         let mut recent_start = messages.len();
@@ -390,11 +574,33 @@ impl ContextManager {
         // Add system messages
         result.extend(messages.iter().take(prefix_len).cloned());
 
-        // Insert summary as a special system message
+        // Insert summary as a special system message, framed as a hand-off,
+        // with the user's own recent words and the files changed so far.
         if !summary.trim().is_empty() {
+            let older = &messages[range.start..recent_start];
+            let mut text = format!(
+                "{SUMMARY_HEADER}\n\nThe earlier part of this conversation was summarized \
+                 to save space. Continue the task from here; read files again before \
+                 editing them.\n\n{}",
+                summary.trim()
+            );
+            let said = recent_user_messages(older, KEEP_USER_MESSAGES_TOKENS);
+            if !said.is_empty() {
+                text.push_str("\n\n### The user's recent messages (verbatim)\n");
+                for m in &said {
+                    text.push_str(&format!("\n> {}\n", m.replace('\n', "\n> ")));
+                }
+            }
+            let files = changed_paths(older);
+            if !files.is_empty() {
+                text.push_str("\n\n### Files changed so far\n");
+                for f in &files {
+                    text.push_str(&format!("- {f}\n"));
+                }
+            }
             result.push(Message {
                 role: Role::System,
-                content: MessageContent::Text(format!("{SUMMARY_HEADER}\n\n{summary}")),
+                content: MessageContent::Text(text),
                 tool_call_id: None,
                 tool_calls: None,
                 reasoning_content: None,
@@ -701,49 +907,6 @@ mod tests {
         assert!(kept <= 2_000 + 400, "recent part stays near 20%: {kept}");
     }
 
-    /// A long tool-heavy session where every request carries a big fixed
-    /// part (Claude Code backend: system prompt, tools, MCP tools): it
-    /// compacts now and then, never on back-to-back steps, never holds more
-    /// than one summary, and always keeps the recent conversation.
-    #[test]
-    fn long_session_with_big_overhead_compacts_rarely() {
-        let mut manager = ContextManager::new(
-            ContextManagerConfig {
-                context_window_target: 100_000,
-                max_retained_messages: 50,
-                auto_summarize_threshold: 70,
-                enable_auto_summarize: true,
-                max_message_chars_for_summary: 10_000,
-            },
-            "test-model".to_string(),
-        );
-        manager.set_prompt_overhead(40_000);
-        let overhead = 65_000; // more than reserved, like many MCP tools
-        let mut messages = vec![make_message(Role::System, "system prompt")];
-        let mut compactions = Vec::new();
-        for step in 0..300 {
-            let out = format!("step {step} {}", "output ".repeat(1_200));
-            messages.push(make_message(Role::Assistant, &format!("step {step}")));
-            messages.push(make_message(Role::Tool, &out));
-            let measured = ContextManager::estimate_tokens_for_slice(&messages) + overhead;
-            if manager.stats_measured(&messages, measured).should_summarize {
-                messages = manager.apply_summary(&messages, &format!("summary at {step}"));
-                compactions.push(step);
-            }
-            assert!(messages.iter().filter(|m| is_summary(m)).count() <= 1);
-            assert!(
-                messages.iter().any(|m| m.role == Role::Tool),
-                "conversation kept"
-            );
-        }
-        assert!(!compactions.is_empty(), "it does compact");
-        assert!(
-            compactions.windows(2).all(|w| w[1] - w[0] >= 10),
-            "never compacts on nearby steps: {compactions:?}"
-        );
-        assert!(compactions.len() <= 300 / 10, "{compactions:?}");
-    }
-
     #[test]
     fn stacked_summaries_merge_into_one() {
         let mut messages = vec![make_message(Role::System, "system prompt")];
@@ -763,19 +926,116 @@ mod tests {
         assert!(merge_stacked_summaries(&merged).is_none());
     }
 
-    /// A big measured prompt with a small conversation (system prompt and
-    /// tools dominate) doesn't trigger compaction: it couldn't help.
     #[test]
-    fn fixed_overhead_alone_does_not_trigger_compaction() {
-        let mut manager = compacting_manager();
-        manager.set_prompt_overhead(2_000);
-        let messages = vec![
-            make_message(Role::System, "system prompt"),
-            make_message(Role::User, "hello"),
+    fn budget_compacts_late_and_prunes_before() {
+        // Sonnet-like: 200k window, 64k max output (32k reserved).
+        let b = ContextBudget::new(200_000, 64_000, None);
+        assert_eq!(b.output_reserve, 32_000);
+        assert_eq!(b.compact_at(), 200_000 - 32_000 - 15_000);
+        assert_eq!(b.prune_at(), b.compact_at() - 20_000);
+        assert!(b.target_after() < b.prune_at());
+        // A 1M window keeps the cap at 90%.
+        let big = ContextBudget::new(1_000_000, 64_000, None);
+        assert!(big.compact_at() <= 900_000 && big.compact_at() >= 600_000);
+        // A small window never compacts below 60%.
+        let small = ContextBudget::new(32_000, 16_000, None);
+        assert!(small.compact_at() >= 19_200);
+        // An explicit percentage wins.
+        assert_eq!(
+            ContextBudget::new(200_000, 64_000, Some(70)).compact_at(),
+            140_000
+        );
+    }
+
+    fn tool_round(i: usize, words: usize) -> [Message; 2] {
+        let mut call = make_message(Role::Assistant, "");
+        call.tool_calls = Some(vec![dcode_ai_common::message::MessageToolCall {
+            id: format!("c{i}"),
+            name: "browser".into(),
+            arguments: serde_json::json!({"action": "snapshot"}),
+        }]);
+        let mut out = make_message(Role::Tool, &format!("page {i} {}", "word ".repeat(words)));
+        out.tool_call_id = Some(format!("c{i}"));
+        [call, out]
+    }
+
+    #[test]
+    fn prune_clears_old_tool_output_and_keeps_the_newest() {
+        let mut messages = vec![
+            make_message(Role::System, "sys"),
+            make_message(Role::User, "go"),
         ];
-        let stats = manager.stats_measured(&messages, 9_500);
-        assert!(stats.usage_percent >= 70);
-        assert!(!stats.should_summarize);
+        for i in 0..40 {
+            messages.extend(tool_round(i, 3_000));
+        }
+        let protect = messages.len() - 6;
+        let (pruned, freed) =
+            prune_tool_outputs(&messages, protect, PRUNE_KEEP_TOKENS, PRUNE_MIN_FREE)
+                .expect("pruned");
+        assert!(freed >= PRUNE_MIN_FREE);
+        let stubs = pruned
+            .iter()
+            .filter(|m| m.content.to_summary_text().starts_with(PRUNED_MARK))
+            .count();
+        assert!(stubs > 0 && stubs < 40);
+        // The newest outputs stay whole; the stub names the tool.
+        assert!(
+            pruned
+                .last()
+                .unwrap()
+                .content
+                .to_summary_text()
+                .starts_with("page 39")
+        );
+        let stub = pruned
+            .iter()
+            .find(|m| m.content.to_summary_text().starts_with(PRUNED_MARK))
+            .unwrap();
+        assert!(stub.content.to_summary_text().contains("browser output"));
+        // Structure is kept (same count, tool ids intact).
+        assert_eq!(pruned.len(), messages.len());
+        // Nothing worth clearing: no prune.
+        assert!(prune_tool_outputs(&messages[..8], 2, PRUNE_KEEP_TOKENS, PRUNE_MIN_FREE).is_none());
+    }
+
+    #[test]
+    fn summary_keeps_the_users_words_and_changed_files() {
+        let manager = compacting_manager();
+        let mut messages = vec![make_message(Role::System, "system prompt")];
+        messages.push(make_message(
+            Role::User,
+            "please fix the login bug in auth.rs",
+        ));
+        let mut edit = make_message(Role::Assistant, "");
+        edit.tool_calls = Some(vec![dcode_ai_common::message::MessageToolCall {
+            id: "e1".into(),
+            name: "edit_file".into(),
+            arguments: serde_json::json!({"path": "src/auth.rs"}),
+        }]);
+        messages.push(edit);
+        let mut res = make_message(Role::Tool, "edited");
+        res.tool_call_id = Some("e1".into());
+        messages.push(res);
+        for i in 0..30 {
+            messages.push(make_message(
+                Role::User,
+                &format!("step {i} {}", "word ".repeat(150)),
+            ));
+            messages.push(make_message(
+                Role::Assistant,
+                &format!("ok {i} {}", "word ".repeat(150)),
+            ));
+        }
+        let out = manager.apply_summary(&messages, "SUMMARY");
+        let summary = out
+            .iter()
+            .find(|m| is_summary(m))
+            .unwrap()
+            .content
+            .to_summary_text();
+        assert!(summary.contains("Continue the task from here"));
+        assert!(summary.contains("> please fix the login bug in auth.rs"));
+        assert!(summary.contains("- src/auth.rs"));
     }
 
     #[test]

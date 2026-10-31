@@ -1667,9 +1667,16 @@ pub struct ContextConfig {
     /// Percentage of context window that triggers auto-summarize (0-100).
     #[serde(default = "default_summarize_threshold")]
     pub auto_summarize_threshold: u8,
-    /// Enable automatic context summarization.
-    #[serde(default = "default_true")]
+    /// Compact automatically when the context fills up.
+    #[serde(default = "default_true", alias = "auto_compact")]
     pub enable_auto_summarize: bool,
+    /// Where automatic compaction happens, as % of the window. 0 = automatic:
+    /// the window minus room for the reply and the summary (~75–85%).
+    #[serde(default)]
+    pub auto_compact_at: u8,
+    /// Before summarizing, clear old tool outputs (no model call).
+    #[serde(default = "default_true")]
+    pub prune_tool_outputs: bool,
 }
 
 impl Default for ContextConfig {
@@ -1681,6 +1688,8 @@ impl Default for ContextConfig {
             max_retained_messages: default_max_retained_messages(),
             auto_summarize_threshold: default_summarize_threshold(),
             enable_auto_summarize: default_true(),
+            auto_compact_at: 0,
+            prune_tool_outputs: true,
         }
     }
 }
@@ -1879,6 +1888,12 @@ impl ContextConfig {
         }
         if let Some(enable_auto_summarize) = partial.enable_auto_summarize {
             self.enable_auto_summarize = enable_auto_summarize;
+        }
+        if let Some(v) = partial.auto_compact_at {
+            self.auto_compact_at = v.min(95);
+        }
+        if let Some(v) = partial.prune_tool_outputs {
+            self.prune_tool_outputs = v;
         }
         if let Some(query_provider_models_api) = partial.query_provider_models_api {
             self.query_provider_models_api = query_provider_models_api;
@@ -2120,7 +2135,10 @@ struct PartialContextConfig {
     query_provider_models_api: Option<bool>,
     max_retained_messages: Option<usize>,
     auto_summarize_threshold: Option<u8>,
+    #[serde(alias = "auto_compact")]
     enable_auto_summarize: Option<bool>,
+    auto_compact_at: Option<u8>,
+    prune_tool_outputs: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

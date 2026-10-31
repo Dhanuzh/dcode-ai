@@ -89,7 +89,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
 | `/permissions` | List rules; `allow`/`ask`/`deny`/`remove <rule>` to edit them; `mode` for the mode picker |
 | `/context`, `/cost`, `/usage`, `/stats` | `/context`: what fills the window (system prompt, skills, tools, MCP tools, summary, conversation, and what the provider counted beyond that); `/usage`: fresh input, cache reads / writes, output, cache hit rate, Claude process restarts and why (history rewritten, prompt or tools changed, process ended), and requests that missed the cache; `/stats`: tokens per day and per project over the last 14 days. Dollar estimates show only on the API backend: on a Claude plan or Copilot they would mislead |
-| `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept). It also happens on its own: before a turn once the context is 70% full, and in the middle of a long turn from 85% |
+| `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept). It also happens on its own near the end of the window — see *Context window and compaction* |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation (in git workspaces also files changed by shell commands) |
 | `/diff` | Full-screen diff of every changed file (↑↓ file · Tab · `n`/`p` hunk · `r r` revert hunk · `q` close); `/diff <args>` prints a git diff |
 | `/new`, `/resume`, `/sessions`, `/fork`, `/rename` | Manage sessions (`/resume <id>` jumps straight in; the picker searches titles and what was said; sessions name themselves after the first turn, bare `/rename` picks a new name) |
@@ -498,9 +498,34 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 - A tool output over 16,000 characters is shortened in the conversation
   (head and tail); the whole output is saved under `.dcode-ai/tool-output/`
   (the last 50) and the agent reads the part it needs.
-- Compaction runs once the conversation itself is 45% of the window and
-  has grown by a fifth of the window since the last one; it keeps the
-  recent messages that fit in a fifth of the window.
+
+## Context window and compaction
+
+One window for everything: the model's (200k, or 1M for `…[1m]` models),
+compared with the prompt size the provider reported for the last request
+plus what was added since. The footer shows `N% until auto-compact` from
+half full and `/context` shows where it happens.
+
+- **Auto-compact point**: the window minus room for the reply (up to 32k)
+  and for the summary request (7.5%, at least 13k), kept between 60% and
+  90% — about 77% on a 200k window. `[memory.context] auto_compact_at = 70`
+  sets it as a percentage instead.
+- At that point old tool output is cleared first (file reads, pages and
+  command output beyond the newest 40k tokens become a one-line stub; no
+  model call). If that is enough, nothing else happens; it is done at most
+  once between compactions, and also when the session was idle for five
+  minutes (the provider's cache is gone then anyway).
+- Otherwise the older history is summarized by the cheap model (Haiku, or
+  `[model] compact_model`). What stays: the summary, framed as a hand-off;
+  your own recent messages word for word (up to 20k tokens); the list of
+  files changed; and the latest messages (15% of the window).
+- A compaction that doesn't make the history at least 30% smaller is thrown
+  away. After three of those in a row automatic compaction pauses until you
+  run `/compact`.
+- It runs before a turn and, at most once, in the middle of a long turn.
+  Every rewrite of old history makes the provider read the whole prompt
+  again without its cache (on the Claude Code backend it restarts the
+  `claude` process), which is why it waits until it's needed.
 
 ## Look of the working line
 

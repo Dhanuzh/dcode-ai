@@ -197,7 +197,15 @@ Delivery is fire-and-forget: failures are ignored and never block the agent.
 ```toml
 [memory]
 file_path = ".dcode-ai/memory.json"
+
+[memory.context]
+auto_compact = true         # compact automatically (alias of enable_auto_summarize)
+auto_compact_at = 0         # 0 = automatic (window − reply − summary room, ~77% of 200k); else a %
+prune_tool_outputs = true   # clear old tool output before summarizing
+context_window_target = 0   # with auto_detect_context_window = false: the window in tokens
 ```
+
+`auto_summarize_threshold` from older versions is no longer used.
 
 ## `[ui]` — terminal UI
 

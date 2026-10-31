@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.0.31 — 2026-10-31
+
+### Automatic compaction, reworked
+Modelled on Claude Code, Codex, Gemini CLI and opencode
+(`docs/plans/2026-10-31-m31-compaction-rework.md`).
+- **One window**: the footer, `/context` and the triggers all use the
+  model's window and the prompt size the provider reported. Before, the
+  footer used 200k while compaction used a shrunken ~100k target and fired
+  at ~35% of the real window.
+- **Late, and in two steps**: at the auto-compact point (~77% of a 200k
+  window) old tool output is cleared first, with no model call; only if
+  that isn't enough is the history summarized. In a 400-step test session
+  this means 5 compactions instead of dozens, each from ~153k down to ~49k.
+- **What survives a compaction**: the summary framed as a hand-off, your
+  own recent messages word for word (up to 20k tokens), and the list of
+  files changed.
+- **Guards**: a compaction that doesn't shrink the history by 30% is
+  thrown away; three in a row pause automatic compaction until `/compact`.
+  A "prompt too long" error clears old tool output before retrying.
+- **Footer**: `N% until auto-compact` instead of "context N% used ·
+  /compact"; `/context` shows the auto-compact point.
+- Config: `[memory.context] auto_compact_at` (a % of the window, 0 =
+  automatic) and `prune_tool_outputs`; `auto_summarize_threshold` is no
+  longer used.
+
 ## 1.0.30 — 2026-10-31
 
 ### New

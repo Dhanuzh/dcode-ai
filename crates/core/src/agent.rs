@@ -40,19 +40,21 @@ pub type ApplySummary = Arc<dyn Fn(&[Message], &str) -> Vec<Message> + Send + Sy
 /// Summarizes the conversation mid-turn when it fills up, like Claude Code's
 /// auto-compact (see [`AgentLoop::compactor`]). The supervisor builds it from
 /// its context manager each turn.
+/// Clears old tool outputs: `(history, protect_from)` → the pruned history
+/// and the tokens freed, or `None` when not worth it (see [`Compactor::prune`]).
+pub type PruneFn = Arc<dyn Fn(&[Message], usize) -> Option<(Vec<Message>, usize)> + Send + Sync>;
+
 #[derive(Clone)]
 pub struct Compactor {
-    /// Compact once the prompt (less `overhead_tokens`) reaches this many
-    /// tokens…
-    pub trigger_tokens: usize,
-    /// …and the conversation itself is at least this big (compaction can't
-    /// shrink the system prompt or tool list).
-    pub min_conversation_tokens: usize,
-    /// Prompt tokens outside the conversation (system prompt, tools).
-    pub overhead_tokens: usize,
-    /// The conversation's size, counted like the supervisor counts it so
-    /// both agree on when compaction is due.
+    /// Clear old tool outputs (no model call) once the prompt reaches this.
+    pub prune_at: usize,
+    /// Summarize once the prompt reaches this.
+    pub compact_at: usize,
+    /// The conversation's size, counted like the supervisor counts it (used
+    /// to check that a compaction really shrank it).
     pub estimate: EstimateTokens,
+    /// `None` when pruning is turned off.
+    pub prune: Option<PruneFn>,
     /// Model that writes the summary (a cheap one where possible).
     pub model: String,
     /// The summary request for the older part of the history; `None` when
@@ -61,6 +63,22 @@ pub struct Compactor {
     /// The history with its older part replaced by `summary` (an empty
     /// summary means the model gave none: build one from the messages).
     pub apply: ApplySummary,
+    /// Failed or ineffective compactions in a row, shared with the
+    /// supervisor; at 3 automatic compaction stops (circuit breaker).
+    pub failures: Arc<std::sync::atomic::AtomicU32>,
+    /// Old tool output was cleared since the last compaction (shared with
+    /// the supervisor): clearing it again would cost another full re-read
+    /// of the prompt, so the next time it summarizes instead.
+    pub pruned: Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// Failed compactions in a row after which automatic compaction stops.
+pub const MAX_COMPACTION_FAILURES: u32 = 3;
+
+/// Whether a compaction from `before` to `after` tokens freed enough to
+/// keep (at least 30% smaller), as Gemini CLI rejects one that doesn't.
+pub fn compaction_worked(before: usize, after: usize) -> bool {
+    after * 10 <= before * 7
 }
 
 /// Drives the multi-turn conversation and tool-use loop.
@@ -82,6 +100,14 @@ pub struct AgentLoop {
     pub checkpoint: Option<Checkpoint>,
     /// Summarizes the history between tool steps once it fills up.
     pub compactor: Option<Compactor>,
+    /// History length when the last request was sent: what came after it
+    /// is added to the measured size.
+    last_prompt_len: usize,
+    /// Old tool outputs were already cleared this turn.
+    pruned_this_turn: bool,
+    /// When the last model request was sent (the provider's prompt cache
+    /// expires after a few idle minutes).
+    last_request_at: Option<std::time::Instant>,
     /// Prompt size of the last model request as the provider counted it
     /// (input + cache reads + cache writes). 0 until a request reports usage
     /// and after the history is compacted.
@@ -147,6 +173,9 @@ impl AgentLoop {
             checkpoint: None,
             compactor: None,
             last_prompt_tokens: 0,
+            last_prompt_len: 0,
+            pruned_this_turn: false,
+            last_request_at: None,
             compacted_this_turn: None,
             page_at_message: Default::default(),
             cold_requests: 0,
@@ -268,6 +297,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         // sits on a changed prefix and would be rejected or ignored.
         strip_provider_blocks_from(&mut self.messages, 0);
         self.last_prompt_tokens = 0;
+        self.last_prompt_len = 0;
         let new_count = self.messages.len();
         tracing::debug!(
             "context compacted: {} messages → {} messages",
@@ -287,6 +317,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
     ) -> Result<String, ProviderError> {
         self.cancel_flag.store(false, Ordering::SeqCst);
         self.compacted_this_turn = None;
+        self.pruned_this_turn = false;
         // The user message is pushed next, at this history index.
         self.undo.begin_turn(self.messages.len());
         let user_msg = if attachments.is_empty() {
@@ -404,6 +435,8 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             let (assistant_text, assistant_reasoning, tool_calls, got_usage, replay_blocks) = loop {
                 stream_attempt += 1;
                 self.last_prompt_tokens = 0;
+                self.last_prompt_len = self.messages.len();
+                self.last_request_at = Some(std::time::Instant::now());
                 let mut stream = match self
                     .provider
                     .chat(
@@ -1174,6 +1207,11 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         self.compacted_this_turn
     }
 
+    /// How long since the last model request (`None` before the first).
+    pub fn idle_for(&self) -> Option<std::time::Duration> {
+        self.last_request_at.map(|t| t.elapsed())
+    }
+
     /// The provider's count for the last request's prompt (0 when unknown).
     pub fn last_prompt_tokens(&self) -> u64 {
         self.last_prompt_tokens
@@ -1183,40 +1221,76 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
     /// (it includes the system prompt and tool list) or the estimate,
     /// whichever is larger.
     pub fn context_tokens(&self) -> u64 {
-        self.estimated_context_tokens().max(self.last_prompt_tokens)
+        self.context_used()
     }
 
-    /// Summarize older history mid-turn once the prompt reaches the
-    /// compactor's trigger, so a long tool-heavy turn keeps going instead of
-    /// hitting the context limit. Any failure leaves the history as it was.
+    /// The prompt's size as the next request would send it: the provider's
+    /// count for the last request plus what was added since. Before any
+    /// request (or right after a compaction) the local estimate of the
+    /// history and the tool list.
+    pub fn context_used(&self) -> u64 {
+        let chars = |m: &[Message]| m.iter().map(|x| x.content.approx_chars()).sum::<usize>();
+        if self.last_prompt_tokens > 0 {
+            let tail = &self.messages[self.last_prompt_len.min(self.messages.len())..];
+            return self.last_prompt_tokens + (chars(tail) / 4) as u64;
+        }
+        let tools: usize = self
+            .tools
+            .definitions()
+            .iter()
+            .map(|d| d.name.len() + d.description.len() + d.parameters.to_string().len())
+            .sum();
+        ((chars(&self.messages) + tools) / 4) as u64
+    }
+
+    /// Mid-turn context stages, between steps of a long turn. At the
+    /// compaction point: first clear old tool outputs (no model call); if
+    /// that brings the prompt back under the prune point, that's enough;
+    /// otherwise summarize the older history with the cheap model. Each
+    /// once a turn. Every rewrite of old history makes the provider re-read
+    /// the whole prompt without its cache, so neither runs earlier. A
+    /// compaction that doesn't shrink the history by 30% is thrown away and
+    /// counts as a failure; after three in a row automatic compaction stops.
     async fn maybe_compact(&mut self, workspace_root: &Path) {
+        use std::sync::atomic::Ordering;
         let Some(c) = self.compactor.clone() else {
             return;
         };
-        let conversation = (c.estimate)(&self.messages);
-        // After one compaction this turn, only the conversation's own growth
-        // counts: the measured prompt still carries the fixed overhead.
-        let size = if self.compacted_this_turn.is_some() {
-            conversation
-        } else {
-            (self.last_prompt_tokens as usize)
-                .saturating_sub(c.overhead_tokens)
-                .max(conversation)
-        };
-        if c.trigger_tokens == 0
-            || size < c.trigger_tokens
-            || conversation < c.min_conversation_tokens
+        if c.failures.load(Ordering::Relaxed) >= MAX_COMPACTION_FAILURES
+            || self.compacted_this_turn.is_some()
+            || (self.context_used() as usize) < c.compact_at
         {
             return;
         }
-        let before = self.context_tokens();
+        if !self.pruned_this_turn
+            && !c.pruned.load(Ordering::Relaxed)
+            && let Some(prune) = &c.prune
+        {
+            self.pruned_this_turn = true;
+            // The last few messages are what the model is acting on now.
+            let protect_from = self.messages.len().saturating_sub(6);
+            if let Some((pruned, freed)) = prune(&self.messages, protect_from) {
+                c.pruned.store(true, Ordering::Relaxed);
+                self.compact_messages(pruned);
+                self.emit(AgentEvent::ContextCompaction {
+                    phase: "completed".into(),
+                    message: format!("Cleared old tool output (~{}k tokens)", freed / 1000),
+                    context_tokens: self.context_used(),
+                })
+                .await;
+                if (self.context_used() as usize) <= c.prune_at {
+                    return;
+                }
+            }
+        }
+        let before_used = self.context_used();
         let Some(prompt) = (c.prompt)(&self.messages) else {
             return;
         };
         self.emit(AgentEvent::ContextCompaction {
             phase: "starting".into(),
             message: "Compacting conversation…".into(),
-            context_tokens: before,
+            context_tokens: before_used,
         })
         .await;
         let summary = match self
@@ -1242,19 +1316,37 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 String::new()
             }
         };
-        self.compacted_this_turn = Some(conversation);
+        let before = (c.estimate)(&self.messages);
+        self.compacted_this_turn = Some(before);
         let compacted = (c.apply)(&self.messages, &summary);
-        if compacted.len() >= self.messages.len() {
+        let after = (c.estimate)(&compacted);
+        if !compaction_worked(before, after) {
+            let n = c.failures.fetch_add(1, Ordering::Relaxed) + 1;
+            self.emit(AgentEvent::ContextCompaction {
+                phase: "completed".into(),
+                message: if n >= MAX_COMPACTION_FAILURES {
+                    "Compaction couldn't free enough room; auto-compact paused (/compact to try again)"
+                        .into()
+                } else {
+                    "Compaction wouldn't free enough room; kept the conversation as it was".into()
+                },
+                context_tokens: before_used,
+            })
+            .await;
             return;
         }
-        let old = self.messages.len();
-        let new = self.compact_messages(compacted);
-        self.compacted_this_turn = Some((c.estimate)(&self.messages));
-        let after = self.estimated_context_tokens();
+        c.failures.store(0, Ordering::Relaxed);
+        c.pruned.store(false, Ordering::Relaxed);
+        self.compact_messages(compacted);
+        self.compacted_this_turn = Some(after);
         self.emit(AgentEvent::ContextCompaction {
             phase: "completed".into(),
-            message: format!("Conversation compacted: {old} messages → {new} (~{after} tokens)"),
-            context_tokens: after,
+            message: format!(
+                "Compacted: ~{}k → ~{}k tokens (summary, your recent messages, files changed)",
+                before_used / 1000,
+                self.context_used() / 1000
+            ),
+            context_tokens: self.context_used(),
         })
         .await;
     }
@@ -1723,6 +1815,13 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex;
+
+    #[test]
+    fn a_compaction_must_free_thirty_percent() {
+        assert!(compaction_worked(100_000, 70_000));
+        assert!(!compaction_worked(100_000, 71_000));
+        assert!(!compaction_worked(100_000, 120_000), "growth is refused");
+    }
 
     #[test]
     fn burn_alarm_pauses_runaway_turns() {
@@ -2376,14 +2475,16 @@ mod tests {
         agent.messages = vec![
             Message::system("sys"),
             Message::user("old question"),
-            Message::assistant("old answer"),
+            Message::assistant(format!("old answer {}", "detail ".repeat(2_000))),
         ];
         let summaries: Arc<std::sync::Mutex<Vec<String>>> = Default::default();
         let seen = summaries.clone();
         agent.compactor = Some(Compactor {
-            trigger_tokens: 8_000,
-            min_conversation_tokens: 0,
-            overhead_tokens: 0,
+            prune_at: 8_000,
+            compact_at: 8_000,
+            prune: None,
+            failures: Default::default(),
+            pruned: Default::default(),
             estimate: Arc::new(|m: &[Message]| {
                 m.iter().map(|x| x.content.approx_chars()).sum::<usize>() / 4
             }),
@@ -2408,12 +2509,12 @@ mod tests {
         assert_eq!(agent.last_prompt_tokens, 0, "reset by compaction");
     }
 
-    /// Every step reports a prompt past the trigger (fixed overhead), but
-    /// the turn compacts at most once, and not at all when the
-    /// conversation is too small for compaction to help.
+    /// Every step reports a prompt past the compaction point, but the turn
+    /// compacts at most once (even when that compaction is refused), and
+    /// not at all below the point.
     #[tokio::test]
     async fn mid_turn_compaction_runs_at_most_once_per_turn() {
-        for (min_conversation, expected) in [(usize::MAX, 0usize), (0, 1)] {
+        for (compact_at, expected) in [(usize::MAX, 0usize), (50_000, 1)] {
             let temp = tempfile::tempdir().expect("tempdir");
             let root =
                 dcode_ai_common::config::canonicalize_simplified(temp.path()).expect("canonical");
@@ -2470,9 +2571,11 @@ mod tests {
             let calls: Arc<std::sync::Mutex<usize>> = Default::default();
             let seen = calls.clone();
             agent.compactor = Some(Compactor {
-                trigger_tokens: 50_000,
-                min_conversation_tokens: min_conversation,
-                overhead_tokens: 0,
+                prune_at: compact_at,
+                compact_at,
+                prune: None,
+                failures: Default::default(),
+                pruned: Default::default(),
                 estimate: Arc::new(|m: &[Message]| {
                     m.iter().map(|x| x.content.approx_chars()).sum::<usize>() / 4
                 }),
@@ -2485,7 +2588,7 @@ mod tests {
             });
             let reply = agent.run_turn("go", &root, &[]).await.expect("turn");
             assert_eq!(reply, "done");
-            assert_eq!(*calls.lock().unwrap(), expected, "min {min_conversation}");
+            assert_eq!(*calls.lock().unwrap(), expected, "compact at {compact_at}");
         }
     }
 

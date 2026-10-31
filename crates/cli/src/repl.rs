@@ -2836,6 +2836,11 @@ pub struct ContextBreakdown {
     pub conversation: u64,
     /// The provider's count for the last request (0 = none yet).
     pub measured: u64,
+    /// The session's window and where clearing and compaction happen
+    /// (0 = unknown).
+    pub window: u64,
+    pub compact_at: u64,
+    pub prune_at: u64,
 }
 
 fn context_usage_lines(
@@ -2849,6 +2854,7 @@ fn context_usage_lines(
     // its tokenizer, its own framing.
     let extra = b.measured.saturating_sub(estimate);
     let used = estimate + extra;
+    let window = if b.window > 0 { b.window } else { window };
     let window = window.max(used).max(1);
     let fmt = |n: u64| -> String {
         if n >= 1_000 {
@@ -2917,8 +2923,15 @@ fn context_usage_lines(
         ));
         lines.push("  (thinking it keeps, its own tokenizer and framing)".into());
     }
+    if b.compact_at > 0 {
+        lines.push(format!(
+            "  Auto-compact at {} ({:.0}%) · old tool output cleared first",
+            fmt(b.compact_at),
+            pct(b.compact_at)
+        ));
+    }
     lines.push(format!(
-        "{message_count} messages · estimates (~4 chars/token) · /compact frees space"
+        "{message_count} messages · estimates (~4 chars/token) · /compact frees space now"
     ));
     lines
 }

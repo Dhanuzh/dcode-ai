@@ -240,6 +240,10 @@ impl SessionRuntime {
             }
         }
         b.measured = agent.last_prompt_tokens();
+        let budget = self.supervisor.context_budget();
+        b.window = budget.window as u64;
+        b.compact_at = budget.compact_at() as u64;
+        b.prune_at = budget.prune_at() as u64;
         b
     }
 
