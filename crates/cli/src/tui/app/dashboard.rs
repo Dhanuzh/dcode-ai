@@ -8,7 +8,7 @@ use crate::tui::render_helpers::truncate_chars;
 use crate::tui::state::{DashTarget, RailTab};
 
 const LEFT_W: u16 = 26;
-const RIGHT_W: u16 = 40;
+const RIGHT_W: u16 = 42;
 /// Both rails need this many columns to leave a usable centre pane.
 const BOTH_RAILS_MIN_W: u16 = 120;
 /// Below this only the centre pane is shown.
@@ -335,13 +335,14 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
         (RailTab::Changes, "changes"),
         (RailTab::Agents, "agents"),
         (RailTab::Files, "files"),
+        (RailTab::Office, "office"),
     ];
     let mut spans = vec![Span::raw(" ")];
     let mut x = rect.x + 2;
     for (i, (tab, label)) in tabs.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled(" │ ", Style::default().fg(theme::border())));
-            x += 3;
+            spans.push(Span::styled("│", Style::default().fg(theme::border())));
+            x += 1;
         }
         let style = if *tab == g.rail_tab {
             Style::default()
@@ -373,7 +374,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             if focused {
                 " ←/→ tabs · Esc back "
             } else {
-                " Alt+1-4 · Ctrl+D focus "
+                " Alt+1-5 · Ctrl+D focus "
             },
             Style::default().fg(theme::muted()),
         )))
@@ -412,6 +413,18 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             ))),
             body,
         ),
+        RailTab::Office => {
+            g.office.tidy();
+            let tick = crate::tui::app::office_tick();
+            frame.render_widget(
+                crate::tui::office::OfficeView {
+                    office: &g.office,
+                    tick,
+                    selected: None,
+                },
+                body,
+            );
+        }
         RailTab::Files => frame.render_widget(
             Paragraph::new(Text::from(files_lines(
                 &g.file_map,

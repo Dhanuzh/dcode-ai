@@ -47,6 +47,15 @@ impl Repl {
         out: ReplOutput<'_>,
     ) -> anyhow::Result<bool> {
         match command {
+            "/office" => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.office_open = true;
+                } else {
+                    out.println("[office] the office needs the full-screen terminal UI");
+                }
+            }
             "/timeline" => {
                 if let ReplOutput::Tui(st) = &out
                     && let Ok(mut g) = st.lock()

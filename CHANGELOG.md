@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.35 — 2026-11-01
+
+### New
+- **Agent Office** (`/office`, dashboard `Alt+5`): every agent — the main
+  one and each sub-agent — as an animated pixel-art character at a desk,
+  acting out what it's doing: typing while it edits or writes, a glowing
+  green screen for shell commands, reading, a head bob while thinking, a
+  raised hand when it needs your approval, asleep when idle, arms up when
+  done. A speech bubble says what (`Edit auth.rs`, `$ cargo test`,
+  `? edit_file`). Sub-agents walk in when they start and leave when they
+  finish. Pick an agent to see its recent activity. Drawn with half-block
+  pixels in the terminal (no images); twice as big when there's room.
+
+### Fixed
+- The end-to-end test for `dcode-ai join` failed on macOS (socket paths
+  there are limited to ~104 bytes and the test's temp folder was long).
+
 ## 1.0.34 — 2026-10-31
 
 ### See it

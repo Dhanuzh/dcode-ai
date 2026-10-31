@@ -13,6 +13,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/fork",
     "/side",
     "/btw",
+    "/office",
     "/timeline",
     "/files",
     "/watch",

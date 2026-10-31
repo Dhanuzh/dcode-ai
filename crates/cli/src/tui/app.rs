@@ -880,18 +880,21 @@ pub fn run_blocking(
 
         // Full-screen transcript overlay (Codex `/transcript`). Runs its own
         // alt-screen loop; on return we force a full redraw of the inline pane.
-        let (overlay_requested, diff_requested, timeline_requested) = state
+        let (overlay_requested, diff_requested, timeline_requested, office_requested) = state
             .lock()
             .map(|g| {
                 (
                     g.transcript_overlay_open,
                     g.diff_overlay_open,
                     g.timeline_open,
+                    g.office_open,
                 )
             })
-            .unwrap_or((false, false, false));
-        if overlay_requested || diff_requested || timeline_requested {
-            if timeline_requested {
+            .unwrap_or((false, false, false, false));
+        if overlay_requested || diff_requested || timeline_requested || office_requested {
+            if office_requested {
+                let _ = crate::tui::office_overlay::run_office_overlay(&state);
+            } else if timeline_requested {
                 let _ = crate::tui::timeline_overlay::run_timeline_overlay(&state);
             } else if diff_requested {
                 let _ = crate::tui::diff_overlay::run_diff_overlay(&state);
@@ -1345,6 +1348,16 @@ pub fn run_blocking(
     restore_terminal(mouse_capture);
     let _ = execute!(stdout(), MoveToColumn(0));
     Ok(())
+}
+
+/// The office animation's frame: ~8 per second, shared by every view.
+pub fn office_tick() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    (START
+        .get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_millis()
+        / 125) as u64
 }
 
 /// Open a URL in the default browser or a file path in the system editor.

@@ -970,7 +970,7 @@ impl Repl {
             | "/plugin" | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
-            "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff" => {
+            "/office" | "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff" => {
                 return self.cmd_team(input, command, rest, parts, out).await;
             }
             "/btw" => {

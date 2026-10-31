@@ -234,6 +234,7 @@ pub(super) fn handle_key_event(
             KeyCode::Char('2') => Some(RailTab::Changes),
             KeyCode::Char('3') => Some(RailTab::Agents),
             KeyCode::Char('4') => Some(RailTab::Files),
+            KeyCode::Char('5') => Some(RailTab::Office),
             _ => None,
         };
         if let Some(tab) = tab {

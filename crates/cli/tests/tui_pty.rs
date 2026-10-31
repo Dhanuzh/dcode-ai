@@ -39,7 +39,7 @@ impl Tui {
         cmd.env("HOME", home);
         cmd.env("USERPROFILE", home);
         cmd.env("XDG_CONFIG_HOME", home.join(".config"));
-        cmd.env("XDG_RUNTIME_DIR", home.join("run"));
+        cmd.env("XDG_RUNTIME_DIR", runtime_dir(home));
         cmd.env("TERM", "xterm-256color");
         // Only ever sent to the local mock model in these tests.
         cmd.env("ANTHROPIC_AUTH_TOKEN", "test-token");
@@ -107,6 +107,19 @@ impl Drop for Tui {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
+}
+
+/// A short folder for session sockets: macOS limits socket paths to ~104
+/// bytes and its temp folders are long, so sockets there would fail.
+fn runtime_dir(home: &Path) -> std::path::PathBuf {
+    let tag: String = home
+        .to_string_lossy()
+        .bytes()
+        .fold(0u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32))
+        .to_string();
+    let dir = std::path::PathBuf::from(format!("/tmp/dcai-{tag}"));
+    let _ = std::fs::create_dir_all(&dir);
+    dir
 }
 
 fn setup() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
@@ -216,9 +229,9 @@ fn typing_pasting_modes_and_dashboard() {
 
     // Ctrl+\ opens the dashboard and closes it again.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-4");
+    tui.wait_for("Alt+1-5");
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-4"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-5"));
 
     // Ctrl+C twice quits.
     tui.send(b"\x03");
@@ -751,7 +764,7 @@ fn one_shot_output_for_scripts() {
             .args(args)
             .current_dir(&ws)
             .env("HOME", &home)
-            .env("XDG_RUNTIME_DIR", home.join("run"))
+            .env("XDG_RUNTIME_DIR", runtime_dir(&home))
             .env("ANTHROPIC_AUTH_TOKEN", "test-token")
             .output()
             .expect("run dcode-ai");
@@ -796,13 +809,20 @@ fn see_and_share_a_session() {
 
     // The dashboard's files tab shows it too.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-4");
+    tui.wait_for("Alt+1-5");
     tui.send(b"\x1b4");
     tui.wait_until("the files tab", |t| {
         t.contains("1 edited") && t.contains("note.txt")
     });
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-4"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-5"));
+
+    run(&mut tui, "/office");
+    tui.wait_until("the office", |t| {
+        t.contains("q close") && t.contains("dcode-ai")
+    });
+    tui.send(b"q");
+    tui.wait_for("? for shortcuts");
 
     run(&mut tui, "/timeline");
     tui.wait_until("the timeline", |t| {
@@ -857,7 +877,7 @@ fn see_and_share_a_session() {
         .args(["join", &id])
         .current_dir(&ws)
         .env("HOME", &home)
-        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("XDG_RUNTIME_DIR", runtime_dir(&home))
         .env("ANTHROPIC_AUTH_TOKEN", "test-token")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::null())
@@ -872,4 +892,88 @@ fn see_and_share_a_session() {
     tui.wait_for("Reply to: hello from beside");
     let _ = join.kill();
     let _ = join.wait();
+}
+
+impl Tui {
+    /// The screen with colours, as JSON rows of `[symbol, fg, bg]`.
+    fn cells_json(&self) -> serde_json::Value {
+        let p = self.screen.lock().unwrap();
+        let screen = p.screen();
+        let col = |c: vt100::Color, default: [u8; 3]| match c {
+            vt100::Color::Rgb(r, g, b) => serde_json::json!([r, g, b]),
+            vt100::Color::Idx(i) => {
+                let v = if i < 16 {
+                    (i as u32 % 8) * 30 + 40
+                } else {
+                    120
+                };
+                serde_json::json!([v, v, v])
+            }
+            vt100::Color::Default => serde_json::json!(default),
+        };
+        let rows: Vec<Vec<serde_json::Value>> = (0..ROWS)
+            .map(|y| {
+                (0..COLS)
+                    .map(|x| match screen.cell(y, x) {
+                        Some(c) => serde_json::json!([
+                            c.contents(),
+                            col(c.fgcolor(), [230, 230, 230]),
+                            col(c.bgcolor(), [24, 22, 20])
+                        ]),
+                        None => serde_json::json!([" ", [0, 0, 0], [24, 22, 20]]),
+                    })
+                    .collect()
+            })
+            .collect();
+        serde_json::json!(rows)
+    }
+}
+
+/// Screenshots of `/office` in the real terminal UI, for review:
+/// `target/office-screens.json` → `cells_to_png.py`.
+#[test]
+#[ignore]
+fn office_screenshots() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    let mut shots = Vec::new();
+    // While a reply is streaming: the dashboard's office tab.
+    tui.send(b"a slow story please");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    tui.wait_for("part0");
+    tui.send(b"\x1c");
+    tui.wait_for("Alt+1-5");
+    tui.send(b"\x1b5");
+    std::thread::sleep(Duration::from_millis(900));
+    shots.push(tui.cells_json());
+    tui.send(b"\x1c");
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-5"));
+    tui.wait_for("? for shortcuts");
+    // Waiting for an approval.
+    tui.send(b"please create the note");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    tui.wait_until("an approval prompt", |t| {
+        t.contains("note.txt") && t.contains("1.")
+    });
+    tui.send(b"\x1c");
+    std::thread::sleep(Duration::from_millis(900));
+    shots.push(tui.cells_json());
+    tui.send(b"\x1c");
+    std::thread::sleep(Duration::from_millis(600));
+    tui.send(b"1");
+    tui.wait_for("Wrote the note.");
+    tui.wait_for("? for shortcuts");
+    // `/office` full screen.
+    tui.send(b"/office");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    tui.wait_for("q close");
+    std::thread::sleep(Duration::from_millis(400));
+    shots.push(tui.cells_json());
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/office-screens.json");
+    std::fs::write(path, serde_json::to_string(&shots).unwrap()).unwrap();
 }

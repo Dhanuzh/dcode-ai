@@ -69,7 +69,7 @@ go), and drag a rail's inner edge to make it wider or narrower.
 
 | Key | Action |
 | --- | --- |
-| `Alt+1` … `Alt+4` | Context · changes · agents · files tab (files: every file the agent read or edited, live, the current one marked ◉) |
+| `Alt+1` … `Alt+5` | Context · changes · agents · files · office tab (files: every file the agent read or edited, live, the current one marked ◉) |
 | `Ctrl+D` | Focus the rail (again to return to the prompt) |
 | `←` / `→` (rail focused) | Previous / next tab |
 | `j` / `k` (changes) | Select a hunk |
@@ -495,6 +495,7 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 
 | Command | What it does |
 | --- | --- |
+| `/office` | The Agent Office: every agent as an animated pixel-art character at a desk, acting out what it does (typing, reading, running commands, hand up for your approval), with a speech bubble; ←/→ picks one to see its activity. Also the dashboard's `office` tab (`Alt+5`) |
 | `/timeline` | The session as steps (your messages, tool calls, replies, compactions) with a scrubber bar; ←/→ to move, Enter on one of your messages rewinds there |
 | `/files` | Files the agent read and edited this session (also the dashboard's `files` tab, `Alt+4`) |
 | `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan` shares it on your network; `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |

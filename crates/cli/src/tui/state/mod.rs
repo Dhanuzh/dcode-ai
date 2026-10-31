@@ -119,6 +119,9 @@ impl TuiSessionState {
             file_map: Default::default(),
             timeline: Default::default(),
             timeline_open: false,
+            office: Default::default(),
+            office_open: false,
+            office_selected: 0,
             busy: false,
             current_busy_state: BusyState::Idle,
             busy_state_since: Instant::now(),
@@ -1461,11 +1464,12 @@ impl TuiSessionState {
 
     /// Next/previous right-rail tab, keeping keyboard focus on the rail.
     pub fn cycle_rail_tab(&mut self, step: i32) {
-        const TABS: [RailTab; 4] = [
+        const TABS: [RailTab; 5] = [
             RailTab::Context,
             RailTab::Changes,
             RailTab::Agents,
             RailTab::Files,
+            RailTab::Office,
         ];
         let i = TABS.iter().position(|t| *t == self.rail_tab).unwrap_or(0) as i32;
         self.rail_tab = TABS[(i + step).rem_euclid(TABS.len() as i32) as usize];
@@ -1791,6 +1795,7 @@ impl TuiSessionState {
     pub fn apply_event(&mut self, e: &AgentEvent) {
         let mut transcript_dirty = false;
         self.timeline.apply(e);
+        self.office.apply(e);
         if let AgentEvent::ToolCallStarted { tool, input, .. } = e {
             self.file_map.touch(tool, input);
         }

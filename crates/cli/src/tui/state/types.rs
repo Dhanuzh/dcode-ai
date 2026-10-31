@@ -189,6 +189,8 @@ pub enum RailTab {
     Agents,
     /// Files the agent touched this session.
     Files,
+    /// The Agent Office: every agent at its desk.
+    Office,
 }
 
 /// Something clickable in the dashboard, recorded while drawing.
@@ -327,6 +329,10 @@ pub struct TuiSessionState {
     pub timeline: crate::tui::activity::Timeline,
     /// `/timeline` is open.
     pub timeline_open: bool,
+    /// The Agent Office (`/office`, dashboard `Alt+5`).
+    pub office: crate::tui::office::Office,
+    pub office_open: bool,
+    pub office_selected: usize,
     pub busy: bool,
     /// Current busy state (for animated indicator).
     pub current_busy_state: BusyState,
