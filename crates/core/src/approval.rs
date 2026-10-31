@@ -221,7 +221,27 @@ impl ApprovalPolicy {
             (Some((pattern, origin)), PermissionTier::Allowed) => {
                 format!("allowed by rule `{pattern}` ({origin})")
             }
-            _ => format!("{:?} mode default for `{tool_name}`", self.config.mode),
+            _ => {
+                let command = matches!(tool_name, "execute_bash" | "run_background").then(|| {
+                    serde_json::from_str::<serde_json::Value>(description)
+                        .map(|v| extract_meaningful_text(&v))
+                        .unwrap_or_else(|_| description.to_string())
+                });
+                let destructive_shell = command
+                    .as_deref()
+                    .is_some_and(|c| classify_command(c) == CommandSafety::Dangerous);
+                let verb = match tier {
+                    PermissionTier::Allowed => "runs",
+                    PermissionTier::Ask => "asks before",
+                    PermissionTier::Denied => "refuses",
+                };
+                if destructive_shell && tier == PermissionTier::Denied {
+                    "refused: a known-destructive command (in every mode, unless an allow rule names it)"
+                        .to_string()
+                } else {
+                    format!("{:?} mode {verb} `{tool_name}`", self.config.mode)
+                }
+            }
         };
         (tier, why)
     }

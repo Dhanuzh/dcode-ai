@@ -16,8 +16,17 @@ impl Repl {
             "/stop" => {
                 let arg = rest.trim();
                 if arg.is_empty() {
-                    self.runtime.request_cancel();
-                    out.println("[stop] cancelling current turn…");
+                    // Commands run between turns, so no turn is running now.
+                    if self.background_jobs.is_empty() {
+                        out.println(
+                            "[stop] nothing is running — Esc stops a turn while it runs; /stop <id> stops a background job",
+                        );
+                    } else {
+                        out.println(&format!(
+                            "[stop] {} background job(s) running — /stop <id> or /stop all (see /ps)",
+                            self.background_jobs.len()
+                        ));
+                    }
                 } else if arg == "all" {
                     let n = self.background_jobs.len();
                     for job in self.background_jobs.drain(..) {
@@ -721,8 +730,11 @@ impl Repl {
                     .messages()
                     .iter()
                     .rev()
-                    .find(|m| m.role == dcode_ai_common::message::Role::User)
-                    .map(|m| m.content.event_preview());
+                    .filter(|m| m.role == dcode_ai_common::message::Role::User)
+                    .map(|m| m.content.event_preview())
+                    // What you typed, not what dcode-ai sent on its own
+                    // (review findings, notifications, steering wrappers).
+                    .find(|t| !is_app_generated_prompt(t));
                 match last_user {
                     Some(text) if !text.trim().is_empty() => {
                         out.println("[retry] Re-sending last message…");
@@ -995,4 +1007,18 @@ fn nest_children(mut kids: Vec<DatedEntry>) -> Vec<SessionPickerEntry> {
             e
         })
         .collect()
+}
+
+/// User-role messages dcode-ai writes itself; `/retry` skips them.
+fn is_app_generated_prompt(text: &str) -> bool {
+    const PREFIXES: [&str; 6] = [
+        "A read-only verifier reviewed",
+        "A reviewer using a different model",
+        "<task-notification>",
+        "The user sent",
+        "The browser screenshot",
+        "(The user interrupted",
+    ];
+    let t = text.trim_start();
+    PREFIXES.iter().any(|p| t.starts_with(p))
 }

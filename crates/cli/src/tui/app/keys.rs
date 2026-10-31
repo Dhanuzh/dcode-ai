@@ -1284,12 +1284,14 @@ pub(super) fn handle_key_event(
             g.followup_queue.push_back(expanded);
         }
         (KeyCode::Tab, _) => {
+            // A completed file ends with a space (folders stay open), so the
+            // next Enter sends instead of completing again.
             if let Some((buf, cidx)) = apply_selected_at_completion(
                 workspace_files,
                 &g.input_buffer,
                 g.cursor_char_idx,
                 g.at_menu_index,
-                false,
+                true,
             ) {
                 g.set_input_text_with_cursor(buf, cidx);
             } else {
@@ -1543,6 +1545,11 @@ pub(super) fn handle_key_event(
                 g.cursor_char_idx,
                 g.at_menu_index,
                 true,
+            ) && !crate::tui::composer_input::at_mention_already_complete(
+                workspace_files,
+                &g.input_buffer,
+                g.cursor_char_idx,
+                g.at_menu_index,
             ) {
                 g.set_input_text_with_cursor(buf, cidx);
                 g.at_menu_index = 0;

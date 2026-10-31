@@ -1197,11 +1197,19 @@ impl Supervisor {
         if !conversation.iter().any(|m| m.role != Role::System) {
             return Err("nothing to compact yet".into());
         }
-        self.run_pre_compact_hooks("manual").await;
         let before = self
             .context_manager
             .stats(&self.agent.messages)
             .estimated_tokens;
+        // A summary of a short conversation is about as long as it: a paid
+        // model call that frees nothing.
+        let conversation_tokens = self.context_manager.stats(&conversation).estimated_tokens;
+        if conversation_tokens < MIN_MANUAL_COMPACT_TOKENS {
+            return Err(format!(
+                "nothing worth compacting yet (~{conversation_tokens} tokens of conversation)"
+            ));
+        }
+        self.run_pre_compact_hooks("manual").await;
         let mut prompt = self.context_manager.summary_prompt(&conversation);
         if let Some(focus) = focus.map(str::trim).filter(|f| !f.is_empty()) {
             prompt.push_str(&format!(
@@ -2319,6 +2327,10 @@ impl ApprovalHandler for AutoDenyHandler {
         ApprovalVerdict::Denied
     }
 }
+
+/// Below this much conversation (tokens) `/compact` declines: the summary
+/// would be about as long as what it replaces.
+const MIN_MANUAL_COMPACT_TOKENS: usize = 4_000;
 
 /// A cheap model for small side questions (auto mode's command check):
 /// `[model] compact_model` when set, Haiku on Claude, else the main model.

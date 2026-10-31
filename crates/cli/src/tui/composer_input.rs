@@ -189,6 +189,25 @@ pub(crate) fn apply_selected_at_completion(
     Some((new_buf, new_cursor_char_idx))
 }
 
+/// The `@mention` being typed is already exactly the highlighted file:
+/// Enter should send, not complete it again.
+pub(crate) fn at_mention_already_complete(
+    workspace_files: &[String],
+    buffer: &str,
+    cursor_char_idx: usize,
+    at_menu_index: usize,
+) -> bool {
+    let at_matches = at_completion_matches(workspace_files, buffer, cursor_char_idx);
+    let b = cursor_byte_index(buffer, cursor_char_idx);
+    let Some((_, prefix)) = file_mentions::at_token_before_cursor(buffer, b) else {
+        return false;
+    };
+    let pick = at_menu_index.min(at_matches.len().saturating_sub(1));
+    at_matches
+        .get(pick)
+        .is_some_and(|choice| !choice.ends_with('/') && *choice == prefix)
+}
+
 pub(crate) fn at_mention_char_ranges(buffer: &str) -> Vec<(usize, usize)> {
     file_mentions::parse_at_mentions(buffer)
         .into_iter()

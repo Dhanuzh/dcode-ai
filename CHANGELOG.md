@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.33 — 2026-10-31
+
+From an end-to-end run of every command against a mock model
+(`docs/plans/2026-10-31-m33-e2e-audit.md`).
+
+### Fixed
+- `/permission-bypass` no longer turns every prompt off in one step: it
+  explains and needs `/permission-bypass on`.
+- `-p "…" --json` prints one JSON result, and `-p` piped into another
+  program prints only the answer (no headers or cost lines).
+- An `@file` completed with Tab sends on the first Enter.
+- `/init` writes only `AGENTS.md`; the empty `.dcode-ai/instructions.md`
+  template earlier versions created is no longer sent with every request.
+- Reviewers started by `/verify`, `/security-review` and `/second-opinion`
+  no longer stay "running" in the dashboard.
+- Esc keeps the partial reply and then says "Interrupted".
+- `/retry` re-sends what you typed, not dcode-ai's own messages; `/stop`
+  says when nothing is running; `/compact` declines on a tiny conversation
+  instead of paying for a summary.
+- `--help` describes every subcommand; `policy test` and `doctor` explain
+  themselves (doctor shows OAuth sign-in instead of asking for API keys).
+
+### Tests
+- New end-to-end tests: `@` mention + Tab + Enter, Esc interrupt, bypass
+  confirmation, `-p` and `--json` output.
+
 ## 1.0.32 — 2026-10-31
 
 ### Fixed

@@ -98,6 +98,37 @@ fn added_dirs_line() -> String {
     )
 }
 
+/// An instructions file with nothing filled in: only headings, HTML
+/// comments and the scaffold's own sentences (old `/init` created one; it
+/// would otherwise go out with every request).
+fn is_blank_scaffold(text: &str) -> bool {
+    let without_comments = regex_lite_strip_comments(text);
+    without_comments.lines().map(str::trim).all(|l| {
+        l.is_empty()
+            || l.starts_with('#')
+            || l == "-"
+            || l.starts_with("Add context here that dcode-ai should always know")
+    })
+}
+
+/// `text` without `<!-- … -->` comments.
+fn regex_lite_strip_comments(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = rest.find("<!--") {
+        out.push_str(&rest[..start]);
+        match rest[start..].find("-->") {
+            Some(end) => rest = &rest[start + end + 3..],
+            None => {
+                rest = "";
+                break;
+            }
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
 pub fn build_system_prompt(
     config: &DcodeAiConfig,
     workspace_root: &Path,
@@ -139,7 +170,7 @@ pub fn build_system_prompt(
 
     if let Some(text) =
         read_if_exists(&workspace_root.join(&config.harness.local_instructions_path))
-        && !text.trim().is_empty()
+        && !is_blank_scaffold(&text)
     {
         sections.push(format!("Local Instructions:\n{}", text.trim()));
     }
@@ -315,6 +346,20 @@ fn orchestration_context_section(orchestration: Option<&OrchestrationContext>) -
     );
 
     Some(lines.join("\n"))
+}
+
+#[cfg(test)]
+mod scaffold_tests {
+    use super::is_blank_scaffold;
+
+    #[test]
+    fn untouched_init_scaffold_is_not_sent() {
+        let scaffold = "# Project Instructions for dcode-ai\n\nAdd context here that dcode-ai should always know about this project.\n\n## Project Overview\n\n<!-- Describe what this project does -->\n\n## Key Conventions\n\n- <!-- e.g. \"Always run `cargo test` before committing\" -->\n\n## Architecture Notes\n\n<!-- Important design decisions -->\n";
+        assert!(is_blank_scaffold(scaffold));
+        assert!(is_blank_scaffold("   \n"));
+        assert!(!is_blank_scaffold(&format!("{scaffold}\n- Use tabs.")));
+        assert!(!is_blank_scaffold("local rule"));
+    }
 }
 
 #[cfg(test)]

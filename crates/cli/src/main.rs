@@ -163,6 +163,7 @@ struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 enum Command {
+    /// Run one prompt in the foreground (with a live view; `-p` is the short form)
     Run {
         #[arg(long)]
         prompt: String,
@@ -195,6 +196,7 @@ enum Command {
         #[arg(long, hide = true)]
         session_id: Option<String>,
     },
+    /// Start a session in the background; follow it with `attach`
     Spawn {
         #[arg(long)]
         prompt: String,
@@ -225,6 +227,7 @@ enum Command {
         #[arg(long, hide = true)]
         session_id: Option<String>,
     },
+    /// List saved sessions in this workspace
     Sessions {
         #[arg(long)]
         json: bool,
@@ -247,6 +250,7 @@ enum Command {
         #[arg(long, value_name = "DAYS")]
         prune: Option<u32>,
     },
+    /// Resume a saved session (same as `-r <id>`)
     Resume {
         session_id: String,
         #[arg(long)]
@@ -262,6 +266,7 @@ enum Command {
         #[arg(long, value_enum)]
         permission_mode: Option<CliPermissionMode>,
     },
+    /// Print a session's event log
     Logs {
         session_id: String,
         #[arg(long)]
@@ -269,6 +274,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Follow a running session's live output
     Attach {
         session_id: String,
         #[arg(long)]
@@ -302,11 +308,13 @@ enum Command {
         #[arg(last = true)]
         args: Vec<String>,
     },
+    /// Show a session's status
     Status {
         session_id: String,
         #[arg(long)]
         json: bool,
     },
+    /// Stop a running session
     Cancel {
         session_id: String,
         #[arg(long)]
@@ -357,16 +365,19 @@ enum Command {
         #[command(subcommand)]
         command: Option<mcp_cli::McpCommand>,
     },
+    /// Saved memory notes: list or add
     Memory {
         #[command(subcommand)]
         command: MemoryCommand,
         #[arg(long)]
         json: bool,
     },
+    /// List the models of the active provider
     Models {
         #[arg(long)]
         json: bool,
     },
+    /// Check sign-in, git, ripgrep, config and sessions
     Doctor {
         #[arg(long)]
         json: bool,
@@ -374,6 +385,7 @@ enum Command {
         #[arg(long)]
         check: bool,
     },
+    /// Show the merged configuration
     Config {
         #[arg(long)]
         json: bool,
@@ -1166,12 +1178,22 @@ async fn try_main() -> anyhow::Result<()> {
                         repl.run().await?;
                     }
                 } else {
+                    // `--json` means one JSON result; output piped to another
+                    // program gets just the answer (like `claude -p`). The
+                    // live view is for a terminal.
+                    let stream = if cli.json
+                        || (matches!(cli.stream, StreamMode::Human) && !stdout().is_terminal())
+                    {
+                        StreamMode::Off
+                    } else {
+                        cli.stream
+                    };
                     run_one_shot(
                         config,
                         &workspace_root,
                         prompt,
                         OneShotOptions {
-                            stream: cli.stream,
+                            stream,
                             json: cli.json,
                             safe: cli.safe,
                             session_id: cli.session_id,
@@ -2505,18 +2527,26 @@ async fn show_doctor(
         );
         println!("Provider: {}", output.provider);
         println!("Default model: {}", output.default_model);
-        println!("Provider readiness:");
+        println!("Providers (sign-in is OAuth: `dcode-ai login anthropic|copilot`):");
+        let store = AuthStore::load().unwrap_or_default();
         for provider in &output.providers {
+            let signed_in = match provider.provider.as_str() {
+                "Claude" => {
+                    store.anthropic.is_some()
+                        || anthropic_signed_in(&config.provider.anthropic)
+                        || std::env::var_os("ANTHROPIC_AUTH_TOKEN").is_some()
+                }
+                _ => store.copilot.is_some() || provider.api_key_present,
+            };
             println!(
-                "  {}{}: api_key={} ({}) model={} base_url={}",
+                "  {}{}: {} · model {} · {}",
                 provider.provider,
                 if provider.selected { " [selected]" } else { "" },
-                if provider.api_key_present {
-                    "configured"
+                if signed_in {
+                    "signed in"
                 } else {
-                    "missing"
+                    "not signed in"
                 },
-                provider.api_key_env,
                 provider.model,
                 provider.base_url
             );

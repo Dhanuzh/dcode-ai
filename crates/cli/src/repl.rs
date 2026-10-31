@@ -1116,12 +1116,22 @@ impl Repl {
             child_id: None,
             approval: None,
         };
-        let report = match dcode_ai_runtime::supervisor::spawn_child_session(
-            cfg,
-            self.runtime.event_sender(),
-        )
-        .await
+        let result =
+            dcode_ai_runtime::supervisor::spawn_child_session(cfg, self.runtime.event_sender())
+                .await;
+        // The reviewer shows in the agents rail while it works; mark it done.
+        if let Ok(r) = &result
+            && let Some(tx) = self.runtime.event_sender()
         {
+            let _ = tx
+                .send(dcode_ai_common::event::AgentEvent::ChildSessionCompleted {
+                    parent_session_id: self.runtime.session_id().to_string(),
+                    child_session_id: r.child_session_id.clone(),
+                    status: r.status.clone(),
+                })
+                .await;
+        }
+        let report = match result {
             Ok(r) if r.status == "completed" => r.output,
             Ok(r) => {
                 out.eprintln(&format!("[verify] verifier {}: {}", r.status, r.output));

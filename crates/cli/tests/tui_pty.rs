@@ -327,8 +327,28 @@ fn answer(mut stream: std::net::TcpStream) {
     };
     let _ = write!(
         stream,
-        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{sse}"
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n"
     );
+    // "slow" prompts stream their reply over ~4 seconds (for Esc / steering).
+    if said.contains("slow") {
+        for p in sse.split("\n\n").filter(|p| !p.is_empty()) {
+            let _ = write!(stream, "{p}\n\n");
+            let _ = stream.flush();
+            if p.contains("content_block_start") {
+                for i in 0..8 {
+                    std::thread::sleep(Duration::from_millis(500));
+                    let delta = serde_json::to_string(&format!(" part{i}")).unwrap();
+                    let _ = write!(
+                        stream,
+                        "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{delta}}}}}\n\n"
+                    );
+                    let _ = stream.flush();
+                }
+            }
+        }
+    } else {
+        let _ = write!(stream, "{sse}");
+    }
 }
 
 fn tool_sse(name: &str, input: &serde_json::Value) -> String {
@@ -537,4 +557,212 @@ fn approved_edit_runs_and_shows_after_resume() {
     tui.wait_for("please create the note");
     tui.wait_for("note.txt");
     tui.wait_for("Wrote the note.");
+}
+
+/// Exploration, not a check: runs every slash command in one session and
+/// writes each screen to `target/e2e-screens.txt` for review. Run with
+/// `cargo test -p dcode-ai-cli --test tui_pty explore -- --ignored`.
+#[test]
+#[ignore]
+fn explore_every_slash_command() {
+    let (_dir, home, ws) = setup_with_model();
+    std::fs::write(ws.join("README.md"), "# demo\nA small demo project.\n").unwrap();
+    std::fs::write(
+        ws.join("main.rs"),
+        "fn main() {\n    println!(\"hi\");\n}\n",
+    )
+    .unwrap();
+    let _ = std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&ws)
+        .status();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    tui.ask("alpha warm up");
+    let skip = [
+        "/exit",
+        "/quit",
+        "/q",
+        "/delete",
+        "/update",
+        "/share",
+        "/pr-comments",
+        "/login",
+        "/logout",
+        "/setup",
+        "/editor",
+        "/set-editor",
+        "/ide",
+        "/web",
+        "/feedback",
+        "/vim",
+        "/mention",
+    ];
+    // `DCODE_AI_EXPLORE_FROM=/cmd` starts the list there.
+    let from = std::env::var("DCODE_AI_EXPLORE_FROM").unwrap_or_default();
+    let cmds: Vec<&str> = dcode_ai_cli::slash_commands::SLASH_COMMANDS
+        .iter()
+        .copied()
+        .filter(|c| !skip.contains(c))
+        .skip_while(|c| !from.is_empty() && **c != from)
+        .collect();
+    let mut out = String::new();
+    for cmd in cmds {
+        tui.send(cmd.as_bytes());
+        std::thread::sleep(Duration::from_millis(150));
+        tui.send(b"\r");
+        std::thread::sleep(Duration::from_millis(1800));
+        let alive = !matches!(tui.child.try_wait(), Ok(Some(_)));
+        out.push_str(&format!(
+            "\n\n==================== {cmd} (alive: {alive})\n{}",
+            tui.text()
+        ));
+        if !alive {
+            break;
+        }
+        // Close whatever opened (one Esc: two on an empty prompt rewind).
+        tui.send(b"\x1b");
+        std::thread::sleep(Duration::from_millis(500));
+        if tui.text().contains("Restore the code and/or conversation") {
+            tui.send(b"\x1b");
+            std::thread::sleep(Duration::from_millis(400));
+        }
+    }
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e-screens.txt");
+    std::fs::write(&path, out).unwrap();
+    println!("screens written to {}", path.display());
+}
+
+/// Exploration of mid-turn behaviour; writes `target/e2e-turns.txt`.
+#[test]
+#[ignore]
+fn explore_turn_controls() {
+    let (_dir, home, ws) = setup_with_model();
+    std::fs::write(ws.join("main.rs"), "fn main() {}\n").unwrap();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    let mut out = String::new();
+    let mut snap = |tui: &Tui, label: &str| {
+        out.push_str(&format!("\n\n==================== {label}\n{}", tui.text()));
+    };
+    // Esc interrupts a streaming reply.
+    tui.send(b"tell a slow story");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    std::thread::sleep(Duration::from_millis(1500));
+    snap(&tui, "streaming");
+    tui.send(b"\x1b");
+    std::thread::sleep(Duration::from_millis(1500));
+    snap(&tui, "after Esc");
+    // Enter while working = steer; Tab = queue.
+    tui.send(b"another slow story");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    std::thread::sleep(Duration::from_millis(1000));
+    tui.send(b"steer now please");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.send(b"queued later please");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\t");
+    std::thread::sleep(Duration::from_millis(600));
+    snap(&tui, "steer + queue while working");
+    std::thread::sleep(Duration::from_millis(7000));
+    snap(&tui, "after both");
+    // Shell mode and a file mention.
+    tui.send(b"!echo shell-ok");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    std::thread::sleep(Duration::from_millis(1500));
+    snap(&tui, "! shell");
+    tui.send(b"explain @main");
+    std::thread::sleep(Duration::from_millis(800));
+    snap(&tui, "@ picker");
+    tui.send(b"\t");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.send(b"\r");
+    std::thread::sleep(Duration::from_millis(2000));
+    snap(&tui, "@ sent");
+    // Auto mode, then the dashboard with Alt+1/2/3.
+    for _ in 0..3 {
+        tui.send(b"\x1b[Z");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    snap(&tui, "shift+tab x3");
+    tui.send(b"\x1c");
+    std::thread::sleep(Duration::from_millis(800));
+    for k in [b"\x1b1", b"\x1b2", b"\x1b3"] {
+        tui.send(k);
+        std::thread::sleep(Duration::from_millis(600));
+        snap(&tui, &format!("dashboard alt+{}", k[1] as char));
+    }
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/e2e-turns.txt");
+    std::fs::write(&path, out).unwrap();
+}
+
+/// Everyday controls on the real UI: a file mention completes with Tab and
+/// sends on the first Enter; Esc stops a streaming reply, keeps what was
+/// shown and says it was interrupted; bypass needs to be asked for by name.
+#[test]
+fn mention_interrupt_and_bypass_controls() {
+    let (_dir, home, ws) = setup_with_model();
+    std::fs::write(ws.join("main.rs"), "fn main() {}\n").unwrap();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+
+    tui.send(b"explain @mai");
+    std::thread::sleep(Duration::from_millis(600));
+    tui.send(b"\t");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.send(b"\r");
+    tui.wait_for("Reply to: explain");
+    tui.wait_for("? for shortcuts");
+
+    tui.send(b"a slow story please");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    tui.wait_for("part1");
+    tui.send(b"\x1b");
+    tui.wait_for("Interrupted");
+    let text = tui.text();
+    let partial = text.find("part0").expect("partial reply kept");
+    assert!(partial < text.find("Interrupted").unwrap(), "{text}");
+    tui.wait_for("? for shortcuts");
+
+    tui.send(b"/permission-bypass");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    tui.wait_for("/permission-bypass on");
+    assert!(
+        !tui.text().contains("bypass permissions on"),
+        "{}",
+        tui.text()
+    );
+}
+
+/// `-p` in a pipe prints only the answer; `--json` prints one JSON result.
+#[test]
+fn one_shot_output_for_scripts() {
+    let (_dir, home, ws) = setup_with_model();
+    let run = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_dcode-ai"))
+            .args(args)
+            .current_dir(&ws)
+            .env("HOME", &home)
+            .env("XDG_RUNTIME_DIR", home.join("run"))
+            .env("ANTHROPIC_AUTH_TOKEN", "test-token")
+            .output()
+            .expect("run dcode-ai");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    assert_eq!(
+        run(&["-p", "hello piped world"]).trim(),
+        "Reply to: hello piped world"
+    );
+    let json: serde_json::Value =
+        serde_json::from_str(&run(&["-p", "json result please", "--json"])).expect("json");
+    assert_eq!(json["output"], "Reply to: json result please");
+    assert_eq!(json["end_reason"], "completed");
 }

@@ -334,7 +334,12 @@ impl Repl {
                         if self.runtime.permission_mode() == PermissionMode::BypassPermissions {
                             PermissionMode::Default
                         } else {
-                            PermissionMode::BypassPermissions
+                            // Turning every prompt off is never one keystroke
+                            // away: say what it does and ask for it by name.
+                            out.println(
+                                "Bypass runs every tool without asking (edits, shell, deletions; known-destructive commands are still refused). Turn it on with `/permission-bypass on`; Shift+Tab's auto mode asks only before risky steps.",
+                            );
+                            return Ok(true);
                         }
                     }
                     "on" | "enable" | "yes" | "1" => PermissionMode::BypassPermissions,

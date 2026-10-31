@@ -697,81 +697,12 @@ impl Repl {
                 }
             }
             "/init" => {
+                // Like Claude Code's `/init`: one instructions file, written
+                // from what the repository actually holds. (It used to also
+                // drop a commented `.dcode.toml` and an empty
+                // `.dcode-ai/instructions.md`, whose placeholder text then
+                // went out with every request.)
                 let workspace = self.runtime.workspace_root();
-                let dcode_toml = workspace.join(".dcode.toml");
-                let instructions_dir = workspace.join(".dcode-ai");
-                let instructions_path = instructions_dir.join("instructions.md");
-
-                // Write .dcode.toml only if it doesn't exist yet.
-                if dcode_toml.exists() {
-                    out.println("[init] .dcode.toml already exists — skipped");
-                } else {
-                    let toml_content = r#"# dcode-ai project configuration — commit this file to share with teammates.
-# All fields are optional; unset fields fall back to the user's global config.
-
-# [model]
-# default_model = "claude-opus-4-5"   # override the default model for this project
-
-# [permissions]
-# mode = "AcceptEdits"                 # Default | AcceptEdits | Plan | DontAsk | Bypass
-
-# [session]
-# agent_profile = "@build"             # default agent profile
-
-# [memory]
-# file_path = ".dcode-ai/memory.json"  # project memory store path
-"#;
-                    match std::fs::write(&dcode_toml, toml_content) {
-                        Ok(_) => out.println("[init] Created .dcode.toml"),
-                        Err(e) => out.eprintln(&format!("[init] Failed to write .dcode.toml: {e}")),
-                    }
-                }
-
-                // Write instructions.md scaffold.
-                if instructions_path.exists() {
-                    out.println("[init] .dcode-ai/instructions.md already exists — skipped");
-                } else {
-                    let instructions_content = "# Project Instructions for dcode-ai\n\n\
-                         Add context here that dcode-ai should always know about this project.\n\n\
-                         ## Project Overview\n\n\
-                         <!-- Describe what this project does -->\n\n\
-                         ## Key Conventions\n\n\
-                         - <!-- e.g. \"Always run `cargo test` before committing\" -->\n\n\
-                         ## Architecture Notes\n\n\
-                         <!-- Important design decisions, patterns, or constraints -->\n"
-                        .to_string();
-                    if let Err(e) = std::fs::create_dir_all(&instructions_dir) {
-                        out.eprintln(&format!("[init] Failed to create .dcode-ai/: {e}"));
-                    } else {
-                        match std::fs::write(&instructions_path, instructions_content) {
-                            Ok(_) => out.println("[init] Created .dcode-ai/instructions.md"),
-                            Err(e) => out
-                                .eprintln(&format!("[init] Failed to write instructions.md: {e}")),
-                        }
-                    }
-                }
-
-                // Remind about .gitignore.
-                let gitignore = workspace.join(".gitignore");
-                let gitignore_hint = if gitignore.exists() {
-                    let content = std::fs::read_to_string(&gitignore).unwrap_or_default();
-                    if content.contains(".dcode-ai/") || content.contains(".dcode-ai") {
-                        None
-                    } else {
-                        Some(true)
-                    }
-                } else {
-                    Some(true)
-                };
-                if gitignore_hint.is_some() {
-                    out.println(
-                        "[init] Tip: add `.dcode-ai/` to your .gitignore (sessions + local config)",
-                    );
-                    out.println(
-                        "[init] Tip: commit `.dcode.toml` to share project config with teammates",
-                    );
-                }
-
                 // Generate AGENTS.md by scanning the repo (Codex/Claude Code
                 // `/init` parity). Skipped when one already exists.
                 let agents_md = workspace.join("AGENTS.md");

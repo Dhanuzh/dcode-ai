@@ -2205,15 +2205,22 @@ impl TuiSessionState {
                 transcript_dirty = true;
             }
             AgentEvent::Error { message } => {
-                let classified = classify_error(message);
-                self.push_block(DisplayBlock::ErrorLine(classified));
-                self.set_process("error", truncate(message, 96));
+                // What was streamed so far stays above the notice, the way
+                // it appeared (Claude Code: partial reply, then "Interrupted").
+                self.flush_stream_before_tool();
                 // The turn is over on any error — clear the busy flag so the
                 // status returns to idle instead of staying stuck on "working".
                 self.set_busy(false);
                 if message.to_ascii_lowercase().contains("run cancelled") {
+                    self.push_block(DisplayBlock::System(
+                        "Interrupted · tell dcode-ai what to do instead".into(),
+                    ));
+                    self.set_process("interrupted", "");
                     self.set_busy_state(BusyState::Idle);
                 } else {
+                    let classified = classify_error(message);
+                    self.push_block(DisplayBlock::ErrorLine(classified));
+                    self.set_process("error", truncate(message, 96));
                     self.set_busy_state(BusyState::Error);
                 }
                 transcript_dirty = true;
