@@ -9,10 +9,13 @@ mod mcp_cli;
 mod mcp_serve;
 mod plugin_cli;
 mod policy_cli;
+mod remote_cli;
 mod repl;
 mod repl_helpers;
 mod runner;
+mod security_findings;
 mod self_update;
+mod session_share_cli;
 mod setup_cli;
 mod terminal_setup;
 mod web_server;
@@ -270,6 +273,34 @@ enum Command {
         session_id: String,
         #[arg(long)]
         json: bool,
+        /// Watch a session running on another machine: `user@host`
+        #[arg(long)]
+        ssh: Option<String>,
+        /// The session's project folder on that machine (with --ssh)
+        #[arg(long)]
+        dir: Option<String>,
+    },
+    /// Share a session: export it as one file (secrets masked), or import
+    /// one a teammate exported so `/resume` finds it
+    Session {
+        #[command(subcommand)]
+        command: SessionShareCommand,
+    },
+    /// Run dcode-ai on another machine over SSH and use it from here
+    /// (`--keep` runs it in tmux there, so it survives disconnects)
+    Remote {
+        /// `user@host` (anything `ssh` accepts)
+        host: String,
+        /// Project folder on that machine
+        #[arg(long)]
+        dir: Option<String>,
+        /// Keep it running in tmux after you disconnect; the same command
+        /// attaches to it again
+        #[arg(long)]
+        keep: bool,
+        /// Arguments for dcode-ai there, after `--` (e.g. `-- -r`)
+        #[arg(last = true)]
+        args: Vec<String>,
     },
     Status {
         session_id: String,
@@ -902,8 +933,47 @@ async fn try_main() -> anyhow::Result<()> {
         }) => {
             show_logs(&config, &workspace_root, &session_id, follow, json).await?;
         }
-        Some(Command::Attach { session_id, json }) => {
+        Some(Command::Attach {
+            session_id,
+            json,
+            ssh: Some(host),
+            dir,
+        }) => {
+            let mut args = vec!["attach".to_string(), session_id];
+            if json {
+                args.push("--json".into());
+            }
+            std::process::exit(remote_cli::run(&host, dir.as_deref(), false, &args)?);
+        }
+        Some(Command::Attach {
+            session_id, json, ..
+        }) => {
             attach_session(&config, &workspace_root, &session_id, json).await?;
+        }
+        Some(Command::Session { command }) => {
+            let sessions_dir = workspace_root.join(&config.session.history_dir);
+            match command {
+                SessionShareCommand::Export { session_id, output } => {
+                    let out = session_share_cli::export(&sessions_dir, &session_id, output).await?;
+                    println!(
+                        "Exported to {} (secrets and your home folder masked). Import it with `dcode-ai session import <file>`.",
+                        out.display()
+                    );
+                }
+                SessionShareCommand::Import { file } => {
+                    let id =
+                        session_share_cli::import(&sessions_dir, &workspace_root, &file).await?;
+                    println!("Imported as {id}. Open it with `dcode-ai -r {id}` or /resume.");
+                }
+            }
+        }
+        Some(Command::Remote {
+            host,
+            dir,
+            keep,
+            args,
+        }) => {
+            std::process::exit(remote_cli::run(&host, dir.as_deref(), keep, &args)?);
         }
         Some(Command::Status { session_id, json }) => {
             show_status(&config, &workspace_root, &session_id, json).await?;
@@ -2831,6 +2901,19 @@ fn should_open_oauth_onboarding(config: &DcodeAiConfig) -> bool {
     runtime_provider_from_auth(&AuthStore::load().unwrap_or_default()).is_none()
 }
 
+#[derive(Debug, clap::Subcommand)]
+enum SessionShareCommand {
+    /// Write a session to one file, secrets masked
+    Export {
+        session_id: String,
+        /// Output file (default: <session-id>.dcode-session)
+        #[arg(short, long)]
+        output: Option<PathBuf>,
+    },
+    /// Add an exported session to this workspace
+    Import { file: PathBuf },
+}
+
 /// Whether `command` may call a model (and so needs the provider settled).
 fn uses_model(command: Option<&Command>) -> bool {
     !matches!(
@@ -2839,6 +2922,8 @@ fn uses_model(command: Option<&Command>) -> bool {
             Command::Sessions { .. }
                 | Command::Logs { .. }
                 | Command::Attach { .. }
+                | Command::Remote { .. }
+                | Command::Session { .. }
                 | Command::Status { .. }
                 | Command::Cancel { .. }
                 | Command::Skills { .. }

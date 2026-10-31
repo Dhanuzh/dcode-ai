@@ -278,3 +278,30 @@ failed, `2` budget reached. As a GitHub Action:
     allow-writes: true
     max-cost: "1.50"
 ```
+
+### Security review in CI
+
+```bash
+dcode-ai ci --security-review origin/main --sarif results.sarif --fail-on high
+```
+
+Reviews the branch's changes against the base. Like Shannon's "no exploit,
+no report", the reviewer must trace each finding from untrusted input to the
+dangerous call in the code: traced ones are `[verified]`, the rest
+`[unverified]` (listed under *Needs checking*). The findings go into the JSON
+result and, with `--sarif`, into a SARIF 2.1.0 file for GitHub code
+scanning. `--fail-on low|medium|high` exits `3` only for **verified**
+findings at that severity or above.
+
+```yaml
+- uses: Dhanuzh/dcode-ai@main
+  with:
+    security-review: origin/main
+    sarif: dcode-ai.sarif
+    fail-on: high
+    copilot-token: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+- uses: github/codeql-action/upload-sarif@v3
+  if: always()
+  with:
+    sarif_file: dcode-ai.sarif
+```

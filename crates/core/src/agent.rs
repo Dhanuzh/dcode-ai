@@ -89,6 +89,11 @@ pub struct AgentLoop {
     /// The browser page open when the user message at each history index
     /// was sent (for `/rewind`).
     page_at_message: std::collections::BTreeMap<usize, String>,
+    /// Requests that found nothing in the provider's cache (cache writes, no
+    /// cache reads) and the tokens they wrote: the whole prompt re-sent at
+    /// full price.
+    pub cold_requests: u64,
+    pub cold_tokens: u64,
     /// A mid-turn compaction already ran this turn: the conversation's size
     /// right after it.
     compacted_this_turn: Option<usize>,
@@ -144,6 +149,8 @@ impl AgentLoop {
             last_prompt_tokens: 0,
             compacted_this_turn: None,
             page_at_message: Default::default(),
+            cold_requests: 0,
+            cold_tokens: 0,
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
@@ -518,6 +525,11 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                         } => {
                             self.cost_tracker.add_cache(read_tokens, creation_tokens);
                             self.last_prompt_tokens += read_tokens + creation_tokens;
+                            // A big write with no read: the cache missed.
+                            if read_tokens == 0 && creation_tokens >= 1024 {
+                                self.cold_requests += 1;
+                                self.cold_tokens += creation_tokens;
+                            }
                         }
                         StreamChunk::ReplayBlock(block) => replay_blocks.push(block),
                         StreamChunk::Stop(reason) => stop_reason = Some(reason),
@@ -715,6 +727,8 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             }
 
             let mut tickets: Vec<Ticket> = Vec::with_capacity(tool_calls.len());
+            // Calls the user approved only in part (some hunks).
+            let mut partial_edits: std::collections::HashSet<String> = Default::default();
 
             for call in &tool_calls {
                 let mut tier = self.approval.check(&call.name, &call.input.to_string());
@@ -799,6 +813,15 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                                 {
                                     let mut patched = call.clone();
                                     patched.input = modified_input.clone();
+                                    // A partial edit arrives as the file's
+                                    // final content: write it (same
+                                    // workspace checks as write_file).
+                                    if let Some(obj) = patched.input.as_object_mut()
+                                        && obj.remove(PARTIAL_WRITE_MARKER).is_some()
+                                    {
+                                        patched.name = "write_file".into();
+                                        partial_edits.insert(call.id.clone());
+                                    }
                                     patched
                                 } else {
                                     call.clone()
@@ -1007,6 +1030,12 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             let sees_images = self.provider.capabilities().supports_native_images;
             let mut screenshots: Vec<String> = Vec::new();
             for mut result in final_results {
+                if result.success && partial_edits.contains(&result.call_id) {
+                    result.output.push_str(
+                        "\n\nThe user accepted only some hunks of this change; the file now \
+                         holds their selection. Read it before editing it again.",
+                    );
+                }
                 // A browser screenshot: let a model that can see images see it.
                 if sees_images
                     && result.success
@@ -1508,6 +1537,10 @@ fn cap_tool_output_with(s: &str, hint: &str) -> String {
         "{head_str}\n\n… [{omitted} characters left out to keep the context small — {hint}] …\n\n{tail_str}"
     )
 }
+
+/// Marker in an approved input that carries a partial edit as the file's
+/// final content (see the TUI's hunk picker).
+const PARTIAL_WRITE_MARKER: &str = "__dcode_partial_write";
 
 /// Why a turn should pause: it processed more than `alarm` tokens, or it
 /// sent the same tool call `max_same` times in a row.
@@ -2178,6 +2211,74 @@ mod tests {
         async fn resolve(&self, _call: &ToolCall, _description: &str) -> ApprovalVerdict {
             ApprovalVerdict::Denied
         }
+    }
+
+    /// Approves an edit only in part, as the TUI's hunk picker does: the
+    /// final content, marked to be written.
+    struct ApprovePart(String);
+
+    #[async_trait]
+    impl crate::approval::ApprovalHandler for ApprovePart {
+        async fn resolve(&self, call: &ToolCall, _description: &str) -> ApprovalVerdict {
+            ApprovalVerdict::ApprovedModified(serde_json::json!({
+                "path": call.input["path"],
+                "content": self.0,
+                PARTIAL_WRITE_MARKER: true,
+            }))
+        }
+    }
+
+    /// A partly approved `edit_file` writes only the chosen content and
+    /// tells the model so.
+    #[tokio::test]
+    async fn partial_approval_writes_only_the_chosen_hunks() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root =
+            dcode_ai_common::config::canonicalize_simplified(temp.path()).expect("canonical");
+        std::fs::write(root.join("a.txt"), "one\ntwo\n").unwrap();
+        let edit = StreamChunk::ToolUse(ToolCall {
+            id: "e1".into(),
+            name: "edit_file".into(),
+            input: serde_json::json!({"path": "a.txt", "old_text": "one\ntwo\n", "new_text": "ONE\nTWO\n"}),
+        });
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new(VecDeque::from([
+                vec![edit, StreamChunk::Done],
+                vec![StreamChunk::TextDelta("done".into()), StreamChunk::Done],
+            ])),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(crate::tools::edit_file::EditFileTool::new(
+            root.clone(),
+        )));
+        tools.register(Box::new(crate::tools::write_file::WriteFileTool::new(
+            root.clone(),
+        )));
+        let (event_tx, _rx) = tokio::sync::mpsc::channel(256);
+        let mut agent = AgentLoop::new(
+            provider,
+            tools,
+            ApprovalPolicy::new(PermissionConfig::default())
+                .with_handler(Arc::new(ApprovePart("ONE\ntwo\n".into()))),
+            "test-model".into(),
+            event_tx,
+            3,
+            3,
+            0,
+            None,
+        );
+        agent.run_turn("go", &root, &[]).await.expect("turn");
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "ONE\ntwo\n"
+        );
+        let result = agent
+            .messages
+            .iter()
+            .find(|m| m.role == Role::Tool)
+            .map(|m| m.content.to_summary_text())
+            .unwrap();
+        assert!(result.contains("accepted only some hunks"), "{result}");
     }
 
     /// The session is saved after each tool step, mid-turn.

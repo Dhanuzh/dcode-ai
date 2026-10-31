@@ -226,8 +226,14 @@ cannot edit files. Review ONLY what the change introduces or touches:
    trust boundary, unsafe `unsafe` code or memory handling.
 3. Ignore denial of service, rate limiting, missing hardening with no concrete
    exploit, and anything in tests or docs only.
-Report only findings you are confident are real, most severe first:
-`[HIGH|MEDIUM|LOW] path:line — vulnerability — how it is exploited — fix`.
+4. Verify every candidate before reporting it: follow the code from where
+   untrusted input enters to the dangerous call, reading each function on the
+   way, and check that nothing validates, escapes or authorizes it in
+   between. Mark it `[verified]` only when you traced that whole path in the
+   code; otherwise `[unverified]`. Drop candidates the code rules out.
+Report findings most severe first, one per line, verified ones first:
+`[HIGH|MEDIUM|LOW] [verified|unverified] path:line — vulnerability — the path from input to sink — fix`.
+Put unverified ones under a `Needs checking:` heading.
 If nothing qualifies, reply exactly: `No security issues found.` and list what
 you checked.
 "#;

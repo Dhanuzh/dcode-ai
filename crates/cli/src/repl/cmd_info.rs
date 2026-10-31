@@ -399,6 +399,33 @@ impl Repl {
                         if one_shots == 1 { "" } else { "s" },
                     ));
                     lines.push("  every restart re-sends the conversation as cache writes".into());
+                    use dcode_ai_core::provider::claude_code as cc;
+                    let load = |c: &std::sync::atomic::AtomicU64| {
+                        c.load(std::sync::atomic::Ordering::Relaxed)
+                    };
+                    let reasons = [
+                        (
+                            load(&cc::RESTART_HISTORY),
+                            "history rewritten (compaction, rewind)",
+                        ),
+                        (
+                            load(&cc::RESTART_PROMPT),
+                            "system prompt, model or effort changed",
+                        ),
+                        (load(&cc::RESTART_TOOLS), "a tool's schema changed"),
+                        (load(&cc::RESTART_ENDED), "the process ended"),
+                    ];
+                    for (n, why) in reasons.iter().filter(|(n, _)| *n > 0) {
+                        lines.push(format!("    {n:>3} × {why}"));
+                    }
+                }
+                let (cold, cold_tokens) = self.runtime.cold_requests();
+                if cold > 0 {
+                    lines.push(format!(
+                        "Cache misses: {cold} request{} re-sent the prompt without the cache ({} tokens written)",
+                        if cold == 1 { "" } else { "s" },
+                        fmt_count(cold_tokens)
+                    ));
                 }
                 lines.push(String::new());
                 if window > 0 {

@@ -69,6 +69,8 @@ desktop-notify = ["notify-rust"]
 [dev-dependencies]
 dcode-ai-runtime = { workspace = true }
 tempfile = "3"
+portable-pty = "0.9"
+vt100 = "0.15"
 assert_cmd = "2"
 insta = "1"
 predicates = "3"

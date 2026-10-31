@@ -1398,7 +1398,7 @@ pub(super) fn handle_key_event(
             if g.active_approval.is_some() && !g.approval_hunk_mode =>
         {
             if let Some(req) = g.active_approval.as_ref() {
-                let hunks = extract_approval_hunks(&req.tool, &req.input);
+                let hunks = extract_approval_hunks(&req.tool, &req.input, &g.workspace_root);
                 if !hunks.is_empty() {
                     g.approval_hunk_selection = vec![true; hunks.len()];
                     g.approval_hunk_cursor = 0;
@@ -1579,8 +1579,10 @@ pub(super) fn handle_key_event(
                             &req.tool,
                             &req.input,
                             &g.approval_hunk_selection,
+                            &g.workspace_root,
                         );
                         let all_selected = g.approval_hunk_selection.iter().all(|&s| s);
+                        let none_selected = !g.approval_hunk_selection.iter().any(|&s| s);
                         g.approval_hunk_mode = false;
                         g.approval_hunk_selection.clear();
                         g.active_approval = None;
@@ -1591,15 +1593,25 @@ pub(super) fn handle_key_event(
                                     call_id,
                                     approved: true,
                                 });
+                            } else if none_selected {
+                                let _ = tx.send(ApprovalAnswer::Verdict {
+                                    call_id,
+                                    approved: false,
+                                });
                             } else if let Some(modified) = modified_input {
                                 let _ = tx.send(ApprovalAnswer::ModifiedApproval {
                                     call_id,
                                     modified_input: modified,
                                 });
                             } else {
+                                // The file changed since the prompt: never
+                                // apply more than was chosen.
+                                g.push_error(
+                                    "Couldn't apply only the chosen hunks (the file changed) — denied".into(),
+                                );
                                 let _ = tx.send(ApprovalAnswer::Verdict {
                                     call_id,
-                                    approved: true,
+                                    approved: false,
                                 });
                             }
                         }

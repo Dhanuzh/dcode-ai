@@ -395,6 +395,7 @@ fn approval_box(g: &TuiSessionState, req: &ApprovalRequest, inner_w: usize) -> P
     if g.approval_hunk_mode && !g.approval_hunk_selection.is_empty() {
         lines.extend(approval_hunk_lines(
             req,
+            &g.workspace_root,
             &g.approval_hunk_selection,
             g.approval_hunk_cursor,
             inner_w,
@@ -478,8 +479,13 @@ fn approval_box(g: &TuiSessionState, req: &ApprovalRequest, inner_w: usize) -> P
         g.approval_option_index.min(2),
         inner_w,
     ));
-    if is_edit {
-        lines.push(muted("h review hunks"));
+    // Offered when the edit splits into more than one hunk to choose from.
+    if is_edit
+        && crate::tui::diff_hunk::extract_approval_hunks(&req.tool, &req.input, &g.workspace_root)
+            .len()
+            > 1
+    {
+        lines.push(muted("h choose which hunks to apply"));
     }
     PromptBox {
         title,

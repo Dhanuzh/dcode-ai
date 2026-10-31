@@ -369,12 +369,13 @@ pub(crate) fn render_info_modal(frame: &mut ratatui::Frame<'_>, area: Rect, g: &
 /// Per-hunk staging view for a file-edit approval (`h`).
 pub(crate) fn approval_hunk_lines(
     req: &ApprovalRequest,
+    root: &std::path::Path,
     hunk_selection: &[bool],
     hunk_cursor: usize,
     inner_w: usize,
 ) -> Vec<Line<'static>> {
     let mut lines: Vec<Line<'static>> = Vec::new();
-    let hunks = extract_approval_hunks(&req.tool, &req.input);
+    let hunks = extract_approval_hunks(&req.tool, &req.input, root);
     for (i, hunk) in hunks.iter().enumerate() {
         let accepted = hunk_selection.get(i).copied().unwrap_or(true);
         let is_focused = i == hunk_cursor;

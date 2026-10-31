@@ -1108,6 +1108,7 @@ impl Repl {
                 self.runtime.messages(),
             ),
             use_worktree: false,
+            explore: false,
             focus_files: changed,
             // The reviewer has no edit tools; auto mode lets it run checks
             // while risky commands are still refused.

@@ -5,8 +5,9 @@ branding:
   color: orange
 inputs:
   prompt:
-    description: The task for the agent
-    required: true
+    description: The task for the agent (not needed with security-review)
+    required: false
+    default: ""
   model:
     description: Model id or alias (e.g. gpt-5-mini, claude-sonnet-5)
     required: false
@@ -31,13 +32,25 @@ inputs:
     description: Stop at this estimated cost in USD (empty = no limit)
     required: false
     default: ""
+  security-review:
+    description: Review this branch's changes against this base (e.g. origin/main) for security issues instead of a task
+    required: false
+    default: ""
+  sarif:
+    description: Write the security findings as SARIF 2.1.0 to this file (for github/codeql-action/upload-sarif)
+    required: false
+    default: ""
+  fail-on:
+    description: Fail (exit 3) when a verified finding is at least this severe (low, medium, high)
+    required: false
+    default: ""
   version:
     description: dcode-ai release to install (empty = latest)
     required: false
     default: ""
 outputs:
   status:
-    description: completed, failed or budget_exceeded
+    description: completed, failed, budget_exceeded or findings
     value: ${{ steps.run.outputs.status }}
   result-file:
     description: Path of the JSON result
@@ -61,8 +74,18 @@ runs:
         DCODE_AI_DEFAULT_PROVIDER: ${{ inputs.provider }}
         COPILOT_GITHUB_TOKEN: ${{ inputs.copilot-token }}
         DCODE_AI_PROMPT: ${{ inputs.prompt }}
+        DCODE_AI_SECURITY_BASE: ${{ inputs.security-review }}
+        DCODE_AI_SARIF: ${{ inputs.sarif }}
+        DCODE_AI_FAIL_ON: ${{ inputs.fail-on }}
       run: |
-        args=(ci --prompt "$DCODE_AI_PROMPT" --output "$RUNNER_TEMP/dcode-ai-result.json")
+        args=(ci --output "$RUNNER_TEMP/dcode-ai-result.json")
+        if [ -n "$DCODE_AI_SECURITY_BASE" ]; then
+          args+=(--security-review "$DCODE_AI_SECURITY_BASE")
+        else
+          args+=(--prompt "$DCODE_AI_PROMPT")
+        fi
+        [ -n "$DCODE_AI_SARIF" ] && args+=(--sarif "$DCODE_AI_SARIF")
+        [ -n "$DCODE_AI_FAIL_ON" ] && args+=(--fail-on "$DCODE_AI_FAIL_ON")
         [ -n "${{ inputs.model }}" ] && args+=(--model "${{ inputs.model }}")
         [ "${{ inputs.allow-writes }}" = "true" ] && args+=(--allow-writes)
         [ "${{ inputs.allow-shell }}" = "true" ] && args+=(--allow-shell)

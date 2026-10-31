@@ -27,6 +27,7 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 | `Esc` | Interrupt the running turn |
 | `Esc` `Esc` | Rewind: pick a message, then restore code and conversation, conversation only, or code only |
 | `1` / `2` / `3` | Answer a permission prompt: yes · yes, don't ask again · no |
+| `h` (edit prompt) | Choose which hunks of an edit to apply (Space toggles, Enter applies the chosen ones; none chosen = no) |
 | `Tab` | Complete `@file` or `/command`; otherwise cycle the agent profile |
 | `@` | Fuzzy file and folder search (`@gitint`, `@src/tui/`); `.gitignore` respected |
 | `!` | Shell mode: the line runs as a shell command (pink `!` prompt) |
@@ -87,7 +88,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/theme` | Theme picker with live preview |
 | `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
 | `/permissions` | List rules; `allow`/`ask`/`deny`/`remove <rule>` to edit them; `mode` for the mode picker |
-| `/context`, `/cost`, `/usage`, `/stats` | `/context`: what fills the window (system prompt, skills, tools, MCP tools, summary, conversation, and what the provider counted beyond that); `/usage`: fresh input, cache reads / writes, output, cache hit rate, Claude process restarts; `/stats`: tokens per day and per project over the last 14 days. Dollar estimates show only on the API backend: on a Claude plan or Copilot they would mislead |
+| `/context`, `/cost`, `/usage`, `/stats` | `/context`: what fills the window (system prompt, skills, tools, MCP tools, summary, conversation, and what the provider counted beyond that); `/usage`: fresh input, cache reads / writes, output, cache hit rate, Claude process restarts and why (history rewritten, prompt or tools changed, process ended), and requests that missed the cache; `/stats`: tokens per day and per project over the last 14 days. Dollar estimates show only on the API backend: on a Claude plan or Copilot they would mislead |
 | `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept). It also happens on its own: before a turn once the context is 70% full, and in the middle of a long turn from 85% |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation (in git workspaces also files changed by shell commands) |
 | `/diff` | Full-screen diff of every changed file (↑↓ file · Tab · `n`/`p` hunk · `r r` revert hunk · `q` close); `/diff <args>` prints a git diff |
@@ -132,6 +133,10 @@ dcode-ai -p "…" --max-turns 20
 
 dcode-ai spawn --prompt "…"       # detached session
 dcode-ai attach <id>              # follow its live output
+dcode-ai attach <id> --ssh me@server --dir ~/app   # …of a session on another machine
+dcode-ai remote me@server --dir ~/app --keep       # use dcode-ai on a server from here (tmux keeps it running)
+dcode-ai session export <id> [-o f]  # one file to hand a teammate, secrets masked
+dcode-ai session import <file>       # add it here; /resume finds it
 dcode-ai status                   # running sessions
 dcode-ai sessions [--all]         # saved sessions (--all includes sub-agents)
 dcode-ai logs <id>                # replay the event log
@@ -247,7 +252,9 @@ The shell sandbox allows writes there as well.
 
 ## Sub-agents
 
-The agent delegates with `spawn_subagent`. Each child:
+The agent delegates with `spawn_subagent`. For lookups it can use
+`explore: true`: a read-only child (plan mode, no worktree) on the cheap
+utility model (`[model] compact_model`, else Haiku on Claude). Each child:
 
 - gets its own session id, linked to the parent in metadata;
 - starts from a summary of the parent conversation;
@@ -458,7 +465,8 @@ element is found again by what it is, not its number). Screenshots are shown
 to models that can see images (API backend, Copilot). When the tab it drives is closed or blank and you are on
 another tab, it follows yours.
 
-To keep requests small, a click, key press, scroll, `wait_for` or submitted
+`find {query}` returns only the elements and text that mention the query,
+which is much smaller than a snapshot. To keep requests small, a click, key press, scroll, `wait_for` or submitted
 form on the same page returns only what changed (new elements, new text);
 the agent asks for a full `snapshot` when it needs one. An element keeps its
 number until the page is left. Rewinding code and conversation (`Esc Esc`)

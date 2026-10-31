@@ -33,6 +33,8 @@ pub struct SpawnRequest {
     pub agent: Option<String>,
     pub focus_files: Vec<String>,
     pub use_worktree: bool,
+    /// Read-only research: plan mode, no worktree, the cheap utility model.
+    pub explore: bool,
     /// The parent's permission mode when the call was made.
     pub parent_mode: Option<dcode_ai_common::config::PermissionMode>,
     /// Return at once and report completion with a notification.
@@ -190,6 +192,10 @@ impl SpawnSubagentTool {
                         "items": { "type": "string" },
                         "description": "Optional list of file paths the sub-agent should focus on."
                     },
+                    "explore": {
+                        "type": "boolean",
+                        "description": "Read-only research (find code, read, summarize): runs on a fast, cheap model with read-only tools and no worktree. Use it for lookups; not for changes."
+                    },
                     "use_worktree": {
                         "type": "boolean",
                         "description": "If true, the sub-agent runs in an isolated git worktree branch. Defaults to true."
@@ -230,7 +236,9 @@ impl SpawnSubagentTool {
             })
             .unwrap_or_default();
 
-        let use_worktree = call.input["use_worktree"].as_bool().unwrap_or(true);
+        let explore = call.input["explore"].as_bool().unwrap_or(false);
+        // Explorers only read: no worktree to create and clean up.
+        let use_worktree = !explore && call.input["use_worktree"].as_bool().unwrap_or(true);
         let background = call.input["run_in_background"]
             .as_bool()
             .unwrap_or_else(|| {
@@ -245,6 +253,7 @@ impl SpawnSubagentTool {
             agent,
             focus_files,
             use_worktree,
+            explore,
             parent_mode: self
                 .parent_mode
                 .as_ref()

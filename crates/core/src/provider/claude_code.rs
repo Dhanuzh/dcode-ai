@@ -66,6 +66,19 @@ pub static SESSION_STARTS: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// summaries, titles).
 pub static ONE_SHOTS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Why conversation processes were restarted (each restart re-sends the
+/// conversation without the cache): system prompt / model / effort changed,
+/// a tool's schema changed, history rewritten (compaction, rewind), the
+/// process ended.
+pub static RESTART_PROMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static RESTART_TOOLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static RESTART_HISTORY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static RESTART_ENDED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn count(counter: &std::sync::atomic::AtomicU64) {
+    counter.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 struct CcSession {
     child: Child,
     stdin: ChildStdin,
@@ -158,10 +171,12 @@ impl Provider for ClaudeCodeProvider {
                     tools = tools.len(),
                     "claude-code: system prompt or tools changed; starting a new process"
                 );
+                count(&RESTART_PROMPT);
                 return None;
             }
             if !matches!(s.child.try_wait(), Ok(None)) {
                 tracing::info!("claude-code: process ended; starting a new one");
+                count(&RESTART_ENDED);
                 return None;
             }
             // A tool whose schema changed can't be announced as "new".
@@ -170,6 +185,7 @@ impl Provider for ClaudeCodeProvider {
                 .any(|(n, h)| s.tools_sent.get(n).is_some_and(|old| old != h))
             {
                 tracing::info!("claude-code: a tool's schema changed; starting a new process");
+                count(&RESTART_TOOLS);
                 return None;
             }
             let new = new_messages_since(conversation, &hashes, &s.sent);
@@ -186,6 +202,7 @@ impl Provider for ClaudeCodeProvider {
                     same_prefix = same,
                     "claude-code: history changed; replaying it in a new process"
                 );
+                count(&RESTART_HISTORY);
             }
             new
         });

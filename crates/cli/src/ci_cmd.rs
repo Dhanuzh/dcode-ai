@@ -39,6 +39,17 @@ pub struct CiArgs {
     /// Live progress on stdout before the JSON result: off (default), human, ndjson
     #[arg(long, value_enum, default_value_t = StreamMode::Off)]
     pub stream: StreamMode,
+    /// Run the security review of this branch's changes against BASE
+    /// (e.g. origin/main) instead of a task; findings are verified or
+    /// marked unverified
+    #[arg(long, value_name = "BASE")]
+    pub security_review: Option<String>,
+    /// Write the review's findings as SARIF 2.1.0 (GitHub code scanning)
+    #[arg(long)]
+    pub sarif: Option<PathBuf>,
+    /// Exit 3 when a verified finding is at least this severe
+    #[arg(long, value_enum)]
+    pub fail_on: Option<crate::security_findings::Severity>,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -52,12 +63,15 @@ pub struct CiResult {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub estimated_cost_usd: f64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub findings: Vec<crate::security_findings::Finding>,
 }
 
 impl CiResult {
     pub fn exit_code(&self) -> u8 {
         match self.status {
             "completed" => 0,
+            "findings" => 3,
             "budget_exceeded" => 2,
             _ => 1,
         }
@@ -67,6 +81,7 @@ impl CiResult {
     pub fn markdown(&self) -> String {
         let icon = match self.status {
             "completed" => "✅",
+            "findings" => "🛡️",
             "budget_exceeded" => "💸",
             _ => "❌",
         };
@@ -96,6 +111,14 @@ impl CiResult {
 }
 
 fn read_prompt(args: &CiArgs) -> anyhow::Result<String> {
+    if let Some(base) = &args.security_review {
+        let def = dcode_ai_core::agent_defs::security_reviewer();
+        return Ok(format!(
+            "{}\n\nTask: review the changes on this branch against `{base}` \
+             (git diff {base}...HEAD).",
+            def.prompt
+        ));
+    }
     let text = match (&args.prompt, &args.prompt_file) {
         (Some(p), None) => p.clone(),
         (None, Some(path)) if path.as_os_str() == "-" => std::io::read_to_string(std::io::stdin())?,
@@ -215,8 +238,23 @@ pub async fn run(
         t.abort();
     }
 
+    let findings = crate::security_findings::parse(&output);
+    let status = match args.fail_on {
+        Some(t) if status == "completed" && crate::security_findings::fails(&findings, t) => {
+            "findings"
+        }
+        _ => status,
+    };
+    if let Some(path) = &args.sarif {
+        std::fs::write(
+            path,
+            serde_json::to_string_pretty(&crate::security_findings::sarif(&findings))?,
+        )?;
+    }
+
     let snap = runtime.snapshot();
     let result = CiResult {
+        findings,
         status,
         session_id: snap.id.clone(),
         model: snap.model.clone(),
@@ -265,7 +303,13 @@ mod tests {
             input_tokens: 10,
             output_tokens: 5,
             estimated_cost_usd: 0.0123,
+            findings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn verified_findings_get_their_own_exit_code() {
+        assert_eq!(result("findings").exit_code(), 3);
     }
 
     #[test]

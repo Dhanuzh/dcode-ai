@@ -153,6 +153,7 @@ pub fn spawn_subagent_consumer(
                 parent_summary,
                 use_worktree: req.use_worktree,
                 focus_files: req.focus_files,
+                explore: req.explore,
                 parent_mode: req.parent_mode,
                 child_id: None,
                 approval: req.approval.clone(),
@@ -572,6 +573,8 @@ pub struct ChildSessionConfig {
     pub parent_summary: String,
     pub use_worktree: bool,
     pub focus_files: Vec<String>,
+    /// Read-only research on the cheap utility model (plan mode).
+    pub explore: bool,
     /// The parent's permission mode when it spawned the child (falls back to
     /// the configured mode).
     pub parent_mode: Option<dcode_ai_common::config::PermissionMode>,
@@ -641,6 +644,32 @@ pub fn child_permission_mode(
     }
 }
 
+/// The child's permission mode and model. Explorers only read and take the
+/// cheap utility model (Haiku on Claude); an agent definition's own model
+/// wins, then `[model] subagent_model`.
+fn child_mode_and_model(
+    cfg: &ChildSessionConfig,
+) -> (dcode_ai_common::config::PermissionMode, Option<String>) {
+    let mode = if cfg.explore {
+        dcode_ai_common::config::PermissionMode::Plan
+    } else {
+        child_permission_mode(cfg.parent_mode.unwrap_or(cfg.config.permissions.mode))
+    };
+    let model = cfg
+        .agent
+        .as_ref()
+        .and_then(|a| a.model.clone())
+        .or_else(|| {
+            if cfg.explore {
+                super::utility_model(&cfg.config)
+            } else {
+                None
+            }
+        })
+        .or_else(|| cfg.config.model.subagent_model.clone());
+    (mode, model)
+}
+
 /// Result of a spawned child session.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChildSessionResult {
@@ -659,14 +688,8 @@ pub async fn spawn_child_session(
     event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 ) -> Result<ChildSessionResult, String> {
     let mut child_config = cfg.config.clone();
-    child_config.permissions.mode =
-        child_permission_mode(cfg.parent_mode.unwrap_or(cfg.config.permissions.mode));
-    // The agent definition's model wins, then `[model] subagent_model`.
-    let routed = cfg
-        .agent
-        .as_ref()
-        .and_then(|a| a.model.clone())
-        .or_else(|| cfg.config.model.subagent_model.clone());
+    let (mode, routed) = child_mode_and_model(&cfg);
+    child_config.permissions.mode = mode;
     if let Some(model) = routed {
         apply_agent_model(&mut child_config, &model);
     }
@@ -993,6 +1016,33 @@ mod tests {
             build_compaction_preview_summary(&context_manager, &messages),
             "Earlier conversation context was compacted due to token limits."
         );
+    }
+
+    #[test]
+    fn explorers_read_only_on_the_cheap_model() {
+        let mut config = DcodeAiConfig::default();
+        config.provider.default = dcode_ai_common::config::ProviderKind::Anthropic;
+        config.model.subagent_model = Some("sonnet".into());
+        let cfg = |explore| ChildSessionConfig {
+            parent_session_id: "p".into(),
+            task: "find it".into(),
+            agent: None,
+            workspace_root: PathBuf::from("/w"),
+            config: config.clone(),
+            parent_summary: String::new(),
+            use_worktree: false,
+            focus_files: Vec::new(),
+            explore,
+            parent_mode: Some(dcode_ai_common::config::PermissionMode::Auto),
+            child_id: None,
+            approval: None,
+        };
+        let (mode, model) = child_mode_and_model(&cfg(true));
+        assert_eq!(mode, dcode_ai_common::config::PermissionMode::Plan);
+        assert!(model.unwrap().contains("haiku"));
+        let (mode, model) = child_mode_and_model(&cfg(false));
+        assert_eq!(mode, dcode_ai_common::config::PermissionMode::Auto);
+        assert_eq!(model.as_deref(), Some("sonnet"));
     }
 
     #[test]

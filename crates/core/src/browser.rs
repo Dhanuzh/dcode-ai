@@ -610,6 +610,72 @@ async fn changes(page: &Page) -> Result<String, String> {
     })
 }
 
+/// `find`: only the parts of the page that mention `query`.
+async fn find(page: &Page, query: &str) -> Result<String, String> {
+    let js = SNAPSHOT_JS.replace("MAX", "1000").replace("TEXT", "200000");
+    let raw = page.eval(&js).await?;
+    let v: Value = serde_json::from_str(raw.as_str().unwrap_or("{}")).map_err(|e| e.to_string())?;
+    note_url(&v);
+    Ok(format_find(&v, query))
+}
+
+/// Most matches `find` lists (elements, and text lines).
+const MAX_FIND: usize = 30;
+
+fn format_find(v: &Value, query: &str) -> String {
+    let q = query.trim().to_lowercase();
+    let mut out = format!(
+        "Page: {}\nURL: {}\nMatches for {query:?}:\n",
+        v["title"].as_str().unwrap_or(""),
+        v["url"].as_str().unwrap_or("")
+    );
+    let elements: Vec<&str> = v["elements"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let hits: Vec<&&str> = elements
+        .iter()
+        .filter(|e| e.to_lowercase().contains(&q))
+        .collect();
+    if !hits.is_empty() {
+        out.push_str("\nElements:\n");
+        for e in hits.iter().take(MAX_FIND) {
+            out.push_str(e);
+            out.push('\n');
+        }
+        if hits.len() > MAX_FIND {
+            out.push_str(&format!("… {} more\n", hits.len() - MAX_FIND));
+        }
+    }
+    let lines: Vec<&str> = v["text"]
+        .as_str()
+        .unwrap_or("")
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    let text_hits: Vec<&str> = lines
+        .iter()
+        .copied()
+        .filter(|l| l.to_lowercase().contains(&q))
+        .collect();
+    if !text_hits.is_empty() {
+        out.push_str("\nText:\n");
+        for l in text_hits.iter().take(MAX_FIND) {
+            let clipped: String = l.chars().take(300).collect();
+            out.push_str(&clipped);
+            out.push('\n');
+        }
+        if text_hits.len() > MAX_FIND {
+            out.push_str(&format!("… {} more\n", text_hits.len() - MAX_FIND));
+        }
+    }
+    if hits.is_empty() && text_hits.is_empty() {
+        out.push_str("\nNothing on the page mentions that. `snapshot` shows the whole page.\n");
+    }
+    out
+}
+
 /// Most changed text lines listed after an action.
 const MAX_CHANGED_LINES: usize = 40;
 
@@ -1050,6 +1116,14 @@ async fn run_page_action(
             snapshot(page).await
         }
         "snapshot" | "read" => snapshot(page).await,
+        "find" | "search" => {
+            let query = input["query"]
+                .as_str()
+                .or_else(|| input["text"].as_str())
+                .filter(|q| !q.trim().is_empty())
+                .ok_or("find needs `query`, the text to look for")?;
+            find(page, query).await
+        }
         "click" => {
             let (x, y, _) = locate(page, r()?).await?;
             click_at(page, x, y).await?;
@@ -1185,7 +1259,7 @@ async fn run_page_action(
 pub fn is_read_only_action(action: &str) -> bool {
     matches!(
         action,
-        "snapshot" | "read" | "screenshot" | "console" | "tabs"
+        "snapshot" | "read" | "find" | "search" | "screenshot" | "console" | "tabs"
     )
 }
 
@@ -1208,6 +1282,8 @@ impl ToolExecutor for BrowserTool {
             description: "Control a real web browser (Chrome/Edge, opened in its own window). \
                 Use it to open and test web pages and apps, fill forms and click through flows. \
                 Actions: navigate {url}; snapshot (the page as text with numbered elements); \
+                find {query} (only the elements and text that mention it — cheaper than a \
+                snapshot when you know what you are looking for); \
                 click {ref}; type {ref, text, submit?}; press {key} (Enter, Tab, Escape, \
                 ArrowDown…); scroll {direction: down|up}; back; screenshot (saves a PNG); \
                 console (log and errors); eval {expression} (run JavaScript); tabs (list open \
@@ -1224,9 +1300,10 @@ impl ToolExecutor for BrowserTool {
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["navigate", "snapshot", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval", "tabs", "switch", "new_tab", "wait_for", "steps", "replay"]
+                        "enum": ["navigate", "snapshot", "find", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval", "tabs", "switch", "new_tab", "wait_for", "steps", "replay"]
                     },
                     "tab": {"type": "integer", "description": "Tab number from `tabs` (for switch)"},
+                    "query": {"type": "string", "description": "find: text to look for (case-insensitive)"},
                     "gone": {"type": "boolean", "description": "wait_for: wait until the text is gone"},
                     "timeout_ms": {"type": "integer"},
                     "file": {"type": "string", "description": "replay: steps file, e.g. .dcode-ai/browser-steps/login.json"},
@@ -1355,6 +1432,18 @@ pub async fn close() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_lists_only_matching_elements_and_text() {
+        let v = json!({"title": "T", "url": "u",
+            "elements": ["[4] button \"Save draft\"", "[7] link \"Home\"", "[9] button \"Save\""],
+            "text": "Welcome\nRelease 1.2 saved\nOther"});
+        let out = format_find(&v, "save");
+        assert!(out.contains("[4] button") && out.contains("[9] button"));
+        assert!(!out.contains("Home") && !out.contains("Welcome"));
+        assert!(out.contains("Release 1.2 saved"));
+        assert!(format_find(&v, "zzz").contains("Nothing on the page"));
+    }
 
     #[test]
     fn changes_list_only_what_is_new_on_the_same_page() {

@@ -658,6 +658,11 @@ impl Supervisor {
     /// Input + output tokens this session has used.
     /// `(fresh input, output, cache reads, cache writes, estimated $)` for
     /// the session so far.
+    /// Requests that missed the provider's cache, and the tokens they wrote.
+    pub fn cold_requests(&self) -> (u64, u64) {
+        (self.agent.cold_requests, self.agent.cold_tokens)
+    }
+
     pub fn usage_breakdown(&self) -> (u64, u64, u64, u64, f64) {
         let c = &self.agent.cost_tracker;
         (
@@ -2280,7 +2285,7 @@ impl ApprovalHandler for AutoDenyHandler {
 
 /// A cheap model for small side questions (auto mode's command check):
 /// `[model] compact_model` when set, Haiku on Claude, else the main model.
-fn utility_model(config: &DcodeAiConfig) -> Option<String> {
+pub(crate) fn utility_model(config: &DcodeAiConfig) -> Option<String> {
     if let Some(m) = config.model.compact_model.as_deref() {
         return Some(config.model.resolve_alias(m));
     }

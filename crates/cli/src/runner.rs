@@ -348,6 +348,10 @@ impl SessionRuntime {
         self.supervisor.usage_breakdown()
     }
 
+    pub fn cold_requests(&self) -> (u64, u64) {
+        self.supervisor.cold_requests()
+    }
+
     pub fn tokens_processed(&self) -> u64 {
         self.supervisor.tokens_processed()
     }

@@ -133,71 +133,78 @@ pub(crate) fn apply_selected_hunks(old: &str, new: &str, selected: &[bool]) -> S
     result
 }
 
-/// Extract old/new content from approval request and compute diff hunks.
-pub(crate) fn extract_approval_hunks(tool: &str, input_json: &str) -> Vec<DiffHunk> {
-    let lower = tool.to_ascii_lowercase();
-    if !lower.contains("write") && !lower.contains("edit") && !lower.contains("patch") {
-        return Vec::new();
-    }
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(input_json) else {
-        return Vec::new();
-    };
-    let path = val
-        .get("path")
-        .or_else(|| val.get("file"))
-        .or_else(|| val.get("filename"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let new_content = val
-        .get("content")
-        .or_else(|| val.get("new_content"))
-        .or_else(|| val.get("text"))
-        .and_then(|v| v.as_str());
-    let old_content = if !path.is_empty() {
-        std::fs::read_to_string(path).ok()
+/// The file an approval would change, as `(path, current, proposed)`:
+/// `write_file` (full content) and `edit_file` (`old_text` → `new_text`,
+/// optionally `replace_all`). Paths are relative to `root`. `None` for other
+/// tools, or when the proposal can't be worked out (then hunks aren't
+/// offered and the edit is approved or denied whole).
+fn approval_change(
+    tool: &str,
+    input_json: &str,
+    root: &std::path::Path,
+) -> Option<(String, String, String)> {
+    let val = serde_json::from_str::<serde_json::Value>(input_json).ok()?;
+    let field = |names: &[&str]| names.iter().find_map(|n| val.get(*n)?.as_str());
+    let path = field(&["path", "file", "filename", "file_path"])?.to_string();
+    let full = if std::path::Path::new(&path).is_absolute() {
+        std::path::PathBuf::from(&path)
     } else {
-        None
+        root.join(&path)
     };
-    match (old_content.as_deref(), new_content) {
-        (Some(old), Some(new)) => parse_diff_hunks(old, new),
-        _ => Vec::new(),
+    let tool = tool.to_ascii_lowercase();
+    if tool == "write_file" {
+        let new = field(&["content", "new_content", "text"])?.to_string();
+        let old = std::fs::read_to_string(&full).unwrap_or_default();
+        return Some((path, old, new));
     }
+    if tool == "edit_file" {
+        let old_text = field(&["old_text", "old_string"])?;
+        let new_text = field(&["new_text", "new_string"])?;
+        let old = std::fs::read_to_string(&full).ok()?;
+        if old_text.is_empty() || !old.contains(old_text) {
+            return None;
+        }
+        let all = val.get("replace_all").and_then(|v| v.as_bool()) == Some(true);
+        let new = if all {
+            old.replace(old_text, new_text)
+        } else {
+            old.replacen(old_text, new_text, 1)
+        };
+        return Some((path, old, new));
+    }
+    None
 }
 
-/// Build modified tool input with only selected hunks applied.
+/// Diff hunks of a file-edit approval (empty when hunks can't be offered).
+pub(crate) fn extract_approval_hunks(
+    tool: &str,
+    input_json: &str,
+    root: &std::path::Path,
+) -> Vec<DiffHunk> {
+    approval_change(tool, input_json, root)
+        .map(|(_, old, new)| parse_diff_hunks(&old, &new))
+        .unwrap_or_default()
+}
+
+/// Marker in a modified approval input: run the call as `write_file` with
+/// this content (a partial `edit_file` can't be expressed as an edit).
+pub const PARTIAL_WRITE_MARKER: &str = "__dcode_partial_write";
+
+/// Tool input for applying only the selected hunks: `{path, content}` with
+/// the old file plus the chosen hunks, marked to run as `write_file`.
 pub(crate) fn build_hunk_modified_input(
     tool: &str,
     input_json: &str,
     selection: &[bool],
+    root: &std::path::Path,
 ) -> Option<serde_json::Value> {
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(input_json) else {
-        return None;
-    };
-    let path = val
-        .get("path")
-        .or_else(|| val.get("file"))
-        .or_else(|| val.get("filename"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let new_content = val
-        .get("content")
-        .or_else(|| val.get("new_content"))
-        .or_else(|| val.get("text"))
-        .and_then(|v| v.as_str())?;
-    let old_content = std::fs::read_to_string(path).ok()?;
-    let patched = apply_selected_hunks(&old_content, new_content, selection);
-    let lower = tool.to_ascii_lowercase();
-    if lower.contains("write") {
-        let mut modified = val.clone();
-        if modified.get("content").is_some() {
-            modified["content"] = serde_json::Value::String(patched);
-        } else if modified.get("text").is_some() {
-            modified["text"] = serde_json::Value::String(patched);
-        }
-        Some(modified)
-    } else {
-        None
-    }
+    let (path, old, new) = approval_change(tool, input_json, root)?;
+    let patched = apply_selected_hunks(&old, &new, selection);
+    Some(serde_json::json!({
+        "path": path,
+        "content": patched,
+        PARTIAL_WRITE_MARKER: true,
+    }))
 }
 
 pub(crate) fn parse_unified_hunk_header(line: &str) -> Option<(usize, usize)> {
@@ -224,4 +231,40 @@ pub(crate) fn parse_unified_hunk_header(line: &str) -> Option<(usize, usize)> {
         .parse::<usize>()
         .ok()?;
     Some((old_start, new_start))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn edit_file_hunks_apply_only_the_chosen_part() {
+        let dir = tempfile::tempdir().unwrap();
+        let old: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(dir.path().join("a.txt"), &old).unwrap();
+        // One edit spanning two far-apart changes → two hunks.
+        let old_text: String = (2..=30).map(|i| format!("line {i}\n")).collect();
+        let new_text = old_text
+            .replace("line 2\n", "line TWO\n")
+            .replace("line 30\n", "line THIRTY\n");
+        let input =
+            serde_json::json!({"path": "a.txt", "old_text": old_text, "new_text": new_text})
+                .to_string();
+        let hunks = extract_approval_hunks("edit_file", &input, dir.path());
+        assert_eq!(hunks.len(), 2);
+        let modified =
+            build_hunk_modified_input("edit_file", &input, &[true, false], dir.path()).unwrap();
+        let content = modified["content"].as_str().unwrap();
+        assert!(content.contains("line TWO") && content.contains("line 30\n"));
+        assert!(!content.contains("THIRTY"));
+        assert_eq!(modified[PARTIAL_WRITE_MARKER], true);
+    }
+
+    #[test]
+    fn unknown_tools_offer_no_hunks() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(extract_approval_hunks("apply_patch", "{}", dir.path()).is_empty());
+        let missing = serde_json::json!({"path": "nope.txt", "old_text": "a", "new_text": "b"});
+        assert!(extract_approval_hunks("edit_file", &missing.to_string(), dir.path()).is_empty());
+    }
 }

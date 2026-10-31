@@ -1,6 +1,37 @@
 # Changelog
 
-## 1.0.29 — 2026-10-31
+## 1.0.30 — 2026-10-31
+
+### New
+- **Cheap explore sub-agents**: `spawn_subagent {explore: true}` runs a
+  read-only lookup (no worktree) on Haiku / `[model] compact_model`.
+- **Browser `find {query}`**: only the elements and text that mention it,
+  instead of a whole snapshot.
+- **`/usage` explains cache misses**: why the Claude process restarted
+  (history rewritten, prompt or tools changed, process ended) and how many
+  requests re-sent the prompt without the cache.
+- **`dcode-ai remote <host> [--dir] [--keep]`**: use dcode-ai on a server
+  over SSH (`--keep` runs it in tmux there so it survives disconnects);
+  `attach <id> --ssh host` follows a server session.
+- **`dcode-ai session export|import`**: hand a session to a teammate as one
+  file, secrets and your home folder masked; it shows up in `/resume`.
+- **Verified security findings** (idea from Shannon's "no exploit, no
+  report"): the security reviewer traces each finding from input to sink
+  and marks it verified or unverified. `dcode-ai ci --security-review
+  <base> --sarif <file> --fail-on high` writes SARIF for GitHub code
+  scanning and fails only on verified findings (exit 3); the GitHub Action
+  has matching inputs.
+- A test drives the real terminal UI in a pseudo-terminal on every CI run:
+  startup, typing, a bracketed paste and a key-burst paste staying in the
+  prompt, Shift+Tab, the dashboard, quitting.
+
+### Fixed
+- Choosing hunks (`h`) in an `edit_file` approval applied the **whole**
+  edit; now only the chosen hunks are written (and the model is told). It
+  works for `edit_file` and `write_file`, paths are taken from the
+  workspace, choosing none denies, and the `h` hint shows only when there
+  is more than one hunk.
+
 
 ### Uses less of your plan
 - **Browser results by difference**: after a click, key press, scroll,
