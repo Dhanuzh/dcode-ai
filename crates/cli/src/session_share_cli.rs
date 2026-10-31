@@ -10,6 +10,44 @@ use serde_json::{Value, json};
 
 const FORMAT: &str = "dcode-session/1";
 
+/// A note for the teammate who picks a session up (`/handoff`).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Handoff {
+    pub from: String,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub note: String,
+    /// The agent's open todo list, if it had one.
+    pub todo: Option<String>,
+    /// Files changed in the working tree when it was handed off.
+    pub changed_files: Vec<String>,
+}
+
+impl Handoff {
+    /// The note as shown to the teammate and given to the agent.
+    pub fn text(&self) -> String {
+        let mut t = format!(
+            "Handoff from {} ({}):\n{}",
+            self.from,
+            self.at.format("%Y-%m-%d %H:%M UTC"),
+            if self.note.trim().is_empty() {
+                "(no note)"
+            } else {
+                self.note.trim()
+            }
+        );
+        if let Some(todo) = self.todo.as_deref().filter(|t| !t.trim().is_empty()) {
+            t.push_str(&format!("\n\nOpen items:\n{}", todo.trim()));
+        }
+        if !self.changed_files.is_empty() {
+            t.push_str("\n\nChanged files:\n");
+            for f in &self.changed_files {
+                t.push_str(&format!("- {f}\n"));
+            }
+        }
+        t
+    }
+}
+
 /// One session as a shareable bundle: state and event log, masked.
 pub fn bundle(state: &SessionState, events: &str) -> anyhow::Result<Value> {
     let masked = dcode_ai_cli::share::mask(&serde_json::to_string(state)?);
@@ -65,6 +103,16 @@ pub async fn export(
     id: &str,
     output: Option<PathBuf>,
 ) -> anyhow::Result<PathBuf> {
+    export_with(sessions_dir, id, output, None).await
+}
+
+/// [`export`] with a handoff note for whoever imports it.
+pub async fn export_with(
+    sessions_dir: &Path,
+    id: &str,
+    output: Option<PathBuf>,
+    handoff: Option<Handoff>,
+) -> anyhow::Result<PathBuf> {
     let store = SessionStore::new(sessions_dir);
     let state = store
         .load(id)
@@ -73,7 +121,12 @@ pub async fn export(
     let events = std::fs::read_to_string(sessions_dir.join(format!("{id}.events.jsonl")))
         .unwrap_or_default();
     let out = output.unwrap_or_else(|| PathBuf::from(format!("{id}.dcode-session")));
-    std::fs::write(&out, serde_json::to_string(&bundle(&state, &events)?)?)?;
+    let mut value = bundle(&state, &events)?;
+    if let Some(h) = handoff {
+        let masked = dcode_ai_cli::share::mask(&serde_json::to_string(&h)?);
+        value["handoff"] = serde_json::from_str(&masked)?;
+    }
+    std::fs::write(&out, serde_json::to_string(&value)?)?;
     Ok(out)
 }
 
@@ -81,7 +134,25 @@ pub async fn import(sessions_dir: &Path, workspace: &Path, file: &Path) -> anyho
     let text = std::fs::read_to_string(file)
         .map_err(|e| anyhow::anyhow!("could not read {}: {e}", file.display()))?;
     let value: Value = serde_json::from_str(&text)?;
-    let (state, events) = unbundle(&value, workspace)?;
+    let (mut state, mut events) = unbundle(&value, workspace)?;
+    // A handoff note: shown at the end of the transcript and given to the
+    // agent, so the teammate can just say "continue".
+    if let Ok(h) = serde_json::from_value::<Handoff>(value["handoff"].clone()) {
+        let text = h.text();
+        state
+            .messages
+            .push(dcode_ai_common::message::Message::user(format!(
+                "{text}\n\n(This session was handed over to me; continue from here.)"
+            )));
+        let notice = serde_json::json!({
+            "id": 0,
+            "event": {"type": "Notice", "message": format!("⇢ {text}")},
+        });
+        if !events.is_empty() {
+            events.push('\n');
+        }
+        events.push_str(&notice.to_string());
+    }
     std::fs::create_dir_all(sessions_dir)?;
     SessionStore::new(sessions_dir)
         .save(&state)
@@ -163,6 +234,47 @@ mod tests {
         );
         assert_eq!(loaded.meta.pid, None);
         assert!(other.join(format!("{id}.events.jsonl")).exists());
+    }
+
+    #[tokio::test]
+    async fn a_handoff_note_reaches_the_teammate_and_the_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        std::fs::create_dir_all(&sessions).unwrap();
+        let state: SessionState = serde_json::from_value(serde_json::json!({
+            "meta": {
+                "id": "s-2", "created_at": chrono::Utc::now(), "updated_at": chrono::Utc::now(),
+                "workspace": "/old", "model": "m", "status": "completed",
+                "pid": null, "socket_path": null, "child_session_ids": []
+            },
+            "messages": [], "total_input_tokens": 0, "total_output_tokens": 0,
+            "estimated_cost_usd": 0.0
+        }))
+        .unwrap();
+        SessionStore::new(&sessions).save(&state).await.unwrap();
+        let handoff = Handoff {
+            from: "dhanush".into(),
+            at: chrono::Utc::now(),
+            note: "login works; finish the logout page".into(),
+            todo: Some("- [ ] logout page".into()),
+            changed_files: vec!["src/auth.rs".into()],
+        };
+        let file = export_with(
+            &sessions,
+            "s-2",
+            Some(dir.path().join("h.dcode-session")),
+            Some(handoff),
+        )
+        .await
+        .unwrap();
+        let other = dir.path().join("teammate");
+        let id = import(&other, &dir.path().join("ws"), &file).await.unwrap();
+        let loaded = SessionStore::new(&other).load(&id).await.unwrap();
+        let last = loaded.messages.last().unwrap().content.to_summary_text();
+        assert!(last.contains("Handoff from dhanush") && last.contains("finish the logout page"));
+        assert!(last.contains("src/auth.rs") && last.contains("logout page"));
+        let log = std::fs::read_to_string(other.join(format!("{id}.events.jsonl"))).unwrap();
+        assert!(log.contains("\"Notice\"") && log.contains("Handoff from dhanush"));
     }
 
     #[test]

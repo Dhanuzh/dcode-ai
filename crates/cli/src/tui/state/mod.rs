@@ -116,6 +116,9 @@ impl TuiSessionState {
             turn_output_tokens: 0,
             started: Instant::now(),
             tool_started: HashMap::new(),
+            file_map: Default::default(),
+            timeline: Default::default(),
+            timeline_open: false,
             busy: false,
             current_busy_state: BusyState::Idle,
             busy_state_since: Instant::now(),
@@ -197,6 +200,7 @@ impl TuiSessionState {
             notifications_enabled: true,
             working_style: "bar".into(),
             shimmer: true,
+            sounds: false,
             backtrack_open: false,
             backtrack_index: 0,
             theme_picker_open: false,
@@ -1457,9 +1461,14 @@ impl TuiSessionState {
 
     /// Next/previous right-rail tab, keeping keyboard focus on the rail.
     pub fn cycle_rail_tab(&mut self, step: i32) {
-        const TABS: [RailTab; 3] = [RailTab::Context, RailTab::Changes, RailTab::Agents];
+        const TABS: [RailTab; 4] = [
+            RailTab::Context,
+            RailTab::Changes,
+            RailTab::Agents,
+            RailTab::Files,
+        ];
         let i = TABS.iter().position(|t| *t == self.rail_tab).unwrap_or(0) as i32;
-        self.rail_tab = TABS[(i + step).rem_euclid(3) as usize];
+        self.rail_tab = TABS[(i + step).rem_euclid(TABS.len() as i32) as usize];
         if self.rail_tab == RailTab::Changes {
             self.diff_review.refresh(&self.workspace_root);
         }
@@ -1781,6 +1790,10 @@ impl TuiSessionState {
 
     pub fn apply_event(&mut self, e: &AgentEvent) {
         let mut transcript_dirty = false;
+        self.timeline.apply(e);
+        if let AgentEvent::ToolCallStarted { tool, input, .. } = e {
+            self.file_map.touch(tool, input);
+        }
         match e {
             AgentEvent::SessionStarted {
                 session_id,

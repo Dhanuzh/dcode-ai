@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>__TITLE__ · dcode-ai live</title>
+<style>
+  :root {
+    --bg: #171412; --panel: #1f1b18; --line: #342d28; --text: #ece6df;
+    --muted: #8f857c; --accent: #d97757; --ok: #7fbf7f; --bad: #e06c75; --warn: #d9b257;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #faf8f5; --panel: #ffffff; --line: #e6e0d8; --text: #2b2420;
+      --muted: #8a8079; --accent: #c4613f; --ok: #3f8f3f; --bad: #c23b46; --warn: #a37a12; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  header { position: sticky; top: 0; z-index: 2; display: flex; align-items: center; gap: 12px;
+    padding: 12px 20px; background: var(--panel); border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; flex: 1;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .live { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .dot.on { background: var(--ok); animation: pulse 1.6s infinite; }
+  .dot.busy { background: var(--accent); animation: pulse .8s infinite; }
+  @keyframes pulse { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, currentColor 0%, transparent); opacity: 1 }
+    50% { opacity: .35 } 100% { opacity: 1 } }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) 300px; gap: 0; }
+  @media (max-width: 820px) { main { grid-template-columns: 1fr; } aside { border-left: 0; border-top: 1px solid var(--line); } }
+  #log { padding: 16px 20px 80px; }
+  .msg { margin: 0 0 14px; white-space: pre-wrap; word-break: break-word; }
+  .user { color: var(--text); padding-left: 14px; border-left: 2px solid var(--accent); }
+  .user::before { content: "› "; color: var(--accent); margin-left: -14px; }
+  .reply::before { content: "● "; color: var(--ok); }
+  .tool { color: var(--muted); font-size: 13px; margin: 0 0 6px 14px; }
+  .tool .name { color: var(--text); }
+  .tool.ok::after { content: " ✓"; color: var(--ok); }
+  .tool.bad::after { content: " ✗"; color: var(--bad); }
+  .tool.run::after { content: " …"; color: var(--accent); }
+  .note { color: var(--warn); font-size: 13px; margin: 0 0 10px 14px; }
+  .err { color: var(--bad); margin: 0 0 10px 14px; }
+  .typing { opacity: .85; }
+  aside { border-left: 1px solid var(--line); padding: 16px 18px; position: sticky; top: 49px;
+    align-self: start; max-height: calc(100vh - 49px); overflow: auto; }
+  aside h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 8px; }
+  .stat { display: flex; justify-content: space-between; color: var(--muted); font-size: 13px; }
+  .stat b { color: var(--text); font-weight: 500; }
+  #files { list-style: none; padding: 0; margin: 0 0 18px; font-size: 13px; }
+  #files li { display: flex; gap: 6px; padding: 2px 0; color: var(--muted); transition: color .6s; }
+  #files li.edit { color: var(--text); }
+  #files li.fresh { color: var(--accent); }
+  #files li .n { margin-left: auto; color: var(--muted); }
+  footer { position: fixed; bottom: 0; left: 0; right: 0; padding: 8px 20px; font-size: 12px;
+    color: var(--muted); background: var(--panel); border-top: 1px solid var(--line); }
+</style>
+</head>
+<body>
+<header>
+  <h1>✻ __TITLE__</h1>
+  <span class="live"><span id="dot" class="dot"></span><span id="state">connecting…</span></span>
+</header>
+<main>
+  <section id="log"></section>
+  <aside>
+    <h2>Activity</h2>
+    <div class="stat"><span>tool calls</span><b id="tools">0</b></div>
+    <div class="stat"><span>files edited</span><b id="edited">0</b></div>
+    <div class="stat"><span>tokens</span><b id="tokens">0</b></div>
+    <div class="stat" style="margin-bottom:18px"><span>context</span><b id="ctx">–</b></div>
+    <h2>Files touched</h2>
+    <ul id="files"></ul>
+  </aside>
+</main>
+<footer>Read-only live view of a dcode-ai session · nothing here can change it</footer>
+<script>
+(() => {
+  const log = document.getElementById('log');
+  const stateEl = document.getElementById('state');
+  const dot = document.getElementById('dot');
+  const files = new Map();
+  const tools = new Map();
+  let toolCount = 0, typing = null;
+  const EDITS = ['write_file','edit_file','apply_patch','replace_match','notebook_edit','delete_path','move_path','rename_path'];
+  const READS = ['read_file','list_directory','inspect_binary','query_symbols','copy_path'];
+
+  const el = (cls, text) => { const d = document.createElement('div'); d.className = cls; d.textContent = text; return d; };
+  const stick = () => (window.innerHeight + window.scrollY) >= document.body.scrollHeight - 80;
+  const add = (node) => { const s = stick(); log.appendChild(node); if (s) window.scrollTo(0, document.body.scrollHeight); };
+  const human = (n) => n >= 1e6 ? (n/1e6).toFixed(1)+'M' : n >= 1e3 ? (n/1e3).toFixed(1)+'k' : String(n);
+
+  function touch(tool, input) {
+    if (!EDITS.includes(tool) && !READS.includes(tool)) return null;
+    const p = input && (input.path || input.file_path || input.notebook_path || input.from);
+    if (!p) return null;
+    const f = files.get(p) || { r: 0, e: 0 };
+    if (EDITS.includes(tool)) f.e++; else f.r++;
+    f.at = Date.now();
+    files.set(p, f);
+    renderFiles();
+    return p;
+  }
+  function renderFiles() {
+    const ul = document.getElementById('files');
+    ul.textContent = '';
+    [...files.entries()].sort((a, b) => b[1].at - a[1].at).slice(0, 60).forEach(([p, f]) => {
+      const li = document.createElement('li');
+      if (f.e) li.classList.add('edit');
+      if (Date.now() - f.at < 4000) li.classList.add('fresh');
+      const name = document.createElement('span'); name.textContent = (f.e ? '✎ ' : '· ') + p;
+      const n = document.createElement('span'); n.className = 'n'; n.textContent = f.e ? f.e + '✎' : f.r + 'r';
+      li.append(name, n); ul.appendChild(li);
+    });
+    document.getElementById('edited').textContent = [...files.values()].filter(f => f.e).length;
+  }
+  setInterval(renderFiles, 2000);
+
+  function target(tool, input) {
+    if (!input) return '';
+    return input.path || input.file_path || input.command || input.action || input.query || input.pattern || '';
+  }
+  function setState(text, cls) { stateEl.textContent = text; dot.className = 'dot ' + cls; }
+
+  function handle(ev) {
+    switch (ev.type) {
+      case 'MessageReceived':
+        if (ev.role === 'user') { add(el('msg user', ev.content)); }
+        else if (ev.role === 'assistant') {
+          if (typing) { typing.remove(); typing = null; }
+          if ((ev.content || '').trim()) add(el('msg reply', ev.content));
+        }
+        break;
+      case 'TokensStreamed':
+        if (!typing) { typing = el('msg reply typing', ''); add(typing); }
+        typing.textContent += ev.delta || '';
+        break;
+      case 'ToolCallStarted': {
+        if (typing) { typing.classList.remove('typing'); typing = null; }
+        toolCount++; document.getElementById('tools').textContent = toolCount;
+        const p = touch(ev.tool, ev.input);
+        const d = document.createElement('div'); d.className = 'tool run';
+        const n = document.createElement('span'); n.className = 'name'; n.textContent = ev.tool;
+        d.append(n, document.createTextNode(' ' + String(p || target(ev.tool, ev.input)).slice(0, 140)));
+        tools.set(ev.call_id, d); add(d);
+        break;
+      }
+      case 'ToolCallCompleted': {
+        const d = tools.get(ev.call_id);
+        if (d) { d.classList.remove('run'); d.classList.add(ev.output && ev.output.success ? 'ok' : 'bad'); }
+        break;
+      }
+      case 'ApprovalRequested': add(el('note', '⏸ waiting for approval: ' + ev.tool)); break;
+      case 'QuestionRequested': add(el('note', '? waiting for an answer')); break;
+      case 'ContextCompaction': if (ev.phase === 'completed') add(el('note', '⟳ ' + ev.message)); break;
+      case 'ChildSessionSpawned': add(el('note', '◇ sub-agent: ' + (ev.task || ''))); break;
+      case 'Error': add(el('err', '✗ ' + ev.message)); break;
+      case 'CostUpdated':
+        document.getElementById('tokens').textContent = human((ev.input_tokens || 0) + (ev.output_tokens || 0));
+        if (ev.context_tokens) document.getElementById('ctx').textContent = human(ev.context_tokens);
+        break;
+      case 'BusyStateChanged':
+        if (ev.state === 'idle') setState('live · idle', 'on'); else setState('live · ' + ev.state, 'busy');
+        break;
+      case 'SessionEnded': setState('session ended', ''); break;
+    }
+  }
+
+  const src = new EventSource('/events?t=__TOKEN__');
+  src.onopen = () => setState('live', 'on');
+  src.onerror = () => setState('reconnecting…', '');
+  src.onmessage = (m) => { try { const env = JSON.parse(m.data); handle(env.event || env); } catch (_) {} };
+})();
+</script>
+</body>
+</html>

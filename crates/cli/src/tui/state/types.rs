@@ -187,6 +187,8 @@ pub enum RailTab {
     Changes,
     /// Live activity of sub-agents.
     Agents,
+    /// Files the agent touched this session.
+    Files,
 }
 
 /// Something clickable in the dashboard, recorded while drawing.
@@ -319,6 +321,12 @@ pub struct TuiSessionState {
     pub started: Instant,
     /// Start time per in-flight tool call_id, for duration badges on completion.
     pub tool_started: HashMap<String, Instant>,
+    /// Files the agent touched (dashboard `files` tab, `/files`).
+    pub file_map: crate::tui::activity::FileMap,
+    /// The session as steps (`/timeline`).
+    pub timeline: crate::tui::activity::Timeline,
+    /// `/timeline` is open.
+    pub timeline_open: bool,
     pub busy: bool,
     /// Current busy state (for animated indicator).
     pub current_busy_state: BusyState,
@@ -467,6 +475,8 @@ pub struct TuiSessionState {
     pub working_style: String,
     /// `[ui] shimmer`.
     pub shimmer: bool,
+    /// `[ui] sounds`: bell on long turns and when input is needed.
+    pub sounds: bool,
     /// Backtrack picker (Esc while idle): pick a past user message, edit it,
     /// and rewind the conversation to just before it.
     pub backtrack_open: bool,

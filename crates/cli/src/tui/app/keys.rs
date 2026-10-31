@@ -226,13 +226,14 @@ pub(super) fn handle_key_event(
         g.toggle_changes_focus();
         return KeyFlow::Continue;
     }
-    // Alt+1/2/3 pick the right-rail tab (context, changes, agents).
+    // Alt+1/2/3/4 pick the right-rail tab (context, changes, agents, files).
     if dashboard_free && key.modifiers == KeyModifiers::ALT {
         use crate::tui::state::RailTab;
         let tab = match key.code {
             KeyCode::Char('1') => Some(RailTab::Context),
             KeyCode::Char('2') => Some(RailTab::Changes),
             KeyCode::Char('3') => Some(RailTab::Agents),
+            KeyCode::Char('4') => Some(RailTab::Files),
             _ => None,
         };
         if let Some(tab) = tab {

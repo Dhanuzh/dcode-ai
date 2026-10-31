@@ -23,7 +23,7 @@ mod web_server;
 // Shared with the library target; compiled once there.
 use dcode_ai_cli::{
     approval_prompts, file_mentions, image_attach, ipc_pending, oauth_login, prompt, share,
-    slash_commands, stream, tool_ui, tui, update_check,
+    slash_commands, stream, tool_ui, tui, update_check, watch,
 };
 
 use crate::approval_prompts::InteractiveIpcApprovalHandler;
@@ -286,6 +286,9 @@ enum Command {
         #[arg(long)]
         dir: Option<String>,
     },
+    /// Join a running session from another terminal: see it live and send
+    /// messages (`/approve`, `/deny`, `/stop`, `/quit`)
+    Join { session_id: String },
     /// Share a session: export it as one file (secrets masked), or import
     /// one a teammate exported so `/resume` finds it
     Session {
@@ -961,6 +964,10 @@ async fn try_main() -> anyhow::Result<()> {
             session_id, json, ..
         }) => {
             attach_session(&config, &workspace_root, &session_id, json).await?;
+        }
+        Some(Command::Join { session_id }) => {
+            let id = resolve_session_id(&config, &workspace_root, &session_id).await?;
+            join_session(&config, &workspace_root, &id).await?;
         }
         Some(Command::Session { command }) => {
             let sessions_dir = workspace_root.join(&config.session.history_dir);
@@ -1978,6 +1985,82 @@ async fn show_logs(
     print_log_file(config, workspace_root, session_id, json).await
 }
 
+/// `dcode-ai join <id>`: follow a running session live and talk to it.
+/// Lines you type are sent as messages (queued until the agent is free);
+/// `/approve` and `/deny` answer the approval it is waiting on; `/stop`
+/// interrupts the turn; `/quit` leaves (the session keeps running).
+async fn join_session(
+    config: &DcodeAiConfig,
+    workspace_root: &Path,
+    session_id: &str,
+) -> anyhow::Result<()> {
+    use dcode_ai_common::event::{AgentCommand, AgentEvent};
+    use tokio::io::AsyncBufReadExt;
+    let store = dcode_ai_runtime::session_store::SessionStore::new(
+        workspace_root.join(&config.session.history_dir),
+    );
+    let session = load_session_for_ipc_command(&store, session_id, false).await?;
+    let Some(socket) = session.meta.socket_path.clone() else {
+        anyhow::bail!("session {session_id} is not running (nothing to join)");
+    };
+    let client = dcode_ai_runtime::ipc::IpcClient::new(socket);
+    let mut events = client
+        .connect()
+        .await
+        .map_err(|e| anyhow::anyhow!("session {session_id} is not running: {e}"))?;
+    eprintln!("joined {session_id} — type to send a message · /approve · /deny · /stop · /quit");
+    let pending: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let seen = pending.clone();
+    let printer = tokio::spawn(async move {
+        while let Some(envelope) = events.recv().await {
+            match &envelope.event {
+                AgentEvent::ApprovalRequested { call_id, .. } => {
+                    if let Ok(mut p) = seen.lock() {
+                        *p = Some(call_id.clone());
+                    }
+                }
+                AgentEvent::ApprovalResolved { .. } => {
+                    if let Ok(mut p) = seen.lock() {
+                        *p = None;
+                    }
+                }
+                _ => {}
+            }
+            let _ = print_event_envelope(&envelope, false);
+        }
+        eprintln!("[join] the session ended");
+    });
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    while let Ok(Some(line)) = lines.next_line().await {
+        let text = line.trim();
+        if text.is_empty() {
+            continue;
+        }
+        let call = || pending.lock().ok().and_then(|mut p| p.take());
+        let cmd = match text {
+            "/quit" | "/exit" => break,
+            "/stop" => AgentCommand::Cancel,
+            "/approve" | "/deny" => match call() {
+                Some(call_id) if text == "/approve" => AgentCommand::ApproveToolCall { call_id },
+                Some(call_id) => AgentCommand::DenyToolCall { call_id },
+                None => {
+                    eprintln!("[join] nothing is waiting for approval");
+                    continue;
+                }
+            },
+            _ => AgentCommand::SendMessage {
+                content: text.to_string(),
+            },
+        };
+        if let Err(e) = client.send_command(&cmd).await {
+            eprintln!("[join] could not reach the session: {e}");
+            break;
+        }
+    }
+    printer.abort();
+    Ok(())
+}
+
 async fn load_session_for_ipc_command(
     store: &dcode_ai_runtime::session_store::SessionStore,
     session_id: &str,
@@ -2954,6 +3037,7 @@ fn uses_model(command: Option<&Command>) -> bool {
                 | Command::Attach { .. }
                 | Command::Remote { .. }
                 | Command::Session { .. }
+                | Command::Join { .. }
                 | Command::Status { .. }
                 | Command::Cancel { .. }
                 | Command::Skills { .. }

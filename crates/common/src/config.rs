@@ -392,6 +392,10 @@ pub struct UiConfig {
     /// Sweep a highlight across the working label.
     #[serde(default = "default_true")]
     pub shimmer: bool,
+    /// Ring the terminal bell when a long turn (10s+) finishes and when
+    /// dcode-ai needs an approval or an answer (`/sounds on|off`).
+    #[serde(default)]
+    pub sounds: bool,
 }
 
 /// Look of the "working…" line: `bar` (sweeping bar), `dots`, or `plain`.
@@ -435,6 +439,7 @@ impl Default for UiConfig {
             notifications: default_notifications(),
             working_style: default_working_style(),
             shimmer: true,
+            sounds: false,
         }
     }
 }
@@ -485,6 +490,9 @@ impl UiConfig {
         }
         if let Some(style) = partial.working_style {
             self.working_style = style;
+        }
+        if let Some(sounds) = partial.sounds {
+            self.sounds = sounds;
         }
         if let Some(shimmer) = partial.shimmer {
             self.shimmer = shimmer;
@@ -2017,6 +2025,7 @@ struct PartialUiConfig {
     notifications: Option<bool>,
     working_style: Option<String>,
     shimmer: Option<bool>,
+    sounds: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

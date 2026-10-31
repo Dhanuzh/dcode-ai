@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.34 — 2026-10-31
+
+### See it
+- **Live file map**: a `files` tab in the dashboard (`Alt+4`) and `/files`
+  show every file the agent read and edited as a tree; the file it is on
+  is marked, edits are counted.
+- **`/timeline`**: the session as steps you can scrub (your messages, tool
+  calls with ✓/✗, replies, compactions, sub-agents) with a scrubber bar
+  and each step's details; Enter on one of your messages rewinds there.
+- **`/sounds on`**: a bell when a long turn finishes or dcode-ai needs you;
+  **`/speak`** reads the last reply aloud.
+
+### Share it
+- **`/watch`**: a live, read-only web page of the session to share. This
+  machine only by default, `/watch lan` for your network; a random token
+  per link; nothing goes through an outside service.
+- **`dcode-ai join <id>`**: another terminal on a running session — see it
+  live, send messages (queued until the agent is free), `/approve`,
+  `/deny`, `/stop`.
+- **`/handoff <note>`**: one file for a teammate (secrets masked) with your
+  note, the open todo list and the changed files; importing it shows the
+  note and gives it to the agent.
+
 ## 1.0.33 — 2026-10-31
 
 From an end-to-end run of every command against a mock model

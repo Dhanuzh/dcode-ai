@@ -216,9 +216,9 @@ fn typing_pasting_modes_and_dashboard() {
 
     // Ctrl+\ opens the dashboard and closes it again.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1/2/3");
+    tui.wait_for("Alt+1-4");
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1/2/3"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-4"));
 
     // Ctrl+C twice quits.
     tui.send(b"\x03");
@@ -765,4 +765,111 @@ fn one_shot_output_for_scripts() {
         serde_json::from_str(&run(&["-p", "json result please", "--json"])).expect("json");
     assert_eq!(json["output"], "Reply to: json result please");
     assert_eq!(json["end_reason"], "completed");
+}
+
+/// Seeing and sharing: after the agent edits a file, `/files` lists it,
+/// `/timeline` opens and closes, `/watch` serves a live page (and refuses
+/// a request without its token), `/handoff` writes a session file with the
+/// note, and a message from `dcode-ai join` reaches the session.
+#[test]
+fn see_and_share_a_session() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    tui.send(b"please create the note");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    tui.wait_until("an approval prompt", |t| {
+        t.contains("note.txt") && t.contains("1.")
+    });
+    tui.send(b"1");
+    tui.wait_for("Wrote the note.");
+    tui.wait_for("? for shortcuts");
+
+    let run = |tui: &mut Tui, cmd: &str| {
+        tui.send(cmd.as_bytes());
+        std::thread::sleep(Duration::from_millis(200));
+        tui.send(b"\r");
+    };
+    run(&mut tui, "/files");
+    tui.wait_for("✎ note.txt");
+
+    // The dashboard's files tab shows it too.
+    tui.send(b"\x1c");
+    tui.wait_for("Alt+1-4");
+    tui.send(b"\x1b4");
+    tui.wait_until("the files tab", |t| {
+        t.contains("1 edited") && t.contains("note.txt")
+    });
+    tui.send(b"\x1c");
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-4"));
+
+    run(&mut tui, "/timeline");
+    tui.wait_until("the timeline", |t| {
+        t.contains("steps") && t.contains("write_file")
+    });
+    tui.send(b"q");
+    tui.wait_for("? for shortcuts");
+
+    run(&mut tui, "/watch");
+    tui.wait_for("[watch] live, read-only:");
+    let text = tui.text();
+    let url = text
+        .split_whitespace()
+        .find(|w| w.starts_with("http://127.0.0.1:"))
+        .expect("watch url")
+        .to_string();
+    let fetch = |url: &str| -> String {
+        let rest = url.strip_prefix("http://").unwrap();
+        let (host, path) = rest.split_once('/').unwrap();
+        let mut s = std::net::TcpStream::connect(host).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+        write!(s, "GET /{path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    };
+    let page = fetch(&url);
+    assert!(
+        page.contains("200 OK") && page.contains("dcode-ai live"),
+        "{page}"
+    );
+    let bare = url.split('?').next().unwrap();
+    assert!(fetch(bare).contains("403"));
+
+    run(&mut tui, "/handoff login works, logout next");
+    tui.wait_for("[handoff] wrote");
+    let handoff = std::fs::read_dir(&ws)
+        .unwrap()
+        .flatten()
+        .find(|e| e.file_name().to_string_lossy().ends_with(".dcode-session"))
+        .expect("handoff file");
+    let bundle = std::fs::read_to_string(handoff.path()).unwrap();
+    assert!(bundle.contains("login works, logout next") && bundle.contains("note.txt"));
+
+    // Another terminal joins and sends a message.
+    let id = handoff
+        .file_name()
+        .to_string_lossy()
+        .trim_end_matches(".dcode-session")
+        .to_string();
+    let mut join = std::process::Command::new(env!("CARGO_BIN_EXE_dcode-ai"))
+        .args(["join", &id])
+        .current_dir(&ws)
+        .env("HOME", &home)
+        .env("XDG_RUNTIME_DIR", home.join("run"))
+        .env("ANTHROPIC_AUTH_TOKEN", "test-token")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("join");
+    std::thread::sleep(Duration::from_millis(1500));
+    if let Some(stdin) = join.stdin.as_mut() {
+        writeln!(stdin, "hello from beside you").unwrap();
+    }
+    tui.wait_for("from a joined terminal: hello from beside you");
+    tui.wait_for("Reply to: hello from beside");
+    let _ = join.kill();
+    let _ = join.wait();
 }

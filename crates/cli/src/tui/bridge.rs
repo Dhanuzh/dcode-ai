@@ -30,7 +30,36 @@ pub fn spawn_tui_bridge(
     };
 
     if let Some(crx) = command_rx {
-        supervisor::spawn_command_consumer(crx, approval_pending, question_pending, None);
+        // Messages from `dcode-ai join` (another terminal on this session)
+        // go in the follow-up queue: sent when the agent is free, after
+        // anything already queued.
+        let (prompt_tx, mut prompt_rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        supervisor::spawn_command_consumer_with_store(
+            crx,
+            approval_pending,
+            question_pending,
+            None,
+            None,
+            Some(prompt_tx),
+            None,
+        );
+        let queue_state = state.clone();
+        tokio::spawn(async move {
+            while let Some(text) = prompt_rx.recv().await {
+                let text = text.trim().to_string();
+                if text.is_empty() {
+                    continue;
+                }
+                if let Ok(mut g) = queue_state.lock() {
+                    g.push_block(crate::tui::state::DisplayBlock::System(format!(
+                        "⇢ from a joined terminal: {}",
+                        crate::tui::render_helpers::truncate_chars(&text, 120)
+                    )));
+                    g.followup_queue.push_back(text);
+                    g.touch_transcript();
+                }
+            }
+        });
     }
 
     let ipc = event_tx_ipc.map(|tx| IpcFanout { tx });

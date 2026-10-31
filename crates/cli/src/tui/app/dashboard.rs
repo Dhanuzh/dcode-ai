@@ -8,7 +8,7 @@ use crate::tui::render_helpers::truncate_chars;
 use crate::tui::state::{DashTarget, RailTab};
 
 const LEFT_W: u16 = 26;
-const RIGHT_W: u16 = 34;
+const RIGHT_W: u16 = 40;
 /// Both rails need this many columns to leave a usable centre pane.
 const BOTH_RAILS_MIN_W: u16 = 120;
 /// Below this only the centre pane is shown.
@@ -334,6 +334,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
         (RailTab::Context, "context"),
         (RailTab::Changes, "changes"),
         (RailTab::Agents, "agents"),
+        (RailTab::Files, "files"),
     ];
     let mut spans = vec![Span::raw(" ")];
     let mut x = rect.x + 2;
@@ -372,7 +373,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             if focused {
                 " ←/→ tabs · Esc back "
             } else {
-                " Alt+1/2/3 · Ctrl+D focus "
+                " Alt+1-4 · Ctrl+D focus "
             },
             Style::default().fg(theme::muted()),
         )))
@@ -411,7 +412,80 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             ))),
             body,
         ),
+        RailTab::Files => frame.render_widget(
+            Paragraph::new(Text::from(files_lines(
+                &g.file_map,
+                body.width as usize,
+                body.height as usize,
+            ))),
+            body,
+        ),
     }
+}
+
+/// The files the agent touched as a tree: edits bright with their count,
+/// reads dim, the file it is on now (or just touched) marked `◉`.
+pub(super) fn files_lines(
+    map: &crate::tui::activity::FileMap,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    use crate::tui::activity::{ago, fresh};
+    if map.files.is_empty() {
+        return vec![
+            muted("no files touched yet"),
+            Line::default(),
+            muted("files the agent reads and"),
+            muted("edits light up here live"),
+        ];
+    }
+    let mut lines = vec![muted(format!(
+        "{} files · {} edited",
+        map.files.len(),
+        map.edited()
+    ))];
+    let tree = map.tree();
+    // The newest stay visible when the tree is long.
+    let room = height.saturating_sub(1);
+    let skip = tree.len().saturating_sub(room);
+    for (depth, name, touch) in tree.into_iter().skip(skip) {
+        let indent = "  ".repeat(depth);
+        let Some(t) = touch else {
+            lines.push(muted(truncate_chars(&format!("{indent}{name}"), width)));
+            continue;
+        };
+        let live = fresh(t);
+        let (mark, color) = if live {
+            ("◉ ", theme::accent())
+        } else if t.edits > 0 {
+            ("✎ ", theme::warn())
+        } else {
+            ("· ", theme::muted())
+        };
+        let counts = if t.edits > 0 {
+            format!(" {}✎", t.edits)
+        } else {
+            format!(" {}r", t.reads)
+        };
+        let when = format!(" {}", ago(t.last_at));
+        let room = width.saturating_sub(indent.len() + 2 + counts.len() + when.len());
+        let mut style = Style::default().fg(if t.edits > 0 {
+            theme::text()
+        } else {
+            theme::muted()
+        });
+        if live {
+            style = style.add_modifier(Modifier::BOLD);
+        }
+        lines.push(Line::from(vec![
+            Span::raw(indent),
+            Span::styled(mark, Style::default().fg(color)),
+            Span::styled(truncate_chars(&name, room), style),
+            Span::styled(counts, Style::default().fg(color)),
+            Span::styled(when, Style::default().fg(theme::muted())),
+        ]));
+    }
+    lines
 }
 
 /// Live sub-agent activity: running agents first, each with its task and

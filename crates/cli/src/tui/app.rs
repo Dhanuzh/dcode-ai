@@ -785,6 +785,7 @@ pub fn run_blocking(
         ratatui::Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     > = None;
     let mut was_busy = false;
+    let mut busy_since: Option<std::time::Instant> = None;
     let mut had_active_approval = false;
 
     // Flush the Antigravity-style startup banner once into the terminal's
@@ -879,12 +880,20 @@ pub fn run_blocking(
 
         // Full-screen transcript overlay (Codex `/transcript`). Runs its own
         // alt-screen loop; on return we force a full redraw of the inline pane.
-        let (overlay_requested, diff_requested) = state
+        let (overlay_requested, diff_requested, timeline_requested) = state
             .lock()
-            .map(|g| (g.transcript_overlay_open, g.diff_overlay_open))
-            .unwrap_or((false, false));
-        if overlay_requested || diff_requested {
-            if diff_requested {
+            .map(|g| {
+                (
+                    g.transcript_overlay_open,
+                    g.diff_overlay_open,
+                    g.timeline_open,
+                )
+            })
+            .unwrap_or((false, false, false));
+        if overlay_requested || diff_requested || timeline_requested {
+            if timeline_requested {
+                let _ = crate::tui::timeline_overlay::run_timeline_overlay(&state);
+            } else if diff_requested {
                 let _ = crate::tui::diff_overlay::run_diff_overlay(&state);
             } else {
                 let _ = run_transcript_overlay(&state);
@@ -999,6 +1008,22 @@ pub fn run_blocking(
                 if let Some(msg) = msg {
                     crate::tui::notify::desktop_notify("dcode-ai", &msg);
                 }
+            }
+            // `[ui] sounds`: the bell while you're looking at another window
+            // in the same terminal — after a long turn, or when input is needed.
+            if g.sounds && terminal_focused {
+                let long_turn = was_busy
+                    && !g.busy
+                    && busy_since.is_some_and(|t| t.elapsed() >= Duration::from_secs(10));
+                let needs_you = (!had_active_approval && g.active_approval.is_some())
+                    || (!had_active_question && g.active_question.is_some());
+                if long_turn || needs_you {
+                    let _ = std::io::Write::write_all(&mut stdout(), b"\x07");
+                    let _ = std::io::Write::flush(&mut stdout());
+                }
+            }
+            if !was_busy && g.busy {
+                busy_since = Some(std::time::Instant::now());
             }
             had_active_question = g.active_question.is_some();
             was_busy = g.busy;
@@ -1352,7 +1377,7 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "  @path              Mention a file".into(),
         "  /                  Commands (plugins: /plugin:command)".into(),
         "  1 / 2 / 3          Answer a permission prompt".into(),
-        "  Ctrl+\\             Full-screen dashboard (Alt+1/2/3 rail tabs, Ctrl+D focus rail, ←/→ switch)".into(),
+        "  Ctrl+\\             Full-screen dashboard (Alt+1/2/3/4 rail tabs, Ctrl+D focus rail, ←/→ switch)".into(),
         "".into(),
         "─── Navigation ───────────────────────────────────────".into(),
         "  ↑ / ↓              Scroll transcript one line".into(),

@@ -149,6 +149,15 @@ dcode-ai spawn --prompt "refactor the auth module"       # detached; attach late
 | **Looks** | Claude's dark, light, colorblind-friendly and ANSI themes with live `/theme` preview, plus `tokyonight`, `catppuccin`, `gruvbox`, `dracula`, `nord` … |
 | **Comfort** | Desktop notifications, `c` copies links, `/terminal-setup` for Shift+Enter, `/vim` keys, `--plain` for screen readers |
 
+### 👀 See it, share it
+
+- **Live file map**: every file the agent reads and edits, as a tree that lights up while it works (dashboard `Alt+4`, `/files`).
+- **`/timeline`**: scrub through the session step by step; jump back to any of your messages.
+- **`/watch`**: a live, read-only web page of the session for a teammate (or your phone); local by default, `/watch lan` for your network.
+- **`dcode-ai join <id>`**: a second terminal (or a teammate over SSH) on the same running session.
+- **`/handoff <note>`**: hand a session to a teammate as one file, with what's done and what's next.
+- **`/sounds`** and **`/speak`**: a bell when it needs you; the last reply read aloud.
+
 ### 🗂️ Sessions that last
 
 - **Crash-safe:** the session saves after every step of a turn, so a crash or a closed terminal loses nothing.

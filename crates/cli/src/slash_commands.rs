@@ -13,6 +13,12 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/fork",
     "/side",
     "/btw",
+    "/timeline",
+    "/files",
+    "/watch",
+    "/handoff",
+    "/sounds",
+    "/speak",
     "/approve",
     "/agent",
     "/plan",
@@ -127,6 +133,16 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/fork" => "fork the conversation into a new session",
         "/side" => "start an ephemeral side conversation (/side end to return)",
         "/btw" => "ask a quick side question without adding it to the conversation",
+        "/timeline" => {
+            "scrub through the session step by step (Enter on your message: rewind there)"
+        }
+        "/files" => "files the agent read and edited this session (live in the dashboard: Alt+4)",
+        "/watch" => {
+            "a live read-only web page of this session to share: /watch, /watch lan, /watch stop"
+        }
+        "/handoff" => "hand this session to a teammate: /handoff <what's done, what's next>",
+        "/sounds" => "a bell when a long turn finishes or dcode-ai needs you: /sounds on|off",
+        "/speak" => "read the last reply aloud",
         "/terminal-setup" => "make Shift+Enter insert a newline in this terminal",
         "/browser" => {
             "the agent's web browser: status, open [url], connect <port>, save [name] (recorded steps), close"

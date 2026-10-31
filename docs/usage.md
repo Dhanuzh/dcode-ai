@@ -69,7 +69,7 @@ go), and drag a rail's inner edge to make it wider or narrower.
 
 | Key | Action |
 | --- | --- |
-| `Alt+1` / `Alt+2` / `Alt+3` | Context · changes · agents tab |
+| `Alt+1` … `Alt+4` | Context · changes · agents · files tab (files: every file the agent read or edited, live, the current one marked ◉) |
 | `Ctrl+D` | Focus the rail (again to return to the prompt) |
 | `←` / `→` (rail focused) | Previous / next tab |
 | `j` / `k` (changes) | Select a hunk |
@@ -136,7 +136,8 @@ dcode-ai attach <id>              # follow its live output
 dcode-ai attach <id> --ssh me@server --dir ~/app   # …of a session on another machine
 dcode-ai remote me@server --dir ~/app --keep       # use dcode-ai on a server from here (tmux keeps it running)
 dcode-ai session export <id> [-o f]  # one file to hand a teammate, secrets masked
-dcode-ai session import <file>       # add it here; /resume finds it
+dcode-ai session import <file>       # add it here; /resume finds it (with its handoff note)
+dcode-ai join <id>                   # another terminal on a running session: watch it live and send messages
 dcode-ai status                   # running sessions
 dcode-ai sessions [--all]         # saved sessions (--all includes sub-agents)
 dcode-ai logs <id>                # replay the event log
@@ -489,6 +490,21 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 - Permissions: reading the page never asks; navigating, clicking and typing
   ask in default mode and run in accept-edits / auto mode; `eval` always
   asks. Password fields are never typed into.
+
+## Seeing and sharing a session
+
+| Command | What it does |
+| --- | --- |
+| `/timeline` | The session as steps (your messages, tool calls, replies, compactions) with a scrubber bar; ←/→ to move, Enter on one of your messages rewinds there |
+| `/files` | Files the agent read and edited this session (also the dashboard's `files` tab, `Alt+4`) |
+| `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan` shares it on your network; `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
+| `/handoff <note>` | Writes `<session>.dcode-session` (secrets masked) with your note, the open todo list and the changed files; the teammate imports it and says "continue" |
+| `/sounds on\|off` | A bell when a turn of 10s+ finishes or dcode-ai needs an approval or an answer |
+| `/speak` | Reads the last reply aloud (system voice; code blocks skipped) |
+
+`dcode-ai join <id>` attaches a second terminal (or a teammate over SSH) to a
+running session: it shows the session live; lines you type are queued as
+messages; `/approve`, `/deny`, `/stop` and `/quit` work as you'd expect.
 
 ## Guards against runaway turns
 

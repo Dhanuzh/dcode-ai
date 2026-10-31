@@ -33,6 +33,90 @@ fn toast_script(title: &str, body: &str) -> String {
     )
 }
 
+/// Text worth reading aloud: no code blocks, inline code marks, links or
+/// Markdown symbols; at most ~1500 characters.
+pub fn speakable(text: &str) -> String {
+    let mut out = String::new();
+    let mut in_code = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_code = !in_code;
+            continue;
+        }
+        if in_code {
+            continue;
+        }
+        let cleaned: String = line
+            .trim_start_matches(['#', '>', '-', '*', ' '])
+            .chars()
+            .filter(|c| !matches!(c, '`' | '*' | '_' | '|'))
+            .collect();
+        if !cleaned.trim().is_empty() {
+            out.push_str(cleaned.trim());
+            out.push(' ');
+        }
+    }
+    out.chars()
+        .take(1500)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
+/// Read `text` aloud with the system's voice, in the background: `say` on
+/// macOS, the speech synthesizer on Windows (also from WSL), `spd-say` or
+/// `espeak` on Linux. The text goes in on stdin, never in a command line.
+pub fn speak(text: &str) -> Result<(), String> {
+    use std::io::Write;
+    let text = speakable(text);
+    if text.is_empty() {
+        return Err("nothing to read aloud".into());
+    }
+    let mut cmd = if cfg!(windows) || (is_wsl() && on_path("powershell.exe")) {
+        let mut c = Command::new(if cfg!(windows) {
+            "powershell"
+        } else {
+            "powershell.exe"
+        });
+        c.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Add-Type -AssemblyName System.Speech; \
+             (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak([Console]::In.ReadToEnd())",
+        ]);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = Command::new("say");
+        c.args(["-f", "-"]);
+        c
+    } else if on_path("spd-say") {
+        let mut c = Command::new("spd-say");
+        c.args(["-e"]);
+        c
+    } else if on_path("espeak") {
+        let mut c = Command::new("espeak");
+        c.args(["--stdin"]);
+        c
+    } else {
+        return Err("no voice found (install spd-say or espeak)".into());
+    };
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    if let Some(mut stdin) = child.stdin.take() {
+        let _ = stdin.write_all(text.as_bytes());
+    }
+    // Reap it in the background.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 /// AppleScript string literal.
 fn apple_quote(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
@@ -107,5 +191,17 @@ mod tests {
         let ps = toast_script("dcode-ai", "it's done");
         assert!(ps.contains("CreateTextNode('it''s done')"), "{ps}");
         assert_eq!(apple_quote(r#"say "hi" \ ok"#), r#""say \"hi\" \\ ok""#);
+    }
+}
+
+#[cfg(test)]
+mod speak_tests {
+    use super::speakable;
+
+    #[test]
+    fn code_and_markdown_are_not_read() {
+        let text =
+            "## Done\nFixed **the bug** in `auth.rs`.\n```rust\nfn main() {}\n```\n- tests pass";
+        assert_eq!(speakable(text), "Done Fixed the bug in auth.rs. tests pass");
     }
 }

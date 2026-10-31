@@ -1,5 +1,6 @@
 //! Full-screen session TUI (transcript + streaming + composer).
 
+pub mod activity;
 pub mod answer_parse;
 pub mod app;
 pub mod branch_picker;
@@ -41,6 +42,7 @@ pub mod statusline;
 pub mod sudo_prompt;
 pub mod terminal;
 pub mod theme;
+pub mod timeline_overlay;
 pub mod tool_summary;
 pub mod transcript;
 pub mod transcript_overlay;

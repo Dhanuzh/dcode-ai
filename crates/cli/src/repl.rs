@@ -35,6 +35,7 @@ mod cmd_info;
 mod cmd_mcp;
 mod cmd_session;
 mod cmd_settings;
+mod cmd_team;
 mod cmd_work;
 
 /// A downloaded, verified update that needs sudo to install.
@@ -408,6 +409,8 @@ pub struct Repl {
     self_cmd_tx: Option<tokio::sync::mpsc::UnboundedSender<TuiCmd>>,
     /// A verified update waiting for a sudo password.
     pending_sudo: Option<PendingSudo>,
+    /// `/watch`: the live read-only page for this session.
+    watch: Option<crate::watch::WatchHandle>,
 }
 
 impl Repl {
@@ -429,6 +432,7 @@ impl Repl {
             self_cmd_tx: None,
             titled_session: None,
             pending_sudo: None,
+            watch: None,
         }
     }
 
@@ -966,6 +970,9 @@ impl Repl {
             | "/plugin" | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
+            "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff" => {
+                return self.cmd_team(input, command, rest, parts, out).await;
+            }
             "/btw" => {
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
@@ -1290,6 +1297,7 @@ impl Repl {
             g.notifications_enabled = self.runtime.config().ui.notifications;
             g.working_style = self.runtime.config().ui.working_style.clone();
             g.shimmer = self.runtime.config().ui.shimmer;
+            g.sounds = self.runtime.config().ui.sounds;
             g.mcp_server_count = self
                 .runtime
                 .config()
