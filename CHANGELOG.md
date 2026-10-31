@@ -14,6 +14,13 @@
   pixels in the terminal (no images); twice as big when there's room.
 
 ### Fixed
+- Full-screen views (diff, timeline, office, transcript) opened over the
+  dashboard showed bits of it through (stray letters at the edges, the old
+  footer); they now start from a clear screen.
+- `/watch lan` from another device: `/watch lan <port>` keeps a fixed port,
+  and on WSL it prints the one-time firewall commands (mirrored networking
+  blocks incoming connections in the Hyper-V firewall; NAT mode needs a
+  port forward).
 - The end-to-end test for `dcode-ai join` failed on macOS (socket paths
   there are limited to ~104 bytes and the test's temp folder was long).
 

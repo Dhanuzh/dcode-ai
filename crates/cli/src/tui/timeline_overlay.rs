@@ -115,6 +115,9 @@ pub(crate) fn run_timeline_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyho
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut term = ratatui::Terminal::new(backend)?;
+    // The alternate screen may still hold what was drawn before (the
+    // dashboard); start from a blank one so nothing shows through.
+    term.clear()?;
     // Start on the newest step.
     let mut selected = state
         .lock()

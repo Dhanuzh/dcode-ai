@@ -498,7 +498,7 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 | `/office` | The Agent Office: every agent as an animated pixel-art character at a desk, acting out what it does (typing, reading, running commands, hand up for your approval), with a speech bubble; ←/→ picks one to see its activity. Also the dashboard's `office` tab (`Alt+5`) |
 | `/timeline` | The session as steps (your messages, tool calls, replies, compactions) with a scrubber bar; ←/→ to move, Enter on one of your messages rewinds there |
 | `/files` | Files the agent read and edited this session (also the dashboard's `files` tab, `Alt+4`) |
-| `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan` shares it on your network; `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
+| `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan [port]` shares it on your network (a fixed port such as `/watch lan 8787` lets you allow it in the firewall once; on WSL it prints the commands); `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
 | `/handoff <note>` | Writes `<session>.dcode-session` (secrets masked) with your note, the open todo list and the changed files; the teammate imports it and says "continue" |
 | `/sounds on\|off` | A bell when a turn of 10s+ finishes or dcode-ai needs an approval or an answer |
 | `/speak` | Reads the last reply aloud (system voice; code blocks skipped) |

@@ -160,19 +160,26 @@ impl Repl {
                     }
                     return Ok(true);
                 }
-                let lan = arg == "lan";
+                // `/watch`, `/watch lan`, `/watch lan 8787`, `/watch 8787`.
+                let words: Vec<&str> = arg.split_whitespace().collect();
+                let lan = words.contains(&"lan");
+                let port: u16 = words.iter().find_map(|w| w.parse().ok()).unwrap_or(0);
                 if let Some(w) = &self.watch
                     && w.lan == lan
+                    && (port == 0 || w.port == port)
                 {
                     out.println(&format!("[watch] already live: {}", w.url));
                     return Ok(true);
                 }
+                // A new one replaces the old.
+                self.watch = None;
                 let title = self
                     .runtime
                     .session_name()
                     .map(str::to_string)
                     .unwrap_or_else(|| self.runtime.session_id().to_string());
-                match crate::watch::start(self.runtime.event_log_path(), title, lan).await {
+                match crate::watch::start_on(self.runtime.event_log_path(), title, lan, port).await
+                {
                     Ok(w) => {
                         let _ = crate::tui::clipboard::copy_to_clipboard(&w.url);
                         out.println(&format!("[watch] live, read-only: {}", w.url));
@@ -180,6 +187,16 @@ impl Repl {
                             out.println(
                                 "[watch] reachable by anyone on this network who has the link — /watch stop ends it",
                             );
+                            if let Some(help) = crate::watch::lan_help(w.port) {
+                                for line in help.lines() {
+                                    out.println(&format!("[watch] {line}"));
+                                }
+                                if port == 0 {
+                                    out.println(
+                                        "[watch] tip: /watch lan 8787 keeps the same port, so the rule is made once",
+                                    );
+                                }
+                            }
                         } else {
                             out.println(
                                 "[watch] this machine only (copied) · /watch lan to share on your network · /watch stop",

@@ -19,6 +19,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub struct WatchHandle {
     pub url: String,
     pub lan: bool,
+    pub port: u16,
     stop: tokio::sync::watch::Sender<bool>,
 }
 
@@ -34,6 +35,31 @@ impl Drop for WatchHandle {
     }
 }
 
+/// What someone on another device needs before a LAN watch link opens, when
+/// it is more than "allow it when Windows asks": WSL's mirrored networking
+/// blocks incoming connections in the Hyper-V firewall, and WSL's NAT mode
+/// hides the address behind Windows altogether.
+pub fn lan_help(port: u16) -> Option<String> {
+    let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some();
+    if !wsl {
+        return None;
+    }
+    let nat = lan_address().is_some_and(|ip| ip.to_string().starts_with("172."));
+    if nat {
+        return Some(format!(
+            "WSL is in NAT mode, so other devices can't reach it directly. Either set \
+             `networkingMode=mirrored` under [wsl2] in %UserProfile%\\.wslconfig (then `wsl --shutdown`), \
+             or forward the port from Windows (admin PowerShell): \
+             netsh interface portproxy add v4tov4 listenport={port} connectport={port} connectaddress=$(wsl hostname -I)"
+        ));
+    }
+    Some(format!(
+        "WSL (mirrored networking) blocks incoming connections until the port is allowed. Once, in an admin PowerShell:\n\
+         New-NetFirewallHyperVRule -Name dcode-ai-watch-{port} -DisplayName \"dcode-ai watch {port}\" -Direction Inbound -VMCreatorId \"{{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}}\" -Protocol TCP -LocalPorts {port}\n\
+         New-NetFirewallRule -DisplayName \"dcode-ai watch {port}\" -Direction Inbound -Protocol TCP -LocalPort {port} -Action Allow -Profile Private"
+    ))
+}
+
 /// This machine's address on the local network (no packet is sent).
 fn lan_address() -> Option<std::net::IpAddr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
@@ -43,8 +69,19 @@ fn lan_address() -> Option<std::net::IpAddr> {
 
 /// Start serving `log_path` (the session's `<id>.events.jsonl`).
 pub async fn start(log_path: PathBuf, title: String, lan: bool) -> std::io::Result<WatchHandle> {
-    let bind = if lan { "0.0.0.0:0" } else { "127.0.0.1:0" };
-    let listener = TcpListener::bind(bind).await?;
+    start_on(log_path, title, lan, 0).await
+}
+
+/// [`start`] on a fixed `port` (0 = any free one). A fixed port lets a
+/// firewall rule be made once.
+pub async fn start_on(
+    log_path: PathBuf,
+    title: String,
+    lan: bool,
+    port: u16,
+) -> std::io::Result<WatchHandle> {
+    let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
+    let listener = TcpListener::bind((host, port)).await?;
     let port = listener.local_addr()?.port();
     let token = format!("{:032x}", rand::random::<u128>());
     let host = if lan {
@@ -77,6 +114,7 @@ pub async fn start(log_path: PathBuf, title: String, lan: bool) -> std::io::Resu
     Ok(WatchHandle {
         url,
         lan,
+        port,
         stop: stop_tx,
     })
 }

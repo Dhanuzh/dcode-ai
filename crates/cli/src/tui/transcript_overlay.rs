@@ -27,6 +27,9 @@ pub(crate) fn run_transcript_overlay(state: &Arc<Mutex<TuiSessionState>>) -> any
     execute!(out, EnterAlternateScreen)?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut term = ratatui::Terminal::new(backend)?;
+    // The alternate screen may still hold what was drawn before (the
+    // dashboard); start from a blank one so nothing shows through.
+    term.clear()?;
 
     let res: anyhow::Result<()> = (|| {
         loop {

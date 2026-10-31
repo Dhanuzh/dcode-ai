@@ -174,6 +174,9 @@ pub(crate) fn run_diff_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyhow::R
     )?;
     let backend = ratatui::backend::CrosstermBackend::new(stdout());
     let mut term = ratatui::Terminal::new(backend)?;
+    // The alternate screen may still hold what was drawn before (the
+    // dashboard); start from a blank one so nothing shows through.
+    term.clear()?;
     {
         let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
         let ws = g.workspace_root.clone();
