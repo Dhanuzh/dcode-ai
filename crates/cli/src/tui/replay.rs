@@ -33,11 +33,49 @@ fn value_to_event(v: &Value) -> Option<AgentEvent> {
 }
 
 /// Skip streaming deltas when replaying; final `MessageReceived` for assistant already has full text.
+/// Session start/end lines don't belong in a replay either: logs written
+/// before 1.0.32 can hold another session's start, and applying it switched
+/// the live session (and its log) to that other id.
 fn should_skip_on_replay(ev: &AgentEvent) -> bool {
     matches!(
         ev,
-        AgentEvent::TokensStreamed { .. } | AgentEvent::ThinkingDelta { .. }
+        AgentEvent::TokensStreamed { .. }
+            | AgentEvent::ThinkingDelta { .. }
+            | AgentEvent::SessionStarted { .. }
+            | AgentEvent::SessionEnded { .. }
     )
+}
+
+/// The logs that hold a session's conversation, oldest first: its own,
+/// then logs of throwaway ids that resuming it used before 1.0.32 (a
+/// `SessionStarted` for an id with no saved state, found in this chain).
+/// Those ids got the resumed conversation's events, so they are read back
+/// in order. Nothing is rewritten.
+pub fn session_log_chain(log_path: &Path) -> Vec<std::path::PathBuf> {
+    let mut chain = vec![log_path.to_path_buf()];
+    let Some(dir) = log_path.parent() else {
+        return chain;
+    };
+    let mut i = 0;
+    while i < chain.len() && chain.len() < 50 {
+        let Ok(raw) = std::fs::read_to_string(&chain[i]) else {
+            i += 1;
+            continue;
+        };
+        for line in raw.lines().filter(|l| l.contains("\"SessionStarted\"")) {
+            for ev in events_on_line(line) {
+                if let AgentEvent::SessionStarted { session_id, .. } = ev {
+                    let log = dir.join(format!("{session_id}.events.jsonl"));
+                    let has_state = dir.join(format!("{session_id}.json")).exists();
+                    if !has_state && log.exists() && !chain.contains(&log) {
+                        chain.push(log);
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+    chain
 }
 
 /// Cheap check before parsing: streaming deltas are most of a log's lines
@@ -81,17 +119,19 @@ const RESUME_VISIBLE_BLOCKS: usize = 200;
 
 /// Read and parse a log off the async runtime.
 fn read_events(log_path: &Path) -> Vec<AgentEvent> {
-    let Ok(raw) = std::fs::read_to_string(log_path) else {
-        return Vec::new();
-    };
     let mut out = Vec::new();
-    for line in raw.lines() {
-        for mut ev in events_on_line(line) {
-            if should_skip_on_replay(&ev) {
-                continue;
+    for path in session_log_chain(log_path) {
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in raw.lines() {
+            for mut ev in events_on_line(line) {
+                if should_skip_on_replay(&ev) {
+                    continue;
+                }
+                cap_replayed(&mut ev);
+                out.push(ev);
             }
-            cap_replayed(&mut ev);
-            out.push(ev);
         }
     }
     out
@@ -390,6 +430,50 @@ mod tests {
             &g.blocks[50],
             crate::tui::state::DisplayBlock::System(t) if t.contains("50 earlier messages")
         ));
+    }
+
+    /// Logs written by the old resume (a throwaway id with no saved state)
+    /// are read back after the session's own log; a real session's log
+    /// (it has saved state) is not.
+    #[test]
+    fn replay_follows_logs_of_old_resume_ids() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = |ev: &str| format!("{{\"id\":1,\"event\":{ev}}}\n");
+        let user = |t: &str| {
+            line(&format!(
+                r#"{{"type":"MessageReceived","role":"user","content":"{t}"}}"#
+            ))
+        };
+        let started = |id: &str| {
+            line(&format!(
+                r#"{{"type":"SessionStarted","session_id":"{id}","workspace":"/w","model":"m"}}"#
+            ))
+        };
+        std::fs::write(
+            dir.path().join("s.events.jsonl"),
+            user("first") + &started("boot") + &started("other"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("s.json"), "{}").unwrap();
+        std::fs::write(dir.path().join("boot.events.jsonl"), user("latest")).unwrap();
+        std::fs::write(dir.path().join("other.events.jsonl"), user("not mine")).unwrap();
+        std::fs::write(dir.path().join("other.json"), "{}").unwrap();
+
+        let events = read_events(&dir.path().join("s.events.jsonl"));
+        let said: Vec<String> = events
+            .iter()
+            .filter_map(|e| match e {
+                AgentEvent::MessageReceived { content, .. } => Some(content.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["first", "latest"]);
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, AgentEvent::SessionStarted { .. })),
+            "a replay never switches the live session"
+        );
     }
 
     #[test]

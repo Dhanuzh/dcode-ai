@@ -1,5 +1,28 @@
 # Changelog
 
+## 1.0.32 — 2026-10-31
+
+### Fixed
+- **Resume showed only part of a conversation**: resuming used a
+  throwaway session id under the hood, and the TUI wrote the resumed
+  conversation's events to that id's log. The next resume replayed only
+  the original log, so the latest messages were missing (and the
+  throwaway logs had no saved state). Resume now keeps the session's own
+  id, a new session's start is written to its own log, and replay can't
+  switch the live session. Logs split by older versions are read back in
+  order on resume, so earlier conversations show in full again.
+- A resumed session whose history was only a compaction summary could be
+  deleted on exit as "empty".
+- With `auto_detect_context_window = false` and no window set, compaction
+  ran on the first message (the window was taken as 0).
+- A compaction that removed nothing was still reported.
+
+### Tests
+- End-to-end tests drive the real terminal UI against a local mock model:
+  quit, continue twice, `/new`, `/resume <id>`, `-r <id>` must keep the
+  whole history in the right session's log; an approved `write_file` runs
+  and shows after resume.
+
 ## 1.0.31 — 2026-10-31
 
 ### Automatic compaction, reworked

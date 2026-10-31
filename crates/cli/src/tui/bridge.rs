@@ -54,7 +54,12 @@ pub fn spawn_tui_bridge(
             .map(str::to_string);
         let mut event_id: u64 = 0;
         while let Some(event) = rx.recv().await {
-            let current = state.lock().ok().map(|g| g.session_id.clone());
+            // A session's start goes in its own log: switch before writing
+            // it (the TUI state only learns the new id when it applies it).
+            let current = match &event {
+                AgentEvent::SessionStarted { session_id, .. } => Some(session_id.clone()),
+                _ => state.lock().ok().map(|g| g.session_id.clone()),
+            };
             // (Re)open when the session changed, or when the first open
             // failed because the sessions folder did not exist yet.
             if let (Some(dir), Some(id)) = (&sessions_dir, current.filter(|i| !i.is_empty()))

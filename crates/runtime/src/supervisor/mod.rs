@@ -78,6 +78,8 @@ pub struct Supervisor {
     compaction_failures: Arc<std::sync::atomic::AtomicU32>,
     /// Old tool output was cleared since the last compaction.
     pruned_since_compaction: Arc<std::sync::atomic::AtomicBool>,
+    /// Loaded from disk: never deleted as an empty session on exit.
+    resumed: bool,
     interactive_handle: crate::interactive_exec::InteractiveExecHandle,
     preview_handle: crate::preview_tool::PreviewHandle,
     /// The agent's `run_background` jobs (for `/bashes`; stopped on finish).
@@ -465,6 +467,7 @@ impl Supervisor {
             context_manager,
             compaction_failures: Default::default(),
             pruned_since_compaction: Default::default(),
+            resumed: false,
             interactive_handle,
             preview_handle,
             background_jobs,
@@ -538,21 +541,22 @@ impl Supervisor {
             }
         }
 
-        // Bootstrap runtime/IPC infrastructure with a fresh ephemeral session ID,
-        // then swap in the loaded persisted state. Never call `create()` with the
-        // target resume ID directly: `create()` saves immediately, which would
-        // overwrite the persisted session before we load it.
+        // Build the runtime under the session's own id (the state is already
+        // loaded above; `create()` doesn't write it). An extra throwaway id
+        // here used to announce itself on the event stream, so the resumed
+        // conversation was logged under that id and the next resume showed
+        // only the part before it.
         let mut sup = Self::create(SupervisorConfig {
             config: config.clone(),
             workspace_root: workspace_root.to_path_buf(),
             safe_mode,
             interactive_approvals,
-            session_id: None,
+            session_id: Some(loaded.meta.id.clone()),
             approval_handler,
             orchestration_context: None,
         })
         .await?;
-        let bootstrap_id = sup.session_id.clone();
+        sup.resumed = true;
 
         sup.session_id = loaded.meta.id.clone();
         sup.session_name = loaded.meta.session_name.clone();
@@ -599,9 +603,6 @@ impl Supervisor {
         sup.agent
             .set_context_token_limit(sup.context_manager.budget().hard_limit());
 
-        // Best-effort cleanup of the bootstrap snapshot created by `create()`.
-        // Ignore failures here because it is non-critical.
-        let _ = sup.session_store.delete(&bootstrap_id).await;
         // Keep last-session pointer consistent with the resumed session.
         let _ = sup.update_last_session().await;
         Ok(sup)
@@ -937,8 +938,12 @@ impl Supervisor {
                 "Context window for {model}: {window} tokens (cached/static), working within {working}"
             );
             working
-        } else {
+        } else if config.memory.context.context_window_target > 0 {
             config.memory.context.context_window_target
+        } else {
+            // No window given: the model's, not zero (a zero window made the
+            // system prompt alone look 75% full and compacted every turn).
+            crate::model_limits::effective_context_window(model)
         };
 
         // One window for everything (M31): the footer, `/context` and the
@@ -1004,6 +1009,14 @@ impl Supervisor {
             }
         }
         let used = self.agent.context_used() as usize;
+        // Nothing old enough to summarize: compacting can't help.
+        if self
+            .context_manager
+            .get_messages_to_summarize(&self.agent.messages)
+            .is_empty()
+        {
+            return;
+        }
         if let Some(tx) = self.agent.event_sender() {
             let _ = tx
                 .send(AgentEvent::ContextCompaction {
@@ -1076,6 +1089,9 @@ impl Supervisor {
             let compacted = self
                 .context_manager
                 .get_sliding_window(&self.agent.messages, None);
+            if compacted.len() >= self.agent.messages.len() {
+                return Err("nothing to compact".into());
+            }
             let new_count = self.agent.compact_messages(compacted);
             let new_stats = self.context_manager.stats(&self.agent.messages);
 
@@ -1437,6 +1453,20 @@ impl Supervisor {
     }
 
     fn should_persist_session(&self) -> bool {
+        // A session that was on disk keeps its file, whatever it holds now
+        // (a compacted history can be all summary).
+        if self.resumed {
+            return true;
+        }
+        // A compaction summary is conversation too.
+        if self
+            .agent
+            .messages
+            .iter()
+            .any(crate::context_manager::is_summary)
+        {
+            return true;
+        }
         // Ignore seed/system bootstrap content.
         let has_non_system_message = self.agent.messages.iter().any(|m| {
             !matches!(m.role, Role::System)

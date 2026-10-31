@@ -21,6 +21,10 @@ struct Tui {
 
 impl Tui {
     fn start(home: &Path, workspace: &Path) -> Self {
+        Self::start_with(home, workspace, &[])
+    }
+
+    fn start_with(home: &Path, workspace: &Path, args: &[&str]) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows: ROWS,
@@ -30,12 +34,15 @@ impl Tui {
             })
             .expect("open pty");
         let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_dcode-ai"));
+        cmd.args(args);
         cmd.cwd(workspace);
         cmd.env("HOME", home);
         cmd.env("USERPROFILE", home);
         cmd.env("XDG_CONFIG_HOME", home.join(".config"));
         cmd.env("XDG_RUNTIME_DIR", home.join("run"));
         cmd.env("TERM", "xterm-256color");
+        // Only ever sent to the local mock model in these tests.
+        cmd.env("ANTHROPIC_AUTH_TOKEN", "test-token");
         let child = pty.slave.spawn_command(cmd).expect("spawn dcode-ai");
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader().expect("reader");
@@ -233,4 +240,301 @@ fn typing_pasting_modes_and_dashboard() {
 
 fn tui_has(tui: &Tui, needle: &str) -> bool {
     tui.composer().contains(needle)
+}
+
+/// A stand-in for the Anthropic Messages API: answers every request with a
+/// streamed `Reply to: <the last thing the user said>`.
+fn spawn_mock_model() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || answer(stream));
+        }
+    });
+    format!("http://{addr}")
+}
+
+fn answer(mut stream: std::net::TcpStream) {
+    let mut buf = Vec::new();
+    let mut chunk = [0u8; 8192];
+    // Headers, then the body by Content-Length.
+    let (head_end, len) = loop {
+        let Ok(n) = stream.read(&mut chunk) else {
+            return;
+        };
+        if n == 0 {
+            return;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+        if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+            let head = String::from_utf8_lossy(&buf[..i]).to_lowercase();
+            let len = head
+                .lines()
+                .find_map(|l| l.strip_prefix("content-length:"))
+                .and_then(|v| v.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            break (i + 4, len);
+        }
+    };
+    while buf.len() < head_end + len {
+        let Ok(n) = stream.read(&mut chunk) else {
+            return;
+        };
+        if n == 0 {
+            break;
+        }
+        buf.extend_from_slice(&chunk[..n]);
+    }
+    let body: serde_json::Value =
+        serde_json::from_slice(&buf[head_end..]).unwrap_or(serde_json::Value::Null);
+    let said = body["messages"]
+        .as_array()
+        .and_then(|m| m.iter().rev().find(|m| m["role"] == "user"))
+        .map(|m| match &m["content"] {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(parts) => parts
+                .iter()
+                .filter_map(|p| p["text"].as_str())
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => String::new(),
+        })
+        .unwrap_or_default();
+    // After a tool result: confirm. Asked to create the note: call write_file.
+    let last = body["messages"]
+        .as_array()
+        .and_then(|m| m.last())
+        .cloned()
+        .unwrap_or_default();
+    let after_tool = last["content"]
+        .as_array()
+        .is_some_and(|parts| parts.iter().any(|p| p["type"] == "tool_result"));
+    let sse = if after_tool {
+        text_sse("Wrote the note.")
+    } else if said.contains("create the note") {
+        tool_sse(
+            "write_file",
+            &serde_json::json!({"path": "note.txt", "content": "hello from the test"}),
+        )
+    } else {
+        let said: String = said
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        text_sse(&format!("Reply to: {said}"))
+    };
+    let _ = write!(
+        stream,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n{sse}"
+    );
+}
+
+fn tool_sse(name: &str, input: &serde_json::Value) -> String {
+    let partial = serde_json::to_string(&input.to_string()).unwrap();
+    format!(
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":100}}}}}}\n\n\
+event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"tool_use\",\"id\":\"toolu_1\",\"name\":\"{name}\",\"input\":{{}}}}}}\n\n\
+event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"input_json_delta\",\"partial_json\":{partial}}}}}\n\n\
+event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"tool_use\"}},\"usage\":{{\"output_tokens\":5}}}}\n\n\
+event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    )
+}
+
+fn text_sse(reply: &str) -> String {
+    let text = serde_json::to_string(reply).unwrap();
+    format!(
+        "event: message_start\ndata: {{\"type\":\"message_start\",\"message\":{{\"usage\":{{\"input_tokens\":100}}}}}}\n\n\
+event: content_block_start\ndata: {{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{{\"type\":\"text\",\"text\":\"\"}}}}\n\n\
+event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{{\"type\":\"text_delta\",\"text\":{text}}}}}\n\n\
+event: content_block_stop\ndata: {{\"type\":\"content_block_stop\",\"index\":0}}\n\n\
+event: message_delta\ndata: {{\"type\":\"message_delta\",\"delta\":{{\"stop_reason\":\"end_turn\"}},\"usage\":{{\"output_tokens\":5}}}}\n\n\
+event: message_stop\ndata: {{\"type\":\"message_stop\"}}\n\n"
+    )
+}
+
+fn setup_with_model() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let (dir, home, ws) = setup();
+    let url = spawn_mock_model();
+    std::fs::write(
+        home.join(".dcode-ai").join("config.toml"),
+        format!(
+            "[provider]\ndefault = \"anthropic\"\n[provider.anthropic]\nbackend = \"api\"\napi_key = \"sk-ant-test-key\"\nbase_url = \"{url}\"\n[memory.context]\nauto_detect_context_window = false\nquery_provider_models_api = false\n"
+        ),
+    )
+    .unwrap();
+    (dir, home, ws)
+}
+
+impl Tui {
+    /// Type a prompt, send it, and wait for the model's reply.
+    fn ask(&mut self, prompt: &str) {
+        self.send(prompt.as_bytes());
+        std::thread::sleep(Duration::from_millis(150));
+        self.send(b"\r");
+        let first: String = prompt
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+        self.wait_for(&format!("Reply to: {first}"));
+        self.wait_for("? for shortcuts");
+    }
+
+    fn quit(&mut self) {
+        self.send(b"\x03");
+        std::thread::sleep(Duration::from_millis(200));
+        self.send(b"\x03");
+        let start = Instant::now();
+        while !matches!(self.child.try_wait(), Ok(Some(_))) {
+            assert!(
+                start.elapsed() < Duration::from_secs(15),
+                "did not quit:\n{}",
+                self.text()
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+/// Session files in the workspace: (ids with saved state, ids with only a log).
+fn session_files(ws: &Path) -> (Vec<String>, Vec<String>) {
+    let dir = ws.join(".dcode-ai").join("sessions");
+    let mut states = Vec::new();
+    let mut logs = Vec::new();
+    for e in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some(id) = name.strip_suffix(".events.jsonl") {
+            logs.push(id.to_string());
+        } else if let Some(id) = name.strip_suffix(".json") {
+            states.push(id.to_string());
+        }
+    }
+    states.sort();
+    let orphans = logs.into_iter().filter(|l| !states.contains(l)).collect();
+    (states, orphans)
+}
+
+fn log_of(ws: &Path, id: &str) -> String {
+    std::fs::read_to_string(
+        ws.join(".dcode-ai")
+            .join("sessions")
+            .join(format!("{id}.events.jsonl")),
+    )
+    .unwrap_or_default()
+}
+
+/// The whole life of a session: talk, quit, continue (`-c`) twice, then
+/// switch sessions in-process with `/resume <id>`. Every resume must show
+/// everything said so far, each session's events must stay in its own log,
+/// and no log may exist without its saved state.
+#[test]
+fn history_survives_quit_continue_and_resume() {
+    let (_dir, home, ws) = setup_with_model();
+
+    // Run 1: a new session.
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    tui.ask("alpha first question");
+    tui.quit();
+    let (states, orphans) = session_files(&ws);
+    assert_eq!(states.len(), 1, "one saved session: {states:?}");
+    assert!(orphans.is_empty(), "logs without state: {orphans:?}");
+    let first = states[0].clone();
+
+    // Run 2: continue it.
+    let mut tui = Tui::start_with(&home, &ws, &["-c"]);
+    tui.wait_for("alpha first question");
+    tui.wait_for("Reply to: alpha first question");
+    tui.ask("beta second question");
+    tui.quit();
+    let (states, orphans) = session_files(&ws);
+    assert_eq!(states, vec![first.clone()], "continuing adds no session");
+    assert!(orphans.is_empty(), "logs without state: {orphans:?}");
+
+    // Run 3: continue again — both earlier turns are there.
+    let mut tui = Tui::start_with(&home, &ws, &["-c"]);
+    tui.wait_for("alpha first question");
+    tui.wait_for("beta second question");
+    tui.wait_for("Reply to: beta second question");
+
+    // In the same process: start a new session, then go back with /resume.
+    tui.send(b"/new");
+    std::thread::sleep(Duration::from_millis(200));
+    tui.send(b"\r");
+    std::thread::sleep(Duration::from_millis(800));
+    tui.ask("gamma other topic");
+    tui.send(format!("/resume {first}").as_bytes());
+    std::thread::sleep(Duration::from_millis(200));
+    tui.send(b"\r");
+    std::thread::sleep(Duration::from_millis(1500));
+    tui.ask("delta back again");
+    tui.quit();
+
+    // Each session's words are in its own log, and only there.
+    let log = log_of(&ws, &first);
+    for said in [
+        "alpha first question",
+        "beta second question",
+        "delta back again",
+    ] {
+        assert!(
+            log.contains(said),
+            "{said:?} missing from the first session's log"
+        );
+    }
+    assert!(
+        !log.contains("gamma other topic"),
+        "another session's turn leaked in"
+    );
+    let (states, orphans) = session_files(&ws);
+    assert_eq!(
+        states.len(),
+        2,
+        "the first session and the /new one: {states:?}"
+    );
+    assert!(orphans.is_empty(), "logs without state: {orphans:?}");
+    let second = states.iter().find(|s| **s != first).unwrap();
+    assert!(log_of(&ws, second).contains("gamma other topic"));
+    assert!(!log_of(&ws, second).contains("delta back again"));
+
+    // Run 4: resume by id — the whole history shows.
+    let tui = Tui::start_with(&home, &ws, &["-r", &first]);
+    for said in [
+        "alpha first question",
+        "beta second question",
+        "Reply to: delta back again",
+    ] {
+        tui.wait_for(said);
+    }
+}
+
+/// A tool call that needs approval: the prompt appears, `1` approves, the
+/// file is written, and resuming shows the call and the reply.
+#[test]
+fn approved_edit_runs_and_shows_after_resume() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    tui.send(b"please create the note");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"\r");
+    tui.wait_until("an approval prompt", |t| {
+        t.contains("note.txt") && t.contains("1.")
+    });
+    tui.send(b"1");
+    tui.wait_for("Wrote the note.");
+    assert_eq!(
+        std::fs::read_to_string(ws.join("note.txt")).unwrap_or_default(),
+        "hello from the test"
+    );
+    tui.wait_for("? for shortcuts");
+    tui.quit();
+
+    let tui = Tui::start_with(&home, &ws, &["-c"]);
+    tui.wait_for("please create the note");
+    tui.wait_for("note.txt");
+    tui.wait_for("Wrote the note.");
 }
