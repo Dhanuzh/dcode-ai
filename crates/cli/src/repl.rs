@@ -1298,6 +1298,9 @@ impl Repl {
             g.working_style = self.runtime.config().ui.working_style.clone();
             g.shimmer = self.runtime.config().ui.shimmer;
             g.sounds = self.runtime.config().ui.sounds;
+            g.office.set_owner(&dcode_ai_cli::people::my_name(
+                self.runtime.workspace_root(),
+            ));
             g.mcp_server_count = self
                 .runtime
                 .config()
@@ -2771,7 +2774,15 @@ fn attach_runtime_to_tui(
         );
     }
     match runtime.take_event_rx() {
-        Some(rx) => spawn_tui_bridge(rx, log_path, ipc, approval, question, tui_state.clone()),
+        Some(rx) => spawn_tui_bridge(
+            rx,
+            log_path,
+            ipc,
+            approval,
+            question,
+            tui_state.clone(),
+            runtime.event_tx(),
+        ),
         None => tokio::spawn(async {}),
     }
 }

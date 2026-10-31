@@ -867,31 +867,72 @@ fn see_and_share_a_session() {
     let bundle = std::fs::read_to_string(handoff.path()).unwrap();
     assert!(bundle.contains("login works, logout next") && bundle.contains("note.txt"));
 
-    // Another terminal joins and sends a message.
+    // Two people join from other terminals, under their names.
     let id = handoff
         .file_name()
         .to_string_lossy()
         .trim_end_matches(".dcode-session")
         .to_string();
-    let mut join = std::process::Command::new(env!("CARGO_BIN_EXE_dcode-ai"))
-        .args(["join", &id])
-        .current_dir(&ws)
-        .env("HOME", &home)
-        .env("XDG_RUNTIME_DIR", runtime_dir(&home))
-        .env("ANTHROPIC_AUTH_TOKEN", "test-token")
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("join");
-    std::thread::sleep(Duration::from_millis(1500));
-    if let Some(stdin) = join.stdin.as_mut() {
+    let join_as = |name: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_dcode-ai"))
+            .args(["join", &id, "--name", name])
+            .current_dir(&ws)
+            .env("HOME", &home)
+            .env("XDG_RUNTIME_DIR", runtime_dir(&home))
+            .env("ANTHROPIC_AUTH_TOKEN", "test-token")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("join")
+    };
+    let mut priya = join_as("Priya");
+    tui.wait_for("⇢ Priya joined");
+    let mut sam = join_as("Sam");
+    tui.wait_for("⇢ Sam joined");
+    // Someone opens the watch page with their name.
+    let events = url.replace("/?t=", "/events?t=") + "&name=Ravi";
+    let (close_page, closed) = std::sync::mpsc::channel::<()>();
+    let watcher = std::thread::spawn(move || {
+        let rest = events.strip_prefix("http://").unwrap().to_string();
+        let (host, path) = rest.split_once('/').unwrap();
+        let mut s = std::net::TcpStream::connect(host).unwrap();
+        write!(s, "GET /{path} HTTP/1.1\r\nHost: x\r\n\r\n").unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(8))).unwrap();
+        let mut buf = [0u8; 4096];
+        let _ = s.read(&mut buf);
+        let _ = closed.recv();
+    });
+    tui.wait_for("⇢ Ravi is watching");
+
+    // Priya says something: everyone sees it, the agent knows it's her.
+    if let Some(stdin) = priya.stdin.as_mut() {
         writeln!(stdin, "hello from beside you").unwrap();
     }
-    tui.wait_for("from a joined terminal: hello from beside you");
-    tui.wait_for("Reply to: hello from beside");
-    let _ = join.kill();
-    let _ = join.wait();
+    tui.wait_for("⇢ Priya: hello from beside you");
+    tui.wait_for("Reply to: (from Priya)");
+    tui.wait_for("? for shortcuts");
+
+    // They are all in the office, under their names.
+    run(&mut tui, "/office");
+    tui.wait_until("people in the office", |t| {
+        t.contains("q close") && t.contains("Priya") && t.contains("Sam") && t.contains("Ravi")
+    });
+    tui.send(b"q");
+    tui.wait_for("? for shortcuts");
+
+    // Leaving: /quit from one, closing the terminal for the other, the page.
+    if let Some(stdin) = priya.stdin.as_mut() {
+        writeln!(stdin, "/quit").unwrap();
+    }
+    tui.wait_for("⇠ Priya left");
+    drop(sam.stdin.take());
+    tui.wait_for("⇠ Sam left");
+    let _ = close_page.send(());
+    let _ = watcher.join();
+    tui.wait_for("⇠ Ravi left");
+    let _ = priya.wait();
+    let _ = sam.wait();
 }
 
 impl Tui {

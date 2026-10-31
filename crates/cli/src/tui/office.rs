@@ -71,6 +71,69 @@ const LINGER: Duration = Duration::from_secs(8);
 #[derive(Debug)]
 pub struct Office {
     pub agents: Vec<OfficeAgent>,
+    /// People with the session: you, teammates on `join`, `/watch` viewers.
+    pub people: Vec<OfficePerson>,
+}
+
+/// How a person is with the session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PersonRole {
+    /// Running this session.
+    Owner,
+    /// On `dcode-ai join`: can send messages.
+    Joined,
+    /// On the `/watch` page: read-only.
+    Watching,
+}
+
+/// A person in the office.
+#[derive(Debug, Clone)]
+pub struct OfficePerson {
+    pub id: String,
+    pub name: String,
+    pub role: PersonRole,
+    /// What they last said (shown for a while).
+    pub said: String,
+    pub said_at: Option<Instant>,
+    pub last_seen: Instant,
+    /// Leaving: waves, then goes.
+    pub leaving: Option<Instant>,
+    pub look: usize,
+}
+
+impl OfficePerson {
+    /// The bubble right now.
+    pub fn bubble(&self) -> String {
+        if self.leaving.is_some() {
+            return "bye 👋".into();
+        }
+        if self.said_at.is_some_and(|t| t.elapsed() < SAID_FOR) {
+            return format!("💬 {}", self.said);
+        }
+        match self.role {
+            PersonRole::Watching => "👀 watching".into(),
+            _ => String::new(),
+        }
+    }
+
+    pub fn talking(&self) -> bool {
+        self.said_at.is_some_and(|t| t.elapsed() < SAID_FOR)
+    }
+}
+
+/// How long a message stays in its bubble.
+const SAID_FOR: Duration = Duration::from_secs(8);
+/// A joined person not heard from for this long has gone.
+const AWAY_AFTER: Duration = Duration::from_secs(25);
+/// How long the wave lasts before someone is gone.
+const WAVE_FOR: Duration = Duration::from_secs(3);
+
+/// A look for a name: the same person always looks the same.
+fn look_for(name: &str) -> usize {
+    let h = name
+        .bytes()
+        .fold(7u32, |h, b| h.wrapping_mul(31).wrapping_add(b as u32));
+    1 + (h as usize % (LOOKS.len() - 1))
 }
 
 impl Default for Office {
@@ -85,6 +148,7 @@ impl Default for Office {
                 finished: None,
                 look: 0,
             }],
+            people: Vec::new(),
         }
     }
 }
@@ -164,6 +228,49 @@ impl Office {
     pub fn tidy(&mut self) {
         self.agents
             .retain(|a| a.finished.is_none_or(|t| t.elapsed() < LINGER));
+        for p in &mut self.people {
+            if p.role != PersonRole::Owner
+                && p.leaving.is_none()
+                && p.last_seen.elapsed() > AWAY_AFTER
+            {
+                p.leaving = Some(Instant::now());
+            }
+        }
+        self.people
+            .retain(|p| p.leaving.is_none_or(|t| t.elapsed() < WAVE_FOR));
+    }
+
+    /// You, at the lead desk (named after git's `user.name`).
+    pub fn set_owner(&mut self, name: &str) {
+        self.people.retain(|p| p.role != PersonRole::Owner);
+        self.people.insert(
+            0,
+            OfficePerson {
+                id: "owner".into(),
+                name: name.to_string(),
+                role: PersonRole::Owner,
+                said: String::new(),
+                said_at: None,
+                last_seen: Instant::now(),
+                leaving: None,
+                look: look_for(name),
+            },
+        );
+    }
+
+    /// People in drawing order: you, then teammates, then watchers.
+    pub fn people_ordered(&self) -> Vec<&OfficePerson> {
+        let mut v: Vec<&OfficePerson> = self.people.iter().collect();
+        v.sort_by_key(|p| match p.role {
+            PersonRole::Owner => 0,
+            PersonRole::Joined => 1,
+            PersonRole::Watching => 2,
+        });
+        v
+    }
+
+    fn person(&mut self, id: &str) -> Option<&mut OfficePerson> {
+        self.people.iter_mut().find(|p| p.id == id)
     }
 
     pub fn apply(&mut self, ev: &AgentEvent) {
@@ -229,6 +336,57 @@ impl Office {
                         (a, b)
                     };
                     self.set(i, activity, bubble);
+                }
+            }
+            AgentEvent::PersonJoined { person, name, role } => {
+                let role = match role.as_str() {
+                    "watch" => PersonRole::Watching,
+                    "owner" => PersonRole::Owner,
+                    _ => PersonRole::Joined,
+                };
+                if let Some(p) = self.person(person) {
+                    p.last_seen = Instant::now();
+                    p.leaving = None;
+                    p.name = name.clone();
+                } else {
+                    self.people.push(OfficePerson {
+                        id: person.clone(),
+                        name: name.clone(),
+                        role,
+                        said: String::new(),
+                        said_at: None,
+                        last_seen: Instant::now(),
+                        leaving: None,
+                        look: look_for(name),
+                    });
+                }
+            }
+            AgentEvent::PersonSeen { person } => {
+                if let Some(p) = self.person(person) {
+                    p.last_seen = Instant::now();
+                }
+            }
+            AgentEvent::PersonLeft { person, .. } => {
+                if let Some(p) = self.person(person)
+                    && p.leaving.is_none()
+                {
+                    p.leaving = Some(Instant::now());
+                }
+            }
+            AgentEvent::PersonSaid { person, text, .. } => {
+                if let Some(p) = self.person(person) {
+                    p.said = short(text, 20);
+                    p.said_at = Some(Instant::now());
+                    p.last_seen = Instant::now();
+                }
+            }
+            // What you type shows over your head.
+            AgentEvent::MessageReceived { role, content }
+                if role == "user" && !content.starts_with("(from ") =>
+            {
+                if let Some(p) = self.person("owner") {
+                    p.said = short(content, 20);
+                    p.said_at = Some(Instant::now());
                 }
             }
             AgentEvent::ChildSessionCompleted {
@@ -534,6 +692,126 @@ fn draw_station(c: &mut Canvas, ox: i32, oy: i32, agent: &OfficeAgent, tick: u64
     }
 }
 
+/// A person (you, a teammate, a viewer) at `(ox, oy)`.
+fn draw_person(c: &mut Canvas, ox: i32, oy: i32, person: &OfficePerson, tick: u64) {
+    let (hair, skin, shirt) = LOOKS[person.look % LOOKS.len()];
+    let f = tick as i32;
+    // Walking out: slide right as the wave goes on.
+    let dx = person
+        .leaving
+        .map(|t| (t.elapsed().as_millis() / 120) as i32)
+        .unwrap_or(0);
+    let ox = ox + dx;
+    let p = |c: &mut Canvas, x: i32, y: i32, col: Color| c.set(ox + x, oy + y, col);
+    let r = |c: &mut Canvas, x: i32, y: i32, w: i32, h: i32, col: Color| {
+        c.rect(ox + x, oy + y, w, h, col)
+    };
+    let standing = person.role == PersonRole::Watching;
+    // Watchers sway a little; standing people are taller.
+    let sway = if standing && (f / 8) % 2 == 0 { 1 } else { 0 };
+    let top = if standing { 1 } else { 2 };
+    let x0 = sway;
+
+    if !standing {
+        r(c, 6, 7, 11, 9, CHAIR);
+    }
+    // Head.
+    r(c, 8 + x0, top, 7, 3, hair);
+    r(c, 8 + x0, top + 3, 1, 2, hair);
+    r(c, 14 + x0, top + 3, 1, 2, hair);
+    r(c, 9 + x0, top + 2, 5, 5, skin);
+    r(c, 9 + x0, top + 2, 5, 1, hair);
+    p(c, 10 + x0, top + 4, EYE);
+    p(c, 12 + x0, top + 4, EYE);
+    // Talking: the mouth opens and closes.
+    if person.talking() && (f / 2) % 2 == 0 {
+        p(c, 11 + x0, top + 6, rgb(0x8a, 0x3a, 0x3a));
+    }
+    r(c, 10 + x0, top + 7, 3, 1, skin);
+    // Body.
+    let body_y = top + 8;
+    r(c, 7 + x0, body_y, 9, 6, shirt);
+    r(c, 10 + x0, body_y, 3, 1, skin);
+
+    if person.leaving.is_some() {
+        // Waving goodbye.
+        let wave = (f / 2) % 2;
+        r(c, 16 + x0, top + 1 + wave, 1, 7, shirt);
+        r(c, 16 + x0, top + wave, 2, 2, skin);
+        r(c, 6 + x0, body_y + 1, 1, 4, shirt);
+    } else if standing {
+        // Holding a mug at the chest.
+        r(c, 6 + x0, body_y + 1, 1, 4, shirt);
+        r(c, 16 + x0, body_y + 1, 1, 3, shirt);
+        r(c, 12 + x0, body_y + 3, 4, 3, MUG);
+        p(c, 16 + x0, body_y + 4, MUG);
+    } else {
+        r(c, 6, body_y + 1, 1, 4, shirt);
+        r(c, 16, body_y + 1, 1, 4, shirt);
+        // Writing while you talk.
+        let pen = person.talking() && (f / 2) % 2 == 0;
+        r(c, 6, 15, 2, 1, skin);
+        r(c, 15, 15 - pen as i32, 2, 1, skin);
+    }
+
+    if standing {
+        // Legs.
+        let pants = rgb(0x2e, 0x34, 0x40);
+        r(c, 8 + x0, body_y + 6, 3, 7, pants);
+        r(c, 12 + x0, body_y + 6, 3, 7, pants);
+        r(c, 8 + x0, body_y + 13, 3, 1, EYE);
+        r(c, 12 + x0, body_y + 13, 3, 1, EYE);
+        return;
+    }
+    // Desk: yours has a notebook, a guest's a coffee.
+    r(c, 1, 16, 22, 1, DESK_TOP);
+    r(c, 1, 17, 22, 2, DESK_FRONT);
+    r(c, 2, 19, 2, 5, DESK_LEG);
+    r(c, 20, 19, 2, 5, DESK_LEG);
+    match person.role {
+        PersonRole::Owner => {
+            r(c, 14, 14, 6, 2, PAPER);
+            r(c, 15, 14, 4, 1, rgb(0x9c, 0xb4, 0xd8));
+            p(c, 19, 13, rgb(0x33, 0x33, 0x33));
+        }
+        _ => {
+            r(c, 16, 13, 3, 3, MUG);
+            p(c, 19, 14, MUG);
+            // Steam.
+            if (f / 3) % 2 == 0 {
+                p(c, 17, 11, rgb(0xd0, 0xd0, 0xd0));
+            } else {
+                p(c, 18, 10, rgb(0xd0, 0xd0, 0xd0));
+            }
+        }
+    }
+}
+
+/// Everyone drawn, in order: you, the agents, teammates, viewers.
+pub enum Who<'a> {
+    Agent(&'a OfficeAgent),
+    Person(&'a OfficePerson),
+}
+
+impl Office {
+    pub fn stations(&self) -> Vec<Who<'_>> {
+        let people = self.people_ordered();
+        let mut out: Vec<Who> = people
+            .iter()
+            .filter(|p| p.role == PersonRole::Owner)
+            .map(|p| Who::Person(p))
+            .collect();
+        out.extend(self.agents.iter().map(Who::Agent));
+        out.extend(
+            people
+                .iter()
+                .filter(|p| p.role != PersonRole::Owner)
+                .map(|p| Who::Person(p)),
+        );
+        out
+    }
+}
+
 /// Desks that fit side by side in `width` logical pixels.
 pub fn desks_per_row(width: u16) -> usize {
     (width as usize / STATION_W).max(1)
@@ -576,7 +854,8 @@ impl Widget for OfficeView<'_> {
         if area.width < 10 || area.height < 4 {
             return;
         }
-        let n = self.office.agents.len().max(1);
+        let stations = self.office.stations();
+        let n = stations.len().max(1);
         let (scale, _) = office_layout(area.width, area.height, n);
         let s = scale as usize;
         // Draw at logical size, then blow each pixel up `s` times.
@@ -589,7 +868,7 @@ impl Widget for OfficeView<'_> {
         let used = per_row.min(n) * STATION_W;
         let left = w.saturating_sub(used) / 2;
         let mut labels: Vec<(u16, u16, String, Style)> = Vec::new();
-        for (i, agent) in self.office.agents.iter().enumerate() {
+        for (i, who) in stations.iter().enumerate() {
             let col = i % per_row;
             let row = i / per_row;
             let cell_x = left + col * STATION_W;
@@ -598,20 +877,37 @@ impl Widget for OfficeView<'_> {
                 break;
             }
             // Pixels start one row below the bubble row.
-            draw_station(
-                &mut canvas,
-                cell_x as i32,
-                ((cell_y + 1) * 2) as i32,
-                agent,
-                self.tick,
-            );
+            let (px, py) = (cell_x as i32, ((cell_y + 1) * 2) as i32);
+            let (bubble, name, tag) = match who {
+                Who::Agent(a) => {
+                    draw_station(&mut canvas, px, py, a, self.tick);
+                    (
+                        a.bubble.clone(),
+                        a.name.clone(),
+                        (a.activity.glow(), rgb(0x1a, 0x16, 0x14)),
+                    )
+                }
+                Who::Person(p) => {
+                    draw_person(&mut canvas, px, py, p, self.tick);
+                    let bg = match p.role {
+                        PersonRole::Owner => rgb(0xd9, 0x77, 0x57),
+                        PersonRole::Joined => rgb(0x3f, 0x7f, 0xbf),
+                        PersonRole::Watching => rgb(0x5a, 0x60, 0x6c),
+                    };
+                    let name = match p.role {
+                        PersonRole::Owner => format!("{} (you)", p.name),
+                        _ => p.name.clone(),
+                    };
+                    (p.bubble(), name, (bg, bg))
+                }
+            };
             let centre = |text: &str| -> u16 {
                 let tw = text.chars().count();
                 ((cell_x * s + (STATION_W * s).saturating_sub(tw) / 2) as u16)
                     .min(area.width.saturating_sub(tw as u16))
             };
-            if !agent.bubble.is_empty() {
-                let text = format!(" {} ", agent.bubble);
+            if !bubble.is_empty() {
+                let text = format!(" {bubble} ");
                 labels.push((
                     centre(&text),
                     (cell_y * s + s - 1) as u16,
@@ -622,12 +918,23 @@ impl Widget for OfficeView<'_> {
                         .add_modifier(Modifier::BOLD),
                 ));
             }
-            let name = format!(" {} ", short(&agent.name, STATION_W * s - 4));
-            let mut style = Style::default()
-                .fg(rgb(0xec, 0xe6, 0xdf))
-                .bg(rgb(0x1a, 0x16, 0x14));
+            let name = format!(" {} ", short(&name, STATION_W * s - 4));
+            let is_person = matches!(who, Who::Person(_));
+            let mut style = if is_person {
+                Style::default()
+                    .fg(rgb(0xf8, 0xf6, 0xf2))
+                    .bg(tag.1)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(rgb(0xec, 0xe6, 0xdf))
+                    .bg(rgb(0x1a, 0x16, 0x14))
+            };
             if self.selected == Some(i) {
-                style = style.fg(rgb(0x1a, 0x16, 0x14)).bg(agent.activity.glow());
+                style = style
+                    .fg(rgb(0x1a, 0x16, 0x14))
+                    .bg(tag.0)
+                    .add_modifier(Modifier::BOLD);
             }
             labels.push((
                 centre(&name),
@@ -705,6 +1012,53 @@ mod tests {
         });
         assert_eq!(o.agents[1].activity, Activity::Done);
         assert!(o.agents[1].finished.is_some());
+    }
+
+    #[test]
+    fn people_join_talk_and_leave() {
+        let mut o = Office::default();
+        o.set_owner("dhanush");
+        o.apply(&AgentEvent::PersonJoined {
+            person: "p1".into(),
+            name: "Priya".into(),
+            role: "join".into(),
+        });
+        o.apply(&AgentEvent::PersonJoined {
+            person: "w1".into(),
+            name: "Ravi".into(),
+            role: "watch".into(),
+        });
+        // Owner first, then the agent, then who joined, then who watches.
+        let order: Vec<String> = o
+            .stations()
+            .iter()
+            .map(|w| match w {
+                Who::Person(p) => p.name.clone(),
+                Who::Agent(a) => format!("agent:{}", a.id),
+            })
+            .collect();
+        assert_eq!(order, ["dhanush", "agent:main", "Priya", "Ravi"]);
+        o.apply(&AgentEvent::PersonSaid {
+            person: "p1".into(),
+            name: "Priya".into(),
+            text: "try staging".into(),
+        });
+        let p = o.people.iter().find(|p| p.id == "p1").unwrap();
+        assert!(p.bubble().contains("try staging"));
+        // The same person joining twice stays one person.
+        o.apply(&AgentEvent::PersonJoined {
+            person: "p1".into(),
+            name: "Priya".into(),
+            role: "join".into(),
+        });
+        assert_eq!(o.people.len(), 3);
+        o.apply(&AgentEvent::PersonLeft {
+            person: "p1".into(),
+            name: "Priya".into(),
+        });
+        let p = o.people.iter().find(|p| p.id == "p1").unwrap();
+        assert!(p.leaving.is_some());
+        assert!(p.bubble().contains("bye"));
     }
 
     #[test]
@@ -790,8 +1144,27 @@ mod preview {
         let scenes = [(o.agents.clone(), 2u64, 0usize), (waiting, 5, 1)];
         let mut out = Vec::new();
         for (agents, tick, sel) in scenes {
-            let office = Office { agents };
-            let area = Rect::new(0, 0, 120, office_height(120, office.agents.len()));
+            let mut office = Office {
+                agents,
+                people: Vec::new(),
+            };
+            office.set_owner("dhanush");
+            office.apply(&AgentEvent::PersonJoined {
+                person: "j1".into(),
+                name: "Priya".into(),
+                role: "join".into(),
+            });
+            office.apply(&AgentEvent::PersonSaid {
+                person: "j1".into(),
+                name: "Priya".into(),
+                text: "try staging".into(),
+            });
+            office.apply(&AgentEvent::PersonJoined {
+                person: "w1".into(),
+                name: "Ravi".into(),
+                role: "watch".into(),
+            });
+            let area = Rect::new(0, 0, 120, office_height(120, office.stations().len()));
             let mut buf = Buffer::empty(area);
             OfficeView {
                 office: &office,

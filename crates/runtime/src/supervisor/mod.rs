@@ -2188,6 +2188,8 @@ pub fn spawn_command_consumer_with_store(
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut cancel = cancel_tx;
+        // Joined people's names, by their id.
+        let mut people: HashMap<String, String> = HashMap::new();
         while let Some(cmd) = command_rx.recv().await {
             match cmd {
                 AgentCommand::ApproveToolCall { call_id } => {
@@ -2268,9 +2270,77 @@ pub fn spawn_command_consumer_with_store(
                         let _ = tx.send(selection);
                     }
                 }
+                AgentCommand::Hello { person, name } => {
+                    let name = clean_person_name(&name);
+                    people.insert(person.clone(), name.clone());
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::PersonJoined {
+                                person,
+                                name,
+                                role: "join".into(),
+                            })
+                            .await;
+                    }
+                }
+                AgentCommand::Heartbeat { person } => {
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(AgentEvent::PersonSeen { person }).await;
+                    }
+                }
+                AgentCommand::Bye { person } => {
+                    let name = people.remove(&person).unwrap_or_default();
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(AgentEvent::PersonLeft { person, name }).await;
+                    }
+                }
+                AgentCommand::Say { person, content } => {
+                    let name = people
+                        .get(&person)
+                        .cloned()
+                        .unwrap_or_else(|| "someone".into());
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::PersonSaid {
+                                person,
+                                name: name.clone(),
+                                text: content.clone(),
+                            })
+                            .await;
+                    }
+                    // The agent knows who is asking.
+                    let content = format!("(from {name}) {content}");
+                    if let Some(ref tx) = prompt_tx {
+                        let _ = tx.send(content);
+                    } else if let Some(ref tx) = event_tx {
+                        let _ = tx
+                            .send(AgentEvent::MessageReceived {
+                                role: "user".into(),
+                                content,
+                            })
+                            .await;
+                    }
+                }
             }
         }
     })
+}
+
+/// A name someone gives to show in the office: letters, digits, spaces and
+/// `-_.`, at most 24 characters; "guest" when nothing is left.
+pub fn clean_person_name(name: &str) -> String {
+    let cleaned: String = name
+        .chars()
+        .filter(|c| c.is_alphanumeric() || matches!(c, ' ' | '-' | '_' | '.'))
+        .take(24)
+        .collect::<String>()
+        .trim()
+        .to_string();
+    if cleaned.is_empty() {
+        "guest".into()
+    } else {
+        cleaned
+    }
 }
 
 /// IPC-based approval handler that waits for approve/deny commands from
@@ -2348,6 +2418,13 @@ pub(crate) fn utility_model(config: &DcodeAiConfig) -> Option<String> {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn person_names_are_cleaned() {
+        assert_eq!(clean_person_name("Priya <script>"), "Priya script");
+        assert_eq!(clean_person_name("   "), "guest");
+        assert_eq!(clean_person_name(&"a".repeat(40)).len(), 24);
+    }
 
     #[test]
     fn memory_section_lists_user_then_project_and_adds_auto_guidance() {
@@ -2994,6 +3071,63 @@ mod tests {
         assert_eq!(received, "hello from ipc");
 
         let _ = cmd_tx.send(AgentCommand::Shutdown);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn joined_people_are_announced_and_named_to_the_agent() {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let task = spawn_command_consumer_with_store(
+            cmd_rx,
+            None,
+            None,
+            None,
+            Some(event_tx),
+            Some(prompt_tx),
+            None,
+        );
+        let next = async |rx: &mut mpsc::Receiver<AgentEvent>| {
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .expect("event")
+                .expect("open")
+        };
+        cmd_tx
+            .send(AgentCommand::Hello {
+                person: "p1".into(),
+                name: "Priya<b>".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            next(&mut event_rx).await,
+            AgentEvent::PersonJoined { ref name, ref role, .. } if name == "Priyab" && role == "join"
+        ));
+        cmd_tx
+            .send(AgentCommand::Say {
+                person: "p1".into(),
+                content: "try staging".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            next(&mut event_rx).await,
+            AgentEvent::PersonSaid { ref name, ref text, .. } if name == "Priyab" && text == "try staging"
+        ));
+        let prompt = tokio::time::timeout(std::time::Duration::from_secs(1), prompt_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prompt, "(from Priyab) try staging");
+        cmd_tx
+            .send(AgentCommand::Bye {
+                person: "p1".into(),
+            })
+            .unwrap();
+        assert!(matches!(
+            next(&mut event_rx).await,
+            AgentEvent::PersonLeft { ref name, .. } if name == "Priyab"
+        ));
         task.abort();
     }
 

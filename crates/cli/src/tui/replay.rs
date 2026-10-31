@@ -43,6 +43,11 @@ fn should_skip_on_replay(ev: &AgentEvent) -> bool {
             | AgentEvent::ThinkingDelta { .. }
             | AgentEvent::SessionStarted { .. }
             | AgentEvent::SessionEnded { .. }
+            // Who was around then is not who is here now.
+            | AgentEvent::PersonJoined { .. }
+            | AgentEvent::PersonSeen { .. }
+            | AgentEvent::PersonLeft { .. }
+            | AgentEvent::PersonSaid { .. }
     )
 }
 

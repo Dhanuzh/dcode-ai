@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.36 — 2026-11-01
+
+### New
+- **People in the Office**: everyone on a session now has a desk in the
+  Agent Office, under their name. You sit at the first desk with a
+  notebook; whoever is on `dcode-ai join` sits at a guest desk with a mug;
+  whoever has the `/watch` page open stands at the side holding one. What
+  someone says shows in their bubble for a few seconds; people wave when
+  they leave. The dashboard's office tab lists who is here.
+- `dcode-ai join <id> --name <you>` (default: git `user.name`, else your
+  login). The session shows `⇢ Priya joined`, `⇢ Priya: …` and
+  `⇠ Priya left`, and the agent gets the message as `(from Priya) …`, so it
+  knows who asked.
+- The `/watch` page takes an optional name (kept in that browser) and lists
+  who else is here.
+
 ## 1.0.35 — 2026-11-01
 
 ### New

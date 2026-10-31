@@ -2157,6 +2157,23 @@ impl TuiSessionState {
                 self.push_block(DisplayBlock::System(format!("⚠ {message}")));
                 transcript_dirty = true;
             }
+            AgentEvent::PersonJoined { name, role, .. } if role != "owner" => {
+                let what = if role == "watch" {
+                    "is watching (/watch page)"
+                } else {
+                    "joined (can send messages)"
+                };
+                self.push_block(DisplayBlock::System(format!("⇢ {name} {what}")));
+                transcript_dirty = true;
+            }
+            AgentEvent::PersonLeft { name, .. } if !name.is_empty() => {
+                self.push_block(DisplayBlock::System(format!("⇠ {name} left")));
+                transcript_dirty = true;
+            }
+            AgentEvent::PersonSaid { name, text, .. } => {
+                self.push_block(DisplayBlock::System(format!("⇢ {name}: {text}")));
+                transcript_dirty = true;
+            }
             AgentEvent::ContextCompaction {
                 phase,
                 message,

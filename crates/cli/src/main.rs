@@ -287,8 +287,14 @@ enum Command {
         dir: Option<String>,
     },
     /// Join a running session from another terminal: see it live and send
-    /// messages (`/approve`, `/deny`, `/stop`, `/quit`)
-    Join { session_id: String },
+    /// messages (`/approve`, `/deny`, `/stop`, `/quit`). You show up in the
+    /// session's office under your name.
+    Join {
+        session_id: String,
+        /// Name shown to the others (default: git user.name, else $USER)
+        #[arg(long)]
+        name: Option<String>,
+    },
     /// Share a session: export it as one file (secrets masked), or import
     /// one a teammate exported so `/resume` finds it
     Session {
@@ -965,9 +971,10 @@ async fn try_main() -> anyhow::Result<()> {
         }) => {
             attach_session(&config, &workspace_root, &session_id, json).await?;
         }
-        Some(Command::Join { session_id }) => {
+        Some(Command::Join { session_id, name }) => {
             let id = resolve_session_id(&config, &workspace_root, &session_id).await?;
-            join_session(&config, &workspace_root, &id).await?;
+            let name = name.unwrap_or_else(|| dcode_ai_cli::people::my_name(&workspace_root));
+            join_session(&config, &workspace_root, &id, &name).await?;
         }
         Some(Command::Session { command }) => {
             let sessions_dir = workspace_root.join(&config.session.history_dir);
@@ -1993,6 +2000,7 @@ async fn join_session(
     config: &DcodeAiConfig,
     workspace_root: &Path,
     session_id: &str,
+    name: &str,
 ) -> anyhow::Result<()> {
     use dcode_ai_common::event::{AgentCommand, AgentEvent};
     use tokio::io::AsyncBufReadExt;
@@ -2003,12 +2011,39 @@ async fn join_session(
     let Some(socket) = session.meta.socket_path.clone() else {
         anyhow::bail!("session {session_id} is not running (nothing to join)");
     };
-    let client = dcode_ai_runtime::ipc::IpcClient::new(socket);
+    let client = dcode_ai_runtime::ipc::IpcClient::new(socket.clone());
     let mut events = client
         .connect()
         .await
         .map_err(|e| anyhow::anyhow!("session {session_id} is not running: {e}"))?;
-    eprintln!("joined {session_id} — type to send a message · /approve · /deny · /stop · /quit");
+    eprintln!(
+        "joined {session_id} as {name} — type to send a message · /approve · /deny · /stop · /quit"
+    );
+    // Say hello, then keep showing up in the office until we leave.
+    let person = dcode_ai_cli::people::new_person_id("join");
+    let _ = client
+        .send_command(&AgentCommand::Hello {
+            person: person.clone(),
+            name: name.to_string(),
+        })
+        .await;
+    let beat = {
+        let client = dcode_ai_runtime::ipc::IpcClient::new(socket.clone());
+        let person = person.clone();
+        tokio::spawn(async move {
+            let mut every = tokio::time::interval(std::time::Duration::from_secs(10));
+            every.tick().await;
+            loop {
+                every.tick().await;
+                let cmd = AgentCommand::Heartbeat {
+                    person: person.clone(),
+                };
+                if client.send_command(&cmd).await.is_err() {
+                    break;
+                }
+            }
+        })
+    };
     let pending: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
     let seen = pending.clone();
     let printer = tokio::spawn(async move {
@@ -2048,7 +2083,8 @@ async fn join_session(
                     continue;
                 }
             },
-            _ => AgentCommand::SendMessage {
+            _ => AgentCommand::Say {
+                person: person.clone(),
                 content: text.to_string(),
             },
         };
@@ -2057,6 +2093,8 @@ async fn join_session(
             break;
         }
     }
+    beat.abort();
+    let _ = client.send_command(&AgentCommand::Bye { person }).await;
     printer.abort();
     Ok(())
 }

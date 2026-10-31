@@ -137,7 +137,7 @@ dcode-ai attach <id> --ssh me@server --dir ~/app   # …of a session on another 
 dcode-ai remote me@server --dir ~/app --keep       # use dcode-ai on a server from here (tmux keeps it running)
 dcode-ai session export <id> [-o f]  # one file to hand a teammate, secrets masked
 dcode-ai session import <file>       # add it here; /resume finds it (with its handoff note)
-dcode-ai join <id>                   # another terminal on a running session: watch it live and send messages
+dcode-ai join <id> [--name you]      # another terminal on a running session: watch it live and send messages
 dcode-ai status                   # running sessions
 dcode-ai sessions [--all]         # saved sessions (--all includes sub-agents)
 dcode-ai logs <id>                # replay the event log
@@ -495,7 +495,7 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 
 | Command | What it does |
 | --- | --- |
-| `/office` | The Agent Office: every agent as an animated pixel-art character at a desk, acting out what it does (typing, reading, running commands, hand up for your approval), with a speech bubble; ←/→ picks one to see its activity. Also the dashboard's `office` tab (`Alt+5`) |
+| `/office` | The Agent Office: every agent as an animated pixel-art character at a desk, acting out what it does (typing, reading, running commands, hand up for your approval), with a speech bubble; ←/→ picks one to see its activity. The people on the session are there too, under their names: you at the first desk, whoever joined (`dcode-ai join`) at a guest desk, whoever has the `/watch` page open standing with a mug; what someone says shows in a bubble. Also the dashboard's `office` tab (`Alt+5`), with who is here listed under the room |
 | `/timeline` | The session as steps (your messages, tool calls, replies, compactions) with a scrubber bar; ←/→ to move, Enter on one of your messages rewinds there |
 | `/files` | Files the agent read and edited this session (also the dashboard's `files` tab, `Alt+4`) |
 | `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan [port]` shares it on your network (a fixed port such as `/watch lan 8787` lets you allow it in the firewall once; on WSL it prints the commands); `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
@@ -506,6 +506,12 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 `dcode-ai join <id>` attaches a second terminal (or a teammate over SSH) to a
 running session: it shows the session live; lines you type are queued as
 messages; `/approve`, `/deny`, `/stop` and `/quit` work as you'd expect.
+`--name` sets the name the others see (default: git `user.name`, else your
+login). The session shows `⇢ Priya joined`, `⇢ Priya: <message>` and
+`⇠ Priya left`, and the agent gets the message as `(from Priya) …`. Someone on
+the `/watch` page can type a name at the top; while the page is open they
+are in the office as watching. Names are display-only (letters, digits,
+spaces and `-_.`, 24 characters at most); they are not a login.
 
 ## Guards against runaway turns
 

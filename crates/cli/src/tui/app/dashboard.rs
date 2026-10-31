@@ -414,16 +414,53 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             body,
         ),
         RailTab::Office => {
+            use crate::tui::office::PersonRole;
             g.office.tidy();
             let tick = crate::tui::app::office_tick();
+            // Who is here, under the room.
+            let mut here: Vec<Line> = vec![muted("here now")];
+            for p in g.office.people_ordered() {
+                let (role, color) = match p.role {
+                    PersonRole::Owner => ("you", theme::accent()),
+                    PersonRole::Joined => ("joined", ratatui::style::Color::Rgb(0x3f, 0x7f, 0xbf)),
+                    PersonRole::Watching => ("watching", theme::muted()),
+                };
+                here.push(Line::from(vec![
+                    Span::styled("  ● ", Style::default().fg(color)),
+                    Span::styled(
+                        truncate_chars(&p.name, (body.width as usize).saturating_sub(16)),
+                        Style::default().fg(theme::text()),
+                    ),
+                    Span::styled(format!("  {role}"), Style::default().fg(theme::muted())),
+                ]));
+            }
+            let list_h = (here.len() as u16 + 1).min(body.height / 3);
+            let n = g.office.stations().len();
+            let (_, room_h) = crate::tui::office::office_layout(
+                body.width,
+                body.height.saturating_sub(list_h),
+                n,
+            );
+            let room = Rect {
+                height: room_h.min(body.height),
+                ..body
+            };
             frame.render_widget(
                 crate::tui::office::OfficeView {
                     office: &g.office,
                     tick,
                     selected: None,
                 },
-                body,
+                room,
             );
+            let below = Rect {
+                y: room.y + room.height + 1,
+                height: body.height.saturating_sub(room.height + 1),
+                ..body
+            };
+            if below.height > 0 {
+                frame.render_widget(Paragraph::new(Text::from(here)), below);
+            }
         }
         RailTab::Files => frame.render_widget(
             Paragraph::new(Text::from(files_lines(

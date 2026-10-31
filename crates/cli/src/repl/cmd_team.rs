@@ -5,17 +5,7 @@ use super::*;
 
 /// Who is handing a session over: git's user name, else the login name.
 fn handoff_author(workspace: &std::path::Path) -> String {
-    std::process::Command::new("git")
-        .args(["config", "user.name"])
-        .current_dir(workspace)
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|n| !n.is_empty())
-        .or_else(|| std::env::var("USER").ok())
-        .or_else(|| std::env::var("USERNAME").ok())
-        .unwrap_or_else(|| "a teammate".into())
+    dcode_ai_cli::people::my_name(workspace)
 }
 
 /// Working-tree changes (paths), for the handoff note.
@@ -178,7 +168,14 @@ impl Repl {
                     .session_name()
                     .map(str::to_string)
                     .unwrap_or_else(|| self.runtime.session_id().to_string());
-                match crate::watch::start_on(self.runtime.event_log_path(), title, lan, port).await
+                match crate::watch::start_on(
+                    self.runtime.event_log_path(),
+                    title,
+                    lan,
+                    port,
+                    self.runtime.event_tx(),
+                )
+                .await
                 {
                     Ok(w) => {
                         let _ = crate::tui::clipboard::copy_to_clipboard(&w.url);

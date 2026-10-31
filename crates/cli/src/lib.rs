@@ -7,6 +7,7 @@ pub mod file_mentions;
 pub mod image_attach;
 pub mod ipc_pending;
 pub mod oauth_login;
+pub mod people;
 pub mod prompt;
 pub mod share;
 pub mod slash_commands;

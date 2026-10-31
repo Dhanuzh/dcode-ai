@@ -168,6 +168,28 @@ pub enum AgentEvent {
     Notice {
         message: String,
     },
+    /// Someone is with this session: on `dcode-ai join` (`role: "join"`),
+    /// on its `/watch` page (`"watch"`), or the one running it (`"owner"`).
+    PersonJoined {
+        person: String,
+        name: String,
+        role: String,
+    },
+    /// Still there (heartbeat; not kept in the session log).
+    PersonSeen {
+        person: String,
+    },
+    PersonLeft {
+        person: String,
+        #[serde(default)]
+        name: String,
+    },
+    /// A joined person sent a message.
+    PersonSaid {
+        person: String,
+        name: String,
+        text: String,
+    },
     Response {
         response: AgentResponse,
     },
@@ -344,6 +366,23 @@ pub enum EndReason {
 #[serde(tag = "type")]
 pub enum AgentCommand {
     SendMessage {
+        content: String,
+    },
+    /// `dcode-ai join` introduces itself; `Heartbeat` every few seconds,
+    /// `Bye` when it leaves.
+    Hello {
+        person: String,
+        name: String,
+    },
+    Heartbeat {
+        person: String,
+    },
+    Bye {
+        person: String,
+    },
+    /// A message from a joined person (shown with their name).
+    Say {
+        person: String,
         content: String,
     },
     ApproveToolCall {

@@ -636,6 +636,20 @@ fn render_event(event: &AgentEvent, stats: &StreamStats) {
                 }
             }
         }
+        AgentEvent::PersonJoined { name, role, .. } => {
+            let what = if role == "watch" {
+                "is watching"
+            } else {
+                "joined"
+            };
+            eprintln!("  {} {name} {what}", "⇢".color(theme::TEXT_DIM));
+        }
+        AgentEvent::PersonLeft { name, .. } if !name.is_empty() => {
+            eprintln!("  {} {name} left", "⇠".color(theme::TEXT_DIM));
+        }
+        AgentEvent::PersonSaid { name, text, .. } => {
+            eprintln!("  {} {name}: {text}", "⇢".color(theme::TEXT_DIM));
+        }
         _ => {}
     }
 }

@@ -52,6 +52,14 @@
   #files li.edit { color: var(--text); }
   #files li.fresh { color: var(--accent); }
   #files li .n { margin-left: auto; color: var(--muted); }
+  #me { background: transparent; border: 1px solid var(--line); border-radius: 6px; color: var(--text);
+    font: inherit; font-size: 12px; padding: 3px 8px; width: 130px; }
+  #people { list-style: none; padding: 0; margin: 0 0 18px; font-size: 13px; }
+  #people li { padding: 2px 0; color: var(--text); }
+  #people li .r { color: var(--muted); }
+  #people li.watch::before { content: "👀 "; }
+  #people li.join::before { content: "⌨ "; }
+  .said { color: #3f7fbf; margin: 0 0 10px 14px; }
   footer { position: fixed; bottom: 0; left: 0; right: 0; padding: 8px 20px; font-size: 12px;
     color: var(--muted); background: var(--panel); border-top: 1px solid var(--line); }
 </style>
@@ -59,6 +67,7 @@
 <body>
 <header>
   <h1>✻ __TITLE__</h1>
+  <input id="me" placeholder="your name" maxlength="24" aria-label="your name (shown in the office)">
   <span class="live"><span id="dot" class="dot"></span><span id="state">connecting…</span></span>
 </header>
 <main>
@@ -69,6 +78,8 @@
     <div class="stat"><span>files edited</span><b id="edited">0</b></div>
     <div class="stat"><span>tokens</span><b id="tokens">0</b></div>
     <div class="stat" style="margin-bottom:18px"><span>context</span><b id="ctx">–</b></div>
+    <h2>Here now</h2>
+    <ul id="people"><li class="r">–</li></ul>
     <h2>Files touched</h2>
     <ul id="files"></ul>
   </aside>
@@ -163,13 +174,53 @@
         if (ev.state === 'idle') setState('live · idle', 'on'); else setState('live · ' + ev.state, 'busy');
         break;
       case 'SessionEnded': setState('session ended', ''); break;
+      case 'PersonJoined':
+        if (ev.role !== 'owner') { people.set(ev.person, { name: ev.name, role: ev.role }); renderPeople();
+          add(el('note', '⇢ ' + ev.name + (ev.role === 'watch' ? ' is watching' : ' joined'))); }
+        break;
+      case 'PersonLeft':
+        if (people.delete(ev.person)) { renderPeople(); if (ev.name) add(el('note', '⇠ ' + ev.name + ' left')); }
+        break;
+      case 'PersonSaid': add(el('said', ev.name + ': ' + ev.text)); break;
     }
   }
 
-  const src = new EventSource('/events?t=__TOKEN__');
-  src.onopen = () => setState('live', 'on');
-  src.onerror = () => setState('reconnecting…', '');
-  src.onmessage = (m) => { try { const env = JSON.parse(m.data); handle(env.event || env); } catch (_) {} };
+  // Who else is here (people who arrive while this page is open).
+  const people = new Map();
+  function renderPeople() {
+    const ul = document.getElementById('people');
+    ul.textContent = '';
+    if (!people.size) { ul.appendChild(Object.assign(document.createElement('li'), { className: 'r', textContent: '–' })); return; }
+    people.forEach((p) => {
+      const li = document.createElement('li'); li.className = p.role;
+      li.textContent = p.name + ' ';
+      const r = document.createElement('span'); r.className = 'r'; r.textContent = p.role === 'watch' ? 'watching' : 'joined';
+      li.appendChild(r); ul.appendChild(li);
+    });
+  }
+
+  // Your name shows you in the office; it stays in this browser only.
+  const me = document.getElementById('me');
+  let myName = '';
+  try { myName = localStorage.getItem('dcode-ai-watch-name') || ''; } catch (_) {}
+  me.value = myName;
+  let src = null;
+  function connect() {
+    if (src) src.close();
+    people.clear(); renderPeople();
+    log.textContent = ''; files.clear(); tools.clear(); toolCount = 0; typing = null;
+    const q = myName ? '&name=' + encodeURIComponent(myName) : '';
+    src = new EventSource('/events?t=__TOKEN__' + q);
+    src.onopen = () => setState('live', 'on');
+    src.onerror = () => setState('reconnecting…', '');
+    src.onmessage = (m) => { try { const env = JSON.parse(m.data); handle(env.event || env); } catch (_) {} };
+  }
+  me.addEventListener('change', () => {
+    myName = me.value.trim().slice(0, 24);
+    try { localStorage.setItem('dcode-ai-watch-name', myName); } catch (_) {}
+    connect();
+  });
+  connect();
 })();
 </script>
 </body>

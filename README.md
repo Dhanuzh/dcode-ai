@@ -151,11 +151,11 @@ dcode-ai spawn --prompt "refactor the auth module"       # detached; attach late
 
 ### 👀 See it, share it
 
-- **Agent Office** (`/office`): every agent as an animated pixel-art character at a desk — typing, reading, running commands, raising a hand when it needs you.
+- **Agent Office** (`/office`): every agent as an animated pixel-art character at a desk — typing, reading, running commands, raising a hand when it needs you. People on the session sit there too, under their names: you, whoever joined, whoever is watching.
 - **Live file map**: every file the agent reads and edits, as a tree that lights up while it works (dashboard `Alt+4`, `/files`).
 - **`/timeline`**: scrub through the session step by step; jump back to any of your messages.
 - **`/watch`**: a live, read-only web page of the session for a teammate (or your phone); local by default, `/watch lan` for your network.
-- **`dcode-ai join <id>`**: a second terminal (or a teammate over SSH) on the same running session.
+- **`dcode-ai join <id> [--name you]`**: a second terminal (or a teammate over SSH) on the same running session; what they say shows with their name, and the agent knows who asked.
 - **`/handoff <note>`**: hand a session to a teammate as one file, with what's done and what's next.
 - **`/sounds`** and **`/speak`**: a bell when it needs you; the last reply read aloud.
 

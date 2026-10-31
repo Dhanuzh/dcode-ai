@@ -20,6 +20,9 @@ pub fn spawn_tui_bridge(
     approval_pending: Option<ApprovalPendingMap>,
     question_pending: Option<QuestionPendingMap>,
     state: Arc<Mutex<TuiSessionState>>,
+    // Presence (`dcode-ai join` people) goes back into this session's
+    // event stream.
+    event_tx: Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 ) -> tokio::task::JoinHandle<()> {
     let (event_tx_ipc, command_rx) = match ipc_handle {
         Some(h) => {
@@ -39,7 +42,7 @@ pub fn spawn_tui_bridge(
             approval_pending,
             question_pending,
             None,
-            None,
+            event_tx,
             Some(prompt_tx),
             None,
         );
@@ -51,10 +54,14 @@ pub fn spawn_tui_bridge(
                     continue;
                 }
                 if let Ok(mut g) = queue_state.lock() {
-                    g.push_block(crate::tui::state::DisplayBlock::System(format!(
-                        "⇢ from a joined terminal: {}",
-                        crate::tui::render_helpers::truncate_chars(&text, 120)
-                    )));
+                    // Named messages (`(from Priya) …`) were announced by
+                    // PersonSaid already.
+                    if !text.starts_with("(from ") {
+                        g.push_block(crate::tui::state::DisplayBlock::System(format!(
+                            "⇢ from a joined terminal: {}",
+                            crate::tui::render_helpers::truncate_chars(&text, 120)
+                        )));
+                    }
                     g.followup_queue.push_back(text);
                     g.touch_transcript();
                 }
@@ -111,7 +118,10 @@ pub fn spawn_tui_bridge(
                 let _ = fan.tx.send(line);
             }
 
-            if let Some(file) = log_file.as_mut()
+            // Heartbeats are not history.
+            let keep = !matches!(event, AgentEvent::PersonSeen { .. });
+            if keep
+                && let Some(file) = log_file.as_mut()
                 && let Ok(line) = serde_json::to_string(&envelope)
             {
                 let _ = file.write_all(line.as_bytes()).await;

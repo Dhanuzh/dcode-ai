@@ -8,12 +8,19 @@
 //!   on the same network can open it. Nothing goes through an outside
 //!   service.
 //! - Every request needs the random per-watch token (`?t=`).
+//! - Someone watching shows up in the session's office (under the name they
+//!   give the page, `&name=`) while their page is open.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
+
+use dcode_ai_common::event::AgentEvent;
+
+/// Where watchers are announced (the session's event stream).
+pub type Presence = tokio::sync::mpsc::Sender<AgentEvent>;
 
 /// A running watch page; dropping it (or `stop`) ends it.
 pub struct WatchHandle {
@@ -69,7 +76,7 @@ fn lan_address() -> Option<std::net::IpAddr> {
 
 /// Start serving `log_path` (the session's `<id>.events.jsonl`).
 pub async fn start(log_path: PathBuf, title: String, lan: bool) -> std::io::Result<WatchHandle> {
-    start_on(log_path, title, lan, 0).await
+    start_on(log_path, title, lan, 0, None).await
 }
 
 /// [`start`] on a fixed `port` (0 = any free one). A fixed port lets a
@@ -79,6 +86,7 @@ pub async fn start_on(
     title: String,
     lan: bool,
     port: u16,
+    presence: Option<Presence>,
 ) -> std::io::Result<WatchHandle> {
     let host = if lan { "0.0.0.0" } else { "127.0.0.1" };
     let listener = TcpListener::bind((host, port)).await?;
@@ -104,8 +112,9 @@ pub async fn start_on(
                     let token = token.clone();
                     let title = title.clone();
                     let stop = stop_rx.clone();
+                    let presence = presence.clone();
                     tokio::spawn(async move {
-                        let _ = serve(stream, &log, &token, &title, stop).await;
+                        let _ = serve(stream, &log, &token, &title, stop, presence).await;
                     });
                 }
             }
@@ -120,8 +129,77 @@ pub async fn start_on(
 }
 
 fn query_token(target: &str) -> Option<&str> {
+    query_param(target, "t")
+}
+
+fn query_param<'a>(target: &'a str, key: &str) -> Option<&'a str> {
     let query = target.split_once('?')?.1;
-    query.split('&').find_map(|kv| kv.strip_prefix("t="))
+    query
+        .split('&')
+        .find_map(|kv| kv.strip_prefix(key)?.strip_prefix('='))
+}
+
+/// `%XX` and `+` decoding of a query value.
+fn url_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        match b[i] {
+            b'+' => out.push(b' '),
+            b'%' if i + 2 < b.len() => {
+                let hex = std::str::from_utf8(&b[i + 1..i + 3]).unwrap_or("");
+                match u8::from_str_radix(hex, 16) {
+                    Ok(v) => {
+                        out.push(v);
+                        i += 2;
+                    }
+                    Err(_) => out.push(b'%'),
+                }
+            }
+            c => out.push(c),
+        }
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// One open watch page, in the office while it lasts.
+struct Watcher {
+    tx: Presence,
+    person: String,
+    name: String,
+}
+
+impl Watcher {
+    async fn arrive(tx: Presence, name: String) -> Self {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        let person = format!("watch-{}", NEXT.fetch_add(1, Ordering::Relaxed));
+        let _ = tx
+            .send(AgentEvent::PersonJoined {
+                person: person.clone(),
+                name: name.clone(),
+                role: "watch".into(),
+            })
+            .await;
+        Self { tx, person, name }
+    }
+
+    fn seen(&self) {
+        let _ = self.tx.try_send(AgentEvent::PersonSeen {
+            person: self.person.clone(),
+        });
+    }
+}
+
+impl Drop for Watcher {
+    fn drop(&mut self) {
+        let _ = self.tx.try_send(AgentEvent::PersonLeft {
+            person: self.person.clone(),
+            name: self.name.clone(),
+        });
+    }
 }
 
 async fn serve(
@@ -130,6 +208,7 @@ async fn serve(
     token: &str,
     title: &str,
     stop: tokio::sync::watch::Receiver<bool>,
+    presence: Option<Presence>,
 ) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
@@ -171,7 +250,19 @@ async fn serve(
                 .replace("__TOKEN__", token);
             respond(&mut write, "200 OK", "text/html; charset=utf-8", &page).await
         }
-        "/events" => stream_log(&mut write, log_path, stop).await,
+        "/events" => {
+            let watcher = match presence {
+                Some(tx) => {
+                    let name = query_param(target, "name")
+                        .map(url_decode)
+                        .unwrap_or_default();
+                    let name = dcode_ai_runtime::supervisor::clean_person_name(&name);
+                    Some(Watcher::arrive(tx, name).await)
+                }
+                None => None,
+            };
+            stream_log(&mut write, log_path, stop, watcher.as_ref()).await
+        }
         _ => respond(&mut write, "404 Not Found", "text/plain", "not found").await,
     }
 }
@@ -197,6 +288,7 @@ async fn stream_log(
     write: &mut tokio::net::tcp::OwnedWriteHalf,
     log_path: &std::path::Path,
     mut stop: tokio::sync::watch::Receiver<bool>,
+    watcher: Option<&Watcher>,
 ) -> std::io::Result<()> {
     write
         .write_all(
@@ -207,6 +299,7 @@ async fn stream_log(
     let mut partial = String::new();
     let mut first = true;
     let mut idle = 0u32;
+    let mut ticks = 0u32;
     loop {
         if *stop.borrow() {
             return Ok(());
@@ -229,8 +322,13 @@ async fn stream_log(
             while let Some(i) = partial.find('\n') {
                 let line: String = partial.drain(..=i).collect();
                 let line = line.trim();
-                // History arrives whole; streaming deltas only matter live.
-                if line.is_empty() || (first && line.contains("\"TokensStreamed\"")) {
+                // History arrives whole; streaming deltas only matter live,
+                // and so does who is here.
+                if line.is_empty()
+                    || (first
+                        && (line.contains("\"TokensStreamed\"")
+                            || line.contains("\"type\":\"Person")))
+                {
                     continue;
                 }
                 out.push_str("data: ");
@@ -244,10 +342,18 @@ async fn stream_log(
             idle = 0;
         } else {
             idle += 1;
-            if idle.is_multiple_of(50) {
+            // A ping every ~5s: finds a closed page quickly (the watcher
+            // then leaves the office) and keeps it marked as here.
+            if idle.is_multiple_of(16) {
                 write.write_all(b": ping\n\n").await?;
                 write.flush().await?;
             }
+        }
+        ticks += 1;
+        if ticks.is_multiple_of(16)
+            && let Some(w) = watcher
+        {
+            w.seen();
         }
         first = false;
         tokio::select! {
@@ -289,6 +395,53 @@ mod tests {
         }
         let (head, body) = got.split_once("\r\n\r\n").unwrap_or((&got, ""));
         (head.to_string(), body.to_string())
+    }
+
+    #[test]
+    fn query_values_are_decoded() {
+        assert_eq!(url_decode("Priya+K%C3%A9"), "Priya Ké");
+        assert_eq!(url_decode("100%"), "100%");
+        assert_eq!(query_param("/events?t=abc&name=Ravi", "name"), Some("Ravi"));
+        assert_eq!(query_param("/events?tt=x&t=abc", "t"), Some("abc"));
+    }
+
+    #[tokio::test]
+    async fn a_watcher_is_in_the_office_while_the_page_is_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("s.events.jsonl");
+        std::fs::write(
+            &log,
+            "{\"id\":1,\"event\":{\"type\":\"PersonJoined\",\"person\":\"old\",\"name\":\"Gone\",\"role\":\"join\"}}\n",
+        )
+        .unwrap();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+        let w = start_on(log, "demo".into(), false, 0, Some(tx))
+            .await
+            .unwrap();
+        let events = w.url.replace("/?t=", "/events?t=") + "&name=Ravi+K";
+        let (_, body) = get(&events).await;
+        assert!(
+            !body.contains("Gone"),
+            "who was here before is not replayed"
+        );
+        let joined = rx.recv().await.unwrap();
+        assert!(matches!(
+            joined,
+            AgentEvent::PersonJoined { ref name, ref role, .. } if name == "Ravi K" && role == "watch"
+        ));
+        // The page closed: they leave (after any heartbeats).
+        let left = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match rx.recv().await {
+                    Some(AgentEvent::PersonLeft { name, .. }) => break name,
+                    Some(_) => continue,
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(left, "Ravi K");
     }
 
     #[tokio::test]

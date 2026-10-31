@@ -2,7 +2,7 @@
 //! top, the selected agent's recent activity below. ←/→ (or Tab) picks an
 //! agent; Enter on an agent waiting for you goes back to answer it.
 
-use crate::tui::office::{Activity, OfficeView, office_layout};
+use crate::tui::office::{Activity, OfficeView, PersonRole, Who, office_layout};
 use crate::tui::state::TuiSessionState;
 use crate::tui::theme;
 use crossterm::{
@@ -36,29 +36,59 @@ fn activity_label(a: Activity) -> &'static str {
     }
 }
 
-/// Recent activity of agent `i`: the main agent's last steps, or a
-/// sub-agent's log.
-fn agent_log(g: &TuiSessionState, i: usize) -> Vec<String> {
-    let Some(agent) = g.office.agents.get(i) else {
-        return Vec::new();
+/// Title, status line and recent activity of the `i`-th one in the room.
+fn details(g: &TuiSessionState, i: usize) -> (String, String, Vec<String>) {
+    let stations = g.office.stations();
+    let Some(who) = stations.get(i) else {
+        return ("office".into(), String::new(), Vec::new());
     };
-    if i == 0 {
-        g.timeline
-            .steps
-            .iter()
-            .rev()
-            .take(12)
-            .map(|s| format!("{} {}", s.kind.icon(), s.label))
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect()
-    } else {
-        g.subagents
-            .iter()
-            .find(|r| r.id == agent.id)
-            .map(|r| r.log.iter().rev().take(12).rev().cloned().collect())
-            .unwrap_or_default()
+    match who {
+        Who::Person(p) => {
+            let role = match p.role {
+                PersonRole::Owner => "you · running this session",
+                PersonRole::Joined => "on dcode-ai join · can send messages",
+                PersonRole::Watching => "on the /watch page · watching",
+            };
+            let said = if p.said.is_empty() {
+                "hasn't said anything yet".to_string()
+            } else {
+                format!("last said: {}", p.said)
+            };
+            (p.name.clone(), role.to_string(), vec![said])
+        }
+        Who::Agent(a) => {
+            let main = a.id == "main";
+            let title = if main {
+                format!("{} · {}", a.name, g.model)
+            } else {
+                format!("sub-agent · {}", a.name)
+            };
+            let status = format!(
+                "{} · {} · for {}s",
+                activity_label(a.activity),
+                a.bubble,
+                a.since.elapsed().as_secs()
+            );
+            let log = if main {
+                g.timeline
+                    .steps
+                    .iter()
+                    .rev()
+                    .take(12)
+                    .map(|s| format!("{} {}", s.kind.icon(), s.label))
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect()
+            } else {
+                g.subagents
+                    .iter()
+                    .find(|r| r.id == a.id)
+                    .map(|r| r.log.iter().rev().take(12).rev().cloned().collect())
+                    .unwrap_or_default()
+            };
+            (title, status, log)
+        }
     }
 }
 
@@ -88,7 +118,7 @@ pub(crate) fn run_office_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyhow:
                     return Ok(());
                 }
                 g.office.tidy();
-                let n = g.office.agents.len();
+                let n = g.office.stations().len();
                 g.office_selected = g.office_selected.min(n.saturating_sub(1));
                 let (scale, room_h) = office_layout(area.width, area.height.saturating_sub(5), n);
                 room_scale = scale;
@@ -100,9 +130,7 @@ pub(crate) fn run_office_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyhow:
                 .split(area);
                 room_rect = rows[0];
                 let sel = g.office_selected;
-                let agent = g.office.agents.get(sel).cloned();
-                let log = agent_log(&g, sel);
-                let model = g.model.clone();
+                let (title, status, log) = details(&g, sel);
                 let tick = crate::tui::app::office_tick();
                 term.draw(|frame| {
                     frame.render_widget(
@@ -117,35 +145,12 @@ pub(crate) fn run_office_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyhow:
                         },
                         rows[0],
                     );
-                    let (title, mut lines) = match &agent {
-                        Some(a) => {
-                            let who = if sel == 0 {
-                                format!("{} · {model}", a.name)
-                            } else {
-                                format!("sub-agent · {}", a.name)
-                            };
-                            (
-                                who,
-                                vec![Line::from(vec![
-                                    Span::styled(
-                                        activity_label(a.activity),
-                                        Style::default()
-                                            .fg(theme::accent())
-                                            .add_modifier(Modifier::BOLD),
-                                    ),
-                                    Span::styled(
-                                        format!(
-                                            " · {} · for {}s",
-                                            a.bubble,
-                                            a.since.elapsed().as_secs()
-                                        ),
-                                        Style::default().fg(theme::muted()),
-                                    ),
-                                ])],
-                            )
-                        }
-                        None => ("office".into(), Vec::new()),
-                    };
+                    let mut lines = vec![Line::from(Span::styled(
+                        status.clone(),
+                        Style::default()
+                            .fg(theme::accent())
+                            .add_modifier(Modifier::BOLD),
+                    ))];
                     lines.push(Line::default());
                     if log.is_empty() {
                         lines.push(Line::from(Span::styled(
@@ -192,7 +197,7 @@ pub(crate) fn run_office_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyhow:
             }
             let ev = read()?;
             let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
-            let n = g.office.agents.len().max(1);
+            let n = g.office.stations().len().max(1);
             match ev {
                 Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
                     // Which desk was clicked.
@@ -225,9 +230,11 @@ pub(crate) fn run_office_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyhow:
                         g.office_selected = (g.office_selected + n - 1) % n
                     }
                     KeyCode::Enter => {
-                        let waiting = g.office.agents.get(g.office_selected).is_some_and(|a| {
-                            matches!(a.activity, Activity::WaitingApproval | Activity::Asking)
-                        });
+                        let waiting = matches!(
+                            g.office.stations().get(g.office_selected),
+                            Some(Who::Agent(a))
+                                if matches!(a.activity, Activity::WaitingApproval | Activity::Asking)
+                        );
                         if waiting {
                             g.office_open = false;
                             return Ok(());
