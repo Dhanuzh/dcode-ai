@@ -200,32 +200,47 @@ impl SessionRuntime {
         &self.supervisor.agent().messages
     }
 
-    /// Estimated context use `(system prompt, tool schemas, conversation)`
-    /// in tokens (~4 characters per token).
-    pub fn context_breakdown(&self) -> (u64, u64, u64) {
+    /// Estimated context use by part (~4 characters per token), and the
+    /// provider's own count for the last request.
+    pub fn context_breakdown(&self) -> crate::repl::ContextBreakdown {
         use dcode_ai_common::message::Role;
         let est = |chars: usize| (chars as u64).div_ceil(4);
         let agent = self.supervisor.agent();
-        let (mut system, mut convo) = (0usize, 0usize);
+        let mut b = crate::repl::ContextBreakdown::default();
         for m in &agent.messages {
-            let n = m.content.to_summary_text().chars().count()
+            let text = m.content.to_summary_text();
+            let n = text.chars().count()
                 + m.tool_calls
                     .as_ref()
                     .map(|c| serde_json::to_string(c).map(|s| s.len()).unwrap_or(0))
                     .unwrap_or(0);
-            if m.role == Role::System {
-                system += n;
+            if dcode_ai_runtime::context_manager::is_summary(m) {
+                b.summary += est(n);
+            } else if m.role == Role::System {
+                // The skills list is part of the system prompt.
+                let skills = text
+                    .find("Available Skills:")
+                    .map(|i| {
+                        let rest = &text[i..];
+                        rest.find("\n\n").unwrap_or(rest.len())
+                    })
+                    .unwrap_or(0);
+                b.skills += est(skills);
+                b.system += est(n.saturating_sub(skills));
             } else {
-                convo += n;
+                b.conversation += est(n);
             }
         }
-        let tools: usize = agent
-            .tools
-            .definitions()
-            .iter()
-            .map(|d| d.name.len() + d.description.len() + d.parameters.to_string().len())
-            .sum();
-        (est(system), est(tools), est(convo))
+        for d in agent.tools.definitions() {
+            let n = est(d.name.len() + d.description.len() + d.parameters.to_string().len());
+            if d.name.starts_with("mcp__") {
+                b.mcp_tools += n;
+            } else {
+                b.tools += n;
+            }
+        }
+        b.measured = agent.last_prompt_tokens();
+        b
     }
 
     /// History index of the `user_index_from_end`-th user message (0 = most
@@ -285,11 +300,15 @@ impl SessionRuntime {
         user_index_from_end: usize,
         expected_text: &str,
         scope: crate::tui::state::RewindScope,
-    ) -> Result<usize, String> {
+    ) -> Result<(usize, Option<String>), String> {
         let pos = self.user_message_position(user_index_from_end, expected_text)?;
         let mut restored = 0;
+        let mut page = None;
         if scope.code() {
             restored = self.supervisor.agent_mut().rewind_files_to(pos)?;
+            // Back to the page that was open then (a form already submitted
+            // to a site can't be taken back).
+            page = self.supervisor.agent().page_at_message(pos);
         }
         if scope.conversation() {
             self.supervisor.agent_mut().messages.truncate(pos);
@@ -299,7 +318,7 @@ impl SessionRuntime {
                 });
             }
         }
-        Ok(restored)
+        Ok((restored, page))
     }
 
     pub fn set_model(&mut self, model: impl Into<String>) {
@@ -475,6 +494,7 @@ impl SessionRuntime {
     /// Replace merged config and rebuild the provider (fails if API key missing, etc.).
     pub fn apply_dcode_ai_config(&mut self, config: DcodeAiConfig) -> Result<(), ProviderError> {
         self.supervisor.apply_dcode_ai_config(config.clone())?;
+        dcode_ai_common::config::set_per_token_billing(config.bills_per_token());
         self.config = config;
         Ok(())
     }
@@ -693,6 +713,7 @@ pub async fn build_session_runtime(
     ipc_approval_handler: Option<Arc<dyn ApprovalHandler>>,
     orchestration_context: Option<OrchestrationContext>,
 ) -> Result<SessionRuntime, ProviderError> {
+    dcode_ai_common::config::set_per_token_billing(config.bills_per_token());
     let approval_handler = ipc_approval_handler;
 
     let mut supervisor = Supervisor::create(SupervisorConfig {
@@ -728,6 +749,7 @@ pub async fn build_resumed_session_runtime(
     session_id: &str,
     approval_handler: Option<Arc<dyn ApprovalHandler>>,
 ) -> Result<SessionRuntime, ProviderError> {
+    dcode_ai_common::config::set_per_token_billing(config.bills_per_token());
     let mut supervisor = Supervisor::resume(
         config.clone(),
         workspace_root,

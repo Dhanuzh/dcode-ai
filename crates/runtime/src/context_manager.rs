@@ -207,7 +207,7 @@ impl ContextManager {
     }
 
     /// The conversation must reach this share of the window before a
-    /// compaction is worth it: compaction keeps ~30%, so below this it would
+    /// compaction is worth it: compaction keeps ~20%, so below this it would
     /// free little and run again soon (each run is a model call and, on the
     /// Claude Code backend, a restarted process).
     pub const MIN_COMPACT_PERCENT: usize = 45;
@@ -303,11 +303,12 @@ impl ContextManager {
             preserve_system: true,
         };
 
-        // Keep the recent messages that fit in ~30% of the window (and at
+        // Keep the recent messages that fit in ~20% of the window (and at
         // most `max_retained_messages`), never a summary: everything older
         // is summarized. Counting tokens, not messages, means one compaction
-        // frees real room even when a few tool outputs are huge.
-        let budget = self.config.context_window_target * 3 / 10;
+        // frees real room even when a few tool outputs are huge; with the
+        // 45% trigger each compaction frees about a quarter of the window.
+        let budget = self.config.context_window_target / 5;
         let mut kept = 0usize;
         let mut kept_tokens = 0usize;
         let mut recent_start = messages.len();
@@ -697,7 +698,7 @@ mod tests {
         assert!(summaries[0].content.to_summary_text().contains("summary 4"));
         assert_eq!(messages[0].content.to_summary_text(), "system prompt");
         let kept = ContextManager::estimate_tokens_for_slice(&messages[2..]);
-        assert!(kept <= 3_000 + 400, "recent part stays near 30%: {kept}");
+        assert!(kept <= 2_000 + 400, "recent part stays near 20%: {kept}");
     }
 
     /// A long tool-heavy session where every request carries a big fixed

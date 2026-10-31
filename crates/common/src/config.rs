@@ -21,6 +21,12 @@ pub struct DcodeAiConfig {
 }
 
 impl DcodeAiConfig {
+    /// See [`per_token_billing`].
+    pub fn bills_per_token(&self) -> bool {
+        matches!(self.provider.default, ProviderKind::Anthropic)
+            && self.provider.anthropic.backend == AnthropicBackend::Api
+    }
+
     /// Load config from defaults, global file, workspace file, and environment.
     pub fn load() -> Result<Self, ConfigError> {
         let workspace_root = env::current_dir().map_err(|source| ConfigError::Io {
@@ -492,6 +498,19 @@ impl UiConfig {
 /// Strip Windows' verbatim prefix (`\\?\C:\…` → `C:\…`) that
 /// `Path::canonicalize` adds there. Verbatim paths confuse users in the UI
 /// and some child processes; plain drive paths are equivalent for our use.
+/// Whether the active provider bills per token (the Anthropic API). Claude
+/// through the user's own `claude` binary and GitHub Copilot are plans: a
+/// dollar estimate there would mislead. Set by the session runtime.
+static PER_TOKEN_BILLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+pub fn set_per_token_billing(on: bool) {
+    PER_TOKEN_BILLING.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn per_token_billing() -> bool {
+    PER_TOKEN_BILLING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn simplify_path(path: PathBuf) -> PathBuf {
     let s = path.as_os_str().to_string_lossy();
     if let Some(rest) = s.strip_prefix(r"\\?\") {
@@ -1495,6 +1514,11 @@ pub struct SessionConfig {
     /// USD (API list prices; 0 = no limit).
     #[serde(default)]
     pub max_cost_usd: f64,
+    /// Pause a turn once it has processed this many tokens (input, cache
+    /// and output across its requests), so a runaway turn can't drain a
+    /// plan. Send "continue" to go on. 0 = no limit.
+    #[serde(default = "default_turn_token_alarm")]
+    pub turn_token_alarm: u64,
     /// After a turn that changed files, run the read-only verifier (`/verify`).
     #[serde(default)]
     pub verify_after_edits: bool,
@@ -1523,6 +1547,7 @@ impl Default for SessionConfig {
             last_session_file: PathBuf::from(".dcode-ai/.last_session"),
             auto_compact_on_finish: false,
             max_cost_usd: 0.0,
+            turn_token_alarm: default_turn_token_alarm(),
             verify_after_edits: false,
             cross_review: false,
             second_opinion_model: None,
@@ -1571,7 +1596,7 @@ impl Default for McpConfig {
 }
 
 fn default_tool_search_threshold() -> usize {
-    15
+    6
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1899,10 +1924,17 @@ impl HookConfig {
     }
 }
 
+fn default_turn_token_alarm() -> u64 {
+    5_000_000
+}
+
 impl SessionConfig {
     fn merge(&mut self, partial: PartialSessionConfig) {
         if let Some(v) = partial.max_cost_usd {
             self.max_cost_usd = v.max(0.0);
+        }
+        if let Some(v) = partial.turn_token_alarm {
+            self.turn_token_alarm = v;
         }
         if let Some(v) = partial.cleanup_period_days {
             self.cleanup_period_days = v;
@@ -2049,6 +2081,7 @@ struct PartialSessionConfig {
     last_session_file: Option<PathBuf>,
     auto_compact_on_finish: Option<bool>,
     max_cost_usd: Option<f64>,
+    turn_token_alarm: Option<u64>,
     verify_after_edits: Option<bool>,
     cross_review: Option<bool>,
     second_opinion_model: Option<String>,

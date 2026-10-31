@@ -20,4 +20,5 @@ pub mod session_store;
 pub mod supervisor;
 pub mod tmux;
 pub mod token_count;
+pub mod usage_log;
 pub mod worktree;

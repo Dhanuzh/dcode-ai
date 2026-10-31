@@ -400,6 +400,7 @@ impl Supervisor {
             hook_runner.clone(),
         );
         agent.max_cost_usd = config.session.max_cost_usd;
+        agent.turn_token_alarm = config.session.turn_token_alarm;
         agent.fallback_models = config.model.fallback_models.clone();
         let mut system_prompt =
             build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
@@ -722,7 +723,14 @@ impl Supervisor {
                 "prompt blocked by UserPromptSubmit hook: {reason}"
             )));
         }
+        let tokens_before = self.tokens_processed();
         let result = self.run_turn_inner(prompt, attachments).await;
+        crate::usage_log::record(&crate::usage_log::TurnUsage {
+            at: Utc::now(),
+            workspace: self.workspace_root.display().to_string(),
+            model: self.model.clone(),
+            tokens: self.tokens_processed().saturating_sub(tokens_before),
+        });
         let status = if result.is_ok() { "completed" } else { "error" };
         self.run_session_hook(
             HookEventKind::Stop,
@@ -963,7 +971,11 @@ impl Supervisor {
         }
 
         let stats = self.measured_stats();
-        let compact = stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens);
+        let conversation = self
+            .context_manager
+            .stats(&self.agent.messages)
+            .estimated_tokens;
+        let compact = stats.should_summarize && self.summary_rearm_ready(conversation);
 
         // Warn only when the context is full and won't be compacted now.
         if stats.needs_attention
@@ -1019,10 +1031,19 @@ impl Supervisor {
             return;
         }
 
+        // The turn compacted itself: that counts as the latest compaction.
+        if let Some(size) = self.agent.compacted_this_turn() {
+            self.last_summary_at_tokens = size.max(1);
+            return;
+        }
         let stats = self.measured_stats();
+        let conversation = self
+            .context_manager
+            .stats(&self.agent.messages)
+            .estimated_tokens;
 
         // Only compact if we missed it before the turn (e.g., context grew during turn)
-        if stats.should_summarize && self.summary_rearm_ready(stats.estimated_tokens) {
+        if stats.should_summarize && self.summary_rearm_ready(conversation) {
             if let Some(tx) = self.agent.event_sender() {
                 let _ = tx
                     .send(AgentEvent::ContextCompaction {
@@ -1198,11 +1219,21 @@ impl Supervisor {
         }
         let pct = config.auto_summarize_threshold.max(85) as usize;
         let trigger_tokens = config.context_window_target * pct / 100;
+        // Due once the conversation is big enough to be worth it, and has
+        // grown a fifth of the window since the last compaction.
+        let since_last = if self.last_summary_at_tokens > 0 {
+            self.last_summary_at_tokens + config.context_window_target / 5
+        } else {
+            0
+        };
         let min_conversation_tokens =
-            config.context_window_target * ContextManager::MIN_COMPACT_PERCENT / 100;
+            (config.context_window_target * ContextManager::MIN_COMPACT_PERCENT / 100)
+                .max(since_last);
         let cm = self.context_manager.clone();
         let cm2 = cm.clone();
+        let cm3 = cm.clone();
         Some(dcode_ai_core::agent::Compactor {
+            estimate: Arc::new(move |messages| cm3.stats(messages).estimated_tokens),
             trigger_tokens,
             min_conversation_tokens,
             overhead_tokens: self.context_manager.prompt_overhead(),
@@ -1230,7 +1261,10 @@ impl Supervisor {
             self.last_summary_at_tokens = 0;
             return true;
         }
-        let rearm_delta = (self.context_manager.config().context_window_target / 10).max(1024);
+        // The conversation must grow by a fifth of the window before the
+        // next compaction (measured sizes carry a fixed part that
+        // compaction can't shrink, so they are not used here).
+        let rearm_delta = (self.context_manager.config().context_window_target / 5).max(1024);
         current_tokens.saturating_sub(self.last_summary_at_tokens) >= rearm_delta
     }
 
@@ -2378,6 +2412,152 @@ mod tests {
         );
         let content = std::fs::read_to_string(&last_session_path).unwrap();
         assert_eq!(content.trim(), "session-newest");
+    }
+
+    /// Release gate for the 1.0.27 failure: a long tool-heavy session where
+    /// every request carries a big fixed prompt (as on the Claude Code
+    /// backend). The real supervisor and agent run it against a scripted
+    /// provider. It must compact rarely, keep one summary at most, keep the
+    /// recent conversation, and never pause on the burn alarm.
+    #[tokio::test]
+    async fn long_session_with_big_fixed_prompt_stays_healthy() {
+        use dcode_ai_core::provider::{Provider, StreamChunk};
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Reads a new file each step for `steps_per_turn` steps, then answers;
+        /// tool-less calls are summaries (or titles) and are counted.
+        struct Scripted {
+            steps_per_turn: usize,
+            step: AtomicUsize,
+            file: AtomicUsize,
+            summaries: Arc<AtomicUsize>,
+            /// Step (files read so far) at each compaction.
+            compacted_at: Arc<std::sync::Mutex<Vec<usize>>>,
+        }
+
+        #[async_trait::async_trait]
+        impl Provider for Scripted {
+            async fn chat(
+                &self,
+                messages: &[Message],
+                tools: &[dcode_ai_common::tool::ToolDefinition],
+                _model: &str,
+                _root: &std::path::Path,
+            ) -> Result<mpsc::Receiver<StreamChunk>, ProviderError> {
+                let (tx, rx) = mpsc::channel(8);
+                let mut chunks = Vec::new();
+                if tools.is_empty() {
+                    let prompt = messages
+                        .last()
+                        .map(|m| m.content.to_summary_text())
+                        .unwrap_or_default();
+                    if prompt.contains("context compaction") {
+                        self.summaries.fetch_add(1, Ordering::SeqCst);
+                        let at = self.file.load(Ordering::SeqCst);
+                        self.compacted_at.lock().unwrap().push(at);
+                    }
+                    chunks.push(StreamChunk::TextDelta("SUMMARY of earlier work".into()));
+                } else {
+                    if messages.last().is_some_and(|m| m.role == Role::User) {
+                        self.step.store(0, Ordering::SeqCst);
+                    }
+                    let step = self.step.fetch_add(1, Ordering::SeqCst);
+                    // The provider's count: the conversation plus a large
+                    // fixed part (system prompt, tools, thinking it keeps).
+                    let chars: usize = messages.iter().map(|m| m.content.approx_chars()).sum();
+                    chunks.push(StreamChunk::Usage {
+                        input_tokens: (chars / 4 + 60_000) as u64,
+                        output_tokens: 50,
+                    });
+                    if step < self.steps_per_turn {
+                        let n = self.file.fetch_add(1, Ordering::SeqCst);
+                        chunks.push(StreamChunk::ToolUse(dcode_ai_common::tool::ToolCall {
+                            id: format!("call-{n}"),
+                            name: "read_file".into(),
+                            input: json!({"path": format!("f{n}.txt")}),
+                        }));
+                    } else {
+                        chunks.push(StreamChunk::TextDelta("done".into()));
+                    }
+                }
+                chunks.push(StreamChunk::Done);
+                tokio::spawn(async move {
+                    for c in chunks {
+                        let _ = tx.send(c).await;
+                    }
+                });
+                Ok(rx)
+            }
+        }
+
+        let temp = tempfile::tempdir().expect("tempdir");
+        let workspace = temp.path().canonicalize().expect("canonicalize workspace");
+        let (turns, steps_per_turn) = (10usize, 25usize);
+        for n in 0..turns * steps_per_turn {
+            std::fs::write(
+                workspace.join(format!("f{n}.txt")),
+                format!("file {n}\n{}", "some content here ".repeat(400)),
+            )
+            .unwrap();
+        }
+
+        let mut config = dcode_ai_common::config::DcodeAiConfig::default();
+        config.provider.default = dcode_ai_common::config::ProviderKind::Anthropic;
+        config.provider.anthropic.backend = dcode_ai_common::config::AnthropicBackend::Api;
+        config.provider.anthropic.api_key = Some("sk-ant-test-key".into());
+        config.memory.context.auto_detect_context_window = false;
+        config.memory.context.query_provider_models_api = false;
+        config.memory.context.context_window_target = 150_000;
+
+        let mut sup = Supervisor::create(SupervisorConfig {
+            config,
+            workspace_root: workspace.clone(),
+            safe_mode: false,
+            interactive_approvals: false,
+            session_id: Some("session-long".into()),
+            approval_handler: None,
+            orchestration_context: None,
+        })
+        .await
+        .expect("create supervisor");
+        let mut events = sup.take_handle().take_event_rx().expect("events");
+        tokio::spawn(async move { while events.recv().await.is_some() {} });
+        let summaries = Arc::new(AtomicUsize::new(0));
+        let compacted_at: Arc<std::sync::Mutex<Vec<usize>>> = Default::default();
+        sup.agent_mut().replace_provider(Box::new(Scripted {
+            steps_per_turn,
+            step: AtomicUsize::new(0),
+            file: AtomicUsize::new(0),
+            summaries: summaries.clone(),
+            compacted_at: compacted_at.clone(),
+        }));
+
+        for turn in 0..turns {
+            let reply = sup.run_turn(&format!("task {turn}")).await.expect("turn");
+            assert_eq!(reply, "done", "turn {turn} paused or failed: {reply}");
+            let messages = &sup.agent().messages;
+            let stacked = messages
+                .iter()
+                .filter(|m| crate::context_manager::is_summary(m))
+                .count();
+            assert!(stacked <= 1, "turn {turn}: {stacked} summaries");
+            assert!(
+                messages.iter().any(|m| m.role == Role::Tool),
+                "turn {turn}: the recent conversation was dropped"
+            );
+        }
+        // ~1k tokens per step into a 75k working window: each compaction
+        // frees about a fifth of the window, so one per ~15 steps is
+        // expected. What must never happen is compacting again before the
+        // conversation grew (the 1.0.27 loop compacted on every step).
+        let n = summaries.load(Ordering::SeqCst);
+        let at = compacted_at.lock().unwrap().clone();
+        assert!(n >= 1, "a session this long compacts at least once");
+        assert!(
+            at.windows(2).all(|w| w[1] - w[0] >= 10),
+            "compactions too close together (step numbers): {at:?}"
+        );
+        assert!(n <= turns * steps_per_turn / 10, "{n} compactions: {at:?}");
     }
 
     #[tokio::test]

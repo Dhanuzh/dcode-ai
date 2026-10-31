@@ -1,5 +1,39 @@
 # Changelog
 
+## 1.0.29 — 2026-10-31
+
+### Uses less of your plan
+- **Browser results by difference**: after a click, key press, scroll,
+  `wait_for` or submitted form on the same page, the agent gets only what
+  changed instead of the whole page again (it was ~3–4k tokens per step).
+  Element numbers now stay the same while the page is open.
+- **Big tool output is saved, not carried**: outputs over 16k characters
+  keep their head and tail in the conversation; the full text goes to
+  `.dcode-ai/tool-output/` for the agent to read in parts.
+- **Burn alarm**: a turn pauses after 5M tokens (`[session]
+  turn_token_alarm`) or when the same tool call repeats 4 times in a row.
+  Send "continue" to go on.
+- MCP tools load on demand from 6 tools instead of 15.
+- Compaction keeps a fifth of the window and waits until the conversation
+  has grown by a fifth again, using one token count everywhere (a
+  mismatch let it run again soon after).
+
+### Honest numbers
+- No dollar estimates on a Claude plan or Copilot (they don't bill per
+  token); `/usage` says the tokens count toward the plan's limits.
+- **`/context`** shows system prompt, skills list, tools, MCP tools,
+  summary, conversation, and the "provider extra" the provider counted on
+  top (thinking it keeps, its tokenizer).
+- **`/stats`** shows tokens per day and per project for the last 14 days
+  (kept locally in `~/.dcode-ai/usage.jsonl`).
+
+### Also
+- Rewinding code and conversation takes the browser back to the page that
+  was open then.
+- A release now has to pass a long-session test: the real supervisor runs
+  250 tool steps with a large fixed prompt and must not compact on nearby
+  steps, stack summaries, drop the recent conversation, or pause.
+
 ## 1.0.28 — 2026-10-30
 
 ### Fixed

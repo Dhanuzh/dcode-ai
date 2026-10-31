@@ -31,6 +31,9 @@ pub type SteerInbox = Arc<std::sync::Mutex<Vec<String>>>;
 
 /// Builds a summary request from the history (see [`Compactor::prompt`]).
 pub type SummaryPrompt = Arc<dyn Fn(&[Message]) -> Option<String> + Send + Sync>;
+/// Counts the conversation's tokens the way the caller's context manager
+/// does (see [`Compactor::estimate`]).
+pub type EstimateTokens = Arc<dyn Fn(&[Message]) -> usize + Send + Sync>;
 /// Replaces older history with a summary (see [`Compactor::apply`]).
 pub type ApplySummary = Arc<dyn Fn(&[Message], &str) -> Vec<Message> + Send + Sync>;
 
@@ -47,6 +50,9 @@ pub struct Compactor {
     pub min_conversation_tokens: usize,
     /// Prompt tokens outside the conversation (system prompt, tools).
     pub overhead_tokens: usize,
+    /// The conversation's size, counted like the supervisor counts it so
+    /// both agree on when compaction is due.
+    pub estimate: EstimateTokens,
     /// Model that writes the summary (a cheap one where possible).
     pub model: String,
     /// The summary request for the older part of the history; `None` when
@@ -80,8 +86,12 @@ pub struct AgentLoop {
     /// (input + cache reads + cache writes). 0 until a request reports usage
     /// and after the history is compacted.
     last_prompt_tokens: u64,
-    /// A mid-turn compaction already ran this turn.
-    compacted_this_turn: bool,
+    /// The browser page open when the user message at each history index
+    /// was sent (for `/rewind`).
+    page_at_message: std::collections::BTreeMap<usize, String>,
+    /// A mid-turn compaction already ran this turn: the conversation's size
+    /// right after it.
+    compacted_this_turn: Option<usize>,
     /// Cheap model for small side questions (auto mode's command check);
     /// `None` uses the session's model.
     pub utility_model: Option<String>,
@@ -93,6 +103,8 @@ pub struct AgentLoop {
     context_token_limit: usize,
     /// Stop once the estimated session cost reaches this (USD). 0 = off.
     pub max_cost_usd: f64,
+    /// Pause a turn after it processed this many tokens. 0 = off.
+    pub turn_token_alarm: u64,
     /// Auto mode: the model's safe/ask verdict per command, this session.
     auto_verdicts: std::collections::HashMap<String, bool>,
     /// Models to try, in order, when the model is overloaded or unavailable.
@@ -130,11 +142,13 @@ impl AgentLoop {
             checkpoint: None,
             compactor: None,
             last_prompt_tokens: 0,
-            compacted_this_turn: false,
+            compacted_this_turn: None,
+            page_at_message: Default::default(),
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
             max_cost_usd: 0.0,
+            turn_token_alarm: 0,
             auto_verdicts: std::collections::HashMap::new(),
             fallback_models: Vec::new(),
         }
@@ -242,6 +256,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         let old_count = self.messages.len();
         self.messages = new_messages;
         self.undo.invalidate_positions();
+        self.page_at_message.clear();
         // Compaction rewrites history, so every replayed provider block now
         // sits on a changed prefix and would be rejected or ignored.
         strip_provider_blocks_from(&mut self.messages, 0);
@@ -264,7 +279,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         attachments: &[ImageAttachment],
     ) -> Result<String, ProviderError> {
         self.cancel_flag.store(false, Ordering::SeqCst);
-        self.compacted_this_turn = false;
+        self.compacted_this_turn = None;
         // The user message is pushed next, at this history index.
         self.undo.begin_turn(self.messages.len());
         let user_msg = if attachments.is_empty() {
@@ -290,6 +305,9 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             Message::user_with_parts(parts)
         };
         let preview = user_msg.event_preview();
+        if let Some(url) = crate::browser::last_url() {
+            self.page_at_message.insert(self.messages.len(), url);
+        }
         self.messages.push(user_msg);
         self.emit(AgentEvent::MessageReceived {
             role: "user".into(),
@@ -305,6 +323,12 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         let mut consecutive_tool_failures: u32 = 0;
         let mut last_failed_tool: String = String::new();
         const MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
+        // Burn alarm: tokens this turn has processed, and the same tool call
+        // repeated back to back.
+        let tokens_at_start = self.tokens_processed();
+        let mut last_call = String::new();
+        let mut same_call_repeats = 0u32;
+        const MAX_SAME_CALL: u32 = 4;
 
         let final_text = loop {
             if turn > 0 {
@@ -990,6 +1014,12 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 {
                     screenshots.push(path.trim().to_string());
                 }
+                if result.success
+                    && let Some(capped) =
+                        spill_tool_output(workspace_root, &result.call_id, &result.output)
+                {
+                    result.output = capped;
+                }
                 let mut content = format_tool_result(&result);
                 // First touch of a subfolder brings its AGENTS.md / CLAUDE.md.
                 if result.success
@@ -1038,6 +1068,29 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 save(&self.messages);
             }
 
+            for call in &tool_calls {
+                let key = format!("{}:{}", call.name, call.input);
+                if key == last_call {
+                    same_call_repeats += 1;
+                } else {
+                    last_call = key;
+                    same_call_repeats = 1;
+                }
+            }
+            if let Some(msg) = burn_alarm(
+                self.tokens_processed().saturating_sub(tokens_at_start),
+                self.turn_token_alarm,
+                same_call_repeats,
+                MAX_SAME_CALL,
+                tool_calls.last().map(|c| c.name.as_str()),
+            ) {
+                self.emit(AgentEvent::Error {
+                    message: msg.clone(),
+                })
+                .await;
+                break msg;
+            }
+
             if consecutive_tool_failures >= MAX_CONSECUTIVE_TOOL_FAILURES {
                 let msg = format!(
                     "Tool `{}` failed {} times consecutively — stopping to avoid infinite loop.",
@@ -1080,6 +1133,23 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         Ok(final_text)
     }
 
+    /// Every token the provider processed so far (input, cache reads and
+    /// writes, output).
+    fn tokens_processed(&self) -> u64 {
+        self.cost_tracker.total_input_tokens() + self.cost_tracker.output_tokens
+    }
+
+    /// The conversation's size right after this turn's mid-turn compaction,
+    /// if one ran.
+    pub fn compacted_this_turn(&self) -> Option<usize> {
+        self.compacted_this_turn
+    }
+
+    /// The provider's count for the last request's prompt (0 when unknown).
+    pub fn last_prompt_tokens(&self) -> u64 {
+        self.last_prompt_tokens
+    }
+
     /// How full the context is: the provider's count for the last request
     /// (it includes the system prompt and tool list) or the estimate,
     /// whichever is larger.
@@ -1094,10 +1164,10 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         let Some(c) = self.compactor.clone() else {
             return;
         };
-        let conversation = self.estimated_context_tokens() as usize;
+        let conversation = (c.estimate)(&self.messages);
         // After one compaction this turn, only the conversation's own growth
         // counts: the measured prompt still carries the fixed overhead.
-        let size = if self.compacted_this_turn {
+        let size = if self.compacted_this_turn.is_some() {
             conversation
         } else {
             (self.last_prompt_tokens as usize)
@@ -1143,13 +1213,14 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 String::new()
             }
         };
-        self.compacted_this_turn = true;
+        self.compacted_this_turn = Some(conversation);
         let compacted = (c.apply)(&self.messages, &summary);
         if compacted.len() >= self.messages.len() {
             return;
         }
         let old = self.messages.len();
         let new = self.compact_messages(compacted);
+        self.compacted_this_turn = Some((c.estimate)(&self.messages));
         let after = self.estimated_context_tokens();
         self.emit(AgentEvent::ContextCompaction {
             phase: "completed".into(),
@@ -1256,6 +1327,12 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
     /// Restore files to before the turn whose user message is at `pos`.
     pub fn rewind_files_to(&mut self, pos: usize) -> Result<usize, String> {
         self.undo.rewind_to(pos)
+    }
+
+    /// The browser page that was open when the user message at `pos` was
+    /// sent, if the browser was in use then.
+    pub fn page_at_message(&self, pos: usize) -> Option<String> {
+        self.page_at_message.get(&pos).cloned()
     }
 
     /// History was replaced wholesale; recorded turns can no longer be
@@ -1394,14 +1471,24 @@ fn verdict_key(command: &str) -> String {
     dirs.join(" && ")
 }
 
-/// Upper bound on a single tool result's size in the conversation (~6k tokens).
+/// Upper bound on a single tool result's size in the conversation (~4k tokens).
 /// Huge outputs (large file reads, `git log`, verbose command output) otherwise
 /// accumulate across a long turn until the prompt balloons and every model call
 /// slows to a crawl (the "stuck for minutes" symptom). Anything larger is
-/// middle-elided, keeping the informative head and tail.
-const MAX_TOOL_OUTPUT_CHARS: usize = 24_000;
+/// middle-elided, keeping the informative head and tail; the agent loop saves
+/// the full text to a file first (see [`spill_tool_output`]).
+const MAX_TOOL_OUTPUT_CHARS: usize = 16_000;
 
 pub fn cap_tool_output(s: &str) -> String {
+    cap_tool_output_with(
+        s,
+        "re-run with a narrower query/range if you need the omitted part",
+    )
+}
+
+/// [`cap_tool_output`] with `hint` saying how to get the omitted part. The
+/// result (hint included) stays within the cap, so capping again is a no-op.
+fn cap_tool_output_with(s: &str, hint: &str) -> String {
     // Byte length bounds the char count; skip counting for the common case.
     if s.len() <= MAX_TOOL_OUTPUT_CHARS {
         return s.to_string();
@@ -1410,15 +1497,89 @@ pub fn cap_tool_output(s: &str) -> String {
     if total <= MAX_TOOL_OUTPUT_CHARS {
         return s.to_string();
     }
-    let head = MAX_TOOL_OUTPUT_CHARS * 2 / 3;
-    let tail = MAX_TOOL_OUTPUT_CHARS - head;
+    let room = MAX_TOOL_OUTPUT_CHARS.saturating_sub(hint.chars().count() + 120);
+    let head = room * 2 / 3;
+    let tail = room - head;
     let chars: Vec<char> = s.chars().collect();
     let head_str: String = chars[..head].iter().collect();
     let tail_str: String = chars[chars.len() - tail..].iter().collect();
     let omitted = total - head - tail;
     format!(
-        "{head_str}\n\n… [{omitted} characters truncated to keep the context small — re-run with a narrower query/range if you need the omitted part] …\n\n{tail_str}"
+        "{head_str}\n\n… [{omitted} characters left out to keep the context small — {hint}] …\n\n{tail_str}"
     )
+}
+
+/// Why a turn should pause: it processed more than `alarm` tokens, or it
+/// sent the same tool call `max_same` times in a row.
+fn burn_alarm(
+    turn_tokens: u64,
+    alarm: u64,
+    same_call_repeats: u32,
+    max_same: u32,
+    tool: Option<&str>,
+) -> Option<String> {
+    if alarm > 0 && turn_tokens >= alarm {
+        return Some(format!(
+            "Paused: this turn has used {:.1}M tokens (limit `[session] turn_token_alarm`). \
+             Send \"continue\" to keep going.",
+            turn_tokens as f64 / 1e6
+        ));
+    }
+    if same_call_repeats >= max_same {
+        return Some(format!(
+            "Paused: `{}` ran {same_call_repeats} times in a row with the same input, which \
+             looks like a loop. Send \"continue\" to keep going, or say what to do instead.",
+            tool.unwrap_or("a tool")
+        ));
+    }
+    None
+}
+
+/// Spilled outputs kept per workspace; older ones are deleted.
+const SPILL_KEEP: usize = 50;
+
+/// When a tool output is too big for the conversation, save all of it under
+/// `.dcode-ai/tool-output/` and cap it with a pointer there, so nothing is
+/// lost and the agent reads only the part it needs.
+fn spill_tool_output(workspace_root: &Path, call_id: &str, output: &str) -> Option<String> {
+    if output.chars().count() <= MAX_TOOL_OUTPUT_CHARS {
+        return None;
+    }
+    let dir = workspace_root.join(".dcode-ai").join("tool-output");
+    std::fs::create_dir_all(&dir).ok()?;
+    let safe: String = call_id
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    let name = format!("{safe}.txt");
+    std::fs::write(dir.join(&name), output).ok()?;
+    if let Ok(entries) = std::fs::read_dir(&dir) {
+        let mut files: Vec<(std::time::SystemTime, std::path::PathBuf)> = entries
+            .flatten()
+            .filter_map(|e| Some((e.metadata().ok()?.modified().ok()?, e.path())))
+            .collect();
+        if files.len() > SPILL_KEEP {
+            files.sort();
+            for (_, path) in &files[..files.len() - SPILL_KEEP] {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
+    let rel = format!(".dcode-ai/tool-output/{name}");
+    let lines = output.lines().count();
+    Some(cap_tool_output_with(
+        output,
+        &format!(
+            "the full output ({lines} lines) is in {rel}; read_file it with a line range for the rest"
+        ),
+    ))
 }
 
 /// Whether a request error means the model itself can't serve it right now,
@@ -1531,6 +1692,32 @@ mod tests {
     use std::sync::Mutex;
 
     #[test]
+    fn burn_alarm_pauses_runaway_turns() {
+        assert!(burn_alarm(10, 5_000_000, 1, 4, None).is_none());
+        assert!(
+            burn_alarm(6_000_000, 5_000_000, 1, 4, None)
+                .unwrap()
+                .contains("6.0M")
+        );
+        assert!(burn_alarm(6_000_000, 0, 1, 4, None).is_none(), "0 = off");
+        let looped = burn_alarm(0, 0, 4, 4, Some("browser")).unwrap();
+        assert!(looped.contains("`browser` ran 4 times"));
+    }
+
+    #[test]
+    fn huge_outputs_are_saved_whole_and_capped_with_a_pointer() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let big: String = (0..5_000).map(|i| format!("line {i}\n")).collect();
+        let capped = spill_tool_output(temp.path(), "call/1", &big).expect("spilled");
+        assert!(capped.chars().count() <= MAX_TOOL_OUTPUT_CHARS);
+        assert!(capped.contains(".dcode-ai/tool-output/call_1.txt"));
+        let saved =
+            std::fs::read_to_string(temp.path().join(".dcode-ai/tool-output/call_1.txt")).unwrap();
+        assert_eq!(saved, big);
+        assert!(spill_tool_output(temp.path(), "c2", "small").is_none());
+    }
+
+    #[test]
     fn cap_tool_output_elides_only_huge_outputs() {
         // Small output passes through untouched.
         let small = "hello world";
@@ -1539,9 +1726,14 @@ mod tests {
         // Oversized output is middle-elided with a marker and kept under budget.
         let big = "x".repeat(MAX_TOOL_OUTPUT_CHARS * 3);
         let capped = cap_tool_output(&big);
-        assert!(capped.contains("characters truncated"));
+        assert!(capped.contains("characters left out"));
         assert!(capped.chars().count() < big.chars().count());
-        assert!(capped.chars().count() <= MAX_TOOL_OUTPUT_CHARS + 200);
+        assert!(capped.chars().count() <= MAX_TOOL_OUTPUT_CHARS);
+        assert_eq!(
+            cap_tool_output(&capped),
+            capped,
+            "capping twice changes nothing"
+        );
     }
 
     struct ChunkProvider {
@@ -2091,6 +2283,9 @@ mod tests {
             trigger_tokens: 8_000,
             min_conversation_tokens: 0,
             overhead_tokens: 0,
+            estimate: Arc::new(|m: &[Message]| {
+                m.iter().map(|x| x.content.approx_chars()).sum::<usize>() / 4
+            }),
             model: "cheap".into(),
             prompt: Arc::new(|_m: &[Message]| Some("summarize".into())),
             apply: Arc::new(move |m: &[Message], summary: &str| {
@@ -2121,13 +2316,15 @@ mod tests {
             let temp = tempfile::tempdir().expect("tempdir");
             let root =
                 dcode_ai_common::config::canonicalize_simplified(temp.path()).expect("canonical");
-            std::fs::write(root.join("a.txt"), "hi").unwrap();
+            for i in 0..6 {
+                std::fs::write(root.join(format!("a{i}.txt")), "hi").unwrap();
+            }
             let step = |i: usize| {
                 vec![
                     StreamChunk::ToolUse(ToolCall {
                         id: format!("r{i}"),
                         name: "read_file".into(),
-                        input: serde_json::json!({"path": "a.txt"}),
+                        input: serde_json::json!({"path": format!("a{i}.txt")}),
                     }),
                     StreamChunk::Usage {
                         input_tokens: 90_000,
@@ -2175,6 +2372,9 @@ mod tests {
                 trigger_tokens: 50_000,
                 min_conversation_tokens: min_conversation,
                 overhead_tokens: 0,
+                estimate: Arc::new(|m: &[Message]| {
+                    m.iter().map(|x| x.content.approx_chars()).sum::<usize>() / 4
+                }),
                 model: "cheap".into(),
                 prompt: Arc::new(|_m: &[Message]| Some("summarize".into())),
                 apply: Arc::new(move |m: &[Message], _s: &str| {
@@ -2186,6 +2386,52 @@ mod tests {
             assert_eq!(reply, "done");
             assert_eq!(*calls.lock().unwrap(), expected, "min {min_conversation}");
         }
+    }
+
+    /// A model that keeps sending the same call is paused, not left to loop.
+    #[tokio::test]
+    async fn repeated_identical_calls_pause_the_turn() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let root =
+            dcode_ai_common::config::canonicalize_simplified(temp.path()).expect("canonical");
+        std::fs::write(root.join("a.txt"), "hi").unwrap();
+        let read = |i: usize| {
+            vec![
+                StreamChunk::ToolUse(ToolCall {
+                    id: format!("r{i}"),
+                    name: "read_file".into(),
+                    input: serde_json::json!({"path": "a.txt"}),
+                }),
+                StreamChunk::Done,
+            ]
+        };
+        let provider = Box::new(ChunkProvider {
+            chunks: Mutex::new((0..10).map(read).collect()),
+        });
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(crate::tools::filesystem::ReadFileTool::new(
+            root.clone(),
+        )));
+        let (event_tx, _rx) = tokio::sync::mpsc::channel(512);
+        let mut agent = AgentLoop::new(
+            provider,
+            tools,
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "test-model".into(),
+            event_tx,
+            20,
+            20,
+            0,
+            None,
+        );
+        let reply = agent.run_turn("go", &root, &[]).await.expect("turn");
+        assert!(reply.starts_with("Paused:"), "{reply}");
+        let calls = agent
+            .messages
+            .iter()
+            .filter(|m| m.role == Role::Tool)
+            .count();
+        assert_eq!(calls, 4);
     }
 
     /// A write followed by a read of the same file in one batch runs in

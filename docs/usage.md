@@ -87,7 +87,7 @@ Type `/` to see them all with descriptions. The most used:
 | `/theme` | Theme picker with live preview |
 | `/output-style` | How replies are written: Default, Explanatory (★ Insight notes), Learning (`TODO(human)`), or custom `output-styles/*.md` |
 | `/permissions` | List rules; `allow`/`ask`/`deny`/`remove <rule>` to edit them; `mode` for the mode picker |
-| `/context`, `/cost`, `/usage`, `/stats` | Context window grid, spend and token use (`/usage`: fresh input, cache reads / writes, output, cache hit rate, Claude process restarts) |
+| `/context`, `/cost`, `/usage`, `/stats` | `/context`: what fills the window (system prompt, skills, tools, MCP tools, summary, conversation, and what the provider counted beyond that); `/usage`: fresh input, cache reads / writes, output, cache hit rate, Claude process restarts; `/stats`: tokens per day and per project over the last 14 days. Dollar estimates show only on the API backend: on a Claude plan or Copilot they would mislead |
 | `/compact [focus]` | Replace the conversation with a model-written summary to free context (`--preview` shows what is kept). It also happens on its own: before a turn once the context is 70% full, and in the middle of a long turn from 85% |
 | `/rewind`, `/undo`, `/redo` | Step back through code and conversation (in git workspaces also files changed by shell commands) |
 | `/diff` | Full-screen diff of every changed file (↑↓ file · Tab · `n`/`p` hunk · `r r` revert hunk · `q` close); `/diff <args>` prints a git diff |
@@ -458,6 +458,13 @@ element is found again by what it is, not its number). Screenshots are shown
 to models that can see images (API backend, Copilot). When the tab it drives is closed or blank and you are on
 another tab, it follows yours.
 
+To keep requests small, a click, key press, scroll, `wait_for` or submitted
+form on the same page returns only what changed (new elements, new text);
+the agent asks for a full `snapshot` when it needs one. An element keeps its
+number until the page is left. Rewinding code and conversation (`Esc Esc`)
+also takes the browser back to the page that was open then; anything
+already sent to a site stays sent.
+
 Your everyday Chrome profile can't be driven: since Chrome 136 Chrome
 ignores remote debugging on the default profile (protection against cookie
 theft). Sign in once in dcode-ai's browser instead — the logins stay.
@@ -474,6 +481,18 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 - Permissions: reading the page never asks; navigating, clicking and typing
   ask in default mode and run in accept-edits / auto mode; `eval` always
   asks. Password fields are never typed into.
+
+## Guards against runaway turns
+
+- A turn pauses once it has processed `[session] turn_token_alarm` tokens
+  (default 5,000,000; 0 = off), or when the same tool call repeats 4 times
+  in a row. Send "continue" to go on.
+- A tool output over 16,000 characters is shortened in the conversation
+  (head and tail); the whole output is saved under `.dcode-ai/tool-output/`
+  (the last 50) and the agent reads the part it needs.
+- Compaction runs once the conversation itself is 45% of the window and
+  has grown by a fifth of the window since the last one; it keeps the
+  recent messages that fit in a fifth of the window.
 
 ## Look of the working line
 

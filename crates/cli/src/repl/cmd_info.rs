@@ -147,7 +147,11 @@ impl Repl {
                     fmt_count(tin),
                     fmt_count(tout)
                 ));
-                lines.push(format!("Cost:        ${cost:.4}"));
+                if dcode_ai_common::config::per_token_billing() {
+                    lines.push(format!("Cost:        ${cost:.4} (API list prices)"));
+                } else {
+                    lines.push("Cost:        on your plan (tokens count toward its limits)".into());
+                }
                 if mcp_count > 0 {
                     lines.push(format!("MCP:         {mcp_count} server(s)"));
                     if let ReplOutput::Tui(st) = &out
@@ -366,8 +370,15 @@ impl Repl {
                         fmt_count(cache_write)
                     ),
                     format!("  output        {:>9}  ~5× input price", fmt_count(output)),
-                    format!("  estimated     ${est:.4} at API list prices"),
                 ];
+                if dcode_ai_common::config::per_token_billing() {
+                    lines.push(format!("  estimated     ${est:.4} at API list prices"));
+                } else {
+                    lines.push(
+                        "  billing       your plan — no per-token bill; these tokens count toward its limits"
+                            .into(),
+                    );
+                }
                 if let Some(hit) = (cache_read * 100).checked_div(fresh + cache_read + cache_write)
                 {
                     lines.push(format!(
@@ -449,7 +460,7 @@ impl Repl {
                     .as_ref()
                     .map(|name| format!("Session:     {} ({})", name, snapshot.id))
                     .unwrap_or_else(|| format!("Session:     {}", snapshot.id));
-                let lines = vec![
+                let mut lines = vec![
                     session_line,
                     format!("Model:       {}", self.runtime.model()),
                     format!("Agent:       @{}", self.agent_profile.label()),
@@ -459,7 +470,17 @@ impl Repl {
                         "Memory:      {}",
                         self.runtime.memory_store_path().display()
                     ),
+                    String::new(),
                 ];
+                // Across sessions and projects, from the local usage log.
+                let history = dcode_ai_runtime::usage_log::log_path()
+                    .map(|p| dcode_ai_runtime::usage_log::load(&p))
+                    .unwrap_or_default();
+                lines.extend(dcode_ai_runtime::usage_log::summary_lines(
+                    &history,
+                    chrono::Local::now().date_naive(),
+                    14,
+                ));
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
                         g.open_info_modal("stats", lines);

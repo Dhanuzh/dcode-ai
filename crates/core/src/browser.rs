@@ -39,6 +39,8 @@ pub struct Page {
     /// The tab (CDP target) this connection drives.
     pub target_id: String,
     alive: Arc<std::sync::atomic::AtomicBool>,
+    /// The last snapshot sent to the model, to report only what changed.
+    last: std::sync::Mutex<Option<Value>>,
 }
 
 impl Page {
@@ -108,6 +110,7 @@ impl Page {
             port,
             target_id: ws_url.rsplit('/').next().unwrap_or_default().to_string(),
             alive,
+            last: std::sync::Mutex::new(None),
         };
         for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {
             page.call(domain, json!({})).await?;
@@ -231,6 +234,25 @@ fn console_line(v: &Value) -> Option<String> {
 }
 
 /// The one page this process drives (shared by the tool and `/browser`).
+/// URL of the page the model last saw (for `/rewind`).
+fn last_url_cell() -> &'static std::sync::Mutex<Option<String>> {
+    static URL: OnceLock<std::sync::Mutex<Option<String>>> = OnceLock::new();
+    URL.get_or_init(Default::default)
+}
+
+/// The page the agent was last on, if it used the browser this process.
+pub fn last_url() -> Option<String> {
+    last_url_cell().lock().ok().and_then(|u| u.clone())
+}
+
+fn note_url(v: &Value) {
+    if let (Some(url), Ok(mut cell)) = (v["url"].as_str(), last_url_cell().lock())
+        && !url.is_empty()
+    {
+        *cell = Some(url.to_string());
+    }
+}
+
 pub fn shared() -> &'static Mutex<Option<Page>> {
     static PAGE: OnceLock<Mutex<Option<Page>>> = OnceLock::new();
     PAGE.get_or_init(|| Mutex::new(None))
@@ -523,13 +545,16 @@ async fn ensure_page(slot: &mut Option<Page>) -> Result<(&Page, Option<String>),
 const SNAPSHOT_JS: &str = r#"(() => {
   const vis = el => { const r = el.getBoundingClientRect(); const s = getComputedStyle(el);
     return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
-  document.querySelectorAll('[data-dcode-ref]').forEach(e => e.removeAttribute('data-dcode-ref'));
+  // Refs are stable while the page lives: an element keeps its number.
+  let next = window.__dcodeNext || 0;
   const sel = 'a[href],button,input:not([type=hidden]),select,textarea,summary,[role=button],[role=link],[role=checkbox],[role=radio],[role=tab],[role=menuitem],[role=option],[role=switch],[contenteditable=""],[contenteditable=true],[onclick]';
   const out = []; let n = 0; let more = false;
   for (const el of document.querySelectorAll(sel)) {
     if (!vis(el) || el.disabled) continue;
     if (n >= MAX) { more = true; break; }
-    n++; el.setAttribute('data-dcode-ref', String(n));
+    n++;
+    let ref = el.getAttribute('data-dcode-ref');
+    if (!ref) { ref = String(++next); el.setAttribute('data-dcode-ref', ref); }
     const tag = el.tagName.toLowerCase();
     const role = el.getAttribute('role') || (tag === 'a' ? 'link' : tag);
     const name = (el.getAttribute('aria-label') || el.innerText || el.placeholder || el.title || el.getAttribute('name') || el.alt || '')
@@ -547,20 +572,112 @@ const SNAPSHOT_JS: &str = r#"(() => {
       const h = el.getAttribute('href') || '';
       if (h && !h.startsWith('javascript')) extra = ` → ${h.slice(0, 80)}`;
     }
-    out.push(`[${n}] ${role}${name ? ` "${name}"` : ''}${extra}`);
+    out.push(`[${ref}] ${role}${name ? ` "${name}"` : ''}${extra}`);
   }
+  window.__dcodeNext = next;
   const text = (document.body ? document.body.innerText : '').replace(/\n{3,}/g, '\n\n');
   return JSON.stringify({ title: document.title, url: location.href, elements: out, more, text: text.slice(0, TEXT), cut: text.length > TEXT });
 })()"#;
 
-/// The page as text for the model.
-async fn snapshot(page: &Page) -> Result<String, String> {
+async fn snapshot_value(page: &Page) -> Result<Value, String> {
     let js = SNAPSHOT_JS
         .replace("MAX", &MAX_ELEMENTS.to_string())
         .replace("TEXT", &MAX_TEXT.to_string());
     let raw = page.eval(&js).await?;
-    let v: Value = serde_json::from_str(raw.as_str().unwrap_or("{}")).map_err(|e| e.to_string())?;
-    Ok(format_snapshot(&v))
+    serde_json::from_str(raw.as_str().unwrap_or("{}")).map_err(|e| e.to_string())
+}
+
+/// The whole page as text for the model.
+async fn snapshot(page: &Page) -> Result<String, String> {
+    let v = snapshot_value(page).await?;
+    note_url(&v);
+    let text = format_snapshot(&v);
+    if let Ok(mut last) = page.last.lock() {
+        *last = Some(v);
+    }
+    Ok(text)
+}
+
+/// After an action: only what changed when still on the same page (most
+/// of a page stays the same after a click), the whole page otherwise.
+async fn changes(page: &Page) -> Result<String, String> {
+    let v = snapshot_value(page).await?;
+    note_url(&v);
+    let prev = page.last.lock().ok().and_then(|mut l| l.replace(v.clone()));
+    Ok(match prev {
+        Some(prev) if prev["url"] == v["url"] => format_changes(&prev, &v),
+        _ => format_snapshot(&v),
+    })
+}
+
+/// Most changed text lines listed after an action.
+const MAX_CHANGED_LINES: usize = 40;
+
+fn format_changes(old: &Value, new: &Value) -> String {
+    let list = |v: &Value, key: &str| -> Vec<String> {
+        v[key]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let lines = |v: &Value| -> Vec<String> {
+        v["text"]
+            .as_str()
+            .unwrap_or("")
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(str::to_string)
+            .collect()
+    };
+    let (old_el, new_el) = (list(old, "elements"), list(new, "elements"));
+    let added: Vec<&String> = new_el.iter().filter(|e| !old_el.contains(e)).collect();
+    let removed = old_el.iter().filter(|e| !new_el.contains(e)).count();
+    let old_text: std::collections::HashSet<String> = lines(old).into_iter().collect();
+    let new_lines: Vec<String> = lines(new)
+        .into_iter()
+        .filter(|l| !old_text.contains(l))
+        .collect();
+
+    let mut out = format!(
+        "Page: {} (same page)\nURL: {}\n",
+        new["title"].as_str().unwrap_or(""),
+        new["url"].as_str().unwrap_or("")
+    );
+    if added.is_empty() && removed == 0 && new_lines.is_empty() {
+        out.push_str("\nNo visible change. `snapshot` shows the whole page.\n");
+        return out;
+    }
+    if !added.is_empty() {
+        out.push_str("\nNew or changed elements:\n");
+        for e in &added {
+            out.push_str(e);
+            out.push('\n');
+        }
+    }
+    if removed > 0 {
+        out.push_str(&format!("({removed} element(s) gone)\n"));
+    }
+    if !new_lines.is_empty() {
+        out.push_str("\nNew text:\n");
+        for l in new_lines.iter().take(MAX_CHANGED_LINES) {
+            out.push_str(l);
+            out.push('\n');
+        }
+        if new_lines.len() > MAX_CHANGED_LINES {
+            out.push_str(&format!(
+                "… {} more line(s); `snapshot` shows the whole page\n",
+                new_lines.len() - MAX_CHANGED_LINES
+            ));
+        }
+    }
+    out.push_str("\nOther elements keep their numbers; `snapshot` lists them all.\n");
+    out
 }
 
 fn format_snapshot(v: &Value) -> String {
@@ -937,7 +1054,7 @@ async fn run_page_action(
             let (x, y, _) = locate(page, r()?).await?;
             click_at(page, x, y).await?;
             page.wait_loaded().await;
-            Ok(format!("Clicked.\n\n{}", snapshot(page).await?))
+            Ok(format!("Clicked.\n\n{}", changes(page).await?))
         }
         "type" | "fill" => {
             let n = r()?;
@@ -962,7 +1079,7 @@ async fn run_page_action(
                 page.wait_loaded().await;
                 return Ok(format!(
                     "Typed and pressed Enter.\n\n{}",
-                    snapshot(page).await?
+                    changes(page).await?
                 ));
             }
             Ok("Typed.".into())
@@ -971,7 +1088,7 @@ async fn run_page_action(
             let key = input["key"].as_str().unwrap_or("Enter");
             press(page, key).await?;
             page.wait_loaded().await;
-            Ok(format!("Pressed {key}.\n\n{}", snapshot(page).await?))
+            Ok(format!("Pressed {key}.\n\n{}", changes(page).await?))
         }
         "scroll" => {
             let dir = if input["direction"].as_str() == Some("up") {
@@ -984,7 +1101,7 @@ async fn run_page_action(
             ))
             .await?;
             tokio::time::sleep(Duration::from_millis(300)).await;
-            snapshot(page).await
+            changes(page).await
         }
         "back" => {
             page.eval("history.back()").await?;
@@ -1034,7 +1151,7 @@ async fn run_page_action(
                 }
                 tokio::time::sleep(Duration::from_millis(250)).await;
             }
-            snapshot(page).await
+            changes(page).await
         }
         "console" => {
             let lines = page.console_lines();
@@ -1096,10 +1213,11 @@ impl ToolExecutor for BrowserTool {
                 console (log and errors); eval {expression} (run JavaScript); tabs (list open \
                 tabs); switch {tab}; new_tab {url}; wait_for {text, gone?, timeout_ms?} (wait \
                 until text appears or disappears); steps (actions so far); replay {file} (run \
-                saved steps). navigate, click, press, scroll, back, switch \
-                and new_tab return the new snapshot. If the user opens a tab, the tool follows it. Element numbers change when the \
-                page changes — use the latest snapshot. Never type passwords: ask the user to \
-                sign in in the browser window."
+                saved steps). navigate, back, switch and new_tab return the whole page; \
+                click, press, scroll, wait_for and type with submit return only what changed \
+                on the same page (call snapshot for everything). An element keeps its number \
+                until the page is left. If the user opens a tab, the tool follows it. Never \
+                type passwords: ask the user to sign in in the browser window."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -1237,6 +1355,23 @@ pub async fn close() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changes_list_only_what_is_new_on_the_same_page() {
+        let old = json!({"title": "T", "url": "u", "elements": ["[1] button \"Save\"", "[2] link \"Home\""],
+            "text": "Header\nRow one"});
+        let new = json!({"title": "T", "url": "u", "elements": ["[1] button \"Save\"", "[3] button \"Undo\""],
+            "text": "Header\nRow one\nSaved!"});
+        let out = format_changes(&old, &new);
+        assert!(out.contains("[3] button \"Undo\""));
+        assert!(
+            !out.contains("[1] button"),
+            "unchanged elements are left out: {out}"
+        );
+        assert!(out.contains("1 element(s) gone"));
+        assert!(out.contains("Saved!") && !out.contains("Row one"));
+        assert!(format_changes(&new, &new).contains("No visible change"));
+    }
 
     #[test]
     fn snapshot_text_lists_elements_and_page_text() {

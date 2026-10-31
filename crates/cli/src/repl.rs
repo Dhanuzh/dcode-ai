@@ -1576,8 +1576,29 @@ impl Repl {
                         .runtime
                         .rewind_to_user_message(user_index_from_end, &text, scope)
                     {
-                        Ok(files) => {
+                        Ok((files, page)) => {
                             let _ = self.runtime.save().await;
+                            let mut page_note = String::new();
+                            let connected = dcode_ai_core::browser::shared()
+                                .lock()
+                                .await
+                                .as_ref()
+                                .is_some_and(|p| p.is_alive());
+                            if let Some(url) = page
+                                && connected
+                                && dcode_ai_core::browser::last_url().as_ref() != Some(&url)
+                            {
+                                let root = self.runtime.workspace_root().to_path_buf();
+                                let nav = serde_json::json!({"action": "navigate", "url": url});
+                                if dcode_ai_core::browser::run_action(&nav, &root)
+                                    .await
+                                    .is_ok()
+                                {
+                                    page_note = format!(
+                                        "\nBrowser back on {url} (anything already sent to a site stays sent)"
+                                    );
+                                }
+                            }
                             let files_note = match files {
                                 0 => "no files changed since".to_string(),
                                 1 => "1 file restored".to_string(),
@@ -1594,7 +1615,7 @@ impl Repl {
                                 RewindScope::Code => format!("Rewound code ({files_note})"),
                             };
                             if let Ok(mut g) = tui_state.lock() {
-                                g.push_block(DisplayBlock::System(msg));
+                                g.push_block(DisplayBlock::System(format!("{msg}{page_note}")));
                                 g.touch_transcript();
                             }
                         }
@@ -2803,13 +2824,30 @@ mod memory_shortcut_tests {
 }
 
 /// `/context`: a Claude-style usage grid plus a per-category breakdown.
+/// What fills the context, by part (`/context`).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ContextBreakdown {
+    pub system: u64,
+    pub skills: u64,
+    pub tools: u64,
+    pub mcp_tools: u64,
+    pub summary: u64,
+    pub conversation: u64,
+    /// The provider's count for the last request (0 = none yet).
+    pub measured: u64,
+}
+
 fn context_usage_lines(
     model: &str,
-    (system, tools, convo): (u64, u64, u64),
+    b: ContextBreakdown,
     window: u64,
     message_count: usize,
 ) -> Vec<String> {
-    let used = system + tools + convo;
+    let estimate = b.system + b.skills + b.tools + b.mcp_tools + b.summary + b.conversation;
+    // What the provider counted beyond the estimate: thinking it keeps,
+    // its tokenizer, its own framing.
+    let extra = b.measured.saturating_sub(estimate);
+    let used = estimate + extra;
     let window = window.max(used).max(1);
     let fmt = |n: u64| -> String {
         if n >= 1_000 {
@@ -2819,12 +2857,21 @@ fn context_usage_lines(
         }
     };
     let pct = |n: u64| n as f64 * 100.0 / window as f64;
+    let parts = [
+        ('▓', "System prompt", b.system),
+        ('▓', "Skills list", b.skills),
+        ('▒', "Tools", b.tools),
+        ('▒', "MCP tools", b.mcp_tools),
+        ('░', "Summary", b.summary),
+        ('█', "Conversation", b.conversation),
+        ('◆', "Provider extra", extra),
+    ];
     // 10×10 grid, one cell per 1% of the window.
     let cells = |n: u64| ((n * 100).div_ceil(window)) as usize;
     let mut grid: Vec<char> = Vec::with_capacity(100);
-    grid.extend(std::iter::repeat_n('▓', cells(system)));
-    grid.extend(std::iter::repeat_n('▒', cells(tools)));
-    grid.extend(std::iter::repeat_n('█', cells(convo)));
+    for (glyph, _, n) in parts {
+        grid.extend(std::iter::repeat_n(glyph, cells(n)));
+    }
     grid.truncate(100);
     grid.resize(100, '·');
     let mut lines = vec![
@@ -2847,12 +2894,10 @@ fn context_usage_lines(
     }
     lines.push(String::new());
     let free = window.saturating_sub(used);
-    for (glyph, label, n) in [
-        ('▓', "System prompt", system),
-        ('▒', "Tool schemas", tools),
-        ('█', "Conversation", convo),
-        ('·', "Free space", free),
-    ] {
+    for (glyph, label, n) in parts.into_iter().chain([('·', "Free space", free)]) {
+        if n == 0 && label != "Free space" && label != "Conversation" {
+            continue;
+        }
         lines.push(format!(
             "  {glyph} {label:<14} {:>7}  ({:.1}%)",
             fmt(n),
@@ -2861,6 +2906,17 @@ fn context_usage_lines(
     }
     lines.push(String::new());
     lines.push(format!(
+        "  Fixed part {} — sent with every request; /compact can't shrink it",
+        fmt(b.system + b.skills + b.tools + b.mcp_tools)
+    ));
+    if extra > 0 {
+        lines.push(format!(
+            "  Provider extra {}: the provider counted more than dcode-ai's estimate",
+            fmt(extra)
+        ));
+        lines.push("  (thinking it keeps, its own tokenizer and framing)".into());
+    }
+    lines.push(format!(
         "{message_count} messages · estimates (~4 chars/token) · /compact frees space"
     ));
     lines
@@ -2868,11 +2924,17 @@ fn context_usage_lines(
 
 #[cfg(test)]
 mod context_usage_tests {
-    use super::context_usage_lines;
+    use super::{ContextBreakdown, context_usage_lines};
 
     #[test]
     fn grid_and_breakdown_add_up() {
-        let lines = context_usage_lines("m", (2_000, 8_000, 10_000), 200_000, 12);
+        let b = ContextBreakdown {
+            system: 2_000,
+            tools: 8_000,
+            conversation: 10_000,
+            ..Default::default()
+        };
+        let lines = context_usage_lines("m", b, 200_000, 12);
         assert!(
             lines[0].contains("20.0k / 200.0k tokens (10%)"),
             "{lines:?}"
@@ -2887,6 +2949,24 @@ mod context_usage_tests {
                 .iter()
                 .any(|l| l.contains("Free space") && l.contains("180.0k"))
         );
+    }
+
+    #[test]
+    fn provider_extra_is_what_was_measured_beyond_the_estimate() {
+        let b = ContextBreakdown {
+            system: 10_000,
+            conversation: 20_000,
+            measured: 80_000,
+            ..Default::default()
+        };
+        let lines = context_usage_lines("m", b, 200_000, 3);
+        assert!(lines[0].contains("80.0k / 200.0k"), "{lines:?}");
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Provider extra") && l.contains("50.0k"))
+        );
+        assert!(lines.iter().any(|l| l.contains("Fixed part 10.0k")));
     }
 }
 

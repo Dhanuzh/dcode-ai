@@ -172,12 +172,18 @@ impl Widget for StatusBar<'_> {
         }
 
         if self.tokens_in > 0 || self.tokens_out > 0 {
+            // Dollars only where tokens are billed (the API); on a Claude
+            // plan or Copilot an estimate would mislead.
+            let cost = if dcode_ai_common::config::per_token_billing() {
+                format!(" · ${:.4}", self.cost_usd)
+            } else {
+                String::new()
+            };
             line2.push(Span::styled(
                 format!(
-                    " {}↓ {}↑ · ${:.4}",
+                    " {}↓ {}↑{cost}",
                     format_tokens(self.tokens_in),
                     format_tokens(self.tokens_out),
-                    self.cost_usd
                 ),
                 Style::default().fg(theme::muted()).bg(theme::surface()),
             ));

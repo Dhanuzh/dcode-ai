@@ -88,7 +88,7 @@ on a server: **Authenticate**, **Reconnect**, **Sign out**, **Disable**
 connects and lists its tools. Signed-in servers renew their tokens on their
 own, also when another dcode-ai window renewed them first.
 
-**Many tools:** when servers bring more than 15 tools
+**Many tools:** when servers bring more than 6 tools
 (`[mcp] tool_search_threshold`, `0` = never), their schemas are not sent with
 every request. The model sees their names and loads the ones it needs with
 `tool_search` (keywords, or `select:<name>`), like Claude Code's deferred

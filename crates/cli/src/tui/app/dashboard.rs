@@ -246,7 +246,11 @@ pub(super) fn context_rail_lines(g: &TuiSessionState, width: usize) -> Vec<Line<
         compact_tokens(g.input_tokens),
         compact_tokens(g.output_tokens)
     )));
-    lines.push(plain(format!("cost ${:.4} (est.)", g.cost_usd)));
+    if dcode_ai_common::config::per_token_billing() {
+        lines.push(plain(format!("cost ${:.4} (est.)", g.cost_usd)));
+    } else {
+        lines.push(muted("on your plan · /usage"));
+    }
 
     let window = dcode_ai_runtime::model_limits::effective_context_window(&g.model) as u64;
     if window > 0 && g.context_tokens > 0 {
