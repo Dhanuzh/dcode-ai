@@ -142,6 +142,43 @@ fn read_events(log_path: &Path) -> Vec<AgentEvent> {
     out
 }
 
+/// The conversation so far from a session's log, for someone joining it:
+/// the newest events, at most about `max_bytes` of JSON.
+pub fn history_events(log_path: &Path, max_bytes: usize) -> Vec<AgentEvent> {
+    let mut events = read_events(log_path);
+    let start = events.len().saturating_sub(3000);
+    events.drain(..start);
+    let mut size: usize = 0;
+    let mut keep = events.len();
+    for ev in events.iter().rev() {
+        size += serde_json::to_string(ev).map(|s| s.len()).unwrap_or(0);
+        if size > max_bytes {
+            break;
+        }
+        keep -= 1;
+    }
+    events.drain(..keep);
+    events
+}
+
+/// Show `events` (from [`history_events`]) as the transcript so far.
+pub fn apply_history(events: &[AgentEvent], state: &Arc<Mutex<TuiSessionState>>) {
+    if events.is_empty() {
+        return;
+    }
+    if let Ok(mut g) = state.lock() {
+        let first_block = g.blocks.len();
+        g.replaying = true;
+        for ev in events {
+            g.apply_event(ev);
+        }
+        g.replaying = false;
+        g.streaming_assistant = None;
+        g.clear_replayed_interaction_state();
+        hide_old_blocks(&mut g, first_block);
+    }
+}
+
 /// Load historical events from disk into TUI state (used on resume / reopen same log).
 pub async fn replay_event_log_into_state(log_path: &Path, state: &Arc<Mutex<TuiSessionState>>) {
     let path = log_path.to_path_buf();

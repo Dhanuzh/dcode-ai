@@ -246,6 +246,9 @@ impl Repl {
                     title,
                     knocks,
                     presence: self.runtime.event_tx(),
+                    host_name: dcode_ai_cli::people::my_name(self.runtime.workspace_root()),
+                    session_id: self.runtime.session_id().to_string(),
+                    model: self.runtime.model().to_string(),
                 };
                 match dcode_ai_cli::invite::host(opts).await {
                     Ok(inv) => {

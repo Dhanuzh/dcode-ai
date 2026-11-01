@@ -17,6 +17,7 @@ pub mod diff_hunk;
 pub(crate) mod diff_overlay;
 pub(crate) mod diff_review;
 pub mod git;
+pub mod guest;
 pub mod keymap;
 pub mod layout;
 pub mod markdown;

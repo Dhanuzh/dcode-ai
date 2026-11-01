@@ -283,6 +283,10 @@ pub struct HostOptions {
     pub knocks: mpsc::Sender<Knock>,
     /// Where web watchers are announced.
     pub presence: Option<crate::watch::Presence>,
+    /// Shown to guests: who is hosting, the session and its model.
+    pub host_name: String,
+    pub session_id: String,
+    pub model: String,
 }
 
 /// A running invite; dropping it (or `stop`) ends it and disconnects
@@ -365,6 +369,9 @@ async fn host_on(
         title: opts.title,
         knocks: opts.knocks,
         presence: opts.presence,
+        host_name: opts.host_name,
+        session_id: opts.session_id,
+        model: opts.model,
         guests: AtomicUsize::new(0),
     });
     let mut stop = stop_rx.clone();
@@ -406,6 +413,9 @@ struct Host {
     knocks: mpsc::Sender<Knock>,
     presence: Option<crate::watch::Presence>,
     web_chat: Option<Arc<crate::watch::WebChat>>,
+    host_name: String,
+    session_id: String,
+    model: String,
     guests: AtomicUsize,
 }
 
@@ -490,16 +500,33 @@ impl Host {
                 .await;
             return Ok(());
         }
-        cipher
-            .send(
-                &mut write,
-                &json!({"t": "admitted", "title": self.title, "let_approve": self.let_approve}),
-            )
-            .await?;
-
         let ipc = dcode_ai_runtime::ipc::IpcClient::new(self.socket.clone());
         let mut events = ipc.connect().await.map_err(io_err)?;
         let person = crate::people::new_person_id("guest");
+        cipher
+            .send(
+                &mut write,
+                &json!({
+                    "t": "admitted",
+                    "title": self.title,
+                    "let_approve": self.let_approve,
+                    "host": self.host_name,
+                    "session_id": self.session_id,
+                    "model": self.model,
+                    "you": person,
+                }),
+            )
+            .await?;
+        // The conversation so far, then live events.
+        let log = self.log_path.clone();
+        let history = tokio::task::spawn_blocking(move || {
+            crate::tui::replay::history_events(&log, 6 * 1024 * 1024)
+        })
+        .await
+        .unwrap_or_default();
+        cipher
+            .send(&mut write, &json!({"t": "history", "events": history}))
+            .await?;
         let _ = ipc
             .send_command(&AgentCommand::Hello {
                 person: person.clone(),
@@ -599,8 +626,27 @@ impl Host {
 
 /// What the guest's terminal shows.
 pub enum GuestUpdate {
+    /// The conversation before they joined (sent once, first).
+    History(Vec<AgentEvent>),
     Event(Box<EventEnvelope>),
     Note(String),
+}
+
+/// Sends for a guest from anywhere (see [`Guest::into_parts`]).
+#[derive(Clone)]
+pub struct GuestSender(mpsc::UnboundedSender<Value>);
+
+impl GuestSender {
+    pub fn say(&self, text: &str) -> bool {
+        self.0.send(json!({"t": "say", "text": text})).is_ok()
+    }
+    pub fn approve(&self, call_id: &str, yes: bool) -> bool {
+        let t = if yes { "approve" } else { "deny" };
+        self.0.send(json!({"t": t, "call_id": call_id})).is_ok()
+    }
+    pub fn stop_turn(&self) -> bool {
+        self.0.send(json!({"t": "stop"})).is_ok()
+    }
 }
 
 /// A guest's live connection, once let in.
@@ -609,14 +655,12 @@ pub struct Guest {
     write: tokio::net::tcp::OwnedWriteHalf,
     pub title: String,
     pub let_approve: bool,
+    /// The host's name, the session, its model, and this guest's person id.
+    pub host: String,
+    pub session_id: String,
+    pub model: String,
+    pub me: String,
     pub updates: mpsc::Receiver<GuestUpdate>,
-    reader: tokio::task::JoinHandle<()>,
-}
-
-impl Drop for Guest {
-    fn drop(&mut self) {
-        self.reader.abort();
-    }
 }
 
 impl Guest {
@@ -666,10 +710,23 @@ impl Guest {
             .get("let_approve")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        let field = |k: &str| {
+            answer
+                .get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let (host, session_id, model, me) = (
+            field("host"),
+            field("session_id"),
+            field("model"),
+            field("you"),
+        );
         let (mut read, write) = stream.into_split();
         let (tx, updates) = mpsc::channel(256);
         let reader_cipher = cipher.clone();
-        let reader = tokio::spawn(async move {
+        tokio::spawn(async move {
             while let Ok(m) = reader_cipher.recv(&mut read).await {
                 let update = match m.get("t").and_then(Value::as_str) {
                     Some("event") => match m
@@ -680,6 +737,18 @@ impl Guest {
                         Some(env) => GuestUpdate::Event(Box::new(env)),
                         None => continue,
                     },
+                    Some("history") => GuestUpdate::History(
+                        m.get("events")
+                            .and_then(Value::as_array)
+                            .map(|a| {
+                                a.iter()
+                                    .filter_map(|e| {
+                                        serde_json::from_value::<AgentEvent>(e.clone()).ok()
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    ),
                     Some("note") => GuestUpdate::Note(
                         m.get("text")
                             .and_then(Value::as_str)
@@ -698,9 +767,32 @@ impl Guest {
             write,
             title,
             let_approve,
+            host,
+            session_id,
+            model,
+            me,
             updates,
-            reader,
         })
+    }
+
+    /// The sending half on its own task, and the updates (for a UI that
+    /// sends from one place and draws from another).
+    pub fn into_parts(self) -> (GuestSender, mpsc::Receiver<GuestUpdate>) {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Value>();
+        let Guest {
+            cipher,
+            mut write,
+            updates,
+            ..
+        } = self;
+        tokio::spawn(async move {
+            while let Some(m) = rx.recv().await {
+                if cipher.send(&mut write, &m).await.is_err() {
+                    break;
+                }
+            }
+        });
+        (GuestSender(tx), updates)
     }
 
     pub async fn say(&mut self, text: &str) -> std::io::Result<()> {
@@ -807,6 +899,11 @@ mod tests {
     #[tokio::test]
     async fn a_guest_knocks_is_let_in_and_talks() {
         let (socket, mut commands, events, dir) = fake_session().await;
+        std::fs::write(
+            dir.path().join("x.events.jsonl"),
+            "{\"id\":1,\"event\":{\"type\":\"MessageReceived\",\"role\":\"user\",\"content\":\"earlier\"}}\n",
+        )
+        .unwrap();
         let (knock_tx, mut knock_rx) = mpsc::channel::<Knock>(4);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
@@ -821,6 +918,9 @@ mod tests {
                 title: "demo".into(),
                 knocks: knock_tx,
                 presence: None,
+                host_name: "Dhanush".into(),
+                session_id: "s-1".into(),
+                model: "m".into(),
             },
             port,
         )
@@ -839,6 +939,17 @@ mod tests {
         });
         let mut guest = Guest::connect(&invite, "Priya", || {}).await.unwrap();
         assert_eq!(guest.title, "demo");
+        assert_eq!(guest.host, "Dhanush");
+        assert!(guest.me.starts_with("guest-"));
+        // The conversation so far comes first.
+        let first = tokio::time::timeout(Duration::from_secs(5), guest.updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(first, GuestUpdate::History(ref h) if h.iter().any(|e| matches!(e,
+            AgentEvent::MessageReceived { content, .. } if content == "earlier")))
+        );
         let hello = tokio::time::timeout(Duration::from_secs(5), commands.recv())
             .await
             .unwrap()
@@ -847,6 +958,7 @@ mod tests {
             panic!("expected hello, got {hello:?}");
         };
         assert_eq!(name, "Priya");
+        assert_eq!(person, guest.me);
 
         // Session events reach the guest.
         tokio::time::sleep(Duration::from_millis(200)).await;

@@ -1046,6 +1046,72 @@ fn invite_someone_to_join() {
     let _ = priya.wait();
 }
 
+/// A guest who joins over `/invite` in a terminal gets the same interface as
+/// the host: the conversation so far, live replies, the office.
+#[test]
+fn invited_guest_gets_the_full_interface() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut host = Tui::start(&home, &ws);
+    host.wait_for("? for shortcuts");
+    let run = |tui: &mut Tui, cmd: &str| {
+        tui.send(cmd.as_bytes());
+        std::thread::sleep(Duration::from_millis(200));
+        tui.send(b"\r");
+    };
+    run(&mut host, "what is in here");
+    host.wait_for("Reply to: what is in");
+    host.wait_for("? for shortcuts");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    run(&mut host, &format!("/invite {port}"));
+    host.wait_for("send this line to whoever should join");
+    let key = host
+        .text()
+        .split_whitespace()
+        .find(|w| w.contains(&format!(":{port}/")))
+        .and_then(|w| w.rsplit('/').next().map(str::to_string))
+        .expect("invite key");
+
+    // The guest: another home, no sign-in of their own.
+    let guest_dir = tempfile::tempdir().unwrap();
+    let invite = format!("127.0.0.1:{port}/{key}");
+    let mut guest = Tui::start_with(
+        guest_dir.path(),
+        guest_dir.path(),
+        &["join", &invite, "--name", "Sam"],
+    );
+    host.wait_for("Sam (127.0.0.1) wants to join");
+    host.send(b"1");
+    host.wait_for("⇢ Sam joined");
+    // The same interface, with the conversation so far.
+    guest.wait_for("you joined");
+    guest.wait_for("Reply to: what is in");
+    guest.wait_for("? for shortcuts");
+
+    run(&mut guest, "hello from sam");
+    host.wait_for("⇢ Sam: hello from sam");
+    guest.wait_for("Reply to: (from Sam)");
+    host.wait_for("? for shortcuts");
+
+    // Their office: the host's desk and theirs.
+    run(&mut guest, "/office");
+    guest.wait_until("the guest's office", |t| {
+        t.contains("q close") && t.contains("(host)") && t.contains("Sam (you)")
+    });
+    guest.send(b"q");
+    guest.wait_for("? for shortcuts");
+
+    // Commands that would change the host's session aren't theirs.
+    run(&mut guest, "/model");
+    guest.wait_for("isn't available while joined");
+
+    run(&mut guest, "/quit");
+    host.wait_for("⇠ Sam left");
+}
+
 impl Tui {
     /// The screen with colours, as JSON rows of `[symbol, fg, bg]`.
     fn cells_json(&self) -> serde_json::Value {

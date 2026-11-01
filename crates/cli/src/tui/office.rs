@@ -73,6 +73,9 @@ pub struct Office {
     pub agents: Vec<OfficeAgent>,
     /// People with the session: you, teammates on `join`, `/watch` viewers.
     pub people: Vec<OfficePerson>,
+    /// Seen from a guest's terminal: their own person id (the owner is
+    /// then the host, and this one is "you").
+    pub me: Option<String>,
 }
 
 /// How a person is with the session.
@@ -149,6 +152,7 @@ impl Default for Office {
                 look: 0,
             }],
             people: Vec::new(),
+            me: None,
         }
     }
 }
@@ -380,9 +384,12 @@ impl Office {
                     p.last_seen = Instant::now();
                 }
             }
-            // What you type shows over your head.
+            // What you type shows over your head (not what dcode-ai sends
+            // on its own, such as `<task-notification>`).
             AgentEvent::MessageReceived { role, content }
-                if role == "user" && !content.starts_with("(from ") =>
+                if role == "user"
+                    && !content.starts_with("(from ")
+                    && !content.trim_start().starts_with('<') =>
             {
                 if let Some(p) = self.person("owner") {
                     p.said = short(content, 20);
@@ -894,8 +901,10 @@ impl Widget for OfficeView<'_> {
                         PersonRole::Joined => rgb(0x3f, 0x7f, 0xbf),
                         PersonRole::Watching => rgb(0x5a, 0x60, 0x6c),
                     };
-                    let name = match p.role {
-                        PersonRole::Owner => format!("{} (you)", p.name),
+                    let name = match (&self.office.me, p.role) {
+                        (Some(me), _) if *me == p.id => format!("{} (you)", p.name),
+                        (Some(_), PersonRole::Owner) => format!("{} (host)", p.name),
+                        (None, PersonRole::Owner) => format!("{} (you)", p.name),
                         _ => p.name.clone(),
                     };
                     (p.bubble(), name, (bg, bg))
@@ -1147,6 +1156,7 @@ mod preview {
             let mut office = Office {
                 agents,
                 people: Vec::new(),
+                me: None,
             };
             office.set_owner("dhanush");
             office.apply(&AgentEvent::PersonJoined {

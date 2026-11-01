@@ -296,6 +296,9 @@ enum Command {
         /// Name shown to the others (default: git user.name, else $USER)
         #[arg(long)]
         name: Option<String>,
+        /// Plain text instead of the full terminal UI (joining over /invite)
+        #[arg(long)]
+        plain: bool,
     },
     /// Share a session: export it as one file (secrets masked), or import
     /// one a teammate exported so `/resume` finds it
@@ -973,10 +976,17 @@ async fn try_main() -> anyhow::Result<()> {
         }) => {
             attach_session(&config, &workspace_root, &session_id, json).await?;
         }
-        Some(Command::Join { session_id, name }) => {
+        Some(Command::Join {
+            session_id,
+            name,
+            plain,
+        }) => {
             let name = name.unwrap_or_else(|| dcode_ai_cli::people::my_name(&workspace_root));
             if let Some(invite) = dcode_ai_cli::invite::Invite::parse(&session_id) {
-                join_invite(&invite, &name).await?;
+                use std::io::IsTerminal;
+                let tui =
+                    !plain && std::io::stdout().is_terminal() && std::io::stdin().is_terminal();
+                join_invite(&invite, &name, tui.then_some(config.ui.theme.as_deref())).await?;
             } else {
                 let id = resolve_session_id(&config, &workspace_root, &session_id).await?;
                 join_session(&config, &workspace_root, &id, &name).await?;
@@ -2108,7 +2118,11 @@ async fn join_session(
 
 /// `dcode-ai join <host:port/key>`: join someone's session over the
 /// network with their `/invite` line. Same keys as a local join.
-async fn join_invite(invite: &dcode_ai_cli::invite::Invite, name: &str) -> anyhow::Result<()> {
+async fn join_invite(
+    invite: &dcode_ai_cli::invite::Invite,
+    name: &str,
+    tui: Option<Option<&str>>,
+) -> anyhow::Result<()> {
     use dcode_ai_cli::invite::{Guest, GuestUpdate};
     use dcode_ai_common::event::AgentEvent;
     use tokio::io::AsyncBufReadExt;
@@ -2119,6 +2133,10 @@ async fn join_invite(invite: &dcode_ai_cli::invite::Invite, name: &str) -> anyho
         )
     })
     .await?;
+    // The same terminal UI as the host's, unless asked for plain text.
+    if let Some(theme) = tui {
+        return dcode_ai_cli::tui::guest::run(guest, theme).await;
+    }
     let keys = if guest.let_approve {
         "type to send a message · /approve · /deny · /stop · /quit"
     } else {
@@ -2139,6 +2157,7 @@ async fn join_invite(invite: &dcode_ai_cli::invite::Invite, name: &str) -> anyho
                     let _ = print_event_envelope(&env, false);
                 }
                 Some(GuestUpdate::Note(text)) => eprintln!("[join] {text}"),
+                Some(GuestUpdate::History(_)) => {}
                 None => {
                     eprintln!("[join] disconnected");
                     break;

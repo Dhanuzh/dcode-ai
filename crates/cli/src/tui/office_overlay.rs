@@ -44,7 +44,10 @@ fn details(g: &TuiSessionState, i: usize) -> (String, String, Vec<String>) {
     };
     match who {
         Who::Person(p) => {
+            let me = g.office.me.as_deref() == Some(p.id.as_str());
             let role = match p.role {
+                PersonRole::Owner if g.office.me.is_some() => "the host · running this session",
+                PersonRole::Joined if me => "you · joined",
                 PersonRole::Owner => "you · running this session",
                 PersonRole::Joined => "on dcode-ai join · can send messages",
                 PersonRole::Watching => "on the /watch page · watching",

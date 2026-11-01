@@ -151,11 +151,16 @@ dcode-ai spawn --prompt "refactor the auth module"       # detached; attach late
 
 ### 👀 See it, share it
 
+<p align="center">
+<img src="docs/assets/agent-office.png" alt="The Agent Office in a terminal: pixel-art people at desks — you with a notebook, the dcode-ai agent at its laptop with a “done ✓” bubble — and the selected one's details below" width="860">
+<br><sub><code>/office</code> — you and every agent at a desk, live. Teammates who join sit there too.</sub>
+</p>
+
 - **Agent Office** (`/office`): every agent as an animated pixel-art character at a desk — typing, reading, running commands, raising a hand when it needs you. People on the session sit there too, under their names: you, whoever joined, whoever is watching.
 - **Live file map**: every file the agent reads and edits, as a tree that lights up while it works (dashboard `Alt+4`, `/files`).
 - **`/timeline`**: scrub through the session step by step; jump back to any of your messages.
 - **`/watch`**: a live, read-only web page of the session for a teammate (or your phone); local by default, `/watch lan` for your network.
-- **`/invite`**: someone on another computer joins with one line it prints (`dcode-ai join 192.168.1.9:8788/… --name Priya`). No SSH. Encrypted with the invite's key, and you're asked before anyone gets in; `/invite web` adds a browser link for people without dcode-ai.
+- **`/invite`**: someone on another computer joins with one line it prints (`dcode-ai join 192.168.1.9:8788/… --name Priya`). No SSH. They get the same interface as you, with the conversation so far. Encrypted with the invite's key, and you're asked before anyone gets in; `/invite web` adds a browser link for people without dcode-ai.
 - **`dcode-ai join <id> [--name you]`**: a second terminal (or a teammate over SSH) on the same running session; what they say shows with their name, and the agent knows who asked.
 - **`/handoff <note>`**: hand a session to a teammate as one file, with what's done and what's next.
 - **`/sounds`** and **`/speak`**: a bell when it needs you; the last reply read aloud.

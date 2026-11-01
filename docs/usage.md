@@ -520,8 +520,12 @@ spaces and `-_.`, 24 characters at most); they are not a login.
    `dcode-ai join 192.168.1.9:8788/Qk3f… --name <your name>`.
 2. The guest runs that line with their name. The host sees
    **"Priya (192.168.1.20) wants to join — let them in?"** and picks yes.
-3. The guest sees the session live and types to send messages; `/quit`
-   leaves.
+3. The guest gets the same dcode-ai interface as the host, with the
+   conversation so far, and types to send messages. `/office` and
+   `/timeline` work (the host's desk says "(host)", theirs "(you)");
+   commands that would change the host's session (`/model`, `/login`, …)
+   say they aren't available; `/quit` leaves. `--plain` gives plain text
+   instead. Guests don't need to be signed in.
 
 - The connection is encrypted and authenticated with the invite's key
   (Noise `NNpsk0`); a wrong or old key can't even knock. Each `/invite`

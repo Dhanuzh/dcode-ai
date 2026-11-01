@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.38 — 2026-11-01
+
+### New
+- **Guests get the same interface**: joining over `/invite` in a terminal
+  now opens the full dcode-ai UI, not plain text — the conversation so far,
+  live replies and tool calls, the dashboard and `/office` (the host's desk
+  marked "(host)", yours "(you)"). Type to send; `/quit` leaves. Commands
+  that would change the host's session say so. `--plain` keeps the text
+  mode. Guests don't need a sign-in of their own.
+- README: an Agent Office screenshot.
+
+### Fixed
+- The office showed dcode-ai's own `<task-notification>` messages as what
+  you last said.
+
 ## 1.0.37 — 2026-11-01
 
 ### New
