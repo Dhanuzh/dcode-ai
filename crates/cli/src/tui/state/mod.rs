@@ -120,6 +120,7 @@ impl TuiSessionState {
             timeline: Default::default(),
             timeline_open: false,
             office: Default::default(),
+            team: Default::default(),
             office_open: false,
             office_selected: 0,
             busy: false,
@@ -1464,12 +1465,13 @@ impl TuiSessionState {
 
     /// Next/previous right-rail tab, keeping keyboard focus on the rail.
     pub fn cycle_rail_tab(&mut self, step: i32) {
-        const TABS: [RailTab; 5] = [
+        const TABS: [RailTab; 6] = [
             RailTab::Context,
             RailTab::Changes,
             RailTab::Agents,
             RailTab::Files,
             RailTab::Office,
+            RailTab::Team,
         ];
         let i = TABS.iter().position(|t| *t == self.rail_tab).unwrap_or(0) as i32;
         self.rail_tab = TABS[(i + step).rem_euclid(TABS.len() as i32) as usize];
@@ -1796,6 +1798,17 @@ impl TuiSessionState {
         let mut transcript_dirty = false;
         self.timeline.apply(e);
         self.office.apply(e);
+        // A ticked-off item's text, before the list forgets it is open.
+        let ticked = match e {
+            AgentEvent::TeamTodoDone { id, .. } => self
+                .team
+                .todos
+                .iter()
+                .position(|t| t.id == *id && t.done_by.is_none())
+                .map(|i| (i + 1, self.team.todos[i].text.clone())),
+            _ => None,
+        };
+        self.team.apply(e);
         if let AgentEvent::ToolCallStarted { tool, input, .. } = e {
             self.file_map.touch(tool, input);
         }
@@ -1832,7 +1845,9 @@ impl TuiSessionState {
                     if self.suppress_next_user_block {
                         self.suppress_next_user_block = false;
                     } else {
-                        self.push_block(DisplayBlock::User(content.clone()));
+                        self.push_block(DisplayBlock::User(crate::tui::team::strip_todo_block(
+                            content,
+                        )));
                     }
                     self.set_process("queued prompt", truncate(content, 96));
                     self.set_busy_state(BusyState::Thinking);
@@ -2169,6 +2184,25 @@ impl TuiSessionState {
             AgentEvent::PersonLeft { name, .. } if !name.is_empty() => {
                 self.push_block(DisplayBlock::System(format!("⇠ {name} left")));
                 transcript_dirty = true;
+            }
+            AgentEvent::PersonChat { name, text, .. } => {
+                self.push_block(DisplayBlock::System(format!("💬 {name}: {text}")));
+                transcript_dirty = true;
+            }
+            AgentEvent::TeamTodoAdded { text, by, .. } => {
+                let n = self.team.todos.len();
+                self.push_block(DisplayBlock::System(format!(
+                    "☐ {by} added to-do #{n}: {text}"
+                )));
+                transcript_dirty = true;
+            }
+            AgentEvent::TeamTodoDone { by, .. } => {
+                if let Some((n, text)) = ticked {
+                    self.push_block(DisplayBlock::System(format!(
+                        "☑ {by} ticked off #{n}: {text}"
+                    )));
+                    transcript_dirty = true;
+                }
             }
             AgentEvent::PersonSaid { name, text, .. } => {
                 self.push_block(DisplayBlock::System(format!("⇢ {name}: {text}")));

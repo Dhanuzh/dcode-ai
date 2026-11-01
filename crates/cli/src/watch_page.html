@@ -59,6 +59,9 @@
   #people li .r { color: var(--muted); }
   #people li.watch::before { content: "👀 "; }
   #people li.join::before { content: "⌨ "; }
+  #todos { list-style: none; padding: 0; margin: 0 0 18px; font-size: 13px; }
+  #todos li.r { color: var(--muted); text-decoration: line-through; }
+  .chatline { color: var(--accent); margin: 0 0 10px 14px; }
   .said { color: #3f7fbf; margin: 0 0 10px 14px; }
   #chat { position: fixed; bottom: 0; left: 0; right: 0; z-index: 3; display: none; gap: 8px; align-items: center;
     padding: 8px 20px; background: var(--panel); border-top: 1px solid var(--line); }
@@ -90,6 +93,8 @@
     <div class="stat" style="margin-bottom:18px"><span>context</span><b id="ctx">–</b></div>
     <h2>Here now</h2>
     <ul id="people"><li class="r">–</li></ul>
+    <h2>Shared to-dos</h2>
+    <ul id="todos"><li class="r">–</li></ul>
     <h2>Files touched</h2>
     <ul id="files"></ul>
   </aside>
@@ -97,7 +102,7 @@
 <div id="chat">
   <span id="chatnote">Ask the host to let you in, then you can send messages.</span>
   <button id="knock" type="button">Ask to join</button>
-  <input id="say" placeholder="message the session…" maxlength="4000" hidden>
+  <input id="say" placeholder="message the agent · /chat <text> to people · /todo <text>" maxlength="4000" hidden>
   <button id="send" type="button" hidden>Send</button>
 </div>
 <footer>Read-only live view of a dcode-ai session · nothing here can change it</footer>
@@ -152,7 +157,7 @@
   function handle(ev) {
     switch (ev.type) {
       case 'MessageReceived':
-        if (ev.role === 'user') { add(el('msg user', ev.content)); }
+        if (ev.role === 'user') { add(el('msg user', (ev.content || '').replace(/\s*<team-todos>[\s\S]*?<\/team-todos>/, ''))); }
         else if (ev.role === 'assistant') {
           if (typing) { typing.remove(); typing = null; }
           if ((ev.content || '').trim()) add(el('msg reply', ev.content));
@@ -198,7 +203,26 @@
         if (people.delete(ev.person)) { renderPeople(); if (ev.name) add(el('note', '⇠ ' + ev.name + ' left')); }
         break;
       case 'PersonSaid': add(el('said', ev.name + ': ' + ev.text)); break;
+      case 'PersonChat': add(el('chatline', '💬 ' + ev.name + ': ' + ev.text)); break;
+      case 'TeamTodoAdded': todos.push({ id: ev.id, text: ev.text, by: ev.by, done: false });
+        add(el('note', '☐ ' + ev.by + ' added a to-do: ' + ev.text)); renderTodos(); break;
+      case 'TeamTodoDone': { const t = todos.find(x => x.id === ev.id);
+        if (t && !t.done) { t.done = true; add(el('note', '☑ ' + ev.by + ' ticked off: ' + t.text)); renderTodos(); } break; }
     }
+  }
+
+  // The shared to-do list.
+  const todos = [];
+  function renderTodos() {
+    const ul = document.getElementById('todos');
+    ul.textContent = '';
+    if (!todos.length) { ul.appendChild(Object.assign(document.createElement('li'), { className: 'r', textContent: '–' })); return; }
+    todos.forEach((t, i) => {
+      const li = document.createElement('li');
+      li.textContent = (i + 1) + '. ' + (t.done ? '☑ ' : '☐ ') + t.text;
+      if (t.done) li.className = 'r';
+      ul.appendChild(li);
+    });
   }
 
   // Who else is here (people who arrive while this page is open).
@@ -228,7 +252,7 @@
   function connect() {
     if (src) src.close();
     people.clear(); renderPeople();
-    log.textContent = ''; files.clear(); tools.clear(); toolCount = 0; typing = null;
+    log.textContent = ''; files.clear(); tools.clear(); toolCount = 0; typing = null; todos.length = 0;
     const q = (myName ? '&name=' + encodeURIComponent(myName) : '') + (guest ? '&p=' + encodeURIComponent(guest) : '');
     src = new EventSource('/events?t=__TOKEN__' + q);
     src.onopen = () => setState('live', 'on');
@@ -262,7 +286,10 @@
       if (!text || !guest) return;
       sendBtn.disabled = true;
       try {
-        const r = await fetch('/say?t=__TOKEN__&p=' + encodeURIComponent(guest), { method: 'POST', body: text });
+        let route = '/say', body = text;
+        if (text.startsWith('/chat ')) { route = '/chat'; body = text.slice(6); }
+        else if (text.startsWith('/todo ')) { route = '/todo'; body = text.slice(6); }
+        const r = await fetch(route + '?t=__TOKEN__&p=' + encodeURIComponent(guest), { method: 'POST', body });
         if (r.ok) sayIn.value = ''; else { chatNote.hidden = false; chatNote.textContent = 'Not let in any more.'; }
       } catch (_) {}
       sendBtn.disabled = false; sayIn.focus();

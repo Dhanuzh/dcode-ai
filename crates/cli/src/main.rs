@@ -2138,10 +2138,11 @@ async fn join_invite(
         return dcode_ai_cli::tui::guest::run(guest, theme).await;
     }
     let keys = if guest.let_approve {
-        "type to send a message · /approve · /deny · /stop · /quit"
+        "type to send a message · /chat · /todo · /approve · /deny · /stop · /quit"
     } else {
-        "type to send a message · /quit"
+        "type to send a message · /chat <text> · /todo <text> · /quit"
     };
+    let send = guest.sender();
     eprintln!("[join] you're in: {} — {keys}", guest.title);
     let mut pending: Option<String> = None;
     let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
@@ -2168,19 +2169,28 @@ async fn join_invite(
                 let text = line.trim();
                 let sent = match text {
                     "" => continue,
-                    "/quit" | "/exit" => break,
-                    "/stop" => guest.stop_turn().await,
+                    "/quit" | "/exit" => {
+                        send.bye();
+                        // Let the bye go out before closing.
+                        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        break;
+                    }
+                    "/stop" => send.stop_turn(),
                     "/approve" | "/deny" => match pending.take() {
-                        Some(call_id) => guest.approve(&call_id, text == "/approve").await,
+                        Some(call_id) => send.approve(&call_id, text == "/approve"),
                         None => {
                             eprintln!("[join] nothing is waiting for approval");
                             continue;
                         }
                     },
-                    _ => guest.say(text).await,
+                    _ => match text.split_once(' ') {
+                        Some(("/chat", rest)) => send.chat(rest),
+                        Some(("/todo", rest)) => send.todo(rest),
+                        _ => send.say(text),
+                    },
                 };
-                if let Err(e) = sent {
-                    eprintln!("[join] lost the connection: {e}");
+                if !sent {
+                    eprintln!("[join] lost the connection");
                     break;
                 }
             }

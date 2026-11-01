@@ -69,7 +69,7 @@ go), and drag a rail's inner edge to make it wider or narrower.
 
 | Key | Action |
 | --- | --- |
-| `Alt+1` … `Alt+5` | Context · changes · agents · files · office tab (files: every file the agent read or edited, live, the current one marked ◉) |
+| `Alt+1` … `Alt+6` | Context · changes · agents · files · office · team tab (team: the shared to-dos and the people's chat; files: every file the agent read or edited, live, the current one marked ◉) |
 | `Ctrl+D` | Focus the rail (again to return to the prompt) |
 | `←` / `→` (rail focused) | Previous / next tab |
 | `j` / `k` (changes) | Select a hunk |
@@ -500,6 +500,10 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 | `/files` | Files the agent read and edited this session (also the dashboard's `files` tab, `Alt+4`) |
 | `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan [port]` shares it on your network (a fixed port such as `/watch lan 8787` lets you allow it in the firewall once; on WSL it prints the commands); `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
 | `/invite` | Let someone on another computer join with one line: prints (and copies) `dcode-ai join <ip>:8788/<key> --name <their name>`. You're asked before each person gets in. `/invite web` also gives a browser link (no install; plain HTTP), `/invite <port>` another port, `/invite --let-approve` lets guests approve and stop too, `/invite stop` ends it |
+| `/chat <text>` | Talk to the people on this session — not sent to the agent. `/chat` alone shows the recent chat; it's also in the dashboard's `team` tab (`Alt+6`) |
+| `/todo` | The shared to-do list: `/todo <text>` adds, `/todo done <n>` ticks off, `/todo` lists. Everyone on the session sees it, and the agent gets the open items with each prompt (not shown in the transcript) |
+| `/people` | Who is with this session: you, guests on `/invite` (terminal or browser), `dcode-ai join` terminals, `/watch` viewers |
+| `/kick <name>` | Remove an invited guest; their invite no longer lets them back in |
 | `/handoff <note>` | Writes `<session>.dcode-session` (secrets masked) with your note, the open todo list and the changed files; the teammate imports it and says "continue" |
 | `/sounds on\|off` | A bell when a turn of 10s+ finishes or dcode-ai needs an approval or an answer |
 | `/speak` | Reads the last reply aloud (system voice; code blocks skipped) |
@@ -540,6 +544,11 @@ spaces and `-_.`, 24 characters at most); they are not a login.
   (the default port 8788 stays the same, so it's once).
 - Outside your network: use a VPN such as Tailscale and its address; don't
   open the port on your router.
+- If a guest's connection drops, they reconnect on their own (no knock;
+  within 20 s nobody sees them leave). `/kick <name>` removes them for good.
+- `/invite web` and `/watch lan` also print the link as a QR code.
+- Guests use `/chat`, `/todo` and `/people` too; their header shows your
+  project and name.
 
 ## Guards against runaway turns
 

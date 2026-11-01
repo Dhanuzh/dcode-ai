@@ -184,6 +184,7 @@ impl Repl {
                             out.println(
                                 "[watch] reachable by anyone on this network who has the link — /watch stop ends it",
                             );
+                            print_qr(&out, "[watch] or scan it with a phone:", &w.url);
                             if let Some(help) = crate::watch::lan_help(w.port) {
                                 for line in help.lines() {
                                     out.println(&format!("[watch] {line}"));
@@ -247,6 +248,12 @@ impl Repl {
                     knocks,
                     presence: self.runtime.event_tx(),
                     host_name: dcode_ai_cli::people::my_name(self.runtime.workspace_root()),
+                    project: self
+                        .runtime
+                        .workspace_root()
+                        .file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default(),
                     session_id: self.runtime.session_id().to_string(),
                     model: self.runtime.model().to_string(),
                 };
@@ -254,6 +261,14 @@ impl Repl {
                     Ok(inv) => {
                         let line = inv.command();
                         let _ = crate::tui::clipboard::copy_to_clipboard(&line);
+                        // The browser link (and its QR code) first, so the
+                        // line to send ends up at the bottom.
+                        if let Some(url) = &inv.web_url {
+                            print_qr(&out, "[invite] or scan it with a phone:", url);
+                            out.println(&format!(
+                                "[invite] in a browser (no install; plain HTTP, so people on this network could read it): {url}"
+                            ));
+                        }
                         out.println(&format!(
                             "[invite] open on port {} — send this line to whoever should join (copied):",
                             inv.port()
@@ -264,11 +279,6 @@ impl Repl {
                         } else {
                             "[invite] you're asked before anyone gets in · guests can send messages (approvals stay with you) · /invite stop ends it"
                         });
-                        if let Some(url) = &inv.web_url {
-                            out.println(&format!(
-                                "[invite] in a browser (no install; plain HTTP, so people on this network could read it): {url}"
-                            ));
-                        }
                         if let Some(help) = crate::watch::lan_help(inv.port()) {
                             for line in help.lines() {
                                 out.println(&format!("[invite] {line}"));
@@ -286,6 +296,137 @@ impl Repl {
                         }
                     )),
                     Err(e) => out.eprintln(&format!("[invite] could not start: {e}")),
+                }
+            }
+            "/chat" => {
+                let text = rest.trim();
+                if text.is_empty() {
+                    let lines: Vec<String> = match &out {
+                        ReplOutput::Tui(st) => st
+                            .lock()
+                            .map(|g| {
+                                g.team
+                                    .chat
+                                    .iter()
+                                    .rev()
+                                    .take(20)
+                                    .rev()
+                                    .map(|c| {
+                                        format!("{} {}: {}", c.at.format("%H:%M"), c.name, c.text)
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    };
+                    if lines.is_empty() {
+                        out.println("[chat] no chat yet — /chat <text> talks to the people here (the agent doesn't see it) · dashboard Alt+6");
+                    }
+                    for l in lines {
+                        out.println(&format!("[chat] {l}"));
+                    }
+                    return Ok(true);
+                }
+                let name = dcode_ai_cli::people::my_name(self.runtime.workspace_root());
+                if let Some(tx) = self.runtime.event_tx() {
+                    let _ = tx
+                        .send(dcode_ai_common::event::AgentEvent::PersonChat {
+                            person: "owner".into(),
+                            name,
+                            text: text.chars().take(2000).collect(),
+                        })
+                        .await;
+                }
+            }
+            "/todo" => {
+                let arg = rest.trim();
+                let name = dcode_ai_cli::people::my_name(self.runtime.workspace_root());
+                let ReplOutput::Tui(st) = &out else {
+                    out.eprintln("[todo] the shared to-do list needs the terminal UI");
+                    return Ok(true);
+                };
+                if arg.is_empty() {
+                    let lines = st.lock().map(|g| g.team.lines()).unwrap_or_default();
+                    for l in lines {
+                        out.println(&format!("[todo] {l}"));
+                    }
+                    return Ok(true);
+                }
+                let event = if let Some(which) = arg
+                    .strip_prefix("done ")
+                    .or_else(|| arg.strip_prefix("tick "))
+                {
+                    let id = st
+                        .lock()
+                        .ok()
+                        .and_then(|g| g.team.find(which).map(|t| t.id.clone()));
+                    match id {
+                        Some(id) => {
+                            dcode_ai_common::event::AgentEvent::TeamTodoDone { id, by: name }
+                        }
+                        None => {
+                            out.eprintln(&format!("[todo] no item {which} — /todo lists them"));
+                            return Ok(true);
+                        }
+                    }
+                } else {
+                    dcode_ai_common::event::AgentEvent::TeamTodoAdded {
+                        id: dcode_ai_runtime::supervisor::new_todo_id(),
+                        text: arg.chars().take(500).collect(),
+                        by: name,
+                    }
+                };
+                if let Some(tx) = self.runtime.event_tx() {
+                    let _ = tx.send(event).await;
+                }
+            }
+            "/people" => {
+                use crate::tui::office::PersonRole;
+                let people: Vec<(String, PersonRole)> = match &out {
+                    ReplOutput::Tui(st) => st
+                        .lock()
+                        .map(|g| {
+                            g.office
+                                .people_ordered()
+                                .into_iter()
+                                .filter(|p| p.leaving.is_none())
+                                .map(|p| (p.name.clone(), p.role))
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    _ => Vec::new(),
+                };
+                let guests = self.invite.as_ref().map(|i| i.guests()).unwrap_or_default();
+                out.println(&format!("[people] {} here", people.len().max(1)));
+                for (name, role) in people {
+                    let what = match role {
+                        PersonRole::Owner => "you · host".to_string(),
+                        PersonRole::Watching => "watching (/watch page)".to_string(),
+                        PersonRole::Joined => match guests.iter().find(|g| g.name == name) {
+                            Some(g) => {
+                                format!("joined over /invite from {} · /kick {name}", g.from)
+                            }
+                            None => "joined (dcode-ai join)".to_string(),
+                        },
+                    };
+                    out.println(&format!("[people]   {name} — {what}"));
+                }
+            }
+            "/kick" => {
+                let name = rest.trim();
+                if name.is_empty() {
+                    out.eprintln("usage: /kick <name> (see /people)");
+                    return Ok(true);
+                }
+                let n = self.invite.as_ref().map(|i| i.kick(name)).unwrap_or(0);
+                if n == 0 {
+                    out.eprintln(&format!(
+                        "[kick] no invited guest named {name} (/people lists who is here; local joins leave with /quit, /watch stop ends the page)"
+                    ));
+                } else {
+                    out.println(&format!(
+                        "[kick] removed {name} — their invite no longer works for them"
+                    ));
                 }
             }
             "/handoff" => {
@@ -411,4 +552,28 @@ fn spawn_knock_prompts(
         }
     });
     tx
+}
+
+/// A link's QR code as one block (so its rows stay together and aligned).
+fn print_qr(out: &ReplOutput<'_>, label: &str, url: &str) {
+    let qr = dcode_ai_cli::people::qr_lines(url);
+    if qr.is_empty() {
+        return;
+    }
+    match out {
+        ReplOutput::Tui(st) => {
+            if let Ok(mut g) = st.lock() {
+                g.push_block(crate::tui::state::DisplayBlock::System(format!(
+                    "{label}\n{}",
+                    qr.join("\n")
+                )));
+            }
+        }
+        _ => {
+            out.println(label);
+            for l in qr {
+                out.println(&l);
+            }
+        }
+    }
 }

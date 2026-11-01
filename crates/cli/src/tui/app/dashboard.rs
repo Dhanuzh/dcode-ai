@@ -8,7 +8,7 @@ use crate::tui::render_helpers::truncate_chars;
 use crate::tui::state::{DashTarget, RailTab};
 
 const LEFT_W: u16 = 26;
-const RIGHT_W: u16 = 42;
+const RIGHT_W: u16 = 44;
 /// Both rails need this many columns to leave a usable centre pane.
 const BOTH_RAILS_MIN_W: u16 = 120;
 /// Below this only the centre pane is shown.
@@ -336,6 +336,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
         (RailTab::Agents, "agents"),
         (RailTab::Files, "files"),
         (RailTab::Office, "office"),
+        (RailTab::Team, "team"),
     ];
     let mut spans = vec![Span::raw(" ")];
     let mut x = rect.x + 2;
@@ -374,7 +375,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             if focused {
                 " ←/→ tabs · Esc back "
             } else {
-                " Alt+1-5 · Ctrl+D focus "
+                " Alt+1-6 · Ctrl+D focus "
             },
             Style::default().fg(theme::muted()),
         )))
@@ -462,6 +463,14 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
                 frame.render_widget(Paragraph::new(Text::from(here)), below);
             }
         }
+        RailTab::Team => frame.render_widget(
+            Paragraph::new(Text::from(team_lines(
+                &g.team,
+                body.width as usize,
+                body.height as usize,
+            ))),
+            body,
+        ),
         RailTab::Files => frame.render_widget(
             Paragraph::new(Text::from(files_lines(
                 &g.file_map,
@@ -471,6 +480,53 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             body,
         ),
     }
+}
+
+/// The shared to-do list on top, the people's chat below (newest last).
+pub(super) fn team_lines(
+    team: &crate::tui::team::Team,
+    width: usize,
+    height: usize,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![muted("to-dos · /todo <text> · /todo done <n>")];
+    if team.todos.is_empty() {
+        lines.push(muted("  nothing yet"));
+    }
+    for (i, t) in team.todos.iter().enumerate() {
+        let (mark, style) = match &t.done_by {
+            Some(_) => ("☑", Style::default().fg(theme::muted())),
+            None => ("☐", Style::default().fg(theme::text())),
+        };
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:>2} {mark} ", i + 1),
+                Style::default().fg(theme::accent()),
+            ),
+            Span::styled(truncate_chars(&t.text, width.saturating_sub(6)), style),
+        ]));
+    }
+    lines.push(Line::default());
+    lines.push(muted("chat · /chat <text> (the agent doesn't see it)"));
+    let room = height.saturating_sub(lines.len());
+    if team.chat.is_empty() {
+        lines.push(muted("  no messages yet"));
+    }
+    let skip = team.chat.len().saturating_sub(room);
+    for c in team.chat.iter().skip(skip) {
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{} ", c.name),
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(ratatui::style::Modifier::BOLD),
+            ),
+            Span::styled(
+                truncate_chars(&c.text, width.saturating_sub(c.name.chars().count() + 1)),
+                Style::default().fg(theme::text()),
+            ),
+        ]));
+    }
+    lines
 }
 
 /// The files the agent touched as a tree: edits bright with their count,

@@ -18,6 +18,10 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/files",
     "/watch",
     "/invite",
+    "/chat",
+    "/todo",
+    "/people",
+    "/kick",
     "/handoff",
     "/sounds",
     "/speak",
@@ -145,6 +149,10 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/invite" => {
             "let someone on another computer join with one line: /invite, /invite web, /invite stop"
         }
+        "/chat" => "chat with the people on this session (not sent to the agent): /chat <text>",
+        "/todo" => "the shared to-do list the agent sees: /todo, /todo <text>, /todo done <n>",
+        "/people" => "who is with this session: you, invited guests, joined terminals, watchers",
+        "/kick" => "remove an invited guest: /kick <name>",
         "/handoff" => "hand this session to a teammate: /handoff <what's done, what's next>",
         "/sounds" => "a bell when a long turn finishes or dcode-ai needs you: /sounds on|off",
         "/speak" => "read the last reply aloud",

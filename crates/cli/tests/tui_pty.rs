@@ -229,9 +229,9 @@ fn typing_pasting_modes_and_dashboard() {
 
     // Ctrl+\ opens the dashboard and closes it again.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-5");
+    tui.wait_for("Alt+1-6");
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-5"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-6"));
 
     // Ctrl+C twice quits.
     tui.send(b"\x03");
@@ -809,13 +809,13 @@ fn see_and_share_a_session() {
 
     // The dashboard's files tab shows it too.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-5");
+    tui.wait_for("Alt+1-6");
     tui.send(b"\x1b4");
     tui.wait_until("the files tab", |t| {
         t.contains("1 edited") && t.contains("note.txt")
     });
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-5"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-6"));
 
     run(&mut tui, "/office");
     tui.wait_until("the office", |t| {
@@ -957,7 +957,7 @@ fn invite_someone_to_join() {
     let text = tui.text();
     let line = text
         .split_whitespace()
-        .find(|w| w.contains(&format!(":{port}/")))
+        .find(|w| w.contains(&format!(":{port}/")) && !w.starts_with("http"))
         .expect("invite line")
         .to_string();
     let key = line.rsplit('/').next().unwrap().to_string();
@@ -1071,7 +1071,7 @@ fn invited_guest_gets_the_full_interface() {
     let key = host
         .text()
         .split_whitespace()
-        .find(|w| w.contains(&format!(":{port}/")))
+        .find(|w| w.contains(&format!(":{port}/")) && !w.starts_with("http"))
         .and_then(|w| w.rsplit('/').next().map(str::to_string))
         .expect("invite key");
 
@@ -1107,8 +1107,49 @@ fn invited_guest_gets_the_full_interface() {
     // Commands that would change the host's session aren't theirs.
     run(&mut guest, "/model");
     guest.wait_for("isn't available while joined");
+    // The host's project, not the guest's folder.
+    assert!(guest.text().contains("'s work"), "{}", guest.text());
 
-    run(&mut guest, "/quit");
+    // Chat between people: not to the agent.
+    run(&mut guest, "/chat lunch at 1?");
+    host.wait_for("💬 Sam: lunch at 1?");
+    run(&mut host, "/chat sure");
+    guest.wait_for("💬");
+    guest.wait_for(": sure");
+
+    // A shared to-do: everyone sees it, and the agent gets it with the
+    // next prompt (hidden in the transcript).
+    run(&mut guest, "/todo fix the login bug");
+    host.wait_for("☐ Sam added to-do #1: fix the login bug");
+    guest.wait_for("added to-do #1");
+    run(&mut host, "next step");
+    host.wait_for("Reply to: next step");
+    host.wait_for("? for shortcuts");
+    // (The mock model echoes the prompt back, so look at your own line.)
+    assert!(
+        host.text().lines().any(|l| l.trim_end() == "> next step"),
+        "the to-do block is hidden in your message:\n{}",
+        host.text()
+    );
+    let logs: String = std::fs::read_dir(ws.join(".dcode-ai/sessions"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().ends_with(".events.jsonl"))
+        .map(|e| std::fs::read_to_string(e.path()).unwrap_or_default())
+        .collect();
+    assert!(
+        logs.contains("<team-todos>") && logs.contains("fix the login bug"),
+        "the agent got the to-do with the prompt"
+    );
+    run(&mut guest, "/todo done 1");
+    host.wait_for("☑ Sam ticked off #1: fix the login bug");
+
+    // The host sees who is here, and can remove them.
+    run(&mut host, "/people");
+    host.wait_for("Sam — joined over /invite");
+    run(&mut host, "/kick Sam");
+    host.wait_for("[kick] removed Sam");
+    guest.wait_for("removed you");
     host.wait_for("⇠ Sam left");
 }
 
@@ -1162,12 +1203,12 @@ fn office_screenshots() {
     tui.send(b"\r");
     tui.wait_for("part0");
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-5");
+    tui.wait_for("Alt+1-6");
     tui.send(b"\x1b5");
     std::thread::sleep(Duration::from_millis(900));
     shots.push(tui.cells_json());
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-5"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-6"));
     tui.wait_for("? for shortcuts");
     // Waiting for an approval.
     tui.send(b"please create the note");

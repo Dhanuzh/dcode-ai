@@ -191,6 +191,8 @@ pub enum RailTab {
     Files,
     /// The Agent Office: every agent at its desk.
     Office,
+    /// The people's chat and the shared to-do list.
+    Team,
 }
 
 /// Something clickable in the dashboard, recorded while drawing.
@@ -331,6 +333,8 @@ pub struct TuiSessionState {
     pub timeline_open: bool,
     /// The Agent Office (`/office`, dashboard `Alt+5`).
     pub office: crate::tui::office::Office,
+    /// Chat between people and the shared to-do list.
+    pub team: crate::tui::team::Team,
     pub office_open: bool,
     pub office_selected: usize,
     pub busy: bool,

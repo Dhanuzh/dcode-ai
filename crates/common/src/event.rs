@@ -184,6 +184,23 @@ pub enum AgentEvent {
         #[serde(default)]
         name: String,
     },
+    /// Chat between the people on the session (not sent to the agent).
+    PersonChat {
+        person: String,
+        name: String,
+        text: String,
+    },
+    /// Someone added to the session's shared to-do list.
+    TeamTodoAdded {
+        id: String,
+        text: String,
+        by: String,
+    },
+    /// Someone ticked off an item on the shared to-do list.
+    TeamTodoDone {
+        id: String,
+        by: String,
+    },
     /// A joined person sent a message.
     PersonSaid {
         person: String,
@@ -379,6 +396,26 @@ pub enum AgentCommand {
     },
     Bye {
         person: String,
+    },
+    /// Chat to the other people (not the agent).
+    Chat {
+        person: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    /// Add to / tick off the shared to-do list (`id` is the item's).
+    TodoAdd {
+        person: String,
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+    TodoDone {
+        person: String,
+        id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     /// A message from a joined person (shown with their name).
     Say {

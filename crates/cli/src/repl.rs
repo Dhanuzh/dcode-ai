@@ -974,7 +974,7 @@ impl Repl {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
             "/office" | "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff"
-            | "/invite" => {
+            | "/invite" | "/chat" | "/todo" | "/people" | "/kick" => {
                 return self.cmd_team(input, command, rest, parts, out).await;
             }
             "/btw" => {
@@ -2440,6 +2440,11 @@ impl Repl {
                         format!("{ctx}\n\n---\n\n{expanded}")
                     } else {
                         expanded
+                    };
+                    // The open shared to-dos go along (hidden in the transcript).
+                    let expanded = match tui_state.lock().ok().and_then(|g| g.team.prompt_block()) {
+                        Some(block) => format!("{expanded}\n\n{block}"),
+                        None => expanded,
                     };
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_busy(true);

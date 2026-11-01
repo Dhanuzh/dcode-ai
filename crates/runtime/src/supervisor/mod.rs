@@ -2299,6 +2299,48 @@ pub fn spawn_command_consumer_with_store(
                         let _ = tx.send(AgentEvent::PersonLeft { person, name }).await;
                     }
                 }
+                AgentCommand::Chat { person, text, name } => {
+                    let name = people
+                        .get(&person)
+                        .cloned()
+                        .or_else(|| name.map(|n| clean_person_name(&n)))
+                        .unwrap_or_else(|| "someone".into());
+                    let text: String = text.trim().chars().take(2000).collect();
+                    if let Some(ref tx) = event_tx
+                        && !text.is_empty()
+                    {
+                        let _ = tx.send(AgentEvent::PersonChat { person, name, text }).await;
+                    }
+                }
+                AgentCommand::TodoAdd { person, text, name } => {
+                    let by = people
+                        .get(&person)
+                        .cloned()
+                        .or_else(|| name.map(|n| clean_person_name(&n)))
+                        .unwrap_or_else(|| "someone".into());
+                    let text: String = text.trim().chars().take(500).collect();
+                    if let Some(ref tx) = event_tx
+                        && !text.is_empty()
+                    {
+                        let _ = tx
+                            .send(AgentEvent::TeamTodoAdded {
+                                id: new_todo_id(),
+                                text,
+                                by,
+                            })
+                            .await;
+                    }
+                }
+                AgentCommand::TodoDone { person, id, name } => {
+                    let by = people
+                        .get(&person)
+                        .cloned()
+                        .or_else(|| name.map(|n| clean_person_name(&n)))
+                        .unwrap_or_else(|| "someone".into());
+                    if let Some(ref tx) = event_tx {
+                        let _ = tx.send(AgentEvent::TeamTodoDone { id, by }).await;
+                    }
+                }
                 AgentCommand::Say {
                     person,
                     content,
@@ -2334,6 +2376,18 @@ pub fn spawn_command_consumer_with_store(
             }
         }
     })
+}
+
+/// A short random id for a shared to-do item.
+pub fn new_todo_id() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, Ordering::Relaxed);
+    let t = Utc::now().timestamp_nanos_opt().unwrap_or_default() as u64;
+    format!(
+        "{:08x}",
+        (t ^ n.wrapping_mul(0x9e37_79b9_7f4a_7c15)) & 0xffff_ffff
+    )
 }
 
 /// A name someone gives to show in the office: letters, digits, spaces and
@@ -3139,6 +3193,60 @@ mod tests {
             next(&mut event_rx).await,
             AgentEvent::PersonLeft { ref name, .. } if name == "Priyab"
         ));
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn chat_and_todos_are_events_not_prompts() {
+        let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+        let (prompt_tx, mut prompt_rx) = mpsc::unbounded_channel();
+        let (event_tx, mut event_rx) = mpsc::channel(16);
+        let task = spawn_command_consumer_with_store(
+            cmd_rx,
+            None,
+            None,
+            None,
+            Some(event_tx),
+            Some(prompt_tx),
+            None,
+        );
+        cmd_tx
+            .send(AgentCommand::Chat {
+                person: "w".into(),
+                text: "lunch?".into(),
+                name: Some("Ravi".into()),
+            })
+            .unwrap();
+        cmd_tx
+            .send(AgentCommand::TodoAdd {
+                person: "w".into(),
+                text: "fix login".into(),
+                name: Some("Ravi".into()),
+            })
+            .unwrap();
+        let next = async |rx: &mut mpsc::Receiver<AgentEvent>| {
+            tokio::time::timeout(std::time::Duration::from_secs(1), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        assert!(matches!(next(&mut event_rx).await,
+            AgentEvent::PersonChat { ref name, ref text, .. } if name == "Ravi" && text == "lunch?"));
+        let AgentEvent::TeamTodoAdded { id, text, by } = next(&mut event_rx).await else {
+            panic!("expected a to-do");
+        };
+        assert_eq!((text.as_str(), by.as_str()), ("fix login", "Ravi"));
+        cmd_tx
+            .send(AgentCommand::TodoDone {
+                person: "w".into(),
+                id: id.clone(),
+                name: Some("Ravi".into()),
+            })
+            .unwrap();
+        assert!(matches!(next(&mut event_rx).await,
+            AgentEvent::TeamTodoDone { id: ref done, .. } if *done == id));
+        // None of it went to the agent.
+        assert!(prompt_rx.try_recv().is_err());
         task.abort();
     }
 

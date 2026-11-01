@@ -377,7 +377,8 @@ impl Office {
                     p.leaving = Some(Instant::now());
                 }
             }
-            AgentEvent::PersonSaid { person, text, .. } => {
+            AgentEvent::PersonSaid { person, text, .. }
+            | AgentEvent::PersonChat { person, text, .. } => {
                 if let Some(p) = self.person(person) {
                     p.said = short(text, 20);
                     p.said_at = Some(Instant::now());
@@ -392,7 +393,7 @@ impl Office {
                     && !content.trim_start().starts_with('<') =>
             {
                 if let Some(p) = self.person("owner") {
-                    p.said = short(content, 20);
+                    p.said = short(&crate::tui::team::strip_todo_block(content), 20);
                     p.said_at = Some(Instant::now());
                 }
             }

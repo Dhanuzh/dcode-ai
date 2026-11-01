@@ -4,52 +4,110 @@
 //! instead of a local agent, and what the guest types goes to the host's
 //! session (`say`, `approve`, `stop`) instead of to a model.
 
-use crate::invite::{Guest, GuestUpdate};
+use crate::invite::{Guest, GuestSender, GuestUpdate};
 use crate::tui::app::{ApprovalAnswer, TuiCmd, run_blocking};
+use crate::tui::office::PersonRole;
 use crate::tui::state::{DisplayBlock, TuiSessionState};
 use std::sync::{Arc, Mutex};
 
 /// What the guest's own slash commands do.
-fn guest_command(text: &str, g: &mut TuiSessionState) -> GuestAction {
-    let word = text.split_whitespace().next().unwrap_or("");
+fn guest_command(text: &str, g: &mut TuiSessionState, send: &GuestSender) -> GuestAction {
+    let (word, rest) = text.split_once(' ').unwrap_or((text, ""));
+    let rest = rest.trim();
     match word {
-        "/quit" | "/exit" | "/leave" => GuestAction::Leave,
-        "/stop" => GuestAction::Stop,
-        "/office" => {
-            g.office_open = true;
-            GuestAction::None
+        "/quit" | "/exit" | "/leave" => return GuestAction::Leave,
+        "/stop" => {
+            send.stop_turn();
         }
-        "/timeline" => {
-            g.timeline_open = true;
-            GuestAction::None
+        "/chat" if !rest.is_empty() => {
+            send.chat(rest);
         }
-        "/help" => {
-            g.push_block(DisplayBlock::System(
-                "[join] you're a guest on this session: type to send a message · /office · /timeline · /stop (if the host allows it) · /quit to leave".into(),
-            ));
-            GuestAction::None
+        "/chat" => {
+            let lines: Vec<String> = g
+                .team
+                .chat
+                .iter()
+                .rev()
+                .take(20)
+                .rev()
+                .map(|c| format!("[chat] {} {}: {}", c.at.format("%H:%M"), c.name, c.text))
+                .collect();
+            if lines.is_empty() {
+                g.push_block(DisplayBlock::System(
+                    "[chat] no chat yet — /chat <text> talks to the people here (the agent doesn't see it)".into(),
+                ));
+            }
+            for l in lines {
+                g.push_block(DisplayBlock::System(l));
+            }
         }
-        _ => {
-            g.push_block(DisplayBlock::System(format!(
-                "[join] {word} isn't available while joined (it would change the host's session) — /help"
-            )));
-            GuestAction::None
+        "/todo" if rest.is_empty() => {
+            for l in g.team.lines() {
+                g.push_block(DisplayBlock::System(format!("[todo] {l}")));
+            }
         }
+        "/todo" => {
+            if let Some(which) = rest.strip_prefix("done ").or_else(|| rest.strip_prefix("tick ")) {
+                match g.team.find(which).map(|t| t.id.clone()) {
+                    Some(id) => {
+                        send.todo_done(&id);
+                    }
+                    None => g.push_block(DisplayBlock::System(format!("[todo] no item {which} — /todo lists them"))),
+                }
+            } else {
+                send.todo(rest);
+            }
+        }
+        "/people" => {
+            let names: Vec<String> = g
+                .office
+                .people_ordered()
+                .into_iter()
+                .filter(|p| p.leaving.is_none())
+                .map(|p| {
+                    let me = g.office.me.as_deref() == Some(p.id.as_str());
+                    let role = match p.role {
+                        PersonRole::Owner => "host",
+                        PersonRole::Joined if me => "you",
+                        PersonRole::Joined => "joined",
+                        PersonRole::Watching => "watching",
+                    };
+                    format!("[people]   {} — {role}", p.name)
+                })
+                .collect();
+            for l in names {
+                g.push_block(DisplayBlock::System(l));
+            }
+        }
+        "/office" => g.office_open = true,
+        "/timeline" => g.timeline_open = true,
+        "/help" => g.push_block(DisplayBlock::System(
+            "[join] you're a guest on this session: type to send a message to the agent · /chat <text> to the people · /todo <text> adds to the shared to-do list · /todo done <n> · /people · /office · /timeline · /stop (if the host allows it) · /quit to leave".into(),
+        )),
+        _ => g.push_block(DisplayBlock::System(format!(
+            "[join] {word} isn't available while joined (it would change the host's session) — /help"
+        ))),
     }
+    GuestAction::None
 }
 
 enum GuestAction {
     None,
     Leave,
-    Stop,
 }
 
 /// Run the TUI for a guest until they leave or the host ends it.
 pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
     crate::tui::theme::set_by_name(theme);
-    let workspace = std::env::current_dir().unwrap_or_default();
     let title = guest.title.clone();
     let host = guest.host.clone();
+    let project = if guest.project.is_empty() {
+        title.clone()
+    } else {
+        guest.project.clone()
+    };
+    // The host's project, not this folder (whose files aren't the session's).
+    let workspace = std::path::PathBuf::from(&project);
     let let_approve = guest.let_approve;
     let state = Arc::new(Mutex::new(TuiSessionState::new(
         guest.session_id.clone(),
@@ -61,17 +119,27 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
     )));
     if let Ok(mut g) = state.lock() {
         g.mouse_capture_on = true;
+        g.workspace_display = if host.is_empty() {
+            project.clone()
+        } else {
+            format!("{project} · hosted by {host}")
+        };
         if !host.is_empty() {
             g.office.set_owner(&host);
         }
         g.office.me = Some(guest.me.clone());
+        let whose = if host.is_empty() {
+            project.clone()
+        } else {
+            format!("{host}'s {project}")
+        };
+        let topic = if title.is_empty() || title == project {
+            String::new()
+        } else {
+            format!(" (“{title}”)")
+        };
         g.push_block(DisplayBlock::System(format!(
-            "[join] you joined {title}{} — type to send a message · /office · /quit to leave{}",
-            if host.is_empty() {
-                String::new()
-            } else {
-                format!(" (hosted by {host})")
-            },
+            "[join] you joined {whose}{topic} — type to send a message to the agent · /chat <text> to the people · /todo · /help · /quit{}",
             if let_approve {
                 " · you may approve and stop turns"
             } else {
@@ -141,15 +209,11 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
                 for text in queued {
                     if text.trim_start().starts_with('/') {
                         let action = match state.lock() {
-                            Ok(mut g) => guest_command(text.trim(), &mut g),
+                            Ok(mut g) => guest_command(text.trim(), &mut g, &send),
                             Err(_) => GuestAction::None,
                         };
-                        match action {
-                            GuestAction::Leave => leave = true,
-                            GuestAction::Stop => {
-                                send.stop_turn();
-                            }
-                            GuestAction::None => {}
+                        if matches!(action, GuestAction::Leave) {
+                            leave = true;
                         }
                     } else if !text.trim().is_empty() {
                         send.say(text.trim());
@@ -169,13 +233,11 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
                         }
                         if text.starts_with('/') {
                             let action = match state.lock() {
-                                Ok(mut g) => guest_command(&text, &mut g),
+                                Ok(mut g) => guest_command(&text, &mut g, &send),
                                 Err(_) => GuestAction::None,
                             };
-                            match action {
-                                GuestAction::Leave => break,
-                                GuestAction::Stop => { send.stop_turn(); }
-                                GuestAction::None => {}
+                            if matches!(action, GuestAction::Leave) {
+                                break;
                             }
                         } else if !send.say(&text) {
                             note(&state, "not connected any more");
@@ -207,9 +269,12 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
             }
         }
     }
+    send.bye();
     if let Ok(mut g) = state.lock() {
         g.should_exit = true;
     }
+    // Let the bye go out.
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     feed.abort();
     let _ = ui.await;
     eprintln!("left {title}");

@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.39 — 2026-11-01
+
+### New
+- **Team chat**: `/chat <text>` talks to the people on the session — not
+  the agent. In the transcript (`💬 Priya: …`), in their office bubble, and
+  in the dashboard's new **team** tab (`Alt+6`). Guests and the browser page
+  can chat too.
+- **Shared to-do list**: `/todo <text>` adds, `/todo done <n>` ticks off,
+  `/todo` lists. Everyone sees it (team tab, browser page), and the agent
+  gets the open items with every prompt (hidden in the transcript) so it
+  works on them and says when one is done. Kept in the session, so
+  `/resume` brings it back.
+- **`/people`** lists who is with the session; **`/kick <name>`** removes an
+  invited guest (they can't rejoin with that invite).
+- **Guests reconnect on their own** after a Wi-Fi drop: no knock, same
+  desk, and the session doesn't see them leave if they're back within 20s.
+- The guest's screen shows the host's project ("Dhanush's d-note"), not the
+  guest's own folder.
+- **QR code** for `/invite web` and `/watch lan` links, to open on a phone.
+
 ## 1.0.38 — 2026-11-01
 
 ### New

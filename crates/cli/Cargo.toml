@@ -49,6 +49,7 @@ urlencoding = "2"
 url = "2"
 notify-rust = { version = "4", optional = true }
 snow = "0.9"
+qrcode = { version = "0.14", default-features = false }
 
 # `scrolling-regions` makes `Terminal::insert_before` flush history via
 # DECSTBM partial-screen scrolls (flicker-free). Windows conhost and Windows

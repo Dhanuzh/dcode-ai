@@ -314,7 +314,8 @@ pub(crate) async fn serve(
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/");
     let path = target.split('?').next().unwrap_or("/");
-    let posting = method == "POST" && chat.is_some() && matches!(path, "/knock" | "/say");
+    let posting =
+        method == "POST" && chat.is_some() && matches!(path, "/knock" | "/say" | "/chat" | "/todo");
     if method != "GET" && !posting {
         return respond(
             &mut write,
@@ -361,6 +362,33 @@ pub(crate) async fn serve(
                 "{\"ok\":false}".to_string()
             };
             respond(&mut write, "200 OK", "application/json", &body).await
+        }
+        ("/chat" | "/todo", Some(chat)) => {
+            let Some((person, name)) = chat.guest(guest_token) else {
+                return respond(&mut write, "403 Forbidden", "text/plain", "not let in").await;
+            };
+            let mut body = vec![0u8; body_len.min(2000)];
+            reader.read_exact(&mut body).await?;
+            let text = String::from_utf8_lossy(&body).trim().to_string();
+            if !text.is_empty() {
+                use dcode_ai_common::event::AgentCommand;
+                let cmd = if path == "/chat" {
+                    AgentCommand::Chat {
+                        person,
+                        text,
+                        name: Some(name),
+                    }
+                } else {
+                    AgentCommand::TodoAdd {
+                        person,
+                        text,
+                        name: Some(name),
+                    }
+                };
+                let ipc = dcode_ai_runtime::ipc::IpcClient::new(chat.socket.clone());
+                let _ = ipc.send_command(&cmd).await;
+            }
+            respond(&mut write, "200 OK", "application/json", "{\"ok\":true}").await
         }
         ("/say", Some(chat)) => {
             let Some((person, name)) = chat.guest(guest_token) else {
@@ -462,7 +490,9 @@ async fn stream_log(
                 if line.is_empty()
                     || (first
                         && (line.contains("\"TokensStreamed\"")
-                            || line.contains("\"type\":\"Person")))
+                            || line.contains("\"type\":\"PersonJoined")
+                            || line.contains("\"type\":\"PersonLeft")
+                            || line.contains("\"type\":\"PersonSaid")))
                 {
                     continue;
                 }

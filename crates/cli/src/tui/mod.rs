@@ -43,6 +43,7 @@ pub mod slash_entries;
 pub mod state;
 pub mod statusline;
 pub mod sudo_prompt;
+pub mod team;
 pub mod terminal;
 pub mod theme;
 pub mod timeline_overlay;

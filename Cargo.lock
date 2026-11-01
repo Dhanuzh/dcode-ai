@@ -1058,7 +1058,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "dcode-ai-autoresearch"
-version = "1.0.38"
+version = "1.0.39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1078,7 +1078,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-cli"
-version = "1.0.38"
+version = "1.0.39"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -1104,6 +1104,7 @@ dependencies = [
  "portable-pty",
  "predicates",
  "pulldown-cmark",
+ "qrcode",
  "rand 0.8.6",
  "ratatui",
  "reedline",
@@ -1131,7 +1132,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-common"
-version = "1.0.38"
+version = "1.0.39"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1148,7 +1149,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-core"
-version = "1.0.38"
+version = "1.0.39"
 dependencies = [
  "async-trait",
  "base64",
@@ -1180,7 +1181,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-runtime"
-version = "1.0.38"
+version = "1.0.39"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -3310,6 +3311,12 @@ name = "pxfm"
 version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quick-error"
