@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.37 — 2026-11-01
+
+### New
+- **`/invite`**: let someone on another computer join with one line, no
+  SSH. `/invite` prints (and copies) `dcode-ai join <ip>:8788/<key> --name
+  <their name>`; when they run it you're asked "Priya wants to join — let
+  them in?". The connection is encrypted and authenticated with the
+  invite's key (Noise), guests can send messages (approvals stay with you
+  unless `/invite --let-approve`), and `/invite stop` ends it.
+- `/invite web`: the same port also serves the live page with an "Ask to
+  join" button and a message box, for people without dcode-ai (plain
+  HTTP).
+
+### Fixed
+- A message from someone the session hadn't seen say hello showed as from
+  "someone"; it now carries their name.
+
 ## 1.0.36 — 2026-11-01
 
 ### New

@@ -60,6 +60,16 @@
   #people li.watch::before { content: "👀 "; }
   #people li.join::before { content: "⌨ "; }
   .said { color: #3f7fbf; margin: 0 0 10px 14px; }
+  #chat { position: fixed; bottom: 0; left: 0; right: 0; z-index: 3; display: none; gap: 8px; align-items: center;
+    padding: 8px 20px; background: var(--panel); border-top: 1px solid var(--line); }
+  body.chat #chat { display: flex; }
+  body.chat footer { display: none; }
+  #chat input { flex: 1; min-width: 0; background: var(--bg); color: var(--text); border: 1px solid var(--line);
+    border-radius: 6px; padding: 7px 10px; font: inherit; }
+  #chat button { background: var(--accent); color: #fff; border: 0; border-radius: 6px; padding: 7px 14px;
+    font: inherit; cursor: pointer; }
+  #chat button:disabled { opacity: .5; cursor: default; }
+  #chatnote { color: var(--muted); font-size: 12px; }
   footer { position: fixed; bottom: 0; left: 0; right: 0; padding: 8px 20px; font-size: 12px;
     color: var(--muted); background: var(--panel); border-top: 1px solid var(--line); }
 </style>
@@ -84,6 +94,12 @@
     <ul id="files"></ul>
   </aside>
 </main>
+<div id="chat">
+  <span id="chatnote">Ask the host to let you in, then you can send messages.</span>
+  <button id="knock" type="button">Ask to join</button>
+  <input id="say" placeholder="message the session…" maxlength="4000" hidden>
+  <button id="send" type="button" hidden>Send</button>
+</div>
 <footer>Read-only live view of a dcode-ai session · nothing here can change it</footer>
 <script>
 (() => {
@@ -205,15 +221,54 @@
   try { myName = localStorage.getItem('dcode-ai-watch-name') || ''; } catch (_) {}
   me.value = myName;
   let src = null;
+  // `/invite web`: this page may ask to join and send messages.
+  const CHAT = '__CHAT__' === '1';
+  let guest = '';
+  try { guest = sessionStorage.getItem('dcode-ai-guest') || ''; } catch (_) {}
   function connect() {
     if (src) src.close();
     people.clear(); renderPeople();
     log.textContent = ''; files.clear(); tools.clear(); toolCount = 0; typing = null;
-    const q = myName ? '&name=' + encodeURIComponent(myName) : '';
+    const q = (myName ? '&name=' + encodeURIComponent(myName) : '') + (guest ? '&p=' + encodeURIComponent(guest) : '');
     src = new EventSource('/events?t=__TOKEN__' + q);
     src.onopen = () => setState('live', 'on');
     src.onerror = () => setState('reconnecting…', '');
     src.onmessage = (m) => { try { const env = JSON.parse(m.data); handle(env.event || env); } catch (_) {} };
+  }
+  const knockBtn = document.getElementById('knock'), sayIn = document.getElementById('say'),
+        sendBtn = document.getElementById('send'), chatNote = document.getElementById('chatnote');
+  function joined() {
+    knockBtn.hidden = true; chatNote.hidden = true; sayIn.hidden = false; sendBtn.hidden = false;
+  }
+  if (CHAT) {
+    document.body.classList.add('chat');
+    if (guest) joined();
+    knockBtn.addEventListener('click', async () => {
+      if (!myName) { me.focus(); chatNote.textContent = 'Type your name at the top first.'; return; }
+      knockBtn.disabled = true; chatNote.textContent = 'Waiting for the host to let you in…';
+      try {
+        const r = await fetch('/knock?t=__TOKEN__&name=' + encodeURIComponent(myName), { method: 'POST' });
+        const j = await r.json();
+        if (j.ok) {
+          guest = j.p;
+          try { sessionStorage.setItem('dcode-ai-guest', guest); } catch (_) {}
+          joined(); connect(); sayIn.focus();
+        } else { chatNote.textContent = 'The host didn\'t let you in.'; }
+      } catch (_) { chatNote.textContent = 'Could not reach the host.'; }
+      knockBtn.disabled = false;
+    });
+    const send = async () => {
+      const text = sayIn.value.trim();
+      if (!text || !guest) return;
+      sendBtn.disabled = true;
+      try {
+        const r = await fetch('/say?t=__TOKEN__&p=' + encodeURIComponent(guest), { method: 'POST', body: text });
+        if (r.ok) sayIn.value = ''; else { chatNote.hidden = false; chatNote.textContent = 'Not let in any more.'; }
+      } catch (_) {}
+      sendBtn.disabled = false; sayIn.focus();
+    };
+    sendBtn.addEventListener('click', send);
+    sayIn.addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
   }
   me.addEventListener('change', () => {
     myName = me.value.trim().slice(0, 24);

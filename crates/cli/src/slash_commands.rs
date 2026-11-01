@@ -17,6 +17,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/timeline",
     "/files",
     "/watch",
+    "/invite",
     "/handoff",
     "/sounds",
     "/speak",
@@ -140,6 +141,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/files" => "files the agent read and edited this session (live in the dashboard: Alt+4)",
         "/watch" => {
             "a live read-only web page of this session to share: /watch, /watch lan, /watch stop"
+        }
+        "/invite" => {
+            "let someone on another computer join with one line: /invite, /invite web, /invite stop"
         }
         "/handoff" => "hand this session to a teammate: /handoff <what's done, what's next>",
         "/sounds" => "a bell when a long turn finishes or dcode-ai needs you: /sounds on|off",

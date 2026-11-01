@@ -5,6 +5,7 @@ pub mod activity;
 pub mod approval_prompts;
 pub mod file_mentions;
 pub mod image_attach;
+pub mod invite;
 pub mod ipc_pending;
 pub mod oauth_login;
 pub mod people;

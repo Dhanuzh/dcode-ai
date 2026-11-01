@@ -384,6 +384,9 @@ pub enum AgentCommand {
     Say {
         person: String,
         content: String,
+        /// Their name, for a sender the session hasn't heard `Hello` from.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
     },
     ApproveToolCall {
         call_id: String,

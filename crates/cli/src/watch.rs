@@ -62,13 +62,13 @@ pub fn lan_help(port: u16) -> Option<String> {
     }
     Some(format!(
         "WSL (mirrored networking) blocks incoming connections until the port is allowed. Once, in an admin PowerShell:\n\
-         New-NetFirewallHyperVRule -Name dcode-ai-watch-{port} -DisplayName \"dcode-ai watch {port}\" -Direction Inbound -VMCreatorId \"{{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}}\" -Protocol TCP -LocalPorts {port}\n\
-         New-NetFirewallRule -DisplayName \"dcode-ai watch {port}\" -Direction Inbound -Protocol TCP -LocalPort {port} -Action Allow -Profile Private"
+         New-NetFirewallHyperVRule -Name dcode-ai-{port} -DisplayName \"dcode-ai {port}\" -Direction Inbound -VMCreatorId \"{{40E0AC32-46A5-438A-A0B2-2B479E8F2E90}}\" -Protocol TCP -LocalPorts {port}\n\
+         New-NetFirewallRule -DisplayName \"dcode-ai {port}\" -Direction Inbound -Protocol TCP -LocalPort {port} -Action Allow -Profile Private"
     ))
 }
 
 /// This machine's address on the local network (no packet is sent).
-fn lan_address() -> Option<std::net::IpAddr> {
+pub(crate) fn lan_address() -> Option<std::net::IpAddr> {
     let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     socket.connect("192.0.2.1:9").ok()?;
     Some(socket.local_addr().ok()?.ip())
@@ -114,7 +114,7 @@ pub async fn start_on(
                     let stop = stop_rx.clone();
                     let presence = presence.clone();
                     tokio::spawn(async move {
-                        let _ = serve(stream, &log, &token, &title, stop, presence).await;
+                        let _ = serve(stream, &log, &token, &title, stop, presence, None).await;
                     });
                 }
             }
@@ -202,30 +202,120 @@ impl Drop for Watcher {
     }
 }
 
-async fn serve(
+/// `/invite web`: the page can also ask to join and send messages.
+pub struct WebChat {
+    pub knocks: tokio::sync::mpsc::Sender<crate::invite::Knock>,
+    /// The session's IPC socket.
+    pub socket: PathBuf,
+    /// Guests let in: their page token → (person id, name).
+    pub guests: std::sync::Mutex<std::collections::HashMap<String, (String, String)>>,
+}
+
+impl WebChat {
+    pub fn new(knocks: tokio::sync::mpsc::Sender<crate::invite::Knock>, socket: PathBuf) -> Self {
+        Self {
+            knocks,
+            socket,
+            guests: Default::default(),
+        }
+    }
+
+    fn guest(&self, token: &str) -> Option<(String, String)> {
+        self.guests.lock().ok()?.get(token).cloned()
+    }
+}
+
+/// A web guest's event stream: they are in the office while it is open.
+struct WebGuest {
+    socket: PathBuf,
+    person: String,
+}
+
+impl WebGuest {
+    async fn arrive(socket: PathBuf, person: String, name: String) -> Self {
+        let ipc = dcode_ai_runtime::ipc::IpcClient::new(socket.clone());
+        let _ = ipc
+            .send_command(&dcode_ai_common::event::AgentCommand::Hello {
+                person: person.clone(),
+                name,
+            })
+            .await;
+        Self { socket, person }
+    }
+}
+
+impl Drop for WebGuest {
+    fn drop(&mut self) {
+        let ipc = dcode_ai_runtime::ipc::IpcClient::new(self.socket.clone());
+        let person = self.person.clone();
+        tokio::spawn(async move {
+            let _ = ipc
+                .send_command(&dcode_ai_common::event::AgentCommand::Bye { person })
+                .await;
+        });
+    }
+}
+
+/// Who an open event stream is.
+enum Here {
+    Watcher(Watcher),
+    Guest(WebGuest),
+}
+
+impl Here {
+    fn seen(&self) {
+        match self {
+            Here::Watcher(w) => w.seen(),
+            Here::Guest(g) => {
+                let ipc = dcode_ai_runtime::ipc::IpcClient::new(g.socket.clone());
+                let person = g.person.clone();
+                tokio::spawn(async move {
+                    let _ = ipc
+                        .send_command(&dcode_ai_common::event::AgentCommand::Heartbeat { person })
+                        .await;
+                });
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn serve(
     stream: TcpStream,
     log_path: &std::path::Path,
     token: &str,
     title: &str,
     stop: tokio::sync::watch::Receiver<bool>,
     presence: Option<Presence>,
+    chat: Option<std::sync::Arc<WebChat>>,
 ) -> std::io::Result<()> {
+    let from = stream
+        .peer_addr()
+        .map(|a| a.ip().to_string())
+        .unwrap_or_default();
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
     let mut request_line = String::new();
     reader.read_line(&mut request_line).await?;
-    // Drain the headers.
+    // Drain the headers (noting the body's length).
+    let mut body_len = 0usize;
     loop {
         let mut line = String::new();
         if reader.read_line(&mut line).await? == 0 || line == "\r\n" || line == "\n" {
             break;
+        }
+        if let Some((k, v)) = line.split_once(':')
+            && k.trim().eq_ignore_ascii_case("content-length")
+        {
+            body_len = v.trim().parse().unwrap_or(0);
         }
     }
     let mut parts = request_line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/");
     let path = target.split('?').next().unwrap_or("/");
-    if method != "GET" {
+    let posting = method == "POST" && chat.is_some() && matches!(path, "/knock" | "/say");
+    if method != "GET" && !posting {
         return respond(
             &mut write,
             "405 Method Not Allowed",
@@ -243,25 +333,70 @@ async fn serve(
         )
         .await;
     }
-    match path {
-        "/" => {
+    let guest_token = query_param(target, "p").unwrap_or("");
+    match (path, &chat) {
+        ("/", _) => {
             let page = PAGE
                 .replace("__TITLE__", &html_escape(title))
-                .replace("__TOKEN__", token);
+                .replace("__TOKEN__", token)
+                .replace("__CHAT__", if chat.is_some() { "1" } else { "" });
             respond(&mut write, "200 OK", "text/html; charset=utf-8", &page).await
         }
-        "/events" => {
-            let watcher = match presence {
-                Some(tx) => {
+        ("/knock", Some(chat)) => {
+            let name = query_param(target, "name")
+                .map(url_decode)
+                .unwrap_or_default();
+            let name = dcode_ai_runtime::supervisor::clean_person_name(&name);
+            let yes = crate::invite::ask_host(&chat.knocks, &name, &from).await;
+            let body = if yes {
+                let p = crate::invite::new_key();
+                if let Ok(mut g) = chat.guests.lock() {
+                    g.insert(
+                        p.clone(),
+                        (crate::people::new_person_id("web"), name.clone()),
+                    );
+                }
+                format!("{{\"ok\":true,\"p\":\"{p}\"}}")
+            } else {
+                "{\"ok\":false}".to_string()
+            };
+            respond(&mut write, "200 OK", "application/json", &body).await
+        }
+        ("/say", Some(chat)) => {
+            let Some((person, name)) = chat.guest(guest_token) else {
+                return respond(&mut write, "403 Forbidden", "text/plain", "not let in").await;
+            };
+            let mut body = vec![0u8; body_len.min(8000)];
+            reader.read_exact(&mut body).await?;
+            let content = String::from_utf8_lossy(&body).trim().to_string();
+            if !content.is_empty() {
+                let ipc = dcode_ai_runtime::ipc::IpcClient::new(chat.socket.clone());
+                let _ = ipc
+                    .send_command(&dcode_ai_common::event::AgentCommand::Say {
+                        person,
+                        content,
+                        name: Some(name),
+                    })
+                    .await;
+            }
+            respond(&mut write, "200 OK", "application/json", "{\"ok\":true}").await
+        }
+        ("/events", _) => {
+            let here = match (chat.as_ref().and_then(|c| c.guest(guest_token)), presence) {
+                (Some((person, name)), _) => {
+                    let socket = chat.as_ref().map(|c| c.socket.clone()).unwrap_or_default();
+                    Some(Here::Guest(WebGuest::arrive(socket, person, name).await))
+                }
+                (None, Some(tx)) => {
                     let name = query_param(target, "name")
                         .map(url_decode)
                         .unwrap_or_default();
                     let name = dcode_ai_runtime::supervisor::clean_person_name(&name);
-                    Some(Watcher::arrive(tx, name).await)
+                    Some(Here::Watcher(Watcher::arrive(tx, name).await))
                 }
-                None => None,
+                (None, None) => None,
             };
-            stream_log(&mut write, log_path, stop, watcher.as_ref()).await
+            stream_log(&mut write, log_path, stop, here.as_ref()).await
         }
         _ => respond(&mut write, "404 Not Found", "text/plain", "not found").await,
     }
@@ -288,7 +423,7 @@ async fn stream_log(
     write: &mut tokio::net::tcp::OwnedWriteHalf,
     log_path: &std::path::Path,
     mut stop: tokio::sync::watch::Receiver<bool>,
-    watcher: Option<&Watcher>,
+    watcher: Option<&Here>,
 ) -> std::io::Result<()> {
     write
         .write_all(

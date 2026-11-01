@@ -71,6 +71,10 @@ impl SessionRuntime {
         self.handle.as_mut()?.take_event_rx()
     }
 
+    pub fn socket_path(&self) -> Option<std::path::PathBuf> {
+        self.supervisor.socket_path()
+    }
+
     pub fn event_log_path(&self) -> std::path::PathBuf {
         self.supervisor.event_log_path()
     }

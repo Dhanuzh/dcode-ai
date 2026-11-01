@@ -204,6 +204,87 @@ impl Repl {
                     Err(e) => out.eprintln(&format!("[watch] could not start: {e}")),
                 }
             }
+            "/invite" => {
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                if words.first() == Some(&"stop") {
+                    if self.invite.take().is_some() {
+                        out.println("[invite] stopped — the line no longer works and guests were disconnected");
+                    } else {
+                        out.println("[invite] no invite is open");
+                    }
+                    return Ok(true);
+                }
+                let ReplOutput::Tui(st) = &out else {
+                    out.eprintln(
+                        "[invite] needs the terminal UI (it asks you before letting anyone in)",
+                    );
+                    return Ok(true);
+                };
+                let Some(socket) = self.runtime.socket_path() else {
+                    out.eprintln(
+                        "[invite] this session has no IPC endpoint, so nobody can join it",
+                    );
+                    return Ok(true);
+                };
+                let web = words.contains(&"web");
+                let let_approve = words.contains(&"--let-approve");
+                let port: u16 = words.iter().find_map(|w| w.parse().ok()).unwrap_or(0);
+                // A new invite replaces the old one (and its key).
+                self.invite = None;
+                let title = self
+                    .runtime
+                    .session_name()
+                    .map(str::to_string)
+                    .unwrap_or_else(|| self.runtime.session_id().to_string());
+                let knocks = spawn_knock_prompts((*st).clone());
+                let opts = dcode_ai_cli::invite::HostOptions {
+                    port,
+                    web,
+                    let_approve,
+                    socket,
+                    log_path: self.runtime.event_log_path(),
+                    title,
+                    knocks,
+                    presence: self.runtime.event_tx(),
+                };
+                match dcode_ai_cli::invite::host(opts).await {
+                    Ok(inv) => {
+                        let line = inv.command();
+                        let _ = crate::tui::clipboard::copy_to_clipboard(&line);
+                        out.println(&format!(
+                            "[invite] open on port {} — send this line to whoever should join (copied):",
+                            inv.port()
+                        ));
+                        out.println(&format!("[invite]   {line}"));
+                        out.println(if let_approve {
+                            "[invite] you're asked before anyone gets in · guests can send messages, approve and stop · /invite stop ends it"
+                        } else {
+                            "[invite] you're asked before anyone gets in · guests can send messages (approvals stay with you) · /invite stop ends it"
+                        });
+                        if let Some(url) = &inv.web_url {
+                            out.println(&format!(
+                                "[invite] in a browser (no install; plain HTTP, so people on this network could read it): {url}"
+                            ));
+                        }
+                        if let Some(help) = crate::watch::lan_help(inv.port()) {
+                            for line in help.lines() {
+                                out.println(&format!("[invite] {line}"));
+                            }
+                        }
+                        out.println("[invite] outside this network: use a VPN such as Tailscale and its address instead");
+                        self.invite = Some(inv);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => out.eprintln(&format!(
+                        "[invite] port {} is in use — try /invite <another port>",
+                        if port == 0 {
+                            dcode_ai_cli::invite::DEFAULT_PORT
+                        } else {
+                            port
+                        }
+                    )),
+                    Err(e) => out.eprintln(&format!("[invite] could not start: {e}")),
+                }
+            }
             "/handoff" => {
                 let _ = self.runtime.save().await;
                 let ws = self.runtime.workspace_root().to_path_buf();
@@ -248,4 +329,83 @@ impl Repl {
         }
         Ok(true)
     }
+}
+
+/// Asks you in the TUI about each knock on `/invite` ("Priya wants to
+/// join — let them in?"), one at a time, when no other prompt is open.
+/// Unanswered after a minute: no.
+fn spawn_knock_prompts(
+    st: Arc<Mutex<TuiSessionState>>,
+) -> tokio::sync::mpsc::Sender<dcode_ai_cli::invite::Knock> {
+    use dcode_ai_cli::invite::{KNOCK_QUESTION, expire_knock, register_knock};
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<dcode_ai_cli::invite::Knock>(8);
+    tokio::spawn(async move {
+        let mut n = 0u64;
+        while let Some(knock) = rx.recv().await {
+            n += 1;
+            let qid = format!("{KNOCK_QUESTION}{n}");
+            let mut shown = false;
+            for _ in 0..300 {
+                if let Ok(mut g) = st.lock()
+                    && g.active_question.is_none()
+                    && g.active_approval.is_none()
+                {
+                    g.active_question = Some(InteractiveQuestionPayload {
+                        question_id: qid.clone(),
+                        call_id: qid.clone(),
+                        prompt: format!(
+                            "{} ({}) wants to join this session — let them in?",
+                            knock.name, knock.from
+                        ),
+                        options: vec![
+                            QuestionOption {
+                                id: "allow".into(),
+                                label: format!("Let {} in", knock.name),
+                                description: Some(
+                                    "they see the session live and can send messages".into(),
+                                ),
+                            },
+                            QuestionOption {
+                                id: "deny".into(),
+                                label: "No".into(),
+                                description: None,
+                            },
+                        ],
+                        allow_custom: false,
+                        suggested_answer: "deny".into(),
+                        header: Some("Invite".into()),
+                        ..Default::default()
+                    });
+                    g.open_question_modal();
+                    shown = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            }
+            if !shown {
+                let _ = knock.reply.send(false);
+                continue;
+            }
+            register_knock(&qid, knock.reply);
+            let st = st.clone();
+            let name = knock.name.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                if expire_knock(&qid)
+                    && let Ok(mut g) = st.lock()
+                {
+                    if g.active_question.as_ref().map(|q| q.question_id.as_str())
+                        == Some(qid.as_str())
+                    {
+                        g.active_question = None;
+                        g.close_question_modal();
+                    }
+                    g.push_block(crate::tui::state::DisplayBlock::System(format!(
+                        "[invite] {name} wasn't let in (no answer)"
+                    )));
+                }
+            });
+        }
+    });
+    tx
 }

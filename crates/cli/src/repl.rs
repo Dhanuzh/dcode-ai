@@ -411,6 +411,8 @@ pub struct Repl {
     pending_sudo: Option<PendingSudo>,
     /// `/watch`: the live read-only page for this session.
     watch: Option<crate::watch::WatchHandle>,
+    /// `/invite`: people on other computers may knock and join.
+    invite: Option<dcode_ai_cli::invite::InviteHandle>,
 }
 
 impl Repl {
@@ -433,6 +435,7 @@ impl Repl {
             titled_session: None,
             pending_sudo: None,
             watch: None,
+            invite: None,
         }
     }
 
@@ -970,7 +973,8 @@ impl Repl {
             | "/plugin" | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
-            "/office" | "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff" => {
+            "/office" | "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff"
+            | "/invite" => {
                 return self.cmd_team(input, command, rest, parts, out).await;
             }
             "/btw" => {
@@ -1406,6 +1410,17 @@ impl Repl {
         let question_state = tui_state.clone();
         tokio::spawn(async move {
             while let Some((qid, sel)) = answer_rx.recv().await {
+                // Someone knocking on `/invite` is asked here too.
+                if dcode_ai_cli::invite::answer_knock(&qid, &sel) {
+                    if let Ok(mut g) = question_state.lock()
+                        && g.active_question.as_ref().map(|q| q.question_id.as_str())
+                            == Some(qid.as_str())
+                    {
+                        g.active_question = None;
+                        g.close_question_modal();
+                    }
+                    continue;
+                }
                 let current = qp_dispatch.lock().ok().and_then(|m| m.question.clone());
                 if !dispatch_question_answer(&current, &qid, sel)
                     && let Ok(mut g) = question_state.lock()

@@ -935,6 +935,117 @@ fn see_and_share_a_session() {
     let _ = sam.wait();
 }
 
+/// `/invite`: someone joins from "another computer" with the one line it
+/// prints, after the host says yes; a browser guest knocks and talks too.
+#[test]
+fn invite_someone_to_join() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let run = |tui: &mut Tui, cmd: &str| {
+        tui.send(cmd.as_bytes());
+        std::thread::sleep(Duration::from_millis(200));
+        tui.send(b"\r");
+    };
+    run(&mut tui, &format!("/invite {port} web"));
+    tui.wait_for("send this line to whoever should join");
+    let text = tui.text();
+    let line = text
+        .split_whitespace()
+        .find(|w| w.contains(&format!(":{port}/")))
+        .expect("invite line")
+        .to_string();
+    let key = line.rsplit('/').next().unwrap().to_string();
+    let invite = format!("127.0.0.1:{port}/{key}");
+    let web = text
+        .split_whitespace()
+        .find(|w| w.starts_with("http://") && w.contains(&format!(":{port}/?t=")))
+        .expect("web link")
+        .to_string();
+    let token = web.split("?t=").nth(1).unwrap().to_string();
+
+    let join_as = |name: &str, invite: &str| {
+        std::process::Command::new(env!("CARGO_BIN_EXE_dcode-ai"))
+            .args(["join", invite, "--name", name])
+            .current_dir(&home)
+            .env("HOME", &home)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("join")
+    };
+
+    // Priya knocks; the host lets her in.
+    let mut priya = join_as("Priya", &invite);
+    tui.wait_for("Priya (127.0.0.1) wants to join");
+    tui.send(b"1");
+    tui.wait_for("⇢ Priya joined");
+    if let Some(stdin) = priya.stdin.as_mut() {
+        writeln!(stdin, "hello over the network").unwrap();
+    }
+    tui.wait_for("⇢ Priya: hello over the network");
+    tui.wait_for("Reply to: (from Priya)");
+    tui.wait_for("? for shortcuts");
+
+    // Mallory is turned down.
+    let mallory = join_as("Mallory", &invite);
+    tui.wait_for("Mallory (127.0.0.1) wants to join");
+    tui.send(b"2");
+    let out = mallory.wait_with_output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("not let in"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // A wrong key never gets to knock.
+    let wrong = join_as("Eve", &format!("127.0.0.1:{port}/abcdefghijkmnpqrstuvwxyz"));
+    let out = wrong.wait_with_output().unwrap();
+    assert!(String::from_utf8_lossy(&out.stderr).contains("refused"));
+
+    // A browser guest knocks and talks.
+    let post = move |path: &str, body: &str| -> String {
+        let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        write!(
+            s,
+            "POST {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut out = String::new();
+        let _ = s.read_to_string(&mut out);
+        out
+    };
+    let knock_path = format!("/knock?t={token}&name=Ravi");
+    let knock = std::thread::spawn(move || post(&knock_path, ""));
+    tui.wait_for("Ravi (127.0.0.1) wants to join");
+    tui.send(b"1");
+    let answer = knock.join().unwrap();
+    let p = answer
+        .split("\"p\":\"")
+        .nth(1)
+        .and_then(|r| r.split('"').next())
+        .expect("a guest token")
+        .to_string();
+    assert!(post(&format!("/say?t={token}&p={p}"), "from the browser").contains("200 OK"));
+    tui.wait_for("Reply to: (from Ravi)");
+    // Not let in: can't send.
+    assert!(post(&format!("/say?t={token}&p=nope"), "sneaky").contains("403"));
+
+    // /invite stop: Priya is disconnected and leaves.
+    tui.wait_for("? for shortcuts");
+    run(&mut tui, "/invite stop");
+    tui.wait_for("[invite] stopped");
+    tui.wait_for("⇠ Priya left");
+    let _ = priya.wait();
+}
+
 impl Tui {
     /// The screen with colours, as JSON rows of `[symbol, fg, bg]`.
     fn cells_json(&self) -> serde_json::Value {

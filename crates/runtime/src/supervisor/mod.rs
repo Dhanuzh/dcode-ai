@@ -625,6 +625,11 @@ impl Supervisor {
         }
     }
 
+    /// The session's IPC endpoint, when it has one.
+    pub fn socket_path(&self) -> Option<PathBuf> {
+        self.socket_path.clone()
+    }
+
     pub fn event_log_path(&self) -> PathBuf {
         self.session_store
             .sessions_dir()
@@ -2294,10 +2299,15 @@ pub fn spawn_command_consumer_with_store(
                         let _ = tx.send(AgentEvent::PersonLeft { person, name }).await;
                     }
                 }
-                AgentCommand::Say { person, content } => {
+                AgentCommand::Say {
+                    person,
+                    content,
+                    name,
+                } => {
                     let name = people
                         .get(&person)
                         .cloned()
+                        .or_else(|| name.map(|n| clean_person_name(&n)))
                         .unwrap_or_else(|| "someone".into());
                     if let Some(ref tx) = event_tx {
                         let _ = tx
@@ -3108,6 +3118,7 @@ mod tests {
             .send(AgentCommand::Say {
                 person: "p1".into(),
                 content: "try staging".into(),
+                name: None,
             })
             .unwrap();
         assert!(matches!(

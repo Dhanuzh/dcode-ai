@@ -499,6 +499,7 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 | `/timeline` | The session as steps (your messages, tool calls, replies, compactions) with a scrubber bar; ←/→ to move, Enter on one of your messages rewinds there |
 | `/files` | Files the agent read and edited this session (also the dashboard's `files` tab, `Alt+4`) |
 | `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan [port]` shares it on your network (a fixed port such as `/watch lan 8787` lets you allow it in the firewall once; on WSL it prints the commands); `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
+| `/invite` | Let someone on another computer join with one line: prints (and copies) `dcode-ai join <ip>:8788/<key> --name <their name>`. You're asked before each person gets in. `/invite web` also gives a browser link (no install; plain HTTP), `/invite <port>` another port, `/invite --let-approve` lets guests approve and stop too, `/invite stop` ends it |
 | `/handoff <note>` | Writes `<session>.dcode-session` (secrets masked) with your note, the open todo list and the changed files; the teammate imports it and says "continue" |
 | `/sounds on\|off` | A bell when a turn of 10s+ finishes or dcode-ai needs an approval or an answer |
 | `/speak` | Reads the last reply aloud (system voice; code blocks skipped) |
@@ -512,6 +513,29 @@ login). The session shows `⇢ Priya joined`, `⇢ Priya: <message>` and
 the `/watch` page can type a name at the top; while the page is open they
 are in the office as watching. Names are display-only (letters, digits,
 spaces and `-_.`, 24 characters at most); they are not a login.
+
+### Joining from another computer: `/invite`
+
+1. The host types `/invite`. It prints one line (and copies it):
+   `dcode-ai join 192.168.1.9:8788/Qk3f… --name <your name>`.
+2. The guest runs that line with their name. The host sees
+   **"Priya (192.168.1.20) wants to join — let them in?"** and picks yes.
+3. The guest sees the session live and types to send messages; `/quit`
+   leaves.
+
+- The connection is encrypted and authenticated with the invite's key
+  (Noise `NNpsk0`); a wrong or old key can't even knock. Each `/invite`
+  makes a new key; `/invite stop` ends it and disconnects guests.
+- Guests send messages only; approvals and stopping a turn stay with you
+  unless you use `/invite --let-approve`.
+- `/invite web` also prints a browser link on the same port, for people
+  without dcode-ai: they type a name, press "Ask to join", and after your
+  yes get a message box. It's plain HTTP, so others on the same network
+  could read that page.
+- WSL: allow the port once with the firewall commands `/invite` prints
+  (the default port 8788 stays the same, so it's once).
+- Outside your network: use a VPN such as Tailscale and its address; don't
+  open the port on your router.
 
 ## Guards against runaway turns
 

@@ -1,0 +1,913 @@
+//! `/invite`: let someone on another computer join this session with one
+//! line, `dcode-ai join <host:port/key> --name <them>`, no SSH.
+//!
+//! - The host listens on the local network. Each invite has a random key;
+//!   the guest's connection is encrypted and authenticated with it (Noise
+//!   `NNpsk0`), so nobody on the network can read it or get in without it.
+//! - Knowing the key only lets you knock: the host is asked "Priya wants to
+//!   join — let them in?" for every guest.
+//! - The host side is a proxy onto the session's own IPC socket: it says
+//!   hello, keeps the guest present, forwards their messages (as
+//!   `(from Name)`) and sends them the session's events. Approvals and
+//!   stopping a turn stay with the host unless the invite allows them.
+//! - `/invite web` also serves the `/watch` page with a message box on the
+//!   same port (plain HTTP).
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::Duration;
+
+use dcode_ai_common::event::{AgentCommand, AgentEvent, EventEnvelope, QuestionSelection};
+use serde_json::{Value, json};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::{mpsc, oneshot};
+
+/// The first bytes a guest sends (anything else is HTTP).
+const MAGIC: &[u8; 5] = b"DCAI1";
+const PATTERN: &str = "Noise_NNpsk0_25519_ChaChaPoly_BLAKE2s";
+/// Plaintext per Noise message (a message is at most 65535 bytes).
+const CHUNK: usize = 60_000;
+/// Largest JSON message accepted.
+const MAX_MESSAGE: usize = 8 * 1024 * 1024;
+/// Guests connected or knocking at once.
+const MAX_GUESTS: usize = 8;
+/// The default port, fixed so a firewall rule is made once.
+pub const DEFAULT_PORT: u16 = 8788;
+
+/// `host:port/key`, what `/invite` prints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Invite {
+    pub host: String,
+    pub port: u16,
+    pub key: String,
+}
+
+impl Invite {
+    /// Parses `host:port/key` (also with a leading `dcai://`).
+    pub fn parse(s: &str) -> Option<Self> {
+        let s = s.trim().trim_start_matches("dcai://");
+        let (addr, key) = s.split_once('/')?;
+        let (host, port) = addr.rsplit_once(':')?;
+        let port: u16 = port.parse().ok()?;
+        let key = key.trim_end_matches('/');
+        if host.is_empty() || key.len() < 16 || !key.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        Some(Self {
+            host: host.trim_matches(['[', ']']).to_string(),
+            port,
+            key: key.to_string(),
+        })
+    }
+
+    pub fn as_string(&self) -> String {
+        let host = if self.host.contains(':') {
+            format!("[{}]", self.host)
+        } else {
+            self.host.clone()
+        };
+        format!("{host}:{}/{}", self.port, self.key)
+    }
+}
+
+/// A fresh invite key: 24 random letters and digits (~142 bits).
+pub fn new_key() -> String {
+    use rand::Rng;
+    const ABC: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::thread_rng();
+    (0..24)
+        .map(|_| ABC[rng.gen_range(0..ABC.len())] as char)
+        .collect()
+}
+
+fn psk(key: &str) -> [u8; 32] {
+    use sha2::Digest;
+    let mut h = sha2::Sha256::new();
+    h.update(b"dcode-ai invite v1");
+    h.update(key.as_bytes());
+    h.finalize().into()
+}
+
+// ── Encrypted framing ────────────────────────────────────────────────
+
+fn io_err(e: impl std::fmt::Display) -> std::io::Error {
+    std::io::Error::other(e.to_string())
+}
+
+async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, data: &[u8]) -> std::io::Result<()> {
+    let len = u16::try_from(data.len()).map_err(io_err)?;
+    w.write_all(&len.to_be_bytes()).await?;
+    w.write_all(data).await?;
+    Ok(())
+}
+
+async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Vec<u8>> {
+    let mut len = [0u8; 2];
+    r.read_exact(&mut len).await?;
+    let mut buf = vec![0u8; u16::from_be_bytes(len) as usize];
+    r.read_exact(&mut buf).await?;
+    Ok(buf)
+}
+
+/// One side's session keys after the handshake.
+#[derive(Clone)]
+struct Cipher(Arc<Mutex<snow::TransportState>>);
+
+impl Cipher {
+    /// Encrypts `value` as one or more frames and writes them.
+    async fn send<W: AsyncWrite + Unpin>(&self, w: &mut W, value: &Value) -> std::io::Result<()> {
+        let bytes = serde_json::to_vec(value).map_err(io_err)?;
+        let chunks: Vec<&[u8]> = if bytes.is_empty() {
+            vec![&[]]
+        } else {
+            bytes.chunks(CHUNK).collect()
+        };
+        let mut out = Vec::new();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let mut plain = Vec::with_capacity(chunk.len() + 1);
+            plain.push(u8::from(i + 1 < chunks.len()));
+            plain.extend_from_slice(chunk);
+            let mut ct = vec![0u8; plain.len() + 16];
+            let n = self
+                .0
+                .lock()
+                .map_err(io_err)?
+                .write_message(&plain, &mut ct)
+                .map_err(io_err)?;
+            out.extend_from_slice(&(n as u16).to_be_bytes());
+            out.extend_from_slice(&ct[..n]);
+        }
+        w.write_all(&out).await?;
+        w.flush().await
+    }
+
+    /// Reads and decrypts one message (however many frames it spans).
+    async fn recv<R: AsyncRead + Unpin>(&self, r: &mut R) -> std::io::Result<Value> {
+        let mut msg = Vec::new();
+        loop {
+            let ct = read_frame(r).await?;
+            let mut plain = vec![0u8; ct.len()];
+            let n = self
+                .0
+                .lock()
+                .map_err(io_err)?
+                .read_message(&ct, &mut plain)
+                .map_err(io_err)?;
+            let Some((&more, data)) = plain[..n].split_first() else {
+                return Err(io_err("empty frame"));
+            };
+            msg.extend_from_slice(data);
+            if msg.len() > MAX_MESSAGE {
+                return Err(io_err("message too large"));
+            }
+            if more == 0 {
+                break;
+            }
+        }
+        serde_json::from_slice(&msg).map_err(io_err)
+    }
+}
+
+async fn handshake_guest(stream: &mut TcpStream, key: &str) -> std::io::Result<Cipher> {
+    let mut noise = snow::Builder::new(PATTERN.parse().map_err(io_err)?)
+        .psk(0, &psk(key))
+        .build_initiator()
+        .map_err(io_err)?;
+    stream.write_all(MAGIC).await?;
+    let mut buf = vec![0u8; 1024];
+    let n = noise.write_message(&[], &mut buf).map_err(io_err)?;
+    write_frame(stream, &buf[..n]).await?;
+    let reply = read_frame(stream).await?;
+    noise.read_message(&reply, &mut buf).map_err(io_err)?;
+    Ok(Cipher(Arc::new(Mutex::new(
+        noise.into_transport_mode().map_err(io_err)?,
+    ))))
+}
+
+/// After [`MAGIC`] was read.
+async fn handshake_host(stream: &mut TcpStream, key: &str) -> std::io::Result<Cipher> {
+    let mut noise = snow::Builder::new(PATTERN.parse().map_err(io_err)?)
+        .psk(0, &psk(key))
+        .build_responder()
+        .map_err(io_err)?;
+    let mut buf = vec![0u8; 1024];
+    let first = read_frame(stream).await?;
+    noise.read_message(&first, &mut buf).map_err(io_err)?;
+    let n = noise.write_message(&[], &mut buf).map_err(io_err)?;
+    write_frame(stream, &buf[..n]).await?;
+    Ok(Cipher(Arc::new(Mutex::new(
+        noise.into_transport_mode().map_err(io_err)?,
+    ))))
+}
+
+// ── Knocking: the host decides ───────────────────────────────────────
+
+/// Someone asks to join. Answer on `reply` (dropping it means no).
+pub struct Knock {
+    pub name: String,
+    pub from: String,
+    pub reply: oneshot::Sender<bool>,
+}
+
+/// Knocks waiting for an answer in the TUI, by question id.
+static KNOCKS: LazyLock<Mutex<HashMap<String, oneshot::Sender<bool>>>> =
+    LazyLock::new(Default::default);
+
+/// The question id prefix of a knock shown in the TUI.
+pub const KNOCK_QUESTION: &str = "invite-knock-";
+
+/// Wait for the TUI's answer to the knock shown as question `id`.
+pub fn register_knock(id: &str, reply: oneshot::Sender<bool>) {
+    if let Ok(mut m) = KNOCKS.lock() {
+        m.insert(id.to_string(), reply);
+    }
+}
+
+/// The TUI answered question `id`: if it is a knock, let them in or not.
+/// Returns whether it was one.
+pub fn answer_knock(id: &str, selection: &QuestionSelection) -> bool {
+    if !id.starts_with(KNOCK_QUESTION) {
+        return false;
+    }
+    let reply = KNOCKS.lock().ok().and_then(|mut m| m.remove(id));
+    if let Some(reply) = reply {
+        let yes =
+            matches!(selection, QuestionSelection::Option { option_id } if option_id == "allow");
+        let _ = reply.send(yes);
+    }
+    true
+}
+
+/// Unanswered after a while: no. Returns whether it was still waiting.
+pub fn expire_knock(id: &str) -> bool {
+    KNOCKS
+        .lock()
+        .ok()
+        .and_then(|mut m| m.remove(id))
+        .map(|r| r.send(false))
+        .is_some()
+}
+
+/// Ask the host; `false` when they say no, don't answer, or are gone.
+pub async fn ask_host(knocks: &mpsc::Sender<Knock>, name: &str, from: &str) -> bool {
+    let (tx, rx) = oneshot::channel();
+    let knock = Knock {
+        name: name.to_string(),
+        from: from.to_string(),
+        reply: tx,
+    };
+    if knocks.send(knock).await.is_err() {
+        return false;
+    }
+    matches!(
+        tokio::time::timeout(Duration::from_secs(90), rx).await,
+        Ok(Ok(true))
+    )
+}
+
+// ── Host ─────────────────────────────────────────────────────────────
+
+pub struct HostOptions {
+    /// 0 = [`DEFAULT_PORT`].
+    pub port: u16,
+    pub web: bool,
+    pub let_approve: bool,
+    /// The session's IPC socket.
+    pub socket: PathBuf,
+    /// The session's event log (for the web page).
+    pub log_path: PathBuf,
+    pub title: String,
+    pub knocks: mpsc::Sender<Knock>,
+    /// Where web watchers are announced.
+    pub presence: Option<crate::watch::Presence>,
+}
+
+/// A running invite; dropping it (or `stop`) ends it and disconnects
+/// everyone who came in through it.
+pub struct InviteHandle {
+    pub invite: Invite,
+    pub web_url: Option<String>,
+    pub let_approve: bool,
+    stop: tokio::sync::watch::Sender<bool>,
+}
+
+impl InviteHandle {
+    pub fn port(&self) -> u16 {
+        self.invite.port
+    }
+    /// What to send the guest.
+    pub fn command(&self) -> String {
+        format!(
+            "dcode-ai join {} --name <your name>",
+            self.invite.as_string()
+        )
+    }
+    pub fn stop(&self) {
+        let _ = self.stop.send(true);
+    }
+}
+
+impl Drop for InviteHandle {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Start listening on every interface.
+pub async fn host(opts: HostOptions) -> std::io::Result<InviteHandle> {
+    let port = if opts.port == 0 {
+        DEFAULT_PORT
+    } else {
+        opts.port
+    };
+    let listener = TcpListener::bind(("0.0.0.0", port)).await?;
+    let port = listener.local_addr()?.port();
+    host_on(listener, opts, port).await
+}
+
+async fn host_on(
+    listener: TcpListener,
+    opts: HostOptions,
+    port: u16,
+) -> std::io::Result<InviteHandle> {
+    let ip = crate::watch::lan_address()
+        .map(|ip| ip.to_string())
+        .unwrap_or_else(|| "127.0.0.1".into());
+    let key = new_key();
+    let invite = Invite {
+        host: ip.clone(),
+        port,
+        key: key.clone(),
+    };
+    // The web page has its own token: knowing the page's link doesn't give
+    // the CLI key away, and the other way round.
+    let web_token = opts.web.then(new_key);
+    let web_url = web_token
+        .as_ref()
+        .map(|t| format!("http://{ip}:{port}/?t={t}"));
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    let web_chat = opts.web.then(|| {
+        Arc::new(crate::watch::WebChat::new(
+            opts.knocks.clone(),
+            opts.socket.clone(),
+        ))
+    });
+    let shared = Arc::new(Host {
+        web_chat,
+        key,
+        web_token,
+        let_approve: opts.let_approve,
+        socket: opts.socket,
+        log_path: opts.log_path,
+        title: opts.title,
+        knocks: opts.knocks,
+        presence: opts.presence,
+        guests: AtomicUsize::new(0),
+    });
+    let mut stop = stop_rx.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = stop.changed() => break,
+                conn = listener.accept() => {
+                    let Ok((stream, peer)) = conn else { continue };
+                    let shared = shared.clone();
+                    if shared.guests.fetch_add(1, Ordering::SeqCst) >= MAX_GUESTS {
+                        shared.guests.fetch_sub(1, Ordering::SeqCst);
+                        continue;
+                    }
+                    let stop = stop_rx.clone();
+                    tokio::spawn(async move {
+                        let _ = shared.connection(stream, peer.ip().to_string(), stop).await;
+                        shared.guests.fetch_sub(1, Ordering::SeqCst);
+                    });
+                }
+            }
+        }
+    });
+    Ok(InviteHandle {
+        invite,
+        web_url,
+        let_approve: opts.let_approve,
+        stop: stop_tx,
+    })
+}
+
+struct Host {
+    key: String,
+    web_token: Option<String>,
+    let_approve: bool,
+    socket: PathBuf,
+    log_path: PathBuf,
+    title: String,
+    knocks: mpsc::Sender<Knock>,
+    presence: Option<crate::watch::Presence>,
+    web_chat: Option<Arc<crate::watch::WebChat>>,
+    guests: AtomicUsize,
+}
+
+impl Host {
+    async fn connection(
+        &self,
+        mut stream: TcpStream,
+        from: String,
+        stop: tokio::sync::watch::Receiver<bool>,
+    ) -> std::io::Result<()> {
+        // A guest says DCAI1 first; a browser starts with "GET /" or "POST".
+        let mut first = [0u8; 5];
+        let peeked = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let n = stream.peek(&mut first).await?;
+                if n == 0 {
+                    return Err(io_err("closed"));
+                }
+                if n >= first.len() || !MAGIC.starts_with(&first[..n]) {
+                    return Ok::<_, std::io::Error>(());
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await;
+        if !matches!(peeked, Ok(Ok(()))) {
+            return Ok(());
+        }
+        if &first == MAGIC {
+            stream.read_exact(&mut first).await?;
+            return self.guest(stream, from, stop).await;
+        }
+        match (&self.web_token, &self.web_chat) {
+            (Some(token), Some(chat)) => {
+                crate::watch::serve(
+                    stream,
+                    &self.log_path,
+                    token,
+                    &self.title,
+                    stop,
+                    self.presence.clone(),
+                    Some(chat.clone()),
+                )
+                .await
+            }
+            _ => Ok(()),
+        }
+    }
+
+    async fn guest(
+        &self,
+        mut stream: TcpStream,
+        from: String,
+        mut stop: tokio::sync::watch::Receiver<bool>,
+    ) -> std::io::Result<()> {
+        let cipher = tokio::time::timeout(
+            Duration::from_secs(10),
+            handshake_host(&mut stream, &self.key),
+        )
+        .await
+        .map_err(io_err)??;
+        let hello = tokio::time::timeout(Duration::from_secs(10), cipher.recv(&mut stream))
+            .await
+            .map_err(io_err)??;
+        let name = dcode_ai_runtime::supervisor::clean_person_name(
+            hello.get("name").and_then(Value::as_str).unwrap_or(""),
+        );
+        let (read, mut write) = stream.into_split();
+        // Watch for the guest giving up while the host decides.
+        let mut read = read;
+        let admitted = tokio::select! {
+            yes = ask_host(&self.knocks, &name, &from) => yes,
+            _ = stop.changed() => false,
+            _ = read.read_u8() => false,
+        };
+        if !admitted {
+            let _ = cipher
+                .send(
+                    &mut write,
+                    &json!({"t": "refused", "reason": "the host said no"}),
+                )
+                .await;
+            return Ok(());
+        }
+        cipher
+            .send(
+                &mut write,
+                &json!({"t": "admitted", "title": self.title, "let_approve": self.let_approve}),
+            )
+            .await?;
+
+        let ipc = dcode_ai_runtime::ipc::IpcClient::new(self.socket.clone());
+        let mut events = ipc.connect().await.map_err(io_err)?;
+        let person = crate::people::new_person_id("guest");
+        let _ = ipc
+            .send_command(&AgentCommand::Hello {
+                person: person.clone(),
+                name: name.clone(),
+            })
+            .await;
+
+        // Their messages, read on their own task (a read cut off by
+        // `select!` would lose part of a frame).
+        let (msg_tx, mut msgs) = mpsc::channel::<Value>(16);
+        let reader_cipher = cipher.clone();
+        let reader = tokio::spawn(async move {
+            while let Ok(m) = reader_cipher.recv(&mut read).await {
+                if msg_tx.send(m).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let mut beat = tokio::time::interval(Duration::from_secs(10));
+        beat.tick().await;
+        let result: std::io::Result<()> = loop {
+            tokio::select! {
+                _ = stop.changed() => {
+                    let _ = cipher.send(&mut write, &json!({"t": "note", "text": "the host ended the invite"})).await;
+                    break Ok(());
+                }
+                ev = events.recv() => {
+                    let Some(env) = ev else {
+                        let _ = cipher.send(&mut write, &json!({"t": "note", "text": "the session ended"})).await;
+                        break Ok(());
+                    };
+                    if matches!(env.event, AgentEvent::PersonSeen { .. }) {
+                        continue;
+                    }
+                    if let Err(e) = cipher.send(&mut write, &json!({"t": "event", "e": env})).await {
+                        break Err(e);
+                    }
+                }
+                _ = beat.tick() => {
+                    let _ = ipc.send_command(&AgentCommand::Heartbeat { person: person.clone() }).await;
+                }
+                m = msgs.recv() => {
+                    let Some(m) = m else { break Ok(()) };
+                    let note = self.carry_out(&ipc, &person, &name, &m).await;
+                    if let Some(text) = note {
+                        let _ = cipher.send(&mut write, &json!({"t": "note", "text": text})).await;
+                    }
+                }
+            }
+        };
+        reader.abort();
+        let _ = ipc.send_command(&AgentCommand::Bye { person }).await;
+        result
+    }
+
+    /// Carries out what a guest sent; a note back when it isn't allowed.
+    async fn carry_out(
+        &self,
+        ipc: &dcode_ai_runtime::ipc::IpcClient,
+        person: &str,
+        name: &str,
+        m: &Value,
+    ) -> Option<String> {
+        let text = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let cmd = match m.get("t").and_then(Value::as_str)? {
+            "say" => {
+                let content = text("text");
+                if content.trim().is_empty() {
+                    return None;
+                }
+                AgentCommand::Say {
+                    person: person.to_string(),
+                    content: content.chars().take(8000).collect(),
+                    name: Some(name.to_string()),
+                }
+            }
+            "approve" | "deny" | "stop" if !self.let_approve => {
+                return Some("only the host can approve, deny or stop on this invite".into());
+            }
+            "approve" => AgentCommand::ApproveToolCall {
+                call_id: text("call_id"),
+            },
+            "deny" => AgentCommand::DenyToolCall {
+                call_id: text("call_id"),
+            },
+            "stop" => AgentCommand::Cancel,
+            _ => return None,
+        };
+        ipc.send_command(&cmd)
+            .await
+            .err()
+            .map(|e| format!("could not reach the session: {e}"))
+    }
+}
+
+// ── Guest ────────────────────────────────────────────────────────────
+
+/// What the guest's terminal shows.
+pub enum GuestUpdate {
+    Event(Box<EventEnvelope>),
+    Note(String),
+}
+
+/// A guest's live connection, once let in.
+pub struct Guest {
+    cipher: Cipher,
+    write: tokio::net::tcp::OwnedWriteHalf,
+    pub title: String,
+    pub let_approve: bool,
+    pub updates: mpsc::Receiver<GuestUpdate>,
+    reader: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Guest {
+    fn drop(&mut self) {
+        self.reader.abort();
+    }
+}
+
+impl Guest {
+    /// Connect, knock, and wait until the host decides (`on_wait` runs once
+    /// the knock is delivered).
+    pub async fn connect(
+        invite: &Invite,
+        name: &str,
+        on_wait: impl FnOnce(),
+    ) -> anyhow::Result<Self> {
+        let addr = format!("{}:{}", invite.host, invite.port);
+        let mut stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
+            .await
+            .map_err(|_| anyhow::anyhow!("no answer from {addr} (is the host's firewall open?)"))?
+            .map_err(|e| anyhow::anyhow!("can't reach {addr}: {e}"))?;
+        let cipher = tokio::time::timeout(
+            Duration::from_secs(10),
+            handshake_guest(&mut stream, &invite.key),
+        )
+        .await
+        .map_err(|_| anyhow::anyhow!("{addr} didn't answer the invite"))?
+        .map_err(|_| anyhow::anyhow!("the invite was refused (old or mistyped key?)"))?;
+        cipher
+            .send(&mut stream, &json!({"t": "hello", "name": name}))
+            .await?;
+        on_wait();
+        let answer = cipher
+            .recv(&mut stream)
+            .await
+            .map_err(|_| anyhow::anyhow!("the host closed the invite"))?;
+        match answer.get("t").and_then(Value::as_str) {
+            Some("admitted") => {}
+            _ => anyhow::bail!(
+                "not let in: {}",
+                answer
+                    .get("reason")
+                    .and_then(Value::as_str)
+                    .unwrap_or("the host said no")
+            ),
+        }
+        let title = answer
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let let_approve = answer
+            .get("let_approve")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let (mut read, write) = stream.into_split();
+        let (tx, updates) = mpsc::channel(256);
+        let reader_cipher = cipher.clone();
+        let reader = tokio::spawn(async move {
+            while let Ok(m) = reader_cipher.recv(&mut read).await {
+                let update = match m.get("t").and_then(Value::as_str) {
+                    Some("event") => match m
+                        .get("e")
+                        .cloned()
+                        .and_then(|e| serde_json::from_value::<EventEnvelope>(e).ok())
+                    {
+                        Some(env) => GuestUpdate::Event(Box::new(env)),
+                        None => continue,
+                    },
+                    Some("note") => GuestUpdate::Note(
+                        m.get("text")
+                            .and_then(Value::as_str)
+                            .unwrap_or("")
+                            .to_string(),
+                    ),
+                    _ => continue,
+                };
+                if tx.send(update).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(Self {
+            cipher,
+            write,
+            title,
+            let_approve,
+            updates,
+            reader,
+        })
+    }
+
+    pub async fn say(&mut self, text: &str) -> std::io::Result<()> {
+        self.cipher
+            .send(&mut self.write, &json!({"t": "say", "text": text}))
+            .await
+    }
+
+    pub async fn approve(&mut self, call_id: &str, yes: bool) -> std::io::Result<()> {
+        let t = if yes { "approve" } else { "deny" };
+        self.cipher
+            .send(&mut self.write, &json!({"t": t, "call_id": call_id}))
+            .await
+    }
+
+    pub async fn stop_turn(&mut self) -> std::io::Result<()> {
+        self.cipher
+            .send(&mut self.write, &json!({"t": "stop"}))
+            .await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn invite_strings_parse() {
+        let i = Invite::parse("192.168.1.9:8788/abcdefghijkmnpqrstuvwxyz").unwrap();
+        assert_eq!(i.host, "192.168.1.9");
+        assert_eq!(i.port, 8788);
+        assert_eq!(Invite::parse(&i.as_string()), Some(i.clone()));
+        assert_eq!(
+            Invite::parse("dcai://192.168.1.9:8788/abcdefghijkmnpqrstuvwxyz/"),
+            Some(i)
+        );
+        assert!(Invite::parse("session-1793477206982552-0").is_none());
+        assert!(Invite::parse("1.2.3.4:88/short").is_none());
+        assert!(Invite::parse("1.2.3.4/abcdefghijkmnpqrstuvwxyz").is_none());
+        let six = Invite::parse("[fe80::1]:8788/abcdefghijkmnpqrstuvwxyz").unwrap();
+        assert_eq!(six.host, "fe80::1");
+        assert!(six.as_string().starts_with("[fe80::1]:8788/"));
+        assert_eq!(new_key().len(), 24);
+    }
+
+    #[tokio::test]
+    async fn messages_round_trip_across_frames() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut m = [0u8; 5];
+            s.read_exact(&mut m).await.unwrap();
+            let c = handshake_host(&mut s, "k3y-for-tests-only-123")
+                .await
+                .unwrap();
+            let got = c.recv(&mut s).await.unwrap();
+            c.send(&mut s, &got).await.unwrap();
+        });
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let c = handshake_guest(&mut s, "k3y-for-tests-only-123")
+            .await
+            .unwrap();
+        let big = json!({"t": "say", "text": "x".repeat(150_000)});
+        c.send(&mut s, &big).await.unwrap();
+        assert_eq!(c.recv(&mut s).await.unwrap(), big);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_wrong_key_is_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut s, _) = listener.accept().await.unwrap();
+            let mut m = [0u8; 5];
+            s.read_exact(&mut m).await.unwrap();
+            handshake_host(&mut s, "the-right-key-000000")
+                .await
+                .is_err()
+        });
+        let mut s = TcpStream::connect(addr).await.unwrap();
+        let _ = handshake_guest(&mut s, "a-wrong-key-00000000").await;
+        assert!(server.await.unwrap(), "host must refuse the wrong key");
+    }
+
+    /// A pretend session: an IPC server whose commands are recorded and
+    /// whose events can be pushed.
+    async fn fake_session() -> (
+        PathBuf,
+        mpsc::UnboundedReceiver<AgentCommand>,
+        tokio::sync::broadcast::Sender<String>,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let id = format!("invite-test-{}", rand::random::<u32>());
+        let server = dcode_ai_runtime::ipc::IpcServer::new(&id);
+        let handle = server.start().await.unwrap();
+        let socket = handle.socket_path().clone();
+        let (events, commands) = handle.into_parts();
+        (socket, commands, events, dir)
+    }
+
+    #[tokio::test]
+    async fn a_guest_knocks_is_let_in_and_talks() {
+        let (socket, mut commands, events, dir) = fake_session().await;
+        let (knock_tx, mut knock_rx) = mpsc::channel::<Knock>(4);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = host_on(
+            listener,
+            HostOptions {
+                port,
+                web: false,
+                let_approve: false,
+                socket,
+                log_path: dir.path().join("x.events.jsonl"),
+                title: "demo".into(),
+                knocks: knock_tx,
+                presence: None,
+            },
+            port,
+        )
+        .await
+        .unwrap();
+        let invite = Invite {
+            host: "127.0.0.1".into(),
+            ..handle.invite.clone()
+        };
+        // The host says yes to Priya.
+        tokio::spawn(async move {
+            while let Some(k) = knock_rx.recv().await {
+                let yes = k.name == "Priya";
+                let _ = k.reply.send(yes);
+            }
+        });
+        let mut guest = Guest::connect(&invite, "Priya", || {}).await.unwrap();
+        assert_eq!(guest.title, "demo");
+        let hello = tokio::time::timeout(Duration::from_secs(5), commands.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let AgentCommand::Hello { person, name } = hello else {
+            panic!("expected hello, got {hello:?}");
+        };
+        assert_eq!(name, "Priya");
+
+        // Session events reach the guest.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let env = EventEnvelope::new(
+            1,
+            AgentEvent::MessageReceived {
+                role: "assistant".into(),
+                content: "hi Priya".into(),
+            },
+        );
+        let _ = events.send(serde_json::to_string(&env).unwrap());
+        let got = tokio::time::timeout(Duration::from_secs(5), guest.updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(got, GuestUpdate::Event(e) if matches!(&e.event,
+            AgentEvent::MessageReceived { content, .. } if content == "hi Priya")));
+
+        // What they say reaches the session as them.
+        guest.say("try staging").await.unwrap();
+        let said = tokio::time::timeout(Duration::from_secs(5), commands.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            matches!(said, AgentCommand::Say { person: ref p, ref content, .. }
+            if *p == person && content == "try staging")
+        );
+
+        // Approvals stay with the host.
+        guest.approve("call-1", true).await.unwrap();
+        let note = tokio::time::timeout(Duration::from_secs(5), guest.updates.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(note, GuestUpdate::Note(t) if t.contains("only the host")));
+
+        // Leaving says bye.
+        drop(guest);
+        let bye = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match commands.recv().await {
+                    Some(AgentCommand::Bye { person: p }) => break p,
+                    Some(_) => continue,
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(bye, person);
+
+        // Someone the host turns down doesn't get in.
+        let refused = Guest::connect(&invite, "Mallory", || {}).await;
+        assert!(refused.err().unwrap().to_string().contains("not let in"));
+        // A wrong key doesn't even get to knock.
+        let wrong = Invite {
+            key: new_key(),
+            ..invite.clone()
+        };
+        assert!(Guest::connect(&wrong, "Eve", || {}).await.is_err());
+        drop(handle);
+    }
+}

@@ -288,8 +288,10 @@ enum Command {
     },
     /// Join a running session from another terminal: see it live and send
     /// messages (`/approve`, `/deny`, `/stop`, `/quit`). You show up in the
-    /// session's office under your name.
+    /// session's office under your name. From another computer, use the
+    /// line the host's `/invite` printed: `dcode-ai join <host:port/key>`
     Join {
+        /// A session id here, or `host:port/key` from someone's `/invite`
         session_id: String,
         /// Name shown to the others (default: git user.name, else $USER)
         #[arg(long)]
@@ -972,9 +974,13 @@ async fn try_main() -> anyhow::Result<()> {
             attach_session(&config, &workspace_root, &session_id, json).await?;
         }
         Some(Command::Join { session_id, name }) => {
-            let id = resolve_session_id(&config, &workspace_root, &session_id).await?;
             let name = name.unwrap_or_else(|| dcode_ai_cli::people::my_name(&workspace_root));
-            join_session(&config, &workspace_root, &id, &name).await?;
+            if let Some(invite) = dcode_ai_cli::invite::Invite::parse(&session_id) {
+                join_invite(&invite, &name).await?;
+            } else {
+                let id = resolve_session_id(&config, &workspace_root, &session_id).await?;
+                join_session(&config, &workspace_root, &id, &name).await?;
+            }
         }
         Some(Command::Session { command }) => {
             let sessions_dir = workspace_root.join(&config.session.history_dir);
@@ -2086,6 +2092,7 @@ async fn join_session(
             _ => AgentCommand::Say {
                 person: person.clone(),
                 content: text.to_string(),
+                name: Some(name.to_string()),
             },
         };
         if let Err(e) = client.send_command(&cmd).await {
@@ -2096,6 +2103,70 @@ async fn join_session(
     beat.abort();
     let _ = client.send_command(&AgentCommand::Bye { person }).await;
     printer.abort();
+    Ok(())
+}
+
+/// `dcode-ai join <host:port/key>`: join someone's session over the
+/// network with their `/invite` line. Same keys as a local join.
+async fn join_invite(invite: &dcode_ai_cli::invite::Invite, name: &str) -> anyhow::Result<()> {
+    use dcode_ai_cli::invite::{Guest, GuestUpdate};
+    use dcode_ai_common::event::AgentEvent;
+    use tokio::io::AsyncBufReadExt;
+    let mut guest = Guest::connect(invite, name, || {
+        eprintln!(
+            "[join] knocking on {}:{} as {name} — waiting for the host to let you in…",
+            invite.host, invite.port
+        )
+    })
+    .await?;
+    let keys = if guest.let_approve {
+        "type to send a message · /approve · /deny · /stop · /quit"
+    } else {
+        "type to send a message · /quit"
+    };
+    eprintln!("[join] you're in: {} — {keys}", guest.title);
+    let mut pending: Option<String> = None;
+    let mut lines = tokio::io::BufReader::new(tokio::io::stdin()).lines();
+    loop {
+        tokio::select! {
+            update = guest.updates.recv() => match update {
+                Some(GuestUpdate::Event(env)) => {
+                    match &env.event {
+                        AgentEvent::ApprovalRequested { call_id, .. } => pending = Some(call_id.clone()),
+                        AgentEvent::ApprovalResolved { .. } => pending = None,
+                        _ => {}
+                    }
+                    let _ = print_event_envelope(&env, false);
+                }
+                Some(GuestUpdate::Note(text)) => eprintln!("[join] {text}"),
+                None => {
+                    eprintln!("[join] disconnected");
+                    break;
+                }
+            },
+            line = lines.next_line() => {
+                let Ok(Some(line)) = line else { break };
+                let text = line.trim();
+                let sent = match text {
+                    "" => continue,
+                    "/quit" | "/exit" => break,
+                    "/stop" => guest.stop_turn().await,
+                    "/approve" | "/deny" => match pending.take() {
+                        Some(call_id) => guest.approve(&call_id, text == "/approve").await,
+                        None => {
+                            eprintln!("[join] nothing is waiting for approval");
+                            continue;
+                        }
+                    },
+                    _ => guest.say(text).await,
+                };
+                if let Err(e) = sent {
+                    eprintln!("[join] lost the connection: {e}");
+                    break;
+                }
+            }
+        }
+    }
     Ok(())
 }
 
