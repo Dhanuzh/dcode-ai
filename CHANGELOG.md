@@ -1,5 +1,32 @@
 # Changelog
 
+## 1.0.44 — 2026-11-02
+
+### New
+- **Menus instead of typing**: `/call` (in a call) opens a menu — mute,
+  push-to-talk, echo reduction, volume for someone (pick the person, then
+  25–200%), hang up. `/kick` alone lists the guests to remove; `/todo done`
+  lists the open to-dos to tick off. Menus show even while the agent works.
+- **A chat window**: `/chat` (or `Alt+6` in the dashboard) opens the team
+  tab like a chat app — messages as bubbles (yours on the right) with a box
+  at the bottom to type in; it sends at once, even mid-turn. The shared
+  to-dos sit on top.
+- **A compact office for teams**: with more than two in the office, the
+  dashboard draws everyone small (headsets and speaking waves included), so
+  five or more fit in the side panel. `/office` stays full size.
+- **Tailscale**: `/invite` puts this machine's Tailscale address in the line
+  next to the LAN one, and `join` tries each. `dcode-ai setup tailscale`
+  checks for Tailscale and, after asking, runs Tailscale's own installer
+  (winget on Windows and WSL, Homebrew on macOS, the official script on
+  Linux); you sign in through Tailscale.
+- **`join` explains a failed connection**: "you're on 192.168.1.x and the
+  host is on 192.168.0.x — different networks…", or that the firewall or the
+  Wi-Fi blocks it.
+
+### Fixed
+- A guest's office showed everyone who joined (themselves included) leaving
+  after 25 s: the host didn't pass "still here" heartbeats on to guests.
+
 ## 1.0.43 — 2026-11-02
 
 ### Calls, phase 2

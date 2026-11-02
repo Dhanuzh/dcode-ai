@@ -23,6 +23,7 @@ pub mod keymap;
 pub mod layout;
 pub mod markdown;
 pub mod mcp_panel;
+pub mod menus;
 pub mod mouse;
 pub mod mouse_select;
 pub mod notify;

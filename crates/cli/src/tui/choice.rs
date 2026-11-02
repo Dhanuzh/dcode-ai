@@ -20,6 +20,9 @@ pub enum ChoiceAction {
         /// (memory file, note id) pairs to remove.
         remove: Vec<(PathBuf, String)>,
     },
+    /// A pick-from-a-list menu (call settings, kick, to-dos): see
+    /// `tui::menus`. Shown even while the agent works.
+    Menu(crate::tui::menus::Menu),
 }
 
 /// A repair `/doctor` can make.

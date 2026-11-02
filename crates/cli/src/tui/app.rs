@@ -1248,7 +1248,12 @@ pub fn run_blocking(
                     );
                 }
                 Event::Paste(pasted) => {
-                    if g.transcript_search_open {
+                    if g.team_typing
+                        && g.rail_tab == crate::tui::state::RailTab::Team
+                        && g.view_mode == crate::tui::state::ViewMode::Dashboard
+                    {
+                        g.team_input.push_str(&pasted.replace(['\r', '\n'], " "));
+                    } else if g.transcript_search_open {
                         // Pasted (or typed fast) into the find box.
                         g.transcript_search_query
                             .push_str(pasted.lines().next().unwrap_or(""));

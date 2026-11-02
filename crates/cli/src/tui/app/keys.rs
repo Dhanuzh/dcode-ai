@@ -250,6 +250,40 @@ pub(super) fn handle_key_event(
             return KeyFlow::Continue;
         }
     }
+    // Typing in the team tab's chat box.
+    if dashboard_free && g.rail_tab == crate::tui::state::RailTab::Team && g.team_typing {
+        match key.code {
+            KeyCode::Esc => {
+                g.team_typing = false;
+                return KeyFlow::Continue;
+            }
+            KeyCode::Enter => {
+                let text = std::mem::take(&mut g.team_input).trim().to_string();
+                if !text.is_empty() {
+                    match g.chat_sink.clone() {
+                        Some(sink) => sink(text),
+                        None => {
+                            let _ = cmd_tx.send(TuiCmd::Submit(format!("/chat {text}")));
+                        }
+                    }
+                }
+                return KeyFlow::Continue;
+            }
+            KeyCode::Backspace => {
+                g.team_input.pop();
+                return KeyFlow::Continue;
+            }
+            KeyCode::Char(c)
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                g.team_input.push(c);
+                return KeyFlow::Continue;
+            }
+            _ => {}
+        }
+    }
     if dashboard_free && g.rail_focus && handle_changes_key(key, g) {
         return KeyFlow::Continue;
     }

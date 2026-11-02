@@ -287,7 +287,14 @@ impl Repl {
                                 out.println(&format!("[invite] {line}"));
                             }
                         }
-                        out.println("[invite] outside this network: use a VPN such as Tailscale and its address instead");
+                        match &inv.tailscale {
+                            Some(ip) => out.println(&format!(
+                                "[invite] works over Tailscale too ({ip}) — from any network, when they run Tailscale"
+                            )),
+                            None => out.println(
+                                "[invite] from another network: run `dcode-ai setup tailscale` once on both computers, then /invite again",
+                            ),
+                        }
                         self.invite = Some(inv);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => out.eprintln(&format!(
@@ -311,6 +318,16 @@ impl Repl {
                     return Ok(true);
                 };
                 let already = st.lock().map(|g| g.office.voice.is_some()).unwrap_or(false);
+                // In a call: the call menu (pick, don't type).
+                if already && rest.trim().is_empty() {
+                    if let Ok(mut g) = st.lock()
+                        && let Some(menu) = crate::tui::menus::call_menu(&g)
+                    {
+                        g.choice_prompts.push_front(menu);
+                        g.touch_transcript();
+                    }
+                    return Ok(true);
+                }
                 if already || !rest.trim().is_empty() {
                     let lines = st
                         .lock()
@@ -376,29 +393,14 @@ impl Repl {
             "/chat" => {
                 let text = rest.trim();
                 if text.is_empty() {
-                    let lines: Vec<String> = match &out {
-                        ReplOutput::Tui(st) => st
-                            .lock()
-                            .map(|g| {
-                                g.team
-                                    .chat
-                                    .iter()
-                                    .rev()
-                                    .take(20)
-                                    .rev()
-                                    .map(|c| {
-                                        format!("{} {}: {}", c.at.format("%H:%M"), c.name, c.text)
-                                    })
-                                    .collect()
-                            })
-                            .unwrap_or_default(),
-                        _ => Vec::new(),
-                    };
-                    if lines.is_empty() {
-                        out.println("[chat] no chat yet — /chat <text> talks to the people here (the agent doesn't see it) · dashboard Alt+6");
-                    }
-                    for l in lines {
-                        out.println(&format!("[chat] {l}"));
+                    // The chat window: the dashboard's team tab, ready to type.
+                    match &out {
+                        ReplOutput::Tui(st) => {
+                            if let Ok(mut g) = st.lock() {
+                                g.open_team_chat();
+                            }
+                        }
+                        _ => out.println("[chat] /chat <text> talks to the people here (the agent doesn't see it)"),
                     }
                     return Ok(true);
                 }
@@ -424,6 +426,22 @@ impl Repl {
                     let lines = st.lock().map(|g| g.team.lines()).unwrap_or_default();
                     for l in lines {
                         out.println(&format!("[todo] {l}"));
+                    }
+                    return Ok(true);
+                }
+                if arg == "done" || arg == "tick" {
+                    let menu = st
+                        .lock()
+                        .ok()
+                        .and_then(|g| crate::tui::menus::todo_menu(&g));
+                    match menu {
+                        Some(menu) => {
+                            if let Ok(mut g) = st.lock() {
+                                g.choice_prompts.push_front(menu);
+                                g.touch_transcript();
+                            }
+                        }
+                        None => out.println("[todo] nothing open to tick off"),
                     }
                     return Ok(true);
                 }
@@ -490,7 +508,21 @@ impl Repl {
             "/kick" => {
                 let name = rest.trim();
                 if name.is_empty() {
-                    out.eprintln("usage: /kick <name> (see /people)");
+                    // Pick who from a list.
+                    let names: Vec<String> = self
+                        .invite
+                        .as_ref()
+                        .map(|i| i.guests().into_iter().map(|g| g.name).collect())
+                        .unwrap_or_default();
+                    match (crate::tui::menus::kick_menu(names), &out) {
+                        (Some(menu), ReplOutput::Tui(st)) => {
+                            if let Ok(mut g) = st.lock() {
+                                g.choice_prompts.push_front(menu);
+                                g.touch_transcript();
+                            }
+                        }
+                        _ => out.println("[kick] no invited guests are here"),
+                    }
                     return Ok(true);
                 }
                 let n = self.invite.as_ref().map(|i| i.kick(name)).unwrap_or(0);

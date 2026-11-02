@@ -13,6 +13,7 @@ pub mod prompt;
 pub mod share;
 pub mod slash_commands;
 pub mod stream;
+pub mod tailscale;
 pub mod tool_ui;
 pub mod tui;
 pub mod update_check;

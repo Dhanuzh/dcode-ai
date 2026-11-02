@@ -437,23 +437,36 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             }
             let list_h = (here.len() as u16 + 1).min(body.height / 3);
             let n = g.office.stations().len();
-            let (_, room_h) = crate::tui::office::office_layout(
-                body.width,
-                body.height.saturating_sub(list_h),
-                n,
-            );
+            // A team: everyone small, so five or more fit in the panel.
+            let compact = n > 2;
+            let room_h = if compact {
+                crate::tui::office::mini_height(body.width, n)
+            } else {
+                crate::tui::office::office_layout(body.width, body.height.saturating_sub(list_h), n)
+                    .1
+            };
             let room = Rect {
-                height: room_h.min(body.height),
+                height: room_h.min(body.height.saturating_sub(list_h).max(4)),
                 ..body
             };
-            frame.render_widget(
-                crate::tui::office::OfficeView {
-                    office: &g.office,
-                    tick,
-                    selected: None,
-                },
-                room,
-            );
+            if compact {
+                frame.render_widget(
+                    crate::tui::office::MiniOfficeView {
+                        office: &g.office,
+                        tick,
+                    },
+                    room,
+                );
+            } else {
+                frame.render_widget(
+                    crate::tui::office::OfficeView {
+                        office: &g.office,
+                        tick,
+                        selected: None,
+                    },
+                    room,
+                );
+            }
             let below = Rect {
                 y: room.y + room.height + 1,
                 height: body.height.saturating_sub(room.height + 1),
@@ -463,14 +476,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
                 frame.render_widget(Paragraph::new(Text::from(here)), below);
             }
         }
-        RailTab::Team => frame.render_widget(
-            Paragraph::new(Text::from(team_lines(
-                &g.team,
-                body.width as usize,
-                body.height as usize,
-            ))),
-            body,
-        ),
+        RailTab::Team => render_team(frame, body, g),
         RailTab::Files => frame.render_widget(
             Paragraph::new(Text::from(files_lines(
                 &g.file_map,
@@ -482,51 +488,137 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
     }
 }
 
-/// The shared to-do list on top, the people's chat below (newest last).
-pub(super) fn team_lines(
-    team: &crate::tui::team::Team,
-    width: usize,
-    height: usize,
-) -> Vec<Line<'static>> {
-    let mut lines = vec![muted("to-dos · /todo <text> · /todo done <n>")];
-    if team.todos.is_empty() {
-        lines.push(muted("  nothing yet"));
-    }
-    for (i, t) in team.todos.iter().enumerate() {
-        let (mark, style) = match &t.done_by {
-            Some(_) => ("☑", Style::default().fg(theme::muted())),
-            None => ("☐", Style::default().fg(theme::text())),
-        };
-        lines.push(Line::from(vec![
+/// The team tab like a chat app: the shared to-dos on top, the messages as
+/// bubbles (yours on the right), and a box to type in at the bottom.
+fn render_team(frame: &mut ratatui::Frame<'_>, body: Rect, g: &TuiSessionState) {
+    let w = body.width as usize;
+    // To-dos (open ones; at most 4 lines).
+    let open: Vec<(usize, &crate::tui::team::TeamTodo)> = g
+        .team
+        .todos
+        .iter()
+        .enumerate()
+        .filter(|(_, t)| t.done_by.is_none())
+        .collect();
+    let mut top = vec![muted(format!(
+        "to-dos · {} open · /todo <text> · /todo done",
+        open.len()
+    ))];
+    for (i, t) in open.iter().take(4) {
+        top.push(Line::from(vec![
             Span::styled(
-                format!("{:>2} {mark} ", i + 1),
+                format!(" #{} ☐ ", i + 1),
                 Style::default().fg(theme::accent()),
             ),
-            Span::styled(truncate_chars(&t.text, width.saturating_sub(6)), style),
-        ]));
-    }
-    lines.push(Line::default());
-    lines.push(muted("chat · /chat <text> (the agent doesn't see it)"));
-    let room = height.saturating_sub(lines.len());
-    if team.chat.is_empty() {
-        lines.push(muted("  no messages yet"));
-    }
-    let skip = team.chat.len().saturating_sub(room);
-    for c in team.chat.iter().skip(skip) {
-        lines.push(Line::from(vec![
             Span::styled(
-                format!("{} ", c.name),
-                Style::default()
-                    .fg(theme::accent())
-                    .add_modifier(ratatui::style::Modifier::BOLD),
-            ),
-            Span::styled(
-                truncate_chars(&c.text, width.saturating_sub(c.name.chars().count() + 1)),
+                truncate_chars(&t.text, w.saturating_sub(8)),
                 Style::default().fg(theme::text()),
             ),
         ]));
     }
-    lines
+    if open.len() > 4 {
+        top.push(muted(format!("  … {} more (/todo)", open.len() - 4)));
+    }
+    let top_h = (top.len() as u16 + 1).min(body.height / 3);
+    let input_h = 3u16.min(body.height.saturating_sub(top_h));
+    let chat_h = body.height.saturating_sub(top_h + input_h);
+    let rows = Layout::vertical([
+        Constraint::Length(top_h),
+        Constraint::Length(chat_h),
+        Constraint::Length(input_h),
+    ])
+    .split(body);
+    frame.render_widget(Paragraph::new(Text::from(top)), rows[0]);
+
+    // Messages, newest at the bottom.
+    let me = match &g.office.me {
+        Some(id) => g
+            .office
+            .people
+            .iter()
+            .find(|p| p.id == *id)
+            .map(|p| p.name.clone()),
+        None => g
+            .office
+            .people
+            .iter()
+            .find(|p| p.role == crate::tui::office::PersonRole::Owner)
+            .map(|p| p.name.clone()),
+    }
+    .unwrap_or_default();
+    let bubble_w = (w * 4 / 5).max(10);
+    let mut lines: Vec<Line> = Vec::new();
+    if g.team.chat.is_empty() {
+        lines.push(muted(
+            "no messages yet — the people here see them; the agent doesn't",
+        ));
+    }
+    for c in &g.team.chat {
+        let mine = c.name == me;
+        let pad = |text: String| -> String {
+            if mine {
+                let n = text.chars().count();
+                format!("{}{text}", " ".repeat(w.saturating_sub(n)))
+            } else {
+                text
+            }
+        };
+        lines.push(Line::default());
+        let header = if mine {
+            format!("{} · you", c.at.format("%H:%M"))
+        } else {
+            format!("{} · {}", c.name, c.at.format("%H:%M"))
+        };
+        lines.push(Line::from(Span::styled(
+            pad(header),
+            Style::default()
+                .fg(if mine {
+                    theme::muted()
+                } else {
+                    theme::accent()
+                })
+                .add_modifier(ratatui::style::Modifier::BOLD),
+        )));
+        let bubble = Style::default().fg(theme::text()).bg(theme::surface());
+        for part in textwrap::wrap(&c.text, bubble_w.saturating_sub(2)) {
+            lines.push(Line::from(Span::styled(pad(format!(" {part} ")), bubble)));
+        }
+    }
+    let skip = lines.len().saturating_sub(rows[1].height as usize);
+    let shown: Vec<Line> = lines.into_iter().skip(skip).collect();
+    frame.render_widget(Paragraph::new(Text::from(shown)), rows[1]);
+
+    // The box to type in.
+    let typing = g.team_typing;
+    let text = if g.team_input.is_empty() && !typing {
+        Span::styled(
+            "Alt+6 or /chat to type…",
+            Style::default().fg(theme::muted()),
+        )
+    } else if g.team_input.is_empty() {
+        Span::styled(
+            "message the team… (Enter send · Esc back)",
+            Style::default().fg(theme::muted()),
+        )
+    } else {
+        let room = w.saturating_sub(4);
+        let n = g.team_input.chars().count();
+        let shown: String = g.team_input.chars().skip(n.saturating_sub(room)).collect();
+        Span::styled(format!("{shown}▏"), Style::default().fg(theme::text()))
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(text)).block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(if typing {
+                    theme::accent()
+                } else {
+                    theme::border()
+                })),
+        ),
+        rows[2],
+    );
 }
 
 /// The files the agent touched as a tree: edits bright with their count,

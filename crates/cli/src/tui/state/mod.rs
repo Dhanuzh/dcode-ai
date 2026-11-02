@@ -122,6 +122,9 @@ impl TuiSessionState {
             office: Default::default(),
             shell_stopped_at: None,
             team: Default::default(),
+            team_typing: false,
+            team_input: String::new(),
+            chat_sink: None,
             office_open: false,
             office_selected: 0,
             busy: false,
@@ -1536,8 +1539,15 @@ impl TuiSessionState {
         self.rail_focus = true;
     }
 
+    /// The dashboard's team tab, ready to type in its chat box.
+    pub fn open_team_chat(&mut self) {
+        self.view_mode = crate::tui::state::ViewMode::Dashboard;
+        self.select_rail_tab(RailTab::Team);
+    }
+
     pub fn select_rail_tab(&mut self, tab: RailTab) {
         self.rail_tab = tab;
+        self.team_typing = tab == RailTab::Team;
         if tab == RailTab::Changes {
             self.diff_review.refresh(&self.workspace_root);
         } else {
@@ -1661,17 +1671,24 @@ impl TuiSessionState {
     /// The decision prompt to show now: only between turns and when no
     /// approval or question is waiting.
     pub fn active_choice(&self) -> Option<&crate::tui::choice::ChoicePrompt> {
-        if self.busy || self.active_approval.is_some() || self.active_question.is_some() {
+        if self.active_approval.is_some() || self.active_question.is_some() {
             return None;
         }
-        self.choice_prompts.front()
+        // Menus you opened yourself show at once; decisions wait for the
+        // agent to finish.
+        self.choice_prompts
+            .front()
+            .filter(|c| !self.busy || matches!(c.action, crate::tui::choice::ChoiceAction::Menu(_)))
     }
 
     pub fn active_choice_mut(&mut self) -> Option<&mut crate::tui::choice::ChoicePrompt> {
-        if self.busy || self.active_approval.is_some() || self.active_question.is_some() {
+        if self.active_approval.is_some() || self.active_question.is_some() {
             return None;
         }
-        self.choice_prompts.front_mut()
+        let busy = self.busy;
+        self.choice_prompts
+            .front_mut()
+            .filter(|c| !busy || matches!(c.action, crate::tui::choice::ChoiceAction::Menu(_)))
     }
 
     /// Messages waiting for the agent's next step (sent with Enter).

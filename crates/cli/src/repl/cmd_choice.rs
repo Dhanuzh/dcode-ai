@@ -43,6 +43,50 @@ impl Repl {
         st: &Arc<Mutex<TuiSessionState>>,
     ) {
         match action {
+            ChoiceAction::Menu(menu) => {
+                use crate::tui::menus::MenuEffect;
+                let effect = match st.lock() {
+                    Ok(mut g) => crate::tui::menus::chosen(menu, index, &mut g),
+                    Err(_) => MenuEffect::None,
+                };
+                let say = |text: String| {
+                    if let Ok(mut g) = st.lock() {
+                        g.push_block(DisplayBlock::System(text));
+                        g.touch_transcript();
+                    }
+                };
+                match effect {
+                    MenuEffect::None => {}
+                    MenuEffect::Say(text) => say(text),
+                    MenuEffect::HangUp => {
+                        if let Ok(mut g) = st.lock()
+                            && let Some(v) = g.office.voice.take()
+                        {
+                            v.hang_up();
+                        }
+                        if let Some(inv) = self.invite.as_ref().or(self.local_invite.as_ref()) {
+                            inv.call_leave();
+                        }
+                        say("[call] you left the call".into());
+                    }
+                    MenuEffect::Kick(name) => {
+                        let n = self.invite.as_ref().map(|i| i.kick(&name)).unwrap_or(0);
+                        say(if n > 0 {
+                            format!("[kick] removed {name} — their invite no longer works for them")
+                        } else {
+                            format!("[kick] {name} isn't here any more")
+                        });
+                    }
+                    MenuEffect::TodoDone(id) => {
+                        let by = dcode_ai_cli::people::my_name(self.runtime.workspace_root());
+                        if let Some(tx) = self.runtime.event_tx() {
+                            let _ = tx
+                                .send(dcode_ai_common::event::AgentEvent::TeamTodoDone { id, by })
+                                .await;
+                        }
+                    }
+                }
+            }
             ChoiceAction::SubagentChanges {
                 child_session_id,
                 task,

@@ -1353,6 +1353,17 @@ impl Repl {
         // `dcode-ai join <id>` on this machine: a private local invite (full
         // interface, calls; no knock — only this user can read its key).
         self.start_local_invite().await;
+        // The team chat box sends straight away, even mid-turn.
+        if let (Some(tx), Ok(mut g)) = (self.runtime.event_tx(), tui_state.lock()) {
+            let name = dcode_ai_cli::people::my_name(self.runtime.workspace_root());
+            g.chat_sink = Some(std::sync::Arc::new(move |text: String| {
+                let _ = tx.try_send(dcode_ai_common::event::AgentEvent::PersonChat {
+                    person: "owner".into(),
+                    name: name.clone(),
+                    text: text.chars().take(2000).collect(),
+                });
+            }));
+        }
         if let Ok(mut g) = tui_state.lock() {
             g.mcp_server_count = self
                 .runtime

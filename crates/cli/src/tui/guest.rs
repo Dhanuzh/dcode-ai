@@ -22,30 +22,19 @@ fn guest_command(text: &str, g: &mut TuiSessionState, send: &GuestSender) -> Gue
         "/chat" if !rest.is_empty() => {
             send.chat(rest);
         }
-        "/chat" => {
-            let lines: Vec<String> = g
-                .team
-                .chat
-                .iter()
-                .rev()
-                .take(20)
-                .rev()
-                .map(|c| format!("[chat] {} {}: {}", c.at.format("%H:%M"), c.name, c.text))
-                .collect();
-            if lines.is_empty() {
-                g.push_block(DisplayBlock::System(
-                    "[chat] no chat yet — /chat <text> talks to the people here (the agent doesn't see it)".into(),
-                ));
-            }
-            for l in lines {
-                g.push_block(DisplayBlock::System(l));
-            }
-        }
+        "/chat" => g.open_team_chat(),
         "/todo" if rest.is_empty() => {
             for l in g.team.lines() {
                 g.push_block(DisplayBlock::System(format!("[todo] {l}")));
             }
         }
+        "/todo" if rest == "done" || rest == "tick" => match crate::tui::menus::todo_menu(g) {
+            Some(menu) => {
+                g.choice_prompts.push_front(menu);
+                g.touch_transcript();
+            }
+            None => g.push_block(DisplayBlock::System("[todo] nothing open to tick off".into())),
+        },
         "/todo" => {
             if let Some(which) = rest.strip_prefix("done ").or_else(|| rest.strip_prefix("tick ")) {
                 match g.team.find(which).map(|t| t.id.clone()) {
@@ -77,6 +66,12 @@ fn guest_command(text: &str, g: &mut TuiSessionState, send: &GuestSender) -> Gue
                 .collect();
             for l in names {
                 g.push_block(DisplayBlock::System(l));
+            }
+        }
+        "/call" if g.office.voice.is_some() && rest.is_empty() => {
+            if let Some(menu) = crate::tui::menus::call_menu(g) {
+                g.choice_prompts.push_front(menu);
+                g.touch_transcript();
             }
         }
         "/call" => {
@@ -200,6 +195,12 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
         )));
     }
     let (send, mut updates) = guest.into_parts();
+    if let Ok(mut g) = state.lock() {
+        let s = send.clone();
+        g.chat_sink = Some(std::sync::Arc::new(move |text: String| {
+            s.chat(&text);
+        }));
+    }
 
     // Events → the same state the host's TUI uses.
     let feed_state = state.clone();
@@ -313,6 +314,33 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
                     TuiCmd::Exit => break,
                     TuiCmd::QuestionAnswer(_) => {
                         note(&state, "only the host can answer the agent's questions");
+                    }
+                    TuiCmd::Choice(crate::tui::choice::ChoiceAction::Menu(menu), index) => {
+                        use crate::tui::menus::MenuEffect;
+                        let effect = match state.lock() {
+                            Ok(mut g) => crate::tui::menus::chosen(menu, index, &mut g),
+                            Err(_) => MenuEffect::None,
+                        };
+                        match effect {
+                            MenuEffect::None | MenuEffect::Kick(_) => {}
+                            MenuEffect::Say(text) => {
+                                if let Ok(mut g) = state.lock() {
+                                    g.push_block(DisplayBlock::System(text));
+                                }
+                            }
+                            MenuEffect::HangUp => {
+                                if let Ok(mut g) = state.lock()
+                                    && let Some(v) = g.office.voice.take()
+                                {
+                                    v.hang_up();
+                                }
+                                send.call_leave();
+                                note(&state, "you left the call");
+                            }
+                            MenuEffect::TodoDone(id) => {
+                                send.todo_done(&id);
+                            }
+                        }
                     }
                     _ => note(&state, "that isn't available while joined"),
                 }

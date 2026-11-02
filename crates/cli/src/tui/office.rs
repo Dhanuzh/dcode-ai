@@ -238,8 +238,11 @@ impl Office {
     pub fn tidy(&mut self) {
         self.agents
             .retain(|a| a.finished.is_none_or(|t| t.elapsed() < LINGER));
+        let me = self.me.clone();
         for p in &mut self.people {
+            // You never time out on your own screen.
             if p.role != PersonRole::Owner
+                && me.as_deref() != Some(p.id.as_str())
                 && p.leaving.is_none()
                 && p.last_seen.elapsed() > AWAY_AFTER
             {
@@ -1069,6 +1072,149 @@ impl Widget for OfficeView<'_> {
     }
 }
 
+/// Columns per person in the compact office.
+const MINI_W: usize = 12;
+/// Terminal rows per person in the compact office (5 of art, the name, a gap).
+const MINI_ROWS: usize = 7;
+
+/// Rows the compact office needs for `n` at `width`.
+pub fn mini_height(width: u16, n: usize) -> u16 {
+    let per_row = (width as usize / MINI_W).max(1);
+    (n.max(1).div_ceil(per_row) * MINI_ROWS) as u16
+}
+
+/// The office small: everyone as a little figure with their name, so a
+/// whole team fits in the dashboard's side panel.
+pub struct MiniOfficeView<'a> {
+    pub office: &'a Office,
+    pub tick: u64,
+}
+
+impl Widget for MiniOfficeView<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        if area.width < MINI_W as u16 || area.height < MINI_ROWS as u16 {
+            return;
+        }
+        let stations = self.office.stations();
+        let w = area.width as usize;
+        let rows = area.height as usize;
+        let mut canvas = Canvas::new(w, rows * 2, room()[2]);
+        // Floorboards.
+        for y in 0..canvas.h {
+            for x in 0..w {
+                if (x + (y / 4) * 7) % 13 == 0 {
+                    canvas.set(x as i32, y as i32, room()[4]);
+                }
+            }
+        }
+        let per_row = (w / MINI_W).max(1);
+        let left = (w - per_row.min(stations.len().max(1)) * MINI_W) / 2;
+        let f = self.tick as i32;
+        let mut labels: Vec<(u16, u16, String, Style)> = Vec::new();
+        for (i, who) in stations.iter().enumerate() {
+            let (col, row) = (i % per_row, i / per_row);
+            if (row + 1) * MINI_ROWS > rows {
+                break;
+            }
+            let ox = (left + col * MINI_W) as i32 + 1;
+            let oy = (row * MINI_ROWS * 2) as i32 + 1;
+            let p = |c: &mut Canvas, x: i32, y: i32, col: Color| c.set(ox + x, oy + y, col);
+            let r = |c: &mut Canvas, x: i32, y: i32, ww: i32, hh: i32, col: Color| {
+                c.rect(ox + x, oy + y, ww, hh, col)
+            };
+            let (look, name, tag, on_call, speaking, activity) = match who {
+                Who::Agent(a) => (
+                    a.look,
+                    a.name.clone(),
+                    rgb(0x1a, 0x16, 0x14),
+                    false,
+                    false,
+                    Some(a.activity),
+                ),
+                Who::Person(pp) => {
+                    let tag = match pp.role {
+                        PersonRole::Owner => rgb(0xd9, 0x77, 0x57),
+                        PersonRole::Joined => rgb(0x3f, 0x7f, 0xbf),
+                        PersonRole::Watching => rgb(0x5a, 0x60, 0x6c),
+                    };
+                    let me = match &self.office.me {
+                        Some(me) => *me == pp.id,
+                        None => pp.role == PersonRole::Owner,
+                    };
+                    (
+                        pp.look,
+                        if me {
+                            format!("{} (you)", pp.name)
+                        } else {
+                            pp.name.clone()
+                        },
+                        tag,
+                        self.office.in_call.contains(&pp.id),
+                        self.office.speaking(&pp.id),
+                        None,
+                    )
+                }
+            };
+            let (hair, skin, shirt) = LOOKS[look % LOOKS.len()];
+            // Head and body.
+            r(&mut canvas, 3, 0, 5, 2, hair);
+            r(&mut canvas, 3, 2, 5, 3, skin);
+            r(&mut canvas, 3, 2, 5, 1, hair);
+            p(&mut canvas, 4, 3, EYE);
+            p(&mut canvas, 6, 3, EYE);
+            r(&mut canvas, 2, 5, 7, 4, shirt);
+            if speaking && f % 2 == 0 {
+                p(&mut canvas, 5, 4, rgb(0x8a, 0x3a, 0x3a));
+            }
+            if on_call {
+                let set = rgb(0x30, 0x34, 0x3c);
+                r(&mut canvas, 3, -1, 5, 1, set);
+                r(&mut canvas, 2, 1, 1, 2, set);
+                r(&mut canvas, 8, 1, 1, 2, set);
+            }
+            if speaking {
+                let wave = rgb(0x7f, 0xbf, 0x7f);
+                p(&mut canvas, 9, 2, wave);
+                p(&mut canvas, 9, 4, wave);
+                if (f / 2) % 2 == 0 {
+                    p(&mut canvas, 10, 3, wave);
+                }
+            }
+            if let Some(act) = activity {
+                // A laptop whose screen shows what the agent does.
+                r(&mut canvas, 5, 6, 5, 3, LAPTOP);
+                r(&mut canvas, 6, 7, 3, 1, act.glow());
+            }
+            let label = short(&name, MINI_W - 1).to_string();
+            let x = (left + col * MINI_W) as u16 + ((MINI_W - label.chars().count()) / 2) as u16;
+            let style = if matches!(who, Who::Person(_)) {
+                Style::default()
+                    .fg(rgb(0xf8, 0xf6, 0xf2))
+                    .bg(tag)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(rgb(0xec, 0xe6, 0xdf)).bg(tag)
+            };
+            labels.push((x, (row * MINI_ROWS + 5) as u16, label, style));
+        }
+        for row in 0..rows {
+            for x in 0..w {
+                let top = canvas.px[(row * 2) * canvas.w + x];
+                let bottom = canvas.px[(row * 2 + 1) * canvas.w + x];
+                if let Some(cell) = buf.cell_mut((area.x + x as u16, area.y + row as u16)) {
+                    cell.set_symbol("▀");
+                    cell.set_style(Style::default().fg(top).bg(bottom));
+                }
+            }
+        }
+        for (x, y, text, style) in labels {
+            if y < area.height {
+                buf.set_string(area.x + x, area.y + y, text, style);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,6 +1354,51 @@ mod preview {
             Color::Rgb(r, g, b) => json!([r, g, b]),
             _ => json!([20, 20, 24]),
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn mini_office_preview() {
+        let mut o = Office::default();
+        o.set_owner("ddhanush1");
+        for (id, name) in [
+            ("a", "Pathithyan"),
+            ("b", "Priya"),
+            ("c", "Sam"),
+            ("d", "Kiran"),
+        ] {
+            o.apply(&AgentEvent::PersonJoined {
+                person: id.into(),
+                name: name.into(),
+                role: "join".into(),
+            });
+        }
+        o.in_call.insert("owner".into());
+        o.in_call.insert("a".into());
+        let area = Rect::new(0, 0, 44, mini_height(44, o.stations().len()));
+        let mut buf = Buffer::empty(area);
+        MiniOfficeView {
+            office: &o,
+            tick: 2,
+        }
+        .render(area, &mut buf);
+        let color = |c: Color| match c {
+            Color::Rgb(r, g, b) => json!([r, g, b]),
+            _ => json!([20, 20, 20]),
+        };
+        let rows: Vec<Vec<serde_json::Value>> = (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| {
+                        let c = &buf[(x, y)];
+                        json!([c.symbol(), color(c.fg), color(c.bg)])
+                    })
+                    .collect()
+            })
+            .collect();
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/mini-office.json");
+        std::fs::write(path, serde_json::to_string(&vec![rows]).unwrap()).unwrap();
     }
 
     #[test]

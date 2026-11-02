@@ -338,6 +338,12 @@ pub struct TuiSessionState {
     pub shell_stopped_at: Option<std::time::Instant>,
     /// Chat between people and the shared to-do list.
     pub team: crate::tui::team::Team,
+    /// Typing in the team tab's chat box (keys go there, not the composer).
+    pub team_typing: bool,
+    pub team_input: String,
+    /// Sends a chat line right away (the host's command loop waits while
+    /// the agent works; chat shouldn't).
+    pub chat_sink: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
     pub office_open: bool,
     pub office_selected: usize,
     pub busy: bool,

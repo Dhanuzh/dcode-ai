@@ -1259,8 +1259,26 @@ fn a_local_join_gets_the_interface_and_the_call() {
 
     run(&mut host, "/call volume Kiran 40");
     host.wait_for("Kiran at 40% for you");
-    run(&mut host, "/call");
-    host.wait_for("Kiran · volume 40");
+    // Settings by picking from menus, not typing.
+    run(&mut mate, "/call");
+    mate.wait_for("Volume for someone");
+    mate.send(b"4");
+    mate.wait_for("Whose volume?");
+    mate.send(b"1");
+    mate.wait_for("Volume for ");
+    mate.send(b"2");
+    mate.wait_for("at 50% for you");
+
+    // The chat window: the dashboard's team tab with a box to type in.
+    run(&mut host, "/chat");
+    host.wait_for("message the team");
+    host.send(b"hi team");
+    std::thread::sleep(Duration::from_millis(200));
+    host.send(b"\r");
+    mate.wait_for("hi team");
+    host.send(b"\x1b");
+    host.send(b"\x1c");
+    host.wait_until("back to the inline view", |t| !t.contains("Alt+1-6"));
 
     run(&mut mate, "/hangup");
     host.wait_for("Kiran left the call");

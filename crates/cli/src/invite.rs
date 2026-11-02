@@ -37,7 +37,9 @@ const MAX_GUESTS: usize = 8;
 /// The default port, fixed so a firewall rule is made once.
 pub const DEFAULT_PORT: u16 = 8788;
 
-/// `host:port/key`, what `/invite` prints.
+/// `host:port/key`, what `/invite` prints. `host` may list several
+/// addresses (`192.168.0.9,100.101.2.3`): the LAN one and the Tailscale
+/// one; `join` tries each.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Invite {
     pub host: String,
@@ -56,21 +58,69 @@ impl Invite {
         if host.is_empty() || key.len() < 16 || !key.chars().all(|c| c.is_ascii_alphanumeric()) {
             return None;
         }
+        let hosts: Vec<&str> = host
+            .split(',')
+            .map(|h| h.trim().trim_matches(['[', ']']))
+            .filter(|h| !h.is_empty())
+            .collect();
+        if hosts.is_empty() {
+            return None;
+        }
         Some(Self {
-            host: host.trim_matches(['[', ']']).to_string(),
+            host: hosts.join(","),
             port,
             key: key.to_string(),
         })
     }
 
+    /// Every address to try, in order.
+    pub fn hosts(&self) -> Vec<String> {
+        self.host
+            .split(',')
+            .map(str::trim)
+            .filter(|h| !h.is_empty())
+            .map(str::to_string)
+            .collect()
+    }
+
     pub fn as_string(&self) -> String {
-        let host = if self.host.contains(':') {
-            format!("[{}]", self.host)
-        } else {
-            self.host.clone()
-        };
+        let host = self
+            .hosts()
+            .iter()
+            .map(|h| {
+                if h.contains(':') {
+                    format!("[{h}]")
+                } else {
+                    h.clone()
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(",");
         format!("{host}:{}/{}", self.port, self.key)
     }
+}
+
+/// Why a host couldn't be reached, in words: different networks, or
+/// something on the way blocking it.
+pub fn unreachable_hint(hosts: &[String]) -> String {
+    let mine = crate::watch::lan_address().map(|ip| ip.to_string());
+    let prefix = |ip: &str| ip.rsplit_once('.').map(|x| x.0.to_string());
+    let lan_hosts: Vec<&String> = hosts.iter().filter(|h| !h.starts_with("100.")).collect();
+    if let (Some(me), Some(h)) = (mine.as_deref(), lan_hosts.first())
+        && prefix(me).is_some()
+        && prefix(me) != prefix(h)
+    {
+        return format!(
+            "you're on {}.x and the host is on {}.x — different networks. Join the same Wi-Fi, \
+             share a phone hotspot, or use Tailscale on both (dcode-ai setup tailscale).",
+            prefix(me).unwrap_or_default(),
+            prefix(h).unwrap_or_default()
+        );
+    }
+    "same network, but nothing answered: the host's firewall may block the port, or this Wi-Fi \
+     keeps devices apart (office and guest Wi-Fi often do) — try a phone hotspot or Tailscale \
+     (dcode-ai setup tailscale)."
+        .into()
 }
 
 /// A fresh invite key: 24 random letters and digits (~142 bits).
@@ -313,6 +363,8 @@ pub struct GuestInfo {
 /// everyone who came in through it.
 pub struct InviteHandle {
     pub invite: Invite,
+    /// This machine's Tailscale address, when the line includes one.
+    pub tailscale: Option<String>,
     pub web_url: Option<String>,
     pub let_approve: bool,
     host: Arc<Host>,
@@ -422,7 +474,19 @@ pub async fn host(opts: HostOptions) -> std::io::Result<InviteHandle> {
     };
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     let port = listener.local_addr()?.port();
-    host_on(listener, opts, port).await
+    let mut handle = host_on(listener, opts, port).await?;
+    // Reachable over Tailscale too: put its address in the line.
+    let ts = tokio::task::spawn_blocking(crate::tailscale::ip)
+        .await
+        .ok()
+        .flatten();
+    if let Some(ts) = ts
+        && !handle.invite.hosts().contains(&ts)
+    {
+        handle.invite.host = format!("{},{ts}", handle.invite.host);
+        handle.tailscale = Some(ts);
+    }
+    Ok(handle)
 }
 
 /// The private local invite: 127.0.0.1 on a free port, nobody asked (only
@@ -547,6 +611,7 @@ async fn host_on(
     });
     Ok(InviteHandle {
         invite,
+        tailscale: None,
         web_url,
         let_approve: opts.let_approve,
         host: shared,
@@ -925,9 +990,8 @@ impl Host {
                         let _ = cipher.send(&mut write, &fin("the session ended")).await;
                         break Ended::Gone;
                     };
-                    if matches!(env.event, AgentEvent::PersonSeen { .. }) {
-                        continue;
-                    }
+                    // (PersonSeen too: without it, everyone who joined
+                    // would seem to leave after 25 s on the guest's screen.)
                     if cipher.send(&mut write, &json!({"t": "event", "e": env})).await.is_err() {
                         break Ended::Dropped;
                     }
@@ -1194,15 +1258,31 @@ async fn open_link(
     hello: Value,
     on_wait: impl FnOnce(),
 ) -> Result<Link, LinkError> {
-    let addr = format!("{}:{}", invite.host, invite.port);
-    let mut stream = tokio::time::timeout(Duration::from_secs(10), TcpStream::connect(&addr))
-        .await
-        .map_err(|_| {
-            LinkError::Unreachable(format!(
-                "no answer from {addr} (not on the same network as the host, or the host's firewall blocks it)"
-            ))
-        })?
-        .map_err(|e| LinkError::Unreachable(format!("can't reach {addr}: {e}")))?;
+    // Try each of the host's addresses (LAN, Tailscale…), first answer wins.
+    let hosts = invite.hosts();
+    let per_host = if hosts.len() > 1 { 5 } else { 10 };
+    let mut found = None;
+    for h in &hosts {
+        let addr = if h.contains(':') {
+            format!("[{h}]:{}", invite.port)
+        } else {
+            format!("{h}:{}", invite.port)
+        };
+        if let Ok(Ok(s)) =
+            tokio::time::timeout(Duration::from_secs(per_host), TcpStream::connect(&addr)).await
+        {
+            found = Some((s, addr));
+            break;
+        }
+    }
+    let Some((mut stream, addr)) = found else {
+        return Err(LinkError::Unreachable(format!(
+            "no answer from {} on port {} — {}",
+            hosts.join(" or "),
+            invite.port,
+            unreachable_hint(&hosts)
+        )));
+    };
     let cipher = tokio::time::timeout(
         Duration::from_secs(10),
         handshake_guest(&mut stream, &invite.key),
@@ -1477,6 +1557,10 @@ mod tests {
             Some(i)
         );
         assert!(Invite::parse("session-1793477206982552-0").is_none());
+        // LAN and Tailscale in one line; join tries each.
+        let two = Invite::parse("192.168.0.9,100.101.2.3:8788/abcdefghijkmnpqrstuvwxyz").unwrap();
+        assert_eq!(two.hosts(), ["192.168.0.9", "100.101.2.3"]);
+        assert_eq!(Invite::parse(&two.as_string()), Some(two));
         assert!(Invite::parse("1.2.3.4:88/short").is_none());
         assert!(Invite::parse("1.2.3.4/abcdefghijkmnpqrstuvwxyz").is_none());
         let six = Invite::parse("[fe80::1]:8788/abcdefghijkmnpqrstuvwxyz").unwrap();

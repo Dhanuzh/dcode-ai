@@ -392,7 +392,70 @@ fn wizard(workspace_root: &Path, all: &[Pack]) -> Option<(Vec<String>, McpScope)
     yes_no("Continue?", true).then_some((ids, scope))
 }
 
+/// `dcode-ai setup tailscale`: so people on other networks can join with
+/// `/invite`. Asks before installing anything; Tailscale's own installer
+/// and sign-in do the rest.
+fn setup_tailscale() -> anyhow::Result<()> {
+    use std::io::{BufRead, Write};
+    if let Some(ip) = dcode_ai_cli::tailscale::ip() {
+        println!("Tailscale is set up: this machine is {ip} on your tailnet.");
+        println!(
+            "/invite now includes it, so people on other networks running Tailscale can join."
+        );
+        return Ok(());
+    }
+    if dcode_ai_cli::tailscale::installed() {
+        println!("Tailscale is installed but not connected. Sign in:");
+        println!(
+            "  {}",
+            if cfg!(target_os = "linux") {
+                "sudo tailscale up"
+            } else {
+                "open Tailscale and sign in"
+            }
+        );
+        return Ok(());
+    }
+    let (what, commands) = dcode_ai_cli::tailscale::install_plan();
+    println!("Tailscale lets people on other networks join your session (both of you need it).");
+    println!("{what}");
+    for c in &commands {
+        println!("  {c}");
+    }
+    print!("Run this now? [y/N] ");
+    std::io::stdout().flush()?;
+    let mut answer = String::new();
+    std::io::stdin().lock().read_line(&mut answer)?;
+    if !matches!(answer.trim(), "y" | "Y" | "yes") {
+        println!("Not installed. Run the commands above yourself whenever you like.");
+        return Ok(());
+    }
+    for c in &commands {
+        println!("$ {c}");
+        let status = if cfg!(windows) {
+            std::process::Command::new("cmd").args(["/C", c]).status()?
+        } else {
+            std::process::Command::new("sh").args(["-c", c]).status()?
+        };
+        if !status.success() {
+            anyhow::bail!("`{c}` failed — see its output above");
+        }
+    }
+    match dcode_ai_cli::tailscale::ip() {
+        Some(ip) => {
+            println!("Done: this machine is {ip} on your tailnet. /invite now includes it.")
+        }
+        None => println!(
+            "Installed. Finish signing in to Tailscale, then /invite includes its address."
+        ),
+    }
+    Ok(())
+}
+
 pub async fn run(workspace_root: &Path, args: SetupArgs) -> anyhow::Result<()> {
+    if args.packs.len() == 1 && args.packs[0] == "tailscale" {
+        return setup_tailscale();
+    }
     let workspace_root = workspace_root
         .canonicalize()
         .unwrap_or_else(|_| workspace_root.to_path_buf());
