@@ -1,6 +1,11 @@
 # Changelog
 
-## 1.0.40 — 2026-11-02
+## 1.0.42 — 2026-11-02
+
+The 1.0.40 release build stopped on a new lint in Rust 1.99 (and the 1.0.41
+tag went out on that same commit); 1.0.42 is 1.0.40 with it fixed.
+
+## 1.0.40 — 2026-11-02 (not published)
 
 ### New
 - **Voice calls** (`/call`, `/mute`, `/hangup`): talk with the people on
