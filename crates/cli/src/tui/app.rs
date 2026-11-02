@@ -595,6 +595,27 @@ struct TranscriptRenderCache {
     hits: Vec<LineAnswerHit>,
 }
 
+/// Lines flushed to scrollback are written cell by cell, without the diff
+/// that knows a wide character (an emoji, CJK) covers two columns: the
+/// blank cell after it would be written too, pushing the rest of the line
+/// one column right. An empty symbol writes nothing there.
+fn blank_wide_tails(buf: &mut ratatui::buffer::Buffer) {
+    use unicode_width::UnicodeWidthStr;
+    let area = buf.area;
+    for y in area.top()..area.bottom() {
+        let mut x = area.left();
+        while x < area.right() {
+            let w = buf[(x, y)].symbol().width().max(1) as u16;
+            for k in 1..w {
+                if x + k < area.right() {
+                    buf[(x + k, y)].set_symbol("");
+                }
+            }
+            x += w;
+        }
+    }
+}
+
 fn latest_copyable_text(state: &TuiSessionState) -> Option<String> {
     if let Some(stream) = state.streaming_assistant.as_ref()
         && !stream.trim().is_empty()
@@ -799,6 +820,7 @@ pub fn run_blocking(
                     .style(Style::default().bg(theme::bg()))
                     .render(area, buf);
                 Paragraph::new(Text::from(blines)).render(area, buf);
+                blank_wide_tails(buf);
             });
         }
     }
@@ -1079,6 +1101,7 @@ pub fn run_blocking(
                         .style(Style::default().bg(theme::bg()))
                         .render(area, buf);
                     Paragraph::new(Text::from(blines)).render(area, buf);
+                    blank_wide_tails(buf);
                 });
             }
 
@@ -1122,6 +1145,7 @@ pub fn run_blocking(
                                 .style(Style::default().bg(theme::bg()))
                                 .render(area, buf);
                             Paragraph::new(Text::from(flush_lines)).render(area, buf);
+                            blank_wide_tails(buf);
                         });
                     }
                     g.flushed_block_count = flush_target;

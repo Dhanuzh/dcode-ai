@@ -49,7 +49,7 @@ impl Tui {
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader().expect("reader");
         let writer = Arc::new(Mutex::new(pty.master.take_writer().expect("writer")));
-        let screen = Arc::new(Mutex::new(vt100::Parser::new(ROWS, COLS, 0)));
+        let screen = Arc::new(Mutex::new(vt100::Parser::new(ROWS, COLS, 5000)));
         let sink = screen.clone();
         let answer = writer.clone();
         std::thread::spawn(move || {
@@ -83,7 +83,19 @@ impl Tui {
     }
 
     fn text(&self) -> String {
-        self.screen.lock().unwrap().screen().contents()
+        let mut p = self.screen.lock().unwrap();
+        p.set_scrollback(0);
+        p.screen().contents()
+    }
+
+    /// The screen and one screenful of scrollback above it (vt100 can't
+    /// page further back).
+    fn all_text(&self) -> String {
+        let mut p = self.screen.lock().unwrap();
+        p.set_scrollback(ROWS as usize);
+        let above = p.screen().contents();
+        p.set_scrollback(0);
+        format!("{above}\n{}", p.screen().contents())
     }
 
     fn send(&mut self, bytes: &[u8]) {
@@ -327,6 +339,11 @@ fn answer(mut stream: std::net::TcpStream) {
         .is_some_and(|parts| parts.iter().any(|p| p["type"] == "tool_result"));
     let sse = if after_tool {
         text_sse("Wrote the note.")
+    } else if said.contains("long answer") {
+        let text: String = (1..=70)
+            .map(|i| format!("line {i} of the long answer\n"))
+            .collect();
+        text_sse(&text)
     } else if said.contains("run the slow command") {
         tool_sse(
             "execute_bash",
@@ -1284,6 +1301,36 @@ fn a_local_join_gets_the_interface_and_the_call() {
     host.wait_for("Kiran left the call");
     run(&mut mate, "/quit");
     host.wait_for("Kiran left");
+}
+
+/// A reply longer than the screen lands whole in the terminal (scrollback
+/// plus screen), not cut off where the screen ended.
+#[test]
+fn a_long_reply_is_printed_in_full() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    tui.send(b"give me a long answer");
+    std::thread::sleep(Duration::from_millis(200));
+    tui.send(b"\r");
+    tui.wait_for("line 70 of the long answer");
+    tui.wait_for("? for shortcuts");
+    let all = tui.all_text();
+    // Scrolled into real scrollback (not dropped): the whole reply is there.
+    let kept = {
+        let mut p = tui.screen.lock().unwrap();
+        p.set_scrollback(usize::MAX);
+        let n = p.screen().scrollback();
+        p.set_scrollback(0);
+        n
+    };
+    assert!(kept >= 50, "only {kept} rows reached scrollback");
+    for i in [10, 20, 35, 50, 69, 70] {
+        assert!(
+            all.contains(&format!("line {i} of the long answer")),
+            "line {i} missing:\n{all}"
+        );
+    }
 }
 
 impl Tui {

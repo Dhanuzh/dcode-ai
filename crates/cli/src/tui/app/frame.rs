@@ -112,8 +112,9 @@ pub(super) fn draw_session_pane(
     };
     g.scroll_lines = start;
     let dashboard = g.view_mode == crate::tui::state::ViewMode::Dashboard;
-    if dashboard && !g.transcript_follow_tail && start >= total.saturating_sub(avail_for_live) {
-        // Scrolled back to the bottom: resume following new output.
+    if !g.transcript_follow_tail && start >= total.saturating_sub(avail_for_live) {
+        // Scrolled back to the bottom: resume following new output (inline
+        // too — otherwise a long reply streams on below the screen, unseen).
         g.transcript_follow_tail = true;
     }
     let mut visible: Vec<Line> = if dashboard {

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.45 — 2026-11-02
+
+### Fixed
+- **Long replies were cut off outside the dashboard.** Finished messages are
+  moved into the terminal's scrollback with partial-screen scrolling, and
+  terminals drop lines scrolled out of a partial region instead of keeping
+  them — so a reply taller than the screen lost its beginning or end. They
+  now scroll the whole screen (as Windows already did), which every
+  terminal keeps.
+- Lines with an emoji or other wide character were pushed one column right
+  when moved into scrollback.
+- Outside the dashboard, scrolling up with the mouse wheel left a long reply
+  streaming on below the screen; the view now follows again when you're
+  back at the bottom, and always when a new message starts.
+- **The dashboard lagged in long sessions**: every streamed word (and the
+  blinking dot of a running tool) re-rendered the whole conversation —
+  markdown and syntax colours for every message. Finished messages are now
+  rendered once and reused.
+
 ## 1.0.44 — 2026-11-02
 
 ### New

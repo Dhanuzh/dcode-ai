@@ -51,19 +51,17 @@ notify-rust = { version = "4", optional = true }
 snow = "0.9"
 qrcode = { version = "0.14", default-features = false }
 
-# `scrolling-regions` makes `Terminal::insert_before` flush history via
-# DECSTBM partial-screen scrolls (flicker-free). Windows conhost and Windows
-# Terminal *discard* lines scrolled out of a margin region instead of pushing
-# them into scrollback, so scrolled-up history appeared blank on Windows. The
-# portable fallback (real newlines at the bottom row) reaches the scrollback
-# buffer on every terminal, so Windows builds omit the feature. Requires
-# resolver = "2" (set in the workspace) so the feature isn't unified across
-# targets.
+# No `scrolling-regions`: with it, `Terminal::insert_before` flushes history
+# with DECSTBM partial-screen scrolls, and lines scrolled out of a margin
+# region are *discarded* instead of reaching scrollback — on Windows
+# terminals, and on Linux ones too (a long reply lost everything above the
+# last screenful). The portable path (real newlines at the bottom row)
+# reaches the scrollback on every terminal.
 [target.'cfg(windows)'.dependencies]
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
 [target.'cfg(not(windows))'.dependencies]
-ratatui = { version = "0.30", default-features = false, features = ["crossterm", "scrolling-regions"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 
 [features]
 desktop-notify = ["notify-rust"]

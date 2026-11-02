@@ -1910,6 +1910,8 @@ impl TuiSessionState {
             }
             AgentEvent::MessageReceived { role, content } => {
                 if role == "user" {
+                    // A new turn: show what comes next.
+                    self.transcript_follow_tail = true;
                     self.streaming_assistant = None;
                     self.streaming_thinking = None;
                     // Skip the user block if this is an auto-generated prompt

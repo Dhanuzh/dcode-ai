@@ -269,7 +269,7 @@ pub(crate) fn render_blocks_range(
     let mut hits: Vec<LineAnswerHit> = Vec::new();
     for (offset, block) in state.blocks[start..end].iter().enumerate() {
         let idx = start + offset;
-        render_block(block, idx, state, w, &mut lines, &mut hits);
+        render_block_cached(block, idx, state, w, &mut lines, &mut hits);
     }
     let (lines, _) = collapse_blank_runs(lines, hits);
     lines
@@ -325,7 +325,7 @@ pub(crate) fn transcript_lines_and_hits_from(
     let start = start.min(state.blocks.len());
     for (offset, block) in state.blocks[start..].iter().enumerate() {
         let idx = start + offset;
-        render_block(block, idx, state, w, &mut lines, &mut hits);
+        render_block_cached(block, idx, state, w, &mut lines, &mut hits);
     }
 
     // ── Streaming thinking ── `✻ Thinking…` with the last few lines.
@@ -400,6 +400,95 @@ pub(crate) fn transcript_lines_and_hits_from(
     }
 
     (lines, hits)
+}
+
+/// Feeds `Debug` output straight into a hasher (no allocation).
+struct HashWriter<'a>(&'a mut std::collections::hash_map::DefaultHasher);
+
+impl std::fmt::Write for HashWriter<'_> {
+    fn write_str(&mut self, s: &str) -> std::fmt::Result {
+        use std::hash::Hasher;
+        self.0.write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Everything a finished block's rendering depends on.
+fn block_key(block: &DisplayBlock, idx: usize, state: &TuiSessionState, w: usize) -> u64 {
+    use std::fmt::Write as _;
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let _ = write!(HashWriter(&mut h), "{block:?}");
+    (idx, w, state.code_line_numbers, state.thinking_expanded).hash(&mut h);
+    theme::current().name.hash(&mut h);
+    state.collapsed_assistant_blocks.contains(&idx).hash(&mut h);
+    match block {
+        DisplayBlock::ToolDone { call_id, name, .. } => state
+            .is_tool_block_collapsed_for(call_id, name)
+            .hash(&mut h),
+        DisplayBlock::Question(q) => {
+            let _ = write!(
+                HashWriter(&mut h),
+                "{:?}",
+                state.answered_questions.get(&q.question_id)
+            );
+        }
+        _ => {}
+    }
+    h.finish()
+}
+
+/// Rendered lines of finished blocks, by index (re-rendering markdown and
+/// syntax colours for the whole history on every streamed word made long
+/// sessions — and the dashboard, which draws everything — lag).
+type RenderedBlock = (u64, Vec<Line<'static>>, Vec<LineAnswerHit>);
+
+thread_local! {
+    static BLOCK_CACHE: std::cell::RefCell<std::collections::HashMap<usize, RenderedBlock>> =
+        Default::default();
+}
+
+fn render_block_cached(
+    block: &DisplayBlock,
+    idx: usize,
+    state: &TuiSessionState,
+    w: usize,
+    lines: &mut Vec<Line<'static>>,
+    hits: &mut Vec<LineAnswerHit>,
+) {
+    // Animated or still changing: always fresh.
+    if matches!(
+        block,
+        DisplayBlock::ToolRunning { .. } | DisplayBlock::ApprovalPending(_)
+    ) {
+        render_block(block, idx, state, w, lines, hits);
+        return;
+    }
+    let key = block_key(block, idx, state, w);
+    let hit = BLOCK_CACHE.with(|c| {
+        c.borrow().get(&idx).and_then(|(k, l, h)| {
+            (*k == key).then(|| {
+                lines.extend(l.iter().cloned());
+                hits.extend(h.iter().cloned());
+            })
+        })
+    });
+    if hit.is_some() {
+        return;
+    }
+    let (mut l, mut h) = (Vec::new(), Vec::new());
+    render_block(block, idx, state, w, &mut l, &mut h);
+    lines.extend(l.iter().cloned());
+    hits.extend(h.iter().cloned());
+    BLOCK_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        // Blocks shrank (/clear, /new): forget what's gone.
+        if c.len() > state.blocks.len() + 64 {
+            let n = state.blocks.len();
+            c.retain(|i, _| *i < n);
+        }
+        c.insert(idx, (key, l, h));
+    });
 }
 
 /// `● ` in `color` — the Claude-style item bullet.
@@ -1328,5 +1417,37 @@ mod tests {
                 .any(|h| matches!(h, Some(LineClickHit::ToggleAssistant(0)))),
             "collapsed assistant block must still expose a click hit to expand it: {hits:?}"
         );
+    }
+
+    #[test]
+    fn cached_blocks_render_the_same_and_follow_display_changes() {
+        let mut st = TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "a".into(),
+            "p".into(),
+            std::path::PathBuf::from("."),
+            false,
+        );
+        st.view_mode = crate::tui::state::ViewMode::Dashboard;
+        st.push_block(DisplayBlock::User("hello".into()));
+        st.push_block(DisplayBlock::Assistant(
+            "# Title\n\nsome `code` here".into(),
+        ));
+        let text = |l: &[Line]| -> Vec<String> {
+            l.iter()
+                .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+                .collect()
+        };
+        let (a, _) = transcript_lines_and_hits(&st, 80);
+        let (b, _) = transcript_lines_and_hits(&st, 80);
+        assert_eq!(text(&a), text(&b), "cached render is the same");
+        // A block changed in place (same index) renders anew.
+        st.blocks[1] = DisplayBlock::Assistant("changed".into());
+        let (c, _) = transcript_lines_and_hits(&st, 80);
+        assert!(text(&c).iter().any(|l| l.contains("changed")));
+        // A narrower width re-renders too.
+        let (d, _) = transcript_lines_and_hits(&st, 30);
+        assert!(d.len() >= c.len());
     }
 }
