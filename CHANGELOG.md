@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.49 — 2026-11-03
+
+### Security
+- `~/.dcode-ai/auth.json` (your GitHub/Copilot sign-in tokens) is now
+  written readable only by you (0600) from the moment it exists, and an
+  existing file with wider permissions is tightened the next time dcode-ai
+  reads it. Before, it used the default file mode, which on many systems
+  let other users on the same machine read it. Found in a security review.
+
 ## 1.0.48 — 2026-11-02
 
 ### New

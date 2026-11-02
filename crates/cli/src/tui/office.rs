@@ -1361,12 +1361,7 @@ mod preview {
     fn mini_office_preview() {
         let mut o = Office::default();
         o.set_owner("ddhanush1");
-        for (id, name) in [
-            ("a", "Pathithyan"),
-            ("b", "Priya"),
-            ("c", "Sam"),
-            ("d", "Kiran"),
-        ] {
+        for (id, name) in [("a", "Arun"), ("b", "Priya"), ("c", "Sam"), ("d", "Kiran")] {
             o.apply(&AgentEvent::PersonJoined {
                 person: id.into(),
                 name: name.into(),

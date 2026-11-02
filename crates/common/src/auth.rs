@@ -49,23 +49,61 @@ impl AuthStore {
         if !path.exists() {
             return Ok(Self::default());
         }
+        // Files written before 1.0.49 could be readable by other users.
+        lock_down(&path);
         let raw = std::fs::read_to_string(path)?;
         Ok(serde_json::from_str(&raw)?)
     }
 
+    /// Writes the sign-in tokens readable only by you (0600 from the moment
+    /// the file exists, then renamed into place).
     pub fn save(&self) -> anyhow::Result<()> {
-        let path = auth_path();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let raw = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, raw)?;
-        Ok(())
+        save_to(&auth_path(), self)
     }
 
     pub fn any_auth_present(&self) -> bool {
         self.anthropic.is_some() || self.copilot.is_some()
     }
+}
+
+fn save_to(path: &std::path::Path, store: &AuthStore) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let raw = serde_json::to_string_pretty(store)?;
+    let tmp = path.with_extension("json.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    {
+        use std::io::Write as _;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600);
+        }
+        let mut f = opts.open(&tmp)?;
+        f.write_all(raw.as_bytes())?;
+        f.sync_all()?;
+    }
+    std::fs::rename(&tmp, path)?;
+    lock_down(path);
+    Ok(())
+}
+
+/// Owner-only (Unix); a no-op elsewhere.
+fn lock_down(path: &std::path::Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(meta) = std::fs::metadata(path)
+            && meta.permissions().mode() & 0o077 != 0
+        {
+            let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 pub fn auth_path() -> PathBuf {
@@ -95,5 +133,21 @@ mod tests {
             store.preferred_provider,
             Some(LoggedProvider::Other)
         ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn auth_file_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("auth.json");
+        save_to(&path, &AuthStore::default()).unwrap();
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "auth.json must be 0600");
+        // An older, world-readable file is tightened.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        lock_down(&path);
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 }
