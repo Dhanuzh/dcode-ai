@@ -491,7 +491,13 @@ impl Supervisor {
         session_id: &str,
         approval_handler: Option<Arc<dyn ApprovalHandler>>,
     ) -> Result<Self, ProviderError> {
-        let store = SessionStore::new(workspace_root.join(&config.session.history_dir));
+        let sessions_dir = workspace_root.join(&config.session.history_dir);
+        // Before anything opens its log: drop the streaming pieces older
+        // versions wrote (most of a long session's log).
+        if let Some((before, after)) = crate::log_tidy::tidy_on_open(&sessions_dir, session_id) {
+            tracing::info!("tidied {session_id}'s log: {before} → {after} bytes");
+        }
+        let store = SessionStore::new(sessions_dir);
         let mut loaded = store
             .load(session_id)
             .await
@@ -2137,13 +2143,15 @@ pub fn spawn_event_fanout(
             {
                 let _ = ptx.send(fwd).await;
             }
+            let live_only = event.is_live_only();
             let envelope = EventEnvelope::new(event_id, event);
             if let Some(ref tx) = event_tx {
                 let line = serde_json::to_string(&envelope).unwrap_or_default();
                 let _ = tx.send(line);
             }
 
-            if let Some(file) = log_file.as_mut()
+            if !live_only
+                && let Some(file) = log_file.as_mut()
                 && let Ok(line) = serde_json::to_string(&envelope)
             {
                 let _ = file.write_all(line.as_bytes()).await;

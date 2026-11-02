@@ -36,6 +36,7 @@ ansi-to-tui = "8"
 textwrap = "0.16"
 unicode-segmentation = "1.13"
 unicode-width = "0.2"
+ignore = "0.4"
 colored = "3"
 async-trait = "0.1"
 chrono = { version = "0.4", features = ["clock"] }

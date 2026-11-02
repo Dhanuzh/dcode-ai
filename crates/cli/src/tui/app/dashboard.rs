@@ -477,7 +477,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             }
         }
         RailTab::Team => render_team(frame, body, g),
-        RailTab::Files => frame.render_widget(
+        RailTab::Files if g.explorer.touched_only => frame.render_widget(
             Paragraph::new(Text::from(files_lines(
                 &g.file_map,
                 body.width as usize,
@@ -485,6 +485,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             ))),
             body,
         ),
+        RailTab::Files => render_explorer(frame, body, g),
     }
 }
 
@@ -655,6 +656,108 @@ fn render_team(frame: &mut ratatui::Frame<'_>, body: Rect, g: &TuiSessionState) 
         ),
         rows[2],
     );
+}
+
+/// The project explorer: every file in the project (minus .gitignore'd),
+/// what the agent touched marked; folders open and close.
+fn render_explorer(frame: &mut ratatui::Frame<'_>, body: Rect, g: &mut TuiSessionState) {
+    use crate::tui::activity::{ago, fresh};
+    let root = g.workspace_root.clone();
+    g.explorer.refresh(&root, &g.file_map);
+    let w = body.width as usize;
+    let focused = g.rail_focus;
+    let mut lines = vec![
+        muted(if focused {
+            "↑↓ · → open ← close · Enter @file · t touched"
+        } else {
+            "project files · click to browse · t touched"
+        }),
+        muted("✎ edited · read ◉ now ● inside"),
+    ];
+    if g.explorer.scanning() {
+        lines.push(muted("reading the project…"));
+        frame.render_widget(Paragraph::new(Text::from(lines)), body);
+        return;
+    }
+    let rows = g.explorer.rows(&g.file_map);
+    if rows.is_empty() {
+        lines.push(muted("no files here"));
+    }
+    let room =
+        (body.height as usize).saturating_sub(lines.len() + usize::from(g.explorer.truncated));
+    let cursor = g.explorer.cursor.min(rows.len().saturating_sub(1));
+    // Keep the cursor in view.
+    let start = cursor
+        .saturating_sub(room.saturating_sub(1))
+        .min(rows.len().saturating_sub(room));
+    let first_y = body.y + lines.len() as u16;
+    let mut hits = Vec::new();
+    for (i, r) in rows.iter().enumerate().skip(start).take(room) {
+        let indent = "  ".repeat(r.depth);
+        let (icon, icon_color) = if r.dir {
+            (if r.open { "▾ " } else { "▸ " }, theme::muted())
+        } else if let Some(t) = r.touch {
+            if fresh(t) {
+                ("◉ ", theme::accent())
+            } else if t.edits > 0 {
+                ("✎ ", theme::warn())
+            } else {
+                ("· ", theme::muted())
+            }
+        } else {
+            ("  ", theme::muted())
+        };
+        let extra = match r.touch {
+            Some(t) if t.edits > 0 => format!(" {}✎ {}", t.edits, ago(t.last_at)),
+            Some(t) => format!(" {}r {}", t.reads, ago(t.last_at)),
+            None if r.touched_inside => " ●".into(),
+            None => String::new(),
+        };
+        let name = if r.dir {
+            format!("{}/", r.name)
+        } else {
+            r.name.clone()
+        };
+        let room_name = w.saturating_sub(indent.len() + 2 + extra.chars().count());
+        let mut style = Style::default().fg(if r.dir || r.touch.is_some_and(|t| t.edits > 0) {
+            theme::text()
+        } else {
+            theme::muted()
+        });
+        if focused && i == cursor {
+            style = style.bg(theme::surface()).add_modifier(Modifier::BOLD);
+        }
+        let row_y = first_y + (i - start) as u16;
+        hits.push((
+            Rect {
+                x: body.x,
+                y: row_y,
+                width: body.width,
+                height: 1,
+            },
+            crate::tui::state::DashTarget::ExplorerRow(i),
+        ));
+        lines.push(Line::from(vec![
+            Span::raw(indent),
+            Span::styled(icon, Style::default().fg(icon_color)),
+            Span::styled(truncate_chars(&name, room_name), style),
+            Span::styled(
+                extra,
+                Style::default().fg(if r.touched_inside && r.touch.is_none() {
+                    theme::accent()
+                } else {
+                    theme::muted()
+                }),
+            ),
+        ]));
+    }
+    if g.explorer.truncated {
+        lines.push(muted("(large project: first 20,000 entries)"));
+    }
+    drop(rows);
+    g.explorer.cursor = cursor;
+    g.dash_hits.targets.extend(hits);
+    frame.render_widget(Paragraph::new(Text::from(lines)), body);
 }
 
 /// The files the agent touched as a tree: edits bright with their count,

@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.48 — 2026-11-02
+
+### New
+- **Project explorer in the dashboard**: the files tab shows your whole
+  project (respecting `.gitignore`), with what the agent touched marked on
+  it (`✎ 4✎`, `· 2r`, `◉` now, `●` on folders with touched files inside).
+  `↑/↓` move, `→`/`←` open and close folders, `Enter` on a file adds
+  `@file` to your message, `t` switches to "touched only". Click rows and
+  scroll with the wheel too.
+- **"Alt+F to fix" from any terminal**: `eval "$(dcode-ai hook zsh)"` (also
+  `bash`, `fish`, `powershell`) in your shell's rc file. When a command
+  fails it says `dcode-ai: Alt+F to fix`; Alt+F opens dcode-ai on that
+  command to find out why and fix it. It only re-runs the command if that's
+  safe, otherwise it asks. `DCODE_FIX_KEY=g` picks another key. Also
+  `dcode-ai --ask "…"` to start a session with a first message.
+- **Relay mode**: join and call from any network, no VPN.
+  `dcode-ai relay serve` on a machine both sides can reach (a small VPS),
+  then `/invite relay <host:port>`. The relay only pairs connections and
+  passes encrypted bytes — it never sees the invite key or anything
+  readable.
+
+### Improved
+- **Much smaller session logs**: streamed text pieces and heartbeats aren't
+  saved any more (resume never used them), and opening a session with a big
+  old log tidies it — dropping those and capping huge old tool results the
+  way new logs store them. `dcode-ai sessions --tidy` does every session at
+  once: real logs went from 31.3 MB to 4.9 MB.
+
 ## 1.0.47 — 2026-11-02
 
 ### Improved

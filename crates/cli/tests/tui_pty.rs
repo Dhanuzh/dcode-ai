@@ -851,9 +851,16 @@ fn see_and_share_a_session() {
     tui.send(b"\x1c");
     tui.wait_for("Alt+1-6");
     tui.send(b"\x1b4");
+    // The project explorer, with what the agent touched marked.
     tui.wait_until("the files tab", |t| {
+        t.contains("note.txt") && t.contains("1✎") && t.contains("t touched")
+    });
+    // `t`: only what the agent touched.
+    tui.send(b"t");
+    tui.wait_until("touched only", |t| {
         t.contains("1 edited") && t.contains("note.txt")
     });
+    tui.send(b"t");
     tui.send(b"\x1c");
     tui.wait_until("the inline view", |t| !t.contains("Alt+1-6"));
 
@@ -1444,6 +1451,16 @@ fn the_mouse_scrolls_the_dashboard() {
         std::thread::sleep(Duration::from_millis(20));
     }
     tui.wait_for("line 70 of the long answer");
+}
+
+/// Alt+F from another terminal runs `dcode-ai fix`: dcode-ai opens on the
+/// failed command and asks the agent about it straight away.
+#[test]
+fn fix_opens_dcode_ai_on_a_failed_command() {
+    let (_dir, home, ws) = setup_with_model();
+    let tui = Tui::start_with(&home, &ws, &["fix", "--cmd", "make build", "--exit", "2"]);
+    tui.wait_for("This command just failed in my terminal (exit code 2)");
+    tui.wait_for("Reply to: This command just");
 }
 
 impl Tui {

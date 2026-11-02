@@ -474,7 +474,7 @@ pub async fn host(opts: HostOptions) -> std::io::Result<InviteHandle> {
     };
     let listener = TcpListener::bind(("0.0.0.0", port)).await?;
     let port = listener.local_addr()?.port();
-    let mut handle = host_on(listener, opts, port).await?;
+    let mut handle = host_on(Some(listener), opts, port, None).await?;
     // Reachable over Tailscale too: put its address in the line.
     let ts = tokio::task::spawn_blocking(crate::tailscale::ip)
         .await
@@ -496,7 +496,7 @@ pub async fn host_local(mut opts: HostOptions) -> std::io::Result<InviteHandle> 
     opts.web = false;
     let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
     let port = listener.local_addr()?.port();
-    let handle = host_on(listener, opts, port).await?;
+    let handle = host_on(Some(listener), opts, port, None).await?;
     Ok(handle)
 }
 
@@ -539,17 +539,65 @@ pub fn read_local_join(session_id: &str) -> Option<Invite> {
     Invite::parse(text.trim())
 }
 
+/// Where guests reach this invite through a relay.
+struct RelayTarget {
+    /// `host:port` of the relay.
+    addr: String,
+    room: String,
+    secret: String,
+}
+
+/// An invite reached through a relay (`dcode-ai relay serve` somewhere both
+/// sides can reach): for people on other networks without a VPN. The relay
+/// only pairs connections; the handshake and everything after it stay
+/// end-to-end encrypted with the invite's key, which it never sees.
+pub async fn host_relay(mut opts: HostOptions, relay: &str) -> std::io::Result<InviteHandle> {
+    let relay = relay.trim();
+    let addr = if relay
+        .rsplit_once(':')
+        .is_some_and(|(_, p)| p.parse::<u16>().is_ok())
+    {
+        relay.to_string()
+    } else {
+        format!("{relay}:{}", crate::relay::DEFAULT_PORT)
+    };
+    // Check it answers before printing a line that wouldn't work.
+    tokio::time::timeout(Duration::from_secs(5), TcpStream::connect(&addr))
+        .await
+        .map_err(|_| io_err(format!("the relay {addr} didn't answer")))??;
+    opts.web = false;
+    let port = addr
+        .rsplit_once(':')
+        .and_then(|(_, p)| p.parse().ok())
+        .unwrap_or(crate::relay::DEFAULT_PORT);
+    let target = RelayTarget {
+        addr,
+        room: new_key(),
+        secret: new_key(),
+    };
+    host_on(None, opts, port, Some(target)).await
+}
+
 async fn host_on(
-    listener: TcpListener,
+    listener: Option<TcpListener>,
     opts: HostOptions,
     port: u16,
+    relay: Option<RelayTarget>,
 ) -> std::io::Result<InviteHandle> {
     let ip = crate::watch::lan_address()
         .map(|ip| ip.to_string())
         .unwrap_or_else(|| "127.0.0.1".into());
     let key = new_key();
+    let invite_host = match &relay {
+        Some(r) => format!(
+            "{}@{}",
+            r.room,
+            r.addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&r.addr)
+        ),
+        None => ip.clone(),
+    };
     let invite = Invite {
-        host: ip.clone(),
+        host: invite_host,
         port,
         key: key.clone(),
     };
@@ -587,9 +635,13 @@ async fn host_on(
         call: opts.hub.unwrap_or_else(new_call_hub),
         auto_admit: opts.auto_admit,
     });
+    if let Some(r) = relay {
+        tokio::spawn(relay_control(shared.clone(), r, stop_rx.clone()));
+    }
     let accept = shared.clone();
     let mut stop = stop_rx.clone();
     tokio::spawn(async move {
+        let Some(listener) = listener else { return };
         loop {
             tokio::select! {
                 _ = stop.changed() => break,
@@ -617,6 +669,62 @@ async fn host_on(
         host: shared,
         stop: stop_tx,
     })
+}
+
+/// Keeps the invite registered with the relay, and opens a data link for
+/// each guest it announces (reconnecting if the relay drops).
+async fn relay_control(
+    shared: Arc<Host>,
+    r: RelayTarget,
+    stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut stop = stop_rx.clone();
+    loop {
+        if *stop.borrow() {
+            return;
+        }
+        if let Ok(mut s) = TcpStream::connect(&r.addr).await
+            && s.write_all(format!("HOST {} {}\n", r.room, r.secret).as_bytes())
+                .await
+                .is_ok()
+            && crate::relay::read_line(&mut s).await.ok().as_deref() == Some("OK")
+        {
+            loop {
+                tokio::select! {
+                    _ = stop.changed() => return,
+                    line = crate::relay::read_line(&mut s) => {
+                        let Ok(line) = line else { break };
+                        let Some(n) = line.strip_prefix("CONN ").map(str::to_string) else {
+                            continue;
+                        };
+                        let shared = shared.clone();
+                        let stop = stop_rx.clone();
+                        let (addr, room, secret) = (r.addr.clone(), r.room.clone(), r.secret.clone());
+                        tokio::spawn(async move {
+                            let Ok(mut data) = TcpStream::connect(&addr).await else { return };
+                            if data
+                                .write_all(format!("PAIR {room} {n} {secret}\n").as_bytes())
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                            if shared.guests.fetch_add(1, Ordering::SeqCst) >= MAX_GUESTS {
+                                shared.guests.fetch_sub(1, Ordering::SeqCst);
+                                return;
+                            }
+                            let _ = shared.connection(data, "the relay".into(), stop).await;
+                            shared.guests.fetch_sub(1, Ordering::SeqCst);
+                        });
+                    }
+                }
+            }
+        }
+        tokio::select! {
+            _ = stop.changed() => return,
+            _ = tokio::time::sleep(Duration::from_secs(3)) => {}
+        }
+    }
 }
 
 /// A guest connected now.
@@ -1262,7 +1370,22 @@ async fn open_link(
     let hosts = invite.hosts();
     let per_host = if hosts.len() > 1 { 5 } else { 10 };
     let mut found = None;
+    let mut relay_err = None;
     for h in &hosts {
+        // `ROOM@relayhost`: through a relay.
+        if let Some((room, relay_host)) = h.split_once('@') {
+            let addr = format!("{relay_host}:{}", invite.port);
+            match crate::relay::guest_connect(&addr, room).await {
+                Ok(s) => {
+                    found = Some((s, addr));
+                    break;
+                }
+                Err(e) => {
+                    relay_err = Some(e);
+                    continue;
+                }
+            }
+        }
         let addr = if h.contains(':') {
             format!("[{h}]:{}", invite.port)
         } else {
@@ -1274,6 +1397,11 @@ async fn open_link(
             found = Some((s, addr));
             break;
         }
+    }
+    if found.is_none()
+        && let Some(e) = relay_err
+    {
+        return Err(LinkError::Refused(e));
     }
     let Some((mut stream, addr)) = found else {
         return Err(LinkError::Unreachable(format!(
@@ -1639,7 +1767,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = host_on(
-            listener,
+            Some(listener),
             HostOptions {
                 port,
                 web: false,
@@ -1657,6 +1785,7 @@ mod tests {
                 hub: None,
             },
             port,
+            None,
         )
         .await
         .unwrap();
@@ -1798,7 +1927,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = host_on(
-            listener,
+            Some(listener),
             HostOptions {
                 port,
                 web: false,
@@ -1816,6 +1945,7 @@ mod tests {
                 hub: None,
             },
             port,
+            None,
         )
         .await
         .unwrap();
@@ -1902,7 +2032,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let handle = host_on(
-            listener,
+            Some(listener),
             HostOptions {
                 port,
                 web: false,
@@ -1920,6 +2050,7 @@ mod tests {
                 hub: None,
             },
             port,
+            None,
         )
         .await
         .unwrap();
@@ -1970,6 +2101,77 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert!(handle.in_call().is_empty());
         handle.call_leave();
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn a_guest_joins_through_a_relay() {
+        let relay = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let relay_port = relay.local_addr().unwrap().port();
+        tokio::spawn(crate::relay::serve_on(relay));
+        let (socket, mut commands, _events, dir) = fake_session().await;
+        let (knock_tx, mut knock_rx) = mpsc::channel::<Knock>(4);
+        tokio::spawn(async move {
+            while let Some(k) = knock_rx.recv().await {
+                let _ = k.reply.send(true);
+            }
+        });
+        let handle = host_relay(
+            HostOptions {
+                port: 0,
+                web: false,
+                let_approve: false,
+                socket,
+                log_path: dir.path().join("none.events.jsonl"),
+                title: "demo".into(),
+                knocks: knock_tx,
+                presence: None,
+                host_name: "Dhanush".into(),
+                project: "d-note".into(),
+                session_id: "s-1".into(),
+                model: "m".into(),
+                auto_admit: false,
+                hub: None,
+            },
+            &format!("127.0.0.1:{relay_port}"),
+        )
+        .await
+        .unwrap();
+        // The line names the relay, not this machine.
+        let line = handle.invite.as_string();
+        assert!(
+            line.contains(&format!("@127.0.0.1:{relay_port}/")),
+            "{line}"
+        );
+        // Give the host a moment to register with the relay.
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        let invite = Invite::parse(&line).unwrap();
+        let guest = Guest::connect(&invite, "Priya", || {}).await.unwrap();
+        assert_eq!(guest.project, "d-note");
+        let next = async |rx: &mut mpsc::UnboundedReceiver<AgentCommand>| {
+            tokio::time::timeout(Duration::from_secs(5), rx.recv())
+                .await
+                .unwrap()
+                .unwrap()
+        };
+        assert!(matches!(
+            next(&mut commands).await,
+            AgentCommand::Hello { .. }
+        ));
+        guest.sender().say("via the relay");
+        assert!(matches!(next(&mut commands).await,
+            AgentCommand::Say { ref content, .. } if content == "via the relay"));
+        // A room the relay doesn't know is refused, with a reason.
+        let wrong = Invite {
+            host: format!("{}@127.0.0.1", new_key()),
+            ..invite.clone()
+        };
+        let err = Guest::connect(&wrong, "Eve", || {})
+            .await
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("relay said"), "{err}");
         drop(handle);
     }
 }

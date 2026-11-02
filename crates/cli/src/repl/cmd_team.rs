@@ -263,7 +263,24 @@ impl Repl {
                     auto_admit: false,
                     hub: Some(self.call_hub.clone()),
                 };
-                match dcode_ai_cli::invite::host(opts).await {
+                // `/invite relay <host:port>` (or $DCODE_AI_RELAY): through a
+                // relay, for people on other networks.
+                let relay = words.iter().position(|w| *w == "relay").map(|i| {
+                    words
+                        .get(i + 1)
+                        .map(|s| s.to_string())
+                        .or_else(|| std::env::var("DCODE_AI_RELAY").ok())
+                });
+                let hosted = match &relay {
+                    Some(Some(addr)) => dcode_ai_cli::invite::host_relay(opts, addr).await,
+                    Some(None) => {
+                        out.eprintln("usage: /invite relay <host:port> — the machine running `dcode-ai relay serve`");
+                        return Ok(true);
+                    }
+                    None => dcode_ai_cli::invite::host(opts).await,
+                };
+                let via_relay = relay.is_some();
+                match hosted {
                     Ok(inv) => {
                         let line = inv.command();
                         let _ = crate::tui::clipboard::copy_to_clipboard(&line);
@@ -285,6 +302,11 @@ impl Repl {
                         } else {
                             "[invite] you're asked before anyone gets in · guests can send messages (approvals stay with you) · /invite stop ends it"
                         });
+                        if via_relay {
+                            out.println("[invite] through the relay — works from any network; the relay only passes encrypted bytes and never sees the key");
+                            self.invite = Some(inv);
+                            return Ok(true);
+                        }
                         if let Some(help) = crate::watch::lan_help(inv.port()) {
                             for line in help.lines() {
                                 out.println(&format!("[invite] {line}"));
@@ -295,7 +317,7 @@ impl Repl {
                                 "[invite] works over Tailscale too ({ip}) — from any network, when they run Tailscale"
                             )),
                             None => out.println(
-                                "[invite] from another network: run `dcode-ai setup tailscale` once on both computers, then /invite again",
+                                "[invite] from another network: `dcode-ai setup tailscale` on both computers, or /invite relay <host:port> (a `dcode-ai relay serve` you run)",
                             ),
                         }
                         self.invite = Some(inv);

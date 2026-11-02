@@ -60,6 +60,10 @@ struct Cli {
     #[arg(short, long)]
     prompt: Option<String>,
 
+    /// Start the interactive session and send this first
+    #[arg(long, value_name = "MESSAGE")]
+    ask: Option<String>,
+
     /// Start in read-only safe mode
     #[arg(short, long)]
     safe: bool,
@@ -249,6 +253,9 @@ enum Command {
         /// Delete sessions not updated in the last DAYS days, then exit
         #[arg(long, value_name = "DAYS")]
         prune: Option<u32>,
+        /// Shrink every session log (drop streaming pieces), then exit
+        #[arg(long)]
+        tidy: bool,
     },
     /// Resume a saved session (same as `-r <id>`)
     Resume {
@@ -290,6 +297,30 @@ enum Command {
     /// messages (`/approve`, `/deny`, `/stop`, `/quit`). You show up in the
     /// session's office under your name. From another computer, use the
     /// line the host's `/invite` printed: `dcode-ai join <host:port/key>`
+    /// Print a shell snippet that offers "Alt+F to fix" after a command
+    /// fails (add `eval "$(dcode-ai hook zsh)"` to your shell's rc file)
+    Hook {
+        /// zsh, bash, fish or powershell
+        shell: String,
+    },
+    /// Run a relay so people on other networks can join (`/invite relay
+    /// <this-host>:<port>`). It only pairs connections and passes encrypted
+    /// bytes — it can't read anything
+    Relay {
+        /// `serve`
+        action: String,
+        #[arg(long, default_value_t = dcode_ai_cli::relay::DEFAULT_PORT)]
+        port: u16,
+    },
+    /// Open dcode-ai on a command that failed (what the Alt+F hook runs)
+    Fix {
+        /// The command that failed
+        #[arg(long)]
+        cmd: String,
+        /// Its exit code
+        #[arg(long, default_value_t = 1)]
+        exit: i32,
+    },
     Join {
         /// A session id here, or `host:port/key` from someone's `/invite`
         session_id: String,
@@ -908,7 +939,41 @@ async fn try_main() -> anyhow::Result<()> {
             limit,
             all,
             prune,
+            tidy,
         }) => {
+            if tidy {
+                let dir = workspace_root.join(&config.session.history_dir);
+                let (mut n, mut before, mut after, mut skipped) = (0, 0u64, 0u64, 0);
+                for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+                    let name = entry.file_name().to_string_lossy().to_string();
+                    let Some(id) = name.strip_suffix(".events.jsonl") else {
+                        continue;
+                    };
+                    if dcode_ai_runtime::log_tidy::session_is_open(id) {
+                        skipped += 1;
+                        continue;
+                    }
+                    if let Ok((b, a)) = dcode_ai_runtime::log_tidy::tidy_log(&entry.path())
+                        && a < b
+                    {
+                        n += 1;
+                        before += b;
+                        after += a;
+                    }
+                }
+                let mb = |b: u64| b as f64 / 1_048_576.0;
+                println!(
+                    "tidied {n} log(s): {:.1} MB → {:.1} MB{}",
+                    mb(before),
+                    mb(after),
+                    if skipped > 0 {
+                        format!(" ({skipped} open session(s) left alone)")
+                    } else {
+                        String::new()
+                    }
+                );
+                return Ok(());
+            }
             if let Some(days) = prune {
                 let n = prune_sessions(&config, &workspace_root, days).await?;
                 println!("deleted {n} session(s) older than {days} day(s)");
@@ -975,6 +1040,29 @@ async fn try_main() -> anyhow::Result<()> {
             session_id, json, ..
         }) => {
             attach_session(&config, &workspace_root, &session_id, json).await?;
+        }
+        Some(Command::Relay { action, port }) => {
+            if action != "serve" {
+                anyhow::bail!(
+                    "usage: dcode-ai relay serve [--port {}]",
+                    dcode_ai_cli::relay::DEFAULT_PORT
+                );
+            }
+            dcode_ai_cli::relay::serve(port).await?;
+        }
+        Some(Command::Hook { shell }) => match dcode_ai_cli::shell_hook::snippet(&shell) {
+            Some(s) => print!("{s}"),
+            None => anyhow::bail!("unknown shell `{shell}` — zsh, bash, fish or powershell"),
+        },
+        Some(Command::Fix { cmd, exit }) => {
+            let prompt = dcode_ai_cli::shell_hook::fix_prompt(&cmd, exit, &workspace_root);
+            let me = std::env::current_exe()?;
+            let status = std::process::Command::new(me)
+                .arg("--ask")
+                .arg(prompt)
+                .current_dir(&workspace_root)
+                .status()?;
+            std::process::exit(status.code().unwrap_or(0));
         }
         Some(Command::Join {
             session_id,
@@ -1317,6 +1405,7 @@ async fn try_main() -> anyhow::Result<()> {
                         );
                     }
                     let mut repl = Repl::new(runtime, cli.safe, cli.run);
+                    repl.startup_prompt = cli.ask.clone();
                     if use_tui {
                         repl.run_with_tui().await?;
                     } else {
@@ -1364,6 +1453,7 @@ async fn try_main() -> anyhow::Result<()> {
                         );
                     }
                     let mut repl = Repl::new(runtime, cli.safe, cli.run);
+                    repl.startup_prompt = cli.ask.clone();
                     if use_tui {
                         repl.run_with_tui().await?;
                     } else {
@@ -3198,6 +3288,9 @@ fn uses_model(command: Option<&Command>) -> bool {
                 | Command::Remote { .. }
                 | Command::Session { .. }
                 | Command::Join { .. }
+                | Command::Hook { .. }
+                | Command::Relay { .. }
+                | Command::Fix { .. }
                 | Command::Status { .. }
                 | Command::Cancel { .. }
                 | Command::Skills { .. }

@@ -122,6 +122,7 @@ impl TuiSessionState {
             office: Default::default(),
             shell_stopped_at: None,
             team: Default::default(),
+            explorer: Default::default(),
             event_time: None,
             team_typing: false,
             team_input: String::new(),
@@ -1552,7 +1553,8 @@ impl TuiSessionState {
         if tab == RailTab::Changes {
             self.diff_review.refresh(&self.workspace_root);
         } else {
-            self.rail_focus = false;
+            // The files tab is browsed with the keys right away.
+            self.rail_focus = tab == RailTab::Files;
         }
     }
 

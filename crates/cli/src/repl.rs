@@ -454,6 +454,8 @@ pub struct Repl {
     local_invite: Option<dcode_ai_cli::invite::InviteHandle>,
     /// One voice call for everyone (local joins and invited guests).
     call_hub: dcode_ai_cli::invite::CallHubHandle,
+    /// Sent as soon as the TUI is up (`--ask`, `dcode-ai fix`).
+    pub startup_prompt: Option<String>,
 }
 
 impl Repl {
@@ -479,6 +481,7 @@ impl Repl {
             invite: None,
             local_invite: None,
             call_hub: dcode_ai_cli::invite::new_call_hub(),
+            startup_prompt: None,
         }
     }
 
@@ -1574,6 +1577,9 @@ impl Repl {
             g.steer_inbox = Some(steer_inbox.clone());
         }
         let mut pending_cmds: VecDeque<TuiCmd> = VecDeque::new();
+        if let Some(p) = self.startup_prompt.take() {
+            pending_cmds.push_back(TuiCmd::Submit(p));
+        }
         let mut mcp_auth: Option<cmd_mcp::McpAuthTask> = None;
 
         loop {

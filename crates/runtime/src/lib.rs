@@ -7,6 +7,7 @@ pub mod goal;
 pub mod interactive_exec;
 pub mod ipc;
 pub mod last_session;
+pub mod log_tidy;
 pub mod memory_store;
 pub mod memory_tool;
 pub mod model_limits;

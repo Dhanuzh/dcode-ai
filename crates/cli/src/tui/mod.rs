@@ -17,6 +17,7 @@ pub mod connect_modal;
 pub mod diff_hunk;
 pub(crate) mod diff_overlay;
 pub(crate) mod diff_review;
+pub mod explorer;
 pub mod git;
 pub mod guest;
 pub mod keymap;

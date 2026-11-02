@@ -284,6 +284,14 @@ pub(super) fn handle_key_event(
             _ => {}
         }
     }
+    // The files tab's explorer, focused.
+    if dashboard_free
+        && g.rail_focus
+        && g.rail_tab == crate::tui::state::RailTab::Files
+        && handle_explorer_key(key, g)
+    {
+        return KeyFlow::Continue;
+    }
     if dashboard_free && g.rail_focus && handle_changes_key(key, g) {
         return KeyFlow::Continue;
     }
@@ -2166,4 +2174,69 @@ fn handle_changes_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
         }
     }
     true
+}
+
+/// Keys for the files tab's explorer. False = not ours.
+fn handle_explorer_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
+    let plain = key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT;
+    if !plain {
+        return false;
+    }
+    if key.code == KeyCode::Char('t') {
+        g.explorer.touched_only = !g.explorer.touched_only;
+        return true;
+    }
+    if g.explorer.touched_only {
+        return false;
+    }
+    let files = std::mem::take(&mut g.file_map);
+    let handled = match key.code {
+        KeyCode::Down | KeyCode::Char('j') => {
+            g.explorer.move_cursor(&files, 1);
+            true
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            g.explorer.move_cursor(&files, -1);
+            true
+        }
+        KeyCode::PageDown => {
+            g.explorer.move_cursor(&files, 15);
+            true
+        }
+        KeyCode::PageUp => {
+            g.explorer.move_cursor(&files, -15);
+            true
+        }
+        KeyCode::Left | KeyCode::Char('h') => {
+            g.explorer.close_or_up(&files);
+            true
+        }
+        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+            let cursor = g.explorer.cursor;
+            if let Some(path) = g.explorer.activate(&files, cursor)
+                && key.code == KeyCode::Enter
+            {
+                // A file: mention it in the message being written.
+                let mut text = g.input_buffer.clone();
+                if !text.is_empty() && !text.ends_with(' ') {
+                    text.push(' ');
+                }
+                text.push_str(&format!("@{path} "));
+                g.set_input_text(text);
+                g.rail_focus = false;
+            }
+            true
+        }
+        KeyCode::Char('r') => {
+            g.explorer.rescan();
+            true
+        }
+        KeyCode::Esc => {
+            g.rail_focus = false;
+            true
+        }
+        _ => false,
+    };
+    g.file_map = files;
+    handled
 }

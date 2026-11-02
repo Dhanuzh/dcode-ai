@@ -118,8 +118,8 @@ pub fn spawn_tui_bridge(
                 let _ = fan.tx.send(line);
             }
 
-            // Heartbeats are not history.
-            let keep = !matches!(event, AgentEvent::PersonSeen { .. });
+            // Streaming pieces and heartbeats are not history.
+            let keep = !event.is_live_only();
             if keep
                 && let Some(file) = log_file.as_mut()
                 && let Ok(line) = serde_json::to_string(&envelope)

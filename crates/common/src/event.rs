@@ -59,6 +59,30 @@ pub struct EventEnvelope {
     pub event: AgentEvent,
 }
 
+impl AgentEvent {
+    /// Only matters while it happens — streamed text and thinking pieces,
+    /// tool output pieces, heartbeats. Not written to the session log: the
+    /// final message and tool result hold the same text, and resume never
+    /// used them (they were most of a log).
+    pub fn is_live_only(&self) -> bool {
+        matches!(
+            self,
+            AgentEvent::TokensStreamed { .. }
+                | AgentEvent::ThinkingDelta { .. }
+                | AgentEvent::ToolOutputDelta { .. }
+                | AgentEvent::PersonSeen { .. }
+        )
+    }
+}
+
+/// The `"type"` tags of live-only events (a cheap check on raw log lines).
+pub const LIVE_ONLY_TYPES: [&str; 4] = [
+    "TokensStreamed",
+    "ThinkingDelta",
+    "ToolOutputDelta",
+    "PersonSeen",
+];
+
 impl EventEnvelope {
     pub fn new(id: u64, event: AgentEvent) -> Self {
         Self {

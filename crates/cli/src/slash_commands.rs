@@ -150,7 +150,7 @@ pub fn slash_command_description(command: &str) -> &'static str {
             "a live read-only web page of this session to share: /watch, /watch lan, /watch stop"
         }
         "/invite" => {
-            "let someone on another computer join with one line: /invite, /invite web, /invite stop"
+            "let someone on another computer join with one line: /invite, /invite web, /invite relay <host:port>, /invite stop"
         }
         "/chat" => "chat with the people on this session (not sent to the agent): /chat <text>",
         "/todo" => "the shared to-do list the agent sees: /todo, /todo <text>, /todo done <n>",

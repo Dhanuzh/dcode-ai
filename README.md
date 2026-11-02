@@ -151,6 +151,8 @@ dcode-ai spawn --prompt "refactor the auth module"       # detached; attach late
 | **Talk while it works** | `Enter` steers the running turn, and `Tab` queues a message for after it |
 | **Stop just one thing** | `Esc` stops a running shell command and the agent carries on; `Esc` again stops the turn. Long commands show a spinner, elapsed time and their latest output |
 | **Find** | `Ctrl+F` searches the conversation, with highlighted matches and a match count |
+| **Project explorer** | The dashboard's files tab is your project tree (`.gitignore` respected) with what the agent touched marked; `Enter` adds `@file` to your message |
+| **Fix from anywhere** | `eval "$(dcode-ai hook zsh)"` (bash, fish, PowerShell too): after a command fails in any terminal, `Alt+F` opens dcode-ai on it |
 | **Rewind** | `Esc` `Esc` restores code, conversation or both to any earlier message |
 | **Context** | `@` fuzzy file search, `[Image #N]` paste (`Ctrl+V`, or `Alt+V` on Windows/WSL), `!` shell mode, `# note` memory |
 | **Dashboard** | `Ctrl+\` opens a full-screen view: sessions and agents, the transcript, and context · changes · agents · files · office · team tabs (`Alt+1`–`6`). Review and revert per hunk, drag to select and copy, resize the rails |
@@ -232,6 +234,7 @@ Bring teammates into the session you're running. They see everything live and ca
 **Where can people join from?**
 
 - **Same machine:** `dcode-ai join <session-id>`. No knock needed.
+- **Any network, no VPN:** run `dcode-ai relay serve` on a small server both of you can reach, then `/invite relay <host:port>`. The relay only passes encrypted bytes.
 - **Same Wi-Fi or office network:** the `/invite` line. On WSL, `/invite` prints the one-time firewall command.
 - **Anywhere else:** run `dcode-ai setup tailscale` once on both computers. It asks before installing Tailscale; then `/invite` adds your Tailscale address and `join` tries each address. If a join fails, it tells you why (different networks, a blocked port, or a Wi-Fi that keeps devices apart).
 

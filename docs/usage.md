@@ -138,6 +138,10 @@ dcode-ai remote me@server --dir ~/app --keep       # use dcode-ai on a server fr
 dcode-ai session export <id> [-o f]  # one file to hand a teammate, secrets masked
 dcode-ai session import <file>       # add it here; /resume finds it (with its handoff note)
 dcode-ai join <id> [--name you]      # another terminal on a running session: watch it live and send messages
+dcode-ai relay serve [--port 8790]   # a relay so people on other networks can join (/invite relay host:port)
+eval "$(dcode-ai hook zsh)"          # in ~/.zshrc: "Alt+F to fix" after a failed command (also bash, fish, powershell)
+dcode-ai --ask "message"             # start a session and send this first
+dcode-ai sessions --tidy             # shrink every session log (streaming pieces, huge old tool results)
 dcode-ai status                   # running sessions
 dcode-ai sessions [--all]         # saved sessions (--all includes sub-agents)
 dcode-ai logs <id>                # replay the event log
@@ -501,6 +505,7 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 | `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan [port]` shares it on your network (a fixed port such as `/watch lan 8787` lets you allow it in the firewall once; on WSL it prints the commands); `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
 | `/invite` | Let someone on another computer join with one line: prints (and copies) `dcode-ai join <ip>:8788/<key> --name <their name>`. You're asked before each person gets in. `/invite web` also gives a browser link (no install; plain HTTP), `/invite <port>` another port, `/invite --let-approve` lets guests approve and stop too, `/invite stop` ends it |
 | `/call` | A voice call with the people on this session (guests on `/invite` and `dcode-ai join` terminals type `/call` to join). In a call: `/call ptt` (hold Ctrl+Space to talk), `/call volume <name> <0-200>`, `/call echo on\|off`. `/mute` toggles your microphone, `/hangup` leaves. Never recorded or logged; headphones avoid echo. Needs PulseAudio/PipeWire on Linux (WSLg on Windows 11) |
+| `/invite relay <host:port>` | Invite through a relay you run (`dcode-ai relay serve` on a machine both sides can reach): people join from any network, no VPN. The relay only passes encrypted bytes |
 | `/chat` | The chat window: the dashboard's team tab, with a box to type in (Enter sends, Esc back). `/chat <text>` sends a line directly |
 | `/chat <text>` | Talk to the people on this session — not sent to the agent. `/chat` alone shows the recent chat; it's also in the dashboard's `team` tab (`Alt+6`) |
 | `/todo` | The shared to-do list: `/todo <text>` adds, `/todo done <n>` ticks off, `/todo` lists. Everyone on the session sees it, and the agent gets the open items with each prompt (not shown in the transcript) |

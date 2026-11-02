@@ -203,6 +203,8 @@ pub enum DashTarget {
     Subagent(usize),
     /// Row in the changes tab for review item `i`.
     ReviewItem(usize),
+    /// Row `i` of the files tab's project explorer.
+    ExplorerRow(usize),
 }
 
 /// Click geometry of the last dashboard frame.
@@ -338,6 +340,8 @@ pub struct TuiSessionState {
     pub shell_stopped_at: Option<std::time::Instant>,
     /// Chat between people and the shared to-do list.
     pub team: crate::tui::team::Team,
+    /// The files tab's project explorer.
+    pub explorer: crate::tui::explorer::Explorer,
     /// Typing in the team tab's chat box (keys go there, not the composer).
     /// When the event being applied happened (set while replaying a log, so
     /// the timeline and file map keep real times); None = now.

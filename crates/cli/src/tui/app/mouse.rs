@@ -427,6 +427,15 @@ pub(super) fn handle_dashboard_mouse(
         && g.dash_hits
             .transcript
             .is_none_or(|(tr, _)| !rect_contains(tr, m.column, m.row));
+    let over_explorer = g.rail_tab == RailTab::Files
+        && !g.explorer.touched_only
+        && g.dash_hits
+            .targets
+            .iter()
+            .any(|(r, t)| matches!(t, DashTarget::ExplorerRow(_)) && m.column >= r.x)
+        && g.dash_hits
+            .transcript
+            .is_none_or(|(tr, _)| !rect_contains(tr, m.column, m.row));
     if dashboard_rail_resize(m, g) {
         return;
     }
@@ -436,6 +445,16 @@ pub(super) fn handle_dashboard_mouse(
         return;
     }
     match m.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if over_explorer => {
+            let files = std::mem::take(&mut g.file_map);
+            let step = if m.kind == MouseEventKind::ScrollUp {
+                -3
+            } else {
+                3
+            };
+            g.explorer.move_cursor(&files, step);
+            g.file_map = files;
+        }
         MouseEventKind::ScrollUp if over_changes => g.diff_review.move_file(-1),
         MouseEventKind::ScrollDown if over_changes => g.diff_review.move_file(1),
         MouseEventKind::ScrollUp => {
@@ -460,6 +479,17 @@ pub(super) fn handle_dashboard_mouse(
                     g.diff_review.cursor = item;
                     g.diff_review.confirm_revert = false;
                     g.diff_overlay_open = true;
+                }
+                Some(DashTarget::ExplorerRow(i)) => {
+                    g.rail_focus = true;
+                    g.explorer.cursor = i;
+                    let files = std::mem::take(&mut g.file_map);
+                    // A folder opens/closes; a file is just selected.
+                    let is_dir = g.explorer.rows(&files).get(i).is_some_and(|r| r.dir);
+                    if is_dir {
+                        g.explorer.activate(&files, i);
+                    }
+                    g.file_map = files;
                 }
                 Some(DashTarget::Subagent(idx)) => {
                     g.open_subagent_modal();
