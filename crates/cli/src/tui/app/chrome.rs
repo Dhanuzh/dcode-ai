@@ -270,6 +270,22 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
         ));
     }
 
+    if let Some(call) = &g.office.voice {
+        let (icon, color) = if call.muted() {
+            ("🔇", theme::warn())
+        } else {
+            ("🎙", theme::success())
+        };
+        left.push(Span::styled(
+            format!(
+                " · {icon} call · {} · {}",
+                g.office.in_call.len().max(1),
+                crate::voice::clock(call.elapsed())
+            ),
+            Style::default().fg(color),
+        ));
+    }
+
     if let Some(badge) = shells_badge(g) {
         left.push(Span::styled(
             format!(" · {badge}"),

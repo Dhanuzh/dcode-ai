@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.40 — 2026-11-02
+
+### New
+- **Voice calls** (`/call`, `/mute`, `/hangup`): talk with the people on
+  the session, like a Teams call, while the agent works. The host starts a
+  call after `/invite`; guests type `/call` to join. The footer shows
+  `🎙 call · 3 · 2:14`; in the office everyone in the call wears a headset
+  and whoever is speaking gets sound waves. Audio goes host ↔ guests over
+  the invite's encrypted connection — never recorded, never logged, never
+  sent to the agent. Linux and WSLg use the PulseAudio protocol in pure
+  Rust (works with PipeWire; nothing extra linked, so dcode-ai still starts
+  without sound); macOS and Windows use the system audio. Headphones
+  recommended (no echo cancellation yet).
+- **Find in the conversation** (`Ctrl+F`): a find box with the number of
+  matches and the matching lines, the match highlighted; Enter/↓ next,
+  ↑ previous.
+- **Live command progress**: a running shell command shows a spinner, how
+  long it has run, and its latest output. **Esc stops just that command**
+  (the agent is told and carries on); Esc again stops the whole turn.
+- **Toasts** for comings and goings (joined, left, joined the call,
+  reconnecting) instead of transcript lines.
+- **Light themes**: the office gets a bright room and QR codes are drawn
+  the right way round.
+
+### Fixed
+- Ctrl+F opened a search nobody could see, and the next key closed it.
+- After copying a link (e.g. `/invite`, `/watch`), a clipboard library
+  warning was printed over the TUI on Linux/WSL.
+
 ## 1.0.39 — 2026-11-01
 
 ### New

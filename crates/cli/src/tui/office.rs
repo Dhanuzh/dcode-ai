@@ -76,6 +76,10 @@ pub struct Office {
     /// Seen from a guest's terminal: their own person id (the owner is
     /// then the host, and this one is "you").
     pub me: Option<String>,
+    /// People in the voice call (person ids).
+    pub in_call: std::collections::HashSet<String>,
+    /// This terminal's side of the call (who is speaking), while in one.
+    pub voice: Option<crate::voice::Call>,
 }
 
 /// How a person is with the session.
@@ -153,6 +157,8 @@ impl Default for Office {
             }],
             people: Vec::new(),
             me: None,
+            in_call: Default::default(),
+            voice: None,
         }
     }
 }
@@ -263,6 +269,31 @@ impl Office {
     }
 
     /// People in drawing order: you, then teammates, then watchers.
+    /// In the call, and speaking right now.
+    pub fn speaking(&self, person: &str) -> bool {
+        self.in_call.contains(person) && self.voice.as_ref().is_some_and(|v| v.speaking(person))
+    }
+
+    /// What's over someone's head.
+    pub fn bubble_for(&self, p: &OfficePerson) -> String {
+        if p.leaving.is_none() && self.in_call.contains(&p.id) {
+            let me = match &self.me {
+                Some(me) => *me == p.id,
+                None => p.role == PersonRole::Owner,
+            };
+            if me && self.voice.as_ref().is_some_and(|v| v.muted()) {
+                return "🔇 muted".into();
+            }
+            if self.speaking(&p.id) {
+                return "🔊 speaking".into();
+            }
+            if !p.talking() {
+                return "📞 on the call".into();
+            }
+        }
+        p.bubble()
+    }
+
     pub fn people_ordered(&self) -> Vec<&OfficePerson> {
         let mut v: Vec<&OfficePerson> = self.people.iter().collect();
         v.sort_by_key(|p| match p.role {
@@ -377,6 +408,15 @@ impl Office {
                     p.leaving = Some(Instant::now());
                 }
             }
+            AgentEvent::CallJoined { person, .. } => {
+                self.in_call.insert(person.clone());
+            }
+            AgentEvent::CallLeft { person, .. } => {
+                self.in_call.remove(person);
+                if let Some(v) = &self.voice {
+                    v.forget(person);
+                }
+            }
             AgentEvent::PersonSaid { person, text, .. }
             | AgentEvent::PersonChat { person, text, .. } => {
                 if let Some(p) = self.person(person) {
@@ -457,13 +497,29 @@ const LOOKS: [(Color, Color, Color); 6] = [
     ),
 ];
 
-const WALL: Color = rgb(0x2a, 0x30, 0x3c);
-const WALL_TRIM: Color = rgb(0x5a, 0x3e, 0x2c);
+/// The room: a dark office on dark themes, a bright one on light themes
+/// (so it doesn't sit in the page as a dark block).
+fn room() -> [Color; 5] {
+    if crate::tui::theme::is_light() {
+        [
+            rgb(0xd9, 0xe1, 0xea), // wall
+            rgb(0xb0, 0x8a, 0x66), // trim
+            rgb(0xe3, 0xcf, 0xb4), // floor
+            rgb(0xea, 0xd8, 0xbf), // floor, alternate
+            rgb(0xcf, 0xb8, 0x9a), // seam
+        ]
+    } else {
+        [
+            rgb(0x2a, 0x30, 0x3c),
+            rgb(0x5a, 0x3e, 0x2c),
+            rgb(0x4a, 0x34, 0x26),
+            rgb(0x55, 0x3b, 0x2b),
+            rgb(0x3a, 0x29, 0x1e),
+        ]
+    }
+}
 const WINDOW: Color = rgb(0x4a, 0x6a, 0x8a);
 const WINDOW_LIGHT: Color = rgb(0x7f, 0x9c, 0xbc);
-const FLOOR_A: Color = rgb(0x4a, 0x34, 0x26);
-const FLOOR_B: Color = rgb(0x55, 0x3b, 0x2b);
-const FLOOR_SEAM: Color = rgb(0x3a, 0x29, 0x1e);
 const DESK_TOP: Color = rgb(0xc4, 0x94, 0x66);
 const DESK_FRONT: Color = rgb(0x8c, 0x62, 0x39);
 const DESK_LEG: Color = rgb(0x5c, 0x40, 0x26);
@@ -515,7 +571,7 @@ const WALL_ROWS: usize = 3;
 
 fn draw_room(c: &mut Canvas, tick: u64) {
     let wall_px = WALL_ROWS * 2;
-    c.rect(0, 0, c.w as i32, wall_px as i32, WALL);
+    c.rect(0, 0, c.w as i32, wall_px as i32, room()[0]);
     // Windows along the wall, softly lit.
     let mut x = 4;
     while x + 10 < c.w as i32 {
@@ -524,18 +580,18 @@ fn draw_room(c: &mut Canvas, tick: u64) {
         c.rect(x + 6, 2, 3, 2, WINDOW_LIGHT);
         x += 22;
     }
-    c.rect(0, wall_px as i32 - 1, c.w as i32, 1, WALL_TRIM);
+    c.rect(0, wall_px as i32 - 1, c.w as i32, 1, room()[1]);
     // Plank floor.
     for y in wall_px..c.h {
         let band = (y - wall_px) / 4;
         let color = if band.is_multiple_of(2) {
-            FLOOR_A
+            room()[2]
         } else {
-            FLOOR_B
+            room()[3]
         };
         for x in 0..c.w {
             let seam = (x + band * 7).is_multiple_of(18);
-            c.set(x as i32, y as i32, if seam { FLOOR_SEAM } else { color });
+            c.set(x as i32, y as i32, if seam { room()[4] } else { color });
         }
     }
     // A plant on the left, a water cooler on the right.
@@ -701,7 +757,14 @@ fn draw_station(c: &mut Canvas, ox: i32, oy: i32, agent: &OfficeAgent, tick: u64
 }
 
 /// A person (you, a teammate, a viewer) at `(ox, oy)`.
-fn draw_person(c: &mut Canvas, ox: i32, oy: i32, person: &OfficePerson, tick: u64) {
+fn draw_person(
+    c: &mut Canvas,
+    ox: i32,
+    oy: i32,
+    person: &OfficePerson,
+    tick: u64,
+    (on_call, speaking): (bool, bool),
+) {
     let (hair, skin, shirt) = LOOKS[person.look % LOOKS.len()];
     let f = tick as i32;
     // Walking out: slide right as the wave goes on.
@@ -731,9 +794,36 @@ fn draw_person(c: &mut Canvas, ox: i32, oy: i32, person: &OfficePerson, tick: u6
     r(c, 9 + x0, top + 2, 5, 1, hair);
     p(c, 10 + x0, top + 4, EYE);
     p(c, 12 + x0, top + 4, EYE);
-    // Talking: the mouth opens and closes.
-    if person.talking() && (f / 2) % 2 == 0 {
+    // Talking: the mouth opens and closes (faster when speaking aloud).
+    let mouth = if speaking {
+        f % 2 == 0
+    } else {
+        person.talking() && (f / 2) % 2 == 0
+    };
+    if mouth {
         p(c, 11 + x0, top + 6, rgb(0x8a, 0x3a, 0x3a));
+    }
+    if on_call {
+        // A headset: the band over the head, ear pads, the mic.
+        let set = rgb(0x30, 0x34, 0x3c);
+        r(c, 8 + x0, top - 1, 7, 1, set);
+        r(c, 7 + x0, top + 3, 1, 3, set);
+        r(c, 15 + x0, top + 3, 1, 3, set);
+        p(c, 8 + x0, top + 6, set);
+        p(c, 9 + x0, top + 6, set);
+    }
+    if speaking {
+        // Sound waves beside the head.
+        let wave = rgb(0x7f, 0xbf, 0x7f);
+        let far = (f / 2) % 2 == 0;
+        p(c, 17 + x0, top + 3, wave);
+        p(c, 17 + x0, top + 5, wave);
+        p(c, 18 + x0, top + 4, wave);
+        if far {
+            p(c, 19 + x0, top + 2, wave);
+            p(c, 20 + x0, top + 4, wave);
+            p(c, 19 + x0, top + 6, wave);
+        }
     }
     r(c, 10 + x0, top + 7, 3, 1, skin);
     // Body.
@@ -757,7 +847,7 @@ fn draw_person(c: &mut Canvas, ox: i32, oy: i32, person: &OfficePerson, tick: u6
         r(c, 6, body_y + 1, 1, 4, shirt);
         r(c, 16, body_y + 1, 1, 4, shirt);
         // Writing while you talk.
-        let pen = person.talking() && (f / 2) % 2 == 0;
+        let pen = (person.talking() || speaking) && (f / 2) % 2 == 0;
         r(c, 6, 15, 2, 1, skin);
         r(c, 15, 15 - pen as i32, 2, 1, skin);
     }
@@ -869,7 +959,7 @@ impl Widget for OfficeView<'_> {
         // Draw at logical size, then blow each pixel up `s` times.
         let w = area.width as usize / s;
         let rows = area.height as usize / s;
-        let mut canvas = Canvas::new(w.max(1), (rows * 2).max(2), FLOOR_A);
+        let mut canvas = Canvas::new(w.max(1), (rows * 2).max(2), room()[2]);
         draw_room(&mut canvas, self.tick);
 
         let per_row = desks_per_row(w as u16);
@@ -896,7 +986,11 @@ impl Widget for OfficeView<'_> {
                     )
                 }
                 Who::Person(p) => {
-                    draw_person(&mut canvas, px, py, p, self.tick);
+                    let voice = (
+                        self.office.in_call.contains(&p.id),
+                        self.office.speaking(&p.id),
+                    );
+                    draw_person(&mut canvas, px, py, p, self.tick, voice);
                     let bg = match p.role {
                         PersonRole::Owner => rgb(0xd9, 0x77, 0x57),
                         PersonRole::Joined => rgb(0x3f, 0x7f, 0xbf),
@@ -908,7 +1002,7 @@ impl Widget for OfficeView<'_> {
                         (None, PersonRole::Owner) => format!("{} (you)", p.name),
                         _ => p.name.clone(),
                     };
-                    (p.bubble(), name, (bg, bg))
+                    (self.office.bubble_for(p), name, (bg, bg))
                 }
             };
             let centre = |text: &str| -> u16 {
@@ -1158,6 +1252,8 @@ mod preview {
                 agents,
                 people: Vec::new(),
                 me: None,
+                in_call: Default::default(),
+                voice: None,
             };
             office.set_owner("dhanush");
             office.apply(&AgentEvent::PersonJoined {
@@ -1175,6 +1271,21 @@ mod preview {
                 name: "Ravi".into(),
                 role: "watch".into(),
             });
+            if sel == 1 {
+                // In a call: you and Priya with headsets, Priya speaking.
+                // SAFETY: only this ignored preview sets it.
+                unsafe { std::env::set_var("DCODE_AI_FAKE_AUDIO", "silence") };
+                let rt = tokio::runtime::Runtime::new().unwrap();
+                let call = rt.block_on(async { crate::voice::Call::start("owner").unwrap().0 });
+                let tone: Vec<i16> = (0..320)
+                    .map(|i| ((i as f32 * 0.17).sin() * 8000.0) as i16)
+                    .collect();
+                call.play("j1", &crate::voice::adpcm::encode(&tone));
+                office.in_call.insert("owner".into());
+                office.in_call.insert("j1".into());
+                office.voice = Some(call);
+                std::mem::forget(rt);
+            }
             let area = Rect::new(0, 0, 120, office_height(120, office.stations().len()));
             let mut buf = Buffer::empty(area);
             OfficeView {

@@ -54,9 +54,29 @@ fn is_tmux() -> bool {
     std::env::var("TMUX").is_ok()
 }
 
+/// One clipboard for the whole run: on Linux the copied text lives as long
+/// as the `Clipboard` that owns it, and dropping it right after writing
+/// makes arboard print a warning straight over the TUI.
 fn try_arboard(text: &str) -> Result<(), String> {
-    let mut cb = arboard::Clipboard::new().map_err(|e| e.to_string())?;
-    cb.set_text(text).map_err(|e| e.to_string())
+    use std::sync::{Mutex, OnceLock};
+    static CLIPBOARD: OnceLock<Mutex<Option<arboard::Clipboard>>> = OnceLock::new();
+    let slot = CLIPBOARD.get_or_init(|| Mutex::new(None));
+    let mut guard = slot.lock().map_err(|e| e.to_string())?;
+    if guard.is_none() {
+        *guard = Some(arboard::Clipboard::new().map_err(|e| e.to_string())?);
+    }
+    let cb = guard.as_mut().expect("set above");
+    match cb.set_text(text) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // A stale connection (display restarted): try once with a new one.
+            *guard = None;
+            let mut fresh = arboard::Clipboard::new().map_err(|e| e.to_string())?;
+            fresh.set_text(text).map_err(|_| e.to_string())?;
+            *guard = Some(fresh);
+            Ok(())
+        }
+    }
 }
 
 fn tmux_load_buffer(text: &str) -> Result<(), String> {

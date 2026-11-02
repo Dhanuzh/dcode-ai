@@ -595,25 +595,6 @@ struct TranscriptRenderCache {
     hits: Vec<LineAnswerHit>,
 }
 
-fn line_plain_text(line: &Line<'_>) -> String {
-    line.spans.iter().map(|s| s.content.as_ref()).collect()
-}
-
-fn transcript_search_matches(lines: &[Line<'_>], query: &str) -> Vec<usize> {
-    let needle = query.trim().to_ascii_lowercase();
-    if needle.is_empty() {
-        return Vec::new();
-    }
-    lines
-        .iter()
-        .enumerate()
-        .filter_map(|(i, line)| {
-            let hay = line_plain_text(line).to_ascii_lowercase();
-            hay.contains(&needle).then_some(i)
-        })
-        .collect()
-}
-
 fn latest_copyable_text(state: &TuiSessionState) -> Option<String> {
     if let Some(stream) = state.streaming_assistant.as_ref()
         && !stream.trim().is_empty()
@@ -1267,7 +1248,12 @@ pub fn run_blocking(
                     );
                 }
                 Event::Paste(pasted) => {
-                    if let Some(panel) = g.mcp_panel.as_mut().filter(|p| p.in_auth()) {
+                    if g.transcript_search_open {
+                        // Pasted (or typed fast) into the find box.
+                        g.transcript_search_query
+                            .push_str(pasted.lines().next().unwrap_or(""));
+                        g.transcript_search_index = 0;
+                    } else if let Some(panel) = g.mcp_panel.as_mut().filter(|p| p.in_auth()) {
                         panel.paste(&pasted.replace(['\r', '\n'], ""));
                     } else if g.anthropic_oauth_modal_open {
                         let normalized = pasted.replace('\r', "");

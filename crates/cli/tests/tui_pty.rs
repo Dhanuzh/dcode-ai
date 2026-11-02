@@ -41,6 +41,8 @@ impl Tui {
         cmd.env("XDG_CONFIG_HOME", home.join(".config"));
         cmd.env("XDG_RUNTIME_DIR", runtime_dir(home));
         cmd.env("TERM", "xterm-256color");
+        // Calls use a fake microphone (a tone) and speakers.
+        cmd.env("DCODE_AI_FAKE_AUDIO", "tone");
         // Only ever sent to the local mock model in these tests.
         cmd.env("ANTHROPIC_AUTH_TOKEN", "test-token");
         let child = pty.slave.spawn_command(cmd).expect("spawn dcode-ai");
@@ -325,6 +327,11 @@ fn answer(mut stream: std::net::TcpStream) {
         .is_some_and(|parts| parts.iter().any(|p| p["type"] == "tool_result"));
     let sse = if after_tool {
         text_sse("Wrote the note.")
+    } else if said.contains("run the slow command") {
+        tool_sse(
+            "execute_bash",
+            &serde_json::json!({"command": "echo started; sleep 30; echo never"}),
+        )
     } else if said.contains("create the note") {
         tool_sse(
             "write_file",
@@ -807,6 +814,18 @@ fn see_and_share_a_session() {
     run(&mut tui, "/files");
     tui.wait_for("✎ note.txt");
 
+    // Ctrl+F finds in the conversation.
+    tui.send(b"\x06");
+    tui.wait_for("Find in conversation");
+    tui.send(b"note");
+    tui.wait_until("matches counted", |t| {
+        t.contains(" of ") && t.contains("note")
+    });
+    tui.send(b"\x1b");
+    tui.wait_until("the find box closed", |t| {
+        !t.contains("Find in conversation")
+    });
+
     // The dashboard's files tab shows it too.
     tui.send(b"\x1c");
     tui.wait_for("Alt+1-6");
@@ -1144,6 +1163,22 @@ fn invited_guest_gets_the_full_interface() {
     run(&mut guest, "/todo done 1");
     host.wait_for("☑ Sam ticked off #1: fix the login bug");
 
+    // A voice call: the host starts it, the guest joins, mutes, leaves.
+    run(&mut host, "/call");
+    host.wait_for("you started the call");
+    host.wait_for("🎙 call · 1");
+    run(&mut guest, "/call");
+    guest.wait_for("you joined the call");
+    host.wait_for("📞 Sam joined the call");
+    host.wait_for("🎙 call · 2");
+    guest.wait_for("call · 2");
+    run(&mut guest, "/mute");
+    guest.wait_for("🔇 call · 2");
+    run(&mut guest, "/hangup");
+    host.wait_for("📞 Sam left the call");
+    run(&mut host, "/hangup");
+    host.wait_for("you left the call");
+
     // The host sees who is here, and can remove them.
     run(&mut host, "/people");
     host.wait_for("Sam — joined over /invite");
@@ -1151,6 +1186,34 @@ fn invited_guest_gets_the_full_interface() {
     host.wait_for("[kick] removed Sam");
     guest.wait_for("removed you");
     host.wait_for("⇠ Sam left");
+}
+
+/// A long shell command shows that it's alive (elapsed time, its output),
+/// and Esc stops just the command: the turn carries on.
+#[test]
+fn a_running_command_shows_progress_and_esc_stops_only_it() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    tui.send(b"please run the slow command");
+    std::thread::sleep(Duration::from_millis(200));
+    tui.send(b"\r");
+    tui.wait_until("an approval prompt", |t| {
+        t.contains("sleep 30") && t.contains("1.")
+    });
+    tui.send(b"1");
+    tui.wait_for("started");
+    tui.wait_until("live progress", |t| {
+        t.contains("running") && t.contains("esc stop")
+    });
+    tui.wait_until("elapsed time ticks", |t| {
+        t.contains("running 2s") || t.contains("running 3s") || t.contains("running 4s")
+    });
+    tui.send(b"\x1b");
+    tui.wait_for("stopped the command");
+    // The agent got the result and went on (the mock confirms a tool result).
+    tui.wait_for("The user stopped this command");
+    tui.wait_for("Wrote the note.");
 }
 
 impl Tui {

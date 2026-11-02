@@ -58,6 +58,9 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
     if g.theme_picker_open {
         return Some(theme_box(g, inner_w));
     }
+    if g.transcript_search_open {
+        return Some(find_box(g, inner_w));
+    }
     if g.input_buffer.is_empty()
         && let Some(c) = g.active_choice()
     {
@@ -552,6 +555,96 @@ pub(crate) fn render_prompt_box(frame: &mut ratatui::Frame<'_>, area: Rect, pb: 
         .padding(Padding::horizontal(1))
         .style(Style::default().bg(theme::bg()));
     frame.render_widget(Paragraph::new(Text::from(pb.lines)).block(block), area);
+}
+
+/// `Ctrl+F`: the query, how many matches, and the matching lines around the
+/// selected one, the match highlighted.
+fn find_box(g: &TuiSessionState, inner_w: usize) -> PromptBox {
+    let query = g.transcript_search_query.clone();
+    let matches = g.transcript_matches();
+    let n = matches.len();
+    let sel = if n == 0 {
+        0
+    } else {
+        g.transcript_search_index.min(n - 1)
+    };
+    let count = if query.trim().is_empty() {
+        "type to search the conversation".to_string()
+    } else if n == 0 {
+        "no matches".to_string()
+    } else {
+        format!("{} of {n}", sel + 1)
+    };
+    let mut lines = vec![Line::from(vec![
+        Span::styled("/ ", Style::default().fg(theme::accent())),
+        Span::styled(
+            format!("{query}▏"),
+            Style::default()
+                .fg(theme::text())
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(format!("   {count}"), Style::default().fg(theme::muted())),
+    ])];
+    lines.push(Line::default());
+    const VISIBLE: usize = 7;
+    let start = sel
+        .saturating_sub(VISIBLE / 2)
+        .min(n.saturating_sub(VISIBLE));
+    let needle = query.trim().to_lowercase();
+    for (i, (who, text)) in matches.iter().enumerate().skip(start).take(VISIBLE) {
+        let mark = if i == sel { "❯ " } else { "  " };
+        let room = inner_w.saturating_sub(who.len() + 6);
+        // Keep the match in view on long lines.
+        let lower = text.to_lowercase();
+        let at = lower.find(&needle).unwrap_or(0);
+        let skip = at.saturating_sub(room / 3);
+        let skip = (0..=skip)
+            .rev()
+            .find(|i| text.is_char_boundary(*i))
+            .unwrap_or(0);
+        let shown: String = if skip > 0 {
+            format!("…{}", &text[skip..])
+        } else {
+            text.clone()
+        };
+        let shown = truncate_chars(&shown, room);
+        let mut spans = vec![
+            Span::styled(mark, Style::default().fg(theme::accent())),
+            Span::styled(format!("{who:>8} "), Style::default().fg(theme::muted())),
+        ];
+        let base = if i == sel {
+            Style::default().fg(theme::text())
+        } else {
+            Style::default().fg(theme::muted())
+        };
+        let hit = Style::default()
+            .fg(theme::bg())
+            .bg(theme::warn())
+            .add_modifier(Modifier::BOLD);
+        let lower_shown = shown.to_lowercase();
+        let mut pos = 0;
+        while !needle.is_empty()
+            && let Some(rel) = lower_shown[pos..].find(&needle)
+        {
+            let a = pos + rel;
+            let b = a + needle.len();
+            if !shown.is_char_boundary(a) || !shown.is_char_boundary(b) {
+                break;
+            }
+            spans.push(Span::styled(shown[pos..a].to_string(), base));
+            spans.push(Span::styled(shown[a..b].to_string(), hit));
+            pos = b;
+        }
+        spans.push(Span::styled(shown[pos..].to_string(), base));
+        lines.push(Line::from(spans));
+    }
+    lines.push(Line::default());
+    lines.push(muted("Enter / ↓ next · ↑ previous · Esc close"));
+    PromptBox {
+        title: "Find in conversation".into(),
+        color: theme::accent(),
+        lines,
+    }
 }
 
 #[cfg(test)]

@@ -650,7 +650,7 @@ fn render_block(
             name,
             input,
             output,
-            call_id: _,
+            call_id,
         } => {
             push_transcript_line(lines, hits, Line::default(), None);
             push_transcript_line(
@@ -668,18 +668,25 @@ fn render_block(
             // Last few lines of streamed output.
             let all: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
             let live = &all[all.len().saturating_sub(4)..];
+            // How long it has run, so a slow command doesn't look stuck.
+            let secs = state
+                .tool_started
+                .get(call_id)
+                .map(|t| t.elapsed().as_secs())
+                .unwrap_or(0);
+            let spin = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+                [(crate::tui::app::office_tick() as usize) % 10];
+            let keys = if name == "execute_bash" {
+                " · esc stop · ctrl+b background"
+            } else {
+                ""
+            };
+            let status = Span::styled(
+                format!("{spin} running {}{keys}", elapsed_label(secs)),
+                dim(),
+            );
             if live.is_empty() {
-                let text = if name == "execute_bash" {
-                    "Running… (ctrl+b to run in background)"
-                } else {
-                    "Running…"
-                };
-                push_transcript_line(
-                    lines,
-                    hits,
-                    result_line(true, vec![Span::styled(text, dim())]),
-                    None,
-                );
+                push_transcript_line(lines, hits, result_line(true, vec![status]), None);
             } else {
                 for (i, l) in live.iter().enumerate() {
                     push_transcript_line(
@@ -695,6 +702,7 @@ fn render_block(
                         None,
                     );
                 }
+                push_transcript_line(lines, hits, result_line(false, vec![status]), None);
             }
         }
         DisplayBlock::ToolDone {
@@ -1171,6 +1179,15 @@ pub(crate) fn question_answer_label(
             .collect::<Vec<_>>()
             .join(", "),
         QuestionSelection::Custom { text } => text.clone(),
+    }
+}
+
+/// `12s`, `3m 05s`.
+fn elapsed_label(secs: u64) -> String {
+    if secs < 60 {
+        format!("{secs}s")
+    } else {
+        format!("{}m {:02}s", secs / 60, secs % 60)
     }
 }
 

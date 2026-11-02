@@ -208,6 +208,14 @@ impl Repl {
             "/invite" => {
                 let words: Vec<&str> = rest.split_whitespace().collect();
                 if words.first() == Some(&"stop") {
+                    if let Some(inv) = &self.invite {
+                        inv.call_leave();
+                    }
+                    if let ReplOutput::Tui(st) = &out
+                        && let Ok(mut g) = st.lock()
+                    {
+                        g.office.voice = None;
+                    }
                     if self.invite.take().is_some() {
                         out.println("[invite] stopped — the line no longer works and guests were disconnected");
                     } else {
@@ -297,6 +305,67 @@ impl Repl {
                     )),
                     Err(e) => out.eprintln(&format!("[invite] could not start: {e}")),
                 }
+            }
+            "/call" => {
+                let ReplOutput::Tui(st) = &out else {
+                    out.eprintln("[call] calls need the terminal UI");
+                    return Ok(true);
+                };
+                let Some(inv) = &self.invite else {
+                    out.println("[call] start /invite first — calls are with the people who join through it");
+                    return Ok(true);
+                };
+                let already = st.lock().map(|g| g.office.voice.is_some()).unwrap_or(false);
+                if already {
+                    out.println("[call] you're in the call — /mute · /hangup");
+                    return Ok(true);
+                }
+                match dcode_ai_cli::voice::Call::start(dcode_ai_cli::invite::HOST_PERSON) {
+                    Ok((call, mic)) => {
+                        inv.call_join(call.clone(), mic);
+                        if let Ok(mut g) = st.lock() {
+                            g.office.voice = Some(call);
+                        }
+                        out.println("[call] 📞 you started the call — guests type /call to join · /mute · /hangup · headphones avoid echo");
+                    }
+                    Err(e) => out.eprintln(&format!("[call] can't start: {e}")),
+                }
+            }
+            "/mute" => {
+                let ReplOutput::Tui(st) = &out else {
+                    return Ok(true);
+                };
+                let state = st.lock().ok().and_then(|g| g.office.voice.clone());
+                match state {
+                    Some(v) => {
+                        let on = !v.muted();
+                        v.set_muted(on);
+                        out.println(if on {
+                            "[call] 🔇 muted — /mute again to talk"
+                        } else {
+                            "[call] 🎙 unmuted"
+                        });
+                    }
+                    None => out.println("[call] you're not in a call — /call"),
+                }
+            }
+            "/hangup" => {
+                let ReplOutput::Tui(st) = &out else {
+                    return Ok(true);
+                };
+                let had = st
+                    .lock()
+                    .ok()
+                    .and_then(|mut g| g.office.voice.take())
+                    .is_some();
+                if let Some(inv) = &self.invite {
+                    inv.call_leave();
+                }
+                out.println(if had {
+                    "[call] you left the call"
+                } else {
+                    "[call] you're not in a call"
+                });
             }
             "/chat" => {
                 let text = rest.trim();

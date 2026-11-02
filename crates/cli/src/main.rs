@@ -2158,7 +2158,7 @@ async fn join_invite(
                     let _ = print_event_envelope(&env, false);
                 }
                 Some(GuestUpdate::Note(text)) => eprintln!("[join] {text}"),
-                Some(GuestUpdate::History(_)) => {}
+                Some(GuestUpdate::History(_)) | Some(GuestUpdate::Audio { .. }) => {}
                 None => {
                     eprintln!("[join] disconnected");
                     break;

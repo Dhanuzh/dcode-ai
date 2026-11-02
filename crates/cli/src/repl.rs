@@ -974,7 +974,8 @@ impl Repl {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
             "/office" | "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff"
-            | "/invite" | "/chat" | "/todo" | "/people" | "/kick" => {
+            | "/invite" | "/chat" | "/todo" | "/people" | "/kick" | "/call" | "/mute"
+            | "/hangup" => {
                 return self.cmd_team(input, command, rest, parts, out).await;
             }
             "/btw" => {

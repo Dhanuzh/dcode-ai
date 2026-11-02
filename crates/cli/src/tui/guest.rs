@@ -79,10 +79,55 @@ fn guest_command(text: &str, g: &mut TuiSessionState, send: &GuestSender) -> Gue
                 g.push_block(DisplayBlock::System(l));
             }
         }
+        "/call" => {
+            if g.office.voice.is_some() {
+                g.push_block(DisplayBlock::System(
+                    "[call] you're in the call — /mute · /hangup".into(),
+                ));
+            } else {
+                let me = g.office.me.clone().unwrap_or_default();
+                match crate::voice::Call::start(&me) {
+                    Ok((call, mut mic)) => {
+                        g.office.voice = Some(call);
+                        send.call_join();
+                        let s = send.clone();
+                        tokio::spawn(async move {
+                            while let Some(packet) = mic.recv().await {
+                                if !s.audio(&packet) {
+                                    break;
+                                }
+                            }
+                        });
+                        g.push_block(DisplayBlock::System(
+                            "[call] 📞 you joined the call — /mute · /hangup · headphones avoid echo".into(),
+                        ));
+                    }
+                    Err(e) => g.push_block(DisplayBlock::System(format!("[call] can't start: {e}"))),
+                }
+            }
+        }
+        "/mute" => match &g.office.voice {
+            Some(v) => {
+                let on = !v.muted();
+                v.set_muted(on);
+                g.push_block(DisplayBlock::System(
+                    if on { "[call] 🔇 muted — /mute again to talk" } else { "[call] 🎙 unmuted" }.into(),
+                ));
+            }
+            None => g.push_block(DisplayBlock::System("[call] you're not in a call — /call".into())),
+        },
+        "/hangup" => match g.office.voice.take() {
+            Some(v) => {
+                v.hang_up();
+                send.call_leave();
+                g.push_block(DisplayBlock::System("[call] you left the call".into()));
+            }
+            None => g.push_block(DisplayBlock::System("[call] you're not in a call".into())),
+        },
         "/office" => g.office_open = true,
         "/timeline" => g.timeline_open = true,
         "/help" => g.push_block(DisplayBlock::System(
-            "[join] you're a guest on this session: type to send a message to the agent · /chat <text> to the people · /todo <text> adds to the shared to-do list · /todo done <n> · /people · /office · /timeline · /stop (if the host allows it) · /quit to leave".into(),
+            "[join] you're a guest on this session: type to send a message to the agent · /chat <text> to the people · /todo <text> adds to the shared to-do list · /todo done <n> · /people · /call · /mute · /hangup · /office · /timeline · /stop (if the host allows it) · /quit to leave".into(),
         )),
         _ => g.push_block(DisplayBlock::System(format!(
             "[join] {word} isn't available while joined (it would change the host's session) — /help"
@@ -160,7 +205,19 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
                     crate::tui::replay::apply_history(&events, &feed_state);
                     continue;
                 }
+                GuestUpdate::Audio { from, packet } => {
+                    if let Some(v) = &g.office.voice {
+                        v.play(&from, &packet);
+                    }
+                }
                 GuestUpdate::Event(env) => g.apply_event(&env.event),
+                // Connection blips are passing notices; anything else
+                // (removed, invite ended) stays in the transcript.
+                GuestUpdate::Note(text)
+                    if text.starts_with("connection lost") || text == "reconnected" =>
+                {
+                    g.show_toast(text, crate::tui::state::ToastKind::Info)
+                }
                 GuestUpdate::Note(text) => {
                     g.push_block(DisplayBlock::System(format!("[join] {text}")))
                 }
@@ -268,6 +325,12 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
                 }
             }
         }
+    }
+    if let Ok(mut g) = state.lock()
+        && let Some(v) = g.office.voice.take()
+    {
+        v.hang_up();
+        send.call_leave();
     }
     send.bye();
     if let Ok(mut g) = state.lock() {

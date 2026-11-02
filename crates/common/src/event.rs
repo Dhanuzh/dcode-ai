@@ -184,6 +184,16 @@ pub enum AgentEvent {
         #[serde(default)]
         name: String,
     },
+    /// Someone joined / left the voice call (no audio is ever logged).
+    CallJoined {
+        person: String,
+        name: String,
+    },
+    CallLeft {
+        person: String,
+        #[serde(default)]
+        name: String,
+    },
     /// Chat between the people on the session (not sent to the agent).
     PersonChat {
         person: String,

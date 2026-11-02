@@ -82,3 +82,9 @@ cargo-husky = { version = "1", default-features = false, features = ["precommit-
 [[bench]]
 name = "tui_perf"
 harness = false
+
+[target.'cfg(target_os = "linux")'.dependencies]
+pulseaudio = "0.3"
+
+[target.'cfg(any(target_os = "macos", windows))'.dependencies]
+cpal = "0.15"

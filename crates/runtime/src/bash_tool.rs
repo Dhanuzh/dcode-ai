@@ -25,6 +25,15 @@ pub fn background_signal() -> Arc<tokio::sync::Notify> {
         .clone()
 }
 
+/// Esc while a shell command runs: stop just that command (the turn goes
+/// on; the agent is told). Only the interactive session's shell listens.
+pub fn stop_signal() -> Arc<tokio::sync::Notify> {
+    static SIGNAL: std::sync::OnceLock<Arc<tokio::sync::Notify>> = std::sync::OnceLock::new();
+    SIGNAL
+        .get_or_init(|| Arc::new(tokio::sync::Notify::new()))
+        .clone()
+}
+
 /// Longest a command may run once it can be moved to the background; the
 /// per-call `timeout_secs` applies while it is still in the foreground.
 const BACKGROUND_MAX_SECS: u64 = 24 * 60 * 60;
@@ -136,8 +145,25 @@ files with this tool (no `echo … >> file` or heredocs) — use write_file / ed
                     pty.exec_streaming(&cmd, BACKGROUND_MAX_SECS, line_tx).await
                 })));
                 let signal = background_signal();
+                let stop = stop_signal();
+                let started = std::time::Instant::now();
                 let handle = guard.0.as_mut().expect("task");
                 tokio::select! {
+                    _ = stop.notified() => {
+                        // Dropping the guard aborts the command.
+                        drop(guard);
+                        let why = format!(
+                            "The user stopped this command after {}s (Esc). Don't run it again \
+                as is: ask what they want, or try another way.",
+                            started.elapsed().as_secs()
+                        );
+                        return ToolResult {
+                            call_id: call.id.clone(),
+                            success: false,
+                            output: why.clone(),
+                            error: Some(why),
+                        };
+                    }
                     joined = handle => {
                         guard.0 = None;
                         joined.unwrap_or_else(|e| Err(PtyError::SpawnFailed(e.to_string())))
@@ -272,8 +298,43 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// The Esc and Ctrl+B signals are process-wide: one test at a time.
+    static SIGNALS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[tokio::test]
+    async fn esc_stops_just_the_running_command() {
+        let _one = SIGNALS.lock().await;
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+        let tool = RuntimeBashTool::with_event_tx(Arc::new(PtyManager::new(dir.path())), tx)
+            .with_background_jobs(BackgroundJobs::default());
+        let marker = dir.path().join("finished");
+        let call = ToolCall {
+            id: "c2".into(),
+            name: "execute_bash".into(),
+            input: json!({"command": format!("sleep 2; touch {}", marker.display())}),
+        };
+        let run = tokio::spawn(async move { tool.execute(&call).await });
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        stop_signal().notify_waiters();
+        let res = tokio::time::timeout(std::time::Duration::from_millis(500), run)
+            .await
+            .expect("returns as soon as it is stopped")
+            .unwrap();
+        assert!(!res.success);
+        assert!(
+            res.output.contains("The user stopped this command"),
+            "{}",
+            res.output
+        );
+        // The command really ended (it never got to finish).
+        tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+        assert!(!marker.exists());
+    }
+
     #[tokio::test]
     async fn ctrl_b_moves_a_running_command_to_the_background() {
+        let _one = SIGNALS.lock().await;
         let dir = tempfile::tempdir().unwrap();
         let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let jobs = BackgroundJobs::default();

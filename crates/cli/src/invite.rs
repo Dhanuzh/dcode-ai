@@ -350,6 +350,49 @@ impl InviteHandle {
     pub fn kick(&self, name: &str) -> usize {
         self.host.kick(name)
     }
+
+    /// The host joins the call: their voiced frames (`mic`) go to every
+    /// guest in it, and what guests say plays on `call`.
+    pub fn call_join(&self, call: crate::voice::Call, mut mic: mpsc::UnboundedReceiver<Vec<u8>>) {
+        if let Ok(mut h) = self.host.call.lock() {
+            h.host = Some(call);
+        }
+        self.host.announce(AgentEvent::CallJoined {
+            person: HOST_PERSON.into(),
+            name: self.host.host_name.clone(),
+        });
+        let host = self.host.clone();
+        tokio::spawn(async move {
+            while let Some(packet) = mic.recv().await {
+                let still = host.call.lock().map(|h| h.host.is_some()).unwrap_or(false);
+                if !still {
+                    break;
+                }
+                host.forward(HOST_PERSON, &packet);
+            }
+        });
+    }
+
+    /// The host leaves the call.
+    pub fn call_leave(&self) {
+        let call = self.host.call.lock().ok().and_then(|mut h| h.host.take());
+        if let Some(call) = call {
+            call.hang_up();
+            self.host.announce(AgentEvent::CallLeft {
+                person: HOST_PERSON.into(),
+                name: self.host.host_name.clone(),
+            });
+        }
+    }
+
+    /// Guests in the call now (person ids).
+    pub fn in_call(&self) -> Vec<String> {
+        self.host
+            .call
+            .lock()
+            .map(|h| h.guests.keys().cloned().collect())
+            .unwrap_or_default()
+    }
 }
 
 impl Drop for InviteHandle {
@@ -415,6 +458,7 @@ async fn host_on(
         rejoin: Default::default(),
         connected: Default::default(),
         pending_bye: Default::default(),
+        call: Default::default(),
     });
     let accept = shared.clone();
     let mut stop = stop_rx.clone();
@@ -480,7 +524,22 @@ struct Host {
     connected: Mutex<HashMap<String, Connected>>,
     /// Person id → their delayed "left" (cancelled when they come back).
     pending_bye: Mutex<HashMap<String, tokio::task::AbortHandle>>,
+    /// The voice call.
+    call: Mutex<CallHub>,
 }
+
+/// Who is in the call, and where to send them audio. The host forwards
+/// each person's audio to everyone else; nobody's audio comes back to them.
+#[derive(Default)]
+struct CallHub {
+    /// Guests in the call → their connection's outgoing queue.
+    guests: HashMap<String, mpsc::UnboundedSender<Value>>,
+    /// The host, when they're in the call.
+    host: Option<crate::voice::Call>,
+}
+
+/// The host's person id in calls and the office.
+pub const HOST_PERSON: &str = "owner";
 
 /// Why a guest's connection ended.
 enum Ended {
@@ -493,6 +552,69 @@ enum Ended {
 impl Host {
     fn ipc(&self) -> dcode_ai_runtime::ipc::IpcClient {
         dcode_ai_runtime::ipc::IpcClient::new(self.socket.clone())
+    }
+
+    fn announce(&self, ev: AgentEvent) {
+        if let Some(tx) = &self.presence {
+            let _ = tx.try_send(ev);
+        }
+    }
+
+    /// Audio from `from` to everyone else in the call.
+    fn forward(&self, from: &str, packet: &[u8]) {
+        use base64::Engine as _;
+        let Ok(hub) = self.call.lock() else { return };
+        if hub.guests.is_empty() && hub.host.is_none() {
+            return;
+        }
+        if from != HOST_PERSON
+            && let Some(host) = &hub.host
+        {
+            host.play(from, packet);
+        }
+        let msg = json!({
+            "t": "audio",
+            "from": from,
+            "d": base64::engine::general_purpose::STANDARD.encode(packet),
+        });
+        for (who, tx) in &hub.guests {
+            if who != from {
+                let _ = tx.send(msg.clone());
+            }
+        }
+    }
+
+    fn call_join(&self, person: &str, name: &str, tx: mpsc::UnboundedSender<Value>) {
+        let fresh = self
+            .call
+            .lock()
+            .map(|mut h| h.guests.insert(person.to_string(), tx).is_none())
+            .unwrap_or(false);
+        if fresh {
+            self.announce(AgentEvent::CallJoined {
+                person: person.to_string(),
+                name: name.to_string(),
+            });
+        }
+    }
+
+    fn call_leave(&self, person: &str, name: &str) {
+        let was = self
+            .call
+            .lock()
+            .map(|mut h| {
+                if let Some(host) = &h.host {
+                    host.forget(person);
+                }
+                h.guests.remove(person).is_some()
+            })
+            .unwrap_or(false);
+        if was {
+            self.announce(AgentEvent::CallLeft {
+                person: person.to_string(),
+                name: name.to_string(),
+            });
+        }
     }
 
     fn kick(&self, name: &str) -> usize {
@@ -714,6 +836,8 @@ impl Host {
             }
         });
         let fin = |text: &str| json!({"t": "note", "text": text, "final": true});
+        // Audio (and call notes) for this guest from the call hub.
+        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Value>();
         let mut beat = tokio::time::interval(Duration::from_secs(10));
         beat.tick().await;
         let ended = loop {
@@ -741,10 +865,44 @@ impl Host {
                 _ = beat.tick() => {
                     let _ = ipc.send_command(&AgentCommand::Heartbeat { person: person.clone() }).await;
                 }
+                a = audio_rx.recv() => {
+                    if let Some(a) = a
+                        && cipher.send(&mut write, &a).await.is_err()
+                    {
+                        break Ended::Dropped;
+                    }
+                }
                 m = msgs.recv() => {
                     let Some(m) = m else { break Ended::Dropped };
-                    if m.get("t").and_then(Value::as_str) == Some("bye") {
-                        break Ended::Gone;
+                    match m.get("t").and_then(Value::as_str) {
+                        Some("bye") => break Ended::Gone,
+                        Some("call_join") => {
+                            self.call_join(&person, &name, audio_tx.clone());
+                            continue;
+                        }
+                        Some("call_leave") => {
+                            self.call_leave(&person, &name);
+                            continue;
+                        }
+                        Some("audio") => {
+                            use base64::Engine as _;
+                            let in_call = self
+                                .call
+                                .lock()
+                                .map(|h| h.guests.contains_key(&person))
+                                .unwrap_or(false);
+                            if in_call
+                                && let Some(packet) = m
+                                    .get("d")
+                                    .and_then(Value::as_str)
+                                    .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                                    .filter(|p| p.len() <= 512)
+                            {
+                                self.forward(&person, &packet);
+                            }
+                            continue;
+                        }
+                        _ => {}
                     }
                     let note = self.carry_out(&ipc, &person, &name, &m).await;
                     if let Some(text) = note {
@@ -754,6 +912,9 @@ impl Host {
             }
         };
         reader.abort();
+        // A dropped or departed guest is out of the call (they rejoin it
+        // after reconnecting).
+        self.call_leave(&person, &name);
         // Only forget them if this connection is still theirs (a reconnect
         // may already have replaced it).
         let still_ours = self
@@ -865,6 +1026,11 @@ impl Host {
 pub enum GuestUpdate {
     /// The conversation before they joined (sent once, first).
     History(Vec<AgentEvent>),
+    /// Someone's voice in the call.
+    Audio {
+        from: String,
+        packet: Vec<u8>,
+    },
     Event(Box<EventEnvelope>),
     Note(String),
 }
@@ -895,6 +1061,18 @@ impl GuestSender {
     }
     pub fn stop_turn(&self) -> bool {
         self.send(json!({"t": "stop"}))
+    }
+    pub fn call_join(&self) -> bool {
+        self.send(json!({"t": "call_join"}))
+    }
+    pub fn call_leave(&self) -> bool {
+        self.send(json!({"t": "call_leave"}))
+    }
+    pub fn audio(&self, packet: &[u8]) -> bool {
+        use base64::Engine as _;
+        self.send(
+            json!({"t": "audio", "d": base64::engine::general_purpose::STANDARD.encode(packet)}),
+        )
     }
     /// Leaving on purpose (no "reconnecting").
     pub fn bye(&self) -> bool {
@@ -998,6 +1176,22 @@ async fn read_link(
     while let Ok(m) = cipher.recv(&mut read).await {
         let fin = m.get("final").and_then(Value::as_bool).unwrap_or(false);
         let update = match m.get("t").and_then(Value::as_str) {
+            Some("audio") => {
+                use base64::Engine as _;
+                let from = m
+                    .get("from")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string();
+                match m
+                    .get("d")
+                    .and_then(Value::as_str)
+                    .and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok())
+                {
+                    Some(packet) => GuestUpdate::Audio { from, packet },
+                    None => continue,
+                }
+            }
             Some("event") => match m
                 .get("e")
                 .cloned()
@@ -1107,6 +1301,8 @@ async fn keep_up(
     mut out: mpsc::UnboundedReceiver<Value>,
     tx: mpsc::Sender<GuestUpdate>,
 ) {
+    // Whether we're in the call (to rejoin it after a reconnect).
+    let mut in_call = false;
     loop {
         let Link {
             cipher,
@@ -1124,7 +1320,13 @@ async fn keep_up(
                         reader.abort();
                         return;
                     };
-                    let leaving = m.get("t").and_then(Value::as_str) == Some("bye");
+                    let kind = m.get("t").and_then(Value::as_str);
+                    let leaving = kind == Some("bye");
+                    match kind {
+                        Some("call_join") => in_call = true,
+                        Some("call_leave") => in_call = false,
+                        _ => {}
+                    }
                     if cipher.send(&mut write, &m).await.is_err() {
                         reader.abort();
                         break false;
@@ -1163,8 +1365,14 @@ async fn keep_up(
             }
         }
         match back {
-            Some(l) => {
+            Some(mut l) => {
                 let _ = tx.send(GuestUpdate::Note("reconnected".into())).await;
+                if in_call {
+                    let _ = l
+                        .cipher
+                        .send(&mut l.write, &json!({"t": "call_join"}))
+                        .await;
+                }
                 link = l;
             }
             None => {
@@ -1519,6 +1727,84 @@ mod tests {
             matches!(next_cmd(&mut commands).await, AgentCommand::Bye { person: ref p } if *p == person)
         );
         assert!(handle.host.rejoin.lock().unwrap().is_empty());
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn the_host_forwards_voice_between_people_in_the_call() {
+        // SAFETY: tests that touch this set the same value.
+        unsafe { std::env::set_var("DCODE_AI_FAKE_AUDIO", "tone") };
+        let (socket, _commands, _events, dir) = fake_session().await;
+        let (knock_tx, mut knock_rx) = mpsc::channel::<Knock>(4);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let handle = host_on(
+            listener,
+            HostOptions {
+                port,
+                web: false,
+                let_approve: false,
+                socket,
+                log_path: dir.path().join("none.events.jsonl"),
+                title: "demo".into(),
+                knocks: knock_tx,
+                presence: None,
+                host_name: "Dhanush".into(),
+                project: "d-note".into(),
+                session_id: "s-1".into(),
+                model: "m".into(),
+            },
+            port,
+        )
+        .await
+        .unwrap();
+        tokio::spawn(async move {
+            while let Some(k) = knock_rx.recv().await {
+                let _ = k.reply.send(true);
+            }
+        });
+        let invite = Invite {
+            host: "127.0.0.1".into(),
+            ..handle.invite.clone()
+        };
+        let mut guest = Guest::connect(&invite, "Priya", || {}).await.unwrap();
+        let send = guest.sender();
+        send.call_join();
+        // The host joins with a (fake) microphone playing a tone.
+        let (host_call, mic) = crate::voice::Call::start(HOST_PERSON).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(handle.in_call(), vec![guest.me.clone()]);
+        handle.call_join(host_call.clone(), mic);
+        // The host's voice reaches the guest.
+        let heard = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match guest.updates.recv().await {
+                    Some(GuestUpdate::Audio { from, packet }) => break (from, packet),
+                    Some(_) => continue,
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .expect("audio from the host");
+        assert_eq!(heard.0, HOST_PERSON);
+        assert_eq!(heard.1.len(), 3 + crate::voice::FRAME / 2);
+        // The guest's voice reaches the host.
+        for _ in 0..3 {
+            send.audio(&heard.1);
+        }
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !host_call.speaking(&guest.me) {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the host hears the guest");
+        // Leaving the call stops it.
+        send.call_leave();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(handle.in_call().is_empty());
+        handle.call_leave();
         drop(handle);
     }
 }

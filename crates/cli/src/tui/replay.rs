@@ -48,6 +48,8 @@ fn should_skip_on_replay(ev: &AgentEvent) -> bool {
             | AgentEvent::PersonSeen { .. }
             | AgentEvent::PersonLeft { .. }
             | AgentEvent::PersonSaid { .. }
+            | AgentEvent::CallJoined { .. }
+            | AgentEvent::CallLeft { .. }
     )
 }
 

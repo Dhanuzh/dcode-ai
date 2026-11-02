@@ -24,7 +24,7 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 | --- | --- |
 | `Enter` / `Shift+Enter` | Send / new line (`\` then Enter or Ctrl+J also add a line; `/terminal-setup` makes Shift+Enter work in VS Code, Cursor, Windsurf, Windows Terminal and Alacritty) |
 | `Shift+Tab` | Cycle mode: default → ⏵⏵ accept edits → ⏸ plan |
-| `Esc` | Interrupt the running turn |
+| `Esc` | Interrupt the running turn (while a shell command runs: stop just that command; Esc again stops the turn) |
 | `Esc` `Esc` | Rewind: pick a message, then restore code and conversation, conversation only, or code only |
 | `1` / `2` / `3` | Answer a permission prompt: yes · yes, don't ask again · no |
 | `h` (edit prompt) | Choose which hunks of an edit to apply (Space toggles, Enter applies the chosen ones; none chosen = no) |
@@ -37,7 +37,7 @@ Press `?` on an empty prompt (or `F1`) for the full list.
 | `Ctrl+B` | Move the running shell command to the background |
 | `Ctrl+T` | Show or hide thinking |
 | `Ctrl+O` | Fold or unfold tool output |
-| `Ctrl+F` · `n` / `N` | Search the transcript |
+| `Ctrl+F` | Find in the conversation: type to search, Enter/↓ next match, ↑ previous, Esc close |
 | `Ctrl+R` | Search prompt history |
 | `Enter` while the agent works | Send now: the agent reads the message at its next step (after the current tool calls) and answers it in the same turn |
 | `Tab` / `Alt+Enter` while the agent works | Queue the message to send after the turn (commands like `/…` and `!…` always queue) |
@@ -500,6 +500,7 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 | `/files` | Files the agent read and edited this session (also the dashboard's `files` tab, `Alt+4`) |
 | `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan [port]` shares it on your network (a fixed port such as `/watch lan 8787` lets you allow it in the firewall once; on WSL it prints the commands); `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
 | `/invite` | Let someone on another computer join with one line: prints (and copies) `dcode-ai join <ip>:8788/<key> --name <their name>`. You're asked before each person gets in. `/invite web` also gives a browser link (no install; plain HTTP), `/invite <port>` another port, `/invite --let-approve` lets guests approve and stop too, `/invite stop` ends it |
+| `/call` | A voice call with the people on this session (after `/invite`; guests type `/call` to join). `/mute` toggles your microphone, `/hangup` leaves. Never recorded or logged; headphones avoid echo. Needs PulseAudio/PipeWire on Linux (WSLg on Windows 11) |
 | `/chat <text>` | Talk to the people on this session — not sent to the agent. `/chat` alone shows the recent chat; it's also in the dashboard's `team` tab (`Alt+6`) |
 | `/todo` | The shared to-do list: `/todo <text>` adds, `/todo done <n>` ticks off, `/todo` lists. Everyone on the session sees it, and the agent gets the open items with each prompt (not shown in the transcript) |
 | `/people` | Who is with this session: you, guests on `/invite` (terminal or browser), `dcode-ai join` terminals, `/watch` viewers |
@@ -549,6 +550,10 @@ spaces and `-_.`, 24 characters at most); they are not a login.
 - `/invite web` and `/watch lan` also print the link as a QR code.
 - Guests use `/chat`, `/todo` and `/people` too; their header shows your
   project and name.
+- Voice: `/call` (host, then each guest), `/mute`, `/hangup`. Each
+  person's voice goes to the host, who passes it to everyone else in the
+  call; silence isn't sent. The browser page can't join calls (browsers
+  allow the microphone only over HTTPS).
 
 ## Guards against runaway turns
 

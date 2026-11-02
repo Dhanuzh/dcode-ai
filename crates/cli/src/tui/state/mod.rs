@@ -120,6 +120,7 @@ impl TuiSessionState {
             timeline: Default::default(),
             timeline_open: false,
             office: Default::default(),
+            shell_stopped_at: None,
             team: Default::default(),
             office_open: false,
             office_selected: 0,
@@ -1294,6 +1295,60 @@ impl TuiSessionState {
         self.subagent_modal_index = 0;
     }
 
+    /// Lines of the conversation matching the find query (case-insensitive):
+    /// who said it, and the line.
+    pub fn transcript_matches(&self) -> Vec<(&'static str, String)> {
+        let needle = self.transcript_search_query.trim().to_lowercase();
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        for b in &self.blocks {
+            let (who, text): (&'static str, &str) = match b {
+                DisplayBlock::User(t) => ("you", t),
+                DisplayBlock::Assistant(t) => ("reply", t),
+                DisplayBlock::Thinking(t) => ("thinking", t),
+                DisplayBlock::System(t) | DisplayBlock::TurnSummary(t) => ("note", t),
+                DisplayBlock::ErrorLine(t) => ("error", t),
+                DisplayBlock::Notice { text, .. } => ("note", text),
+                DisplayBlock::ToolDone {
+                    name,
+                    input,
+                    detail,
+                    ..
+                } => {
+                    for line in std::iter::once(input.as_str()).chain(detail.lines()) {
+                        if line.to_lowercase().contains(&needle) {
+                            out.push(("tool", format!("{name} · {}", line.trim())));
+                        }
+                    }
+                    continue;
+                }
+                DisplayBlock::ToolRunning {
+                    name,
+                    input,
+                    output,
+                    ..
+                } => {
+                    for line in std::iter::once(input.as_str()).chain(output.lines()) {
+                        if line.to_lowercase().contains(&needle) {
+                            out.push(("tool", format!("{name} · {}", line.trim())));
+                        }
+                    }
+                    continue;
+                }
+                _ => continue,
+            };
+            let text = crate::tui::team::strip_todo_block(text);
+            for line in text.lines() {
+                if line.to_lowercase().contains(&needle) {
+                    out.push((who, line.trim().to_string()));
+                }
+            }
+        }
+        out
+    }
+
     pub fn open_transcript_search(&mut self) {
         self.transcript_search_open = true;
         self.transcript_search_index = 0;
@@ -2172,18 +2227,24 @@ impl TuiSessionState {
                 self.push_block(DisplayBlock::System(format!("⚠ {message}")));
                 transcript_dirty = true;
             }
+            // Comings and goings are passing notices (the office and
+            // /people show who is here), not part of the conversation.
             AgentEvent::PersonJoined { name, role, .. } if role != "owner" => {
                 let what = if role == "watch" {
                     "is watching (/watch page)"
                 } else {
                     "joined (can send messages)"
                 };
-                self.push_block(DisplayBlock::System(format!("⇢ {name} {what}")));
-                transcript_dirty = true;
+                self.show_toast(format!("⇢ {name} {what}"), ToastKind::Info);
             }
             AgentEvent::PersonLeft { name, .. } if !name.is_empty() => {
-                self.push_block(DisplayBlock::System(format!("⇠ {name} left")));
-                transcript_dirty = true;
+                self.show_toast(format!("⇠ {name} left"), ToastKind::Info);
+            }
+            AgentEvent::CallJoined { name, .. } => {
+                self.show_toast(format!("📞 {name} joined the call"), ToastKind::Info);
+            }
+            AgentEvent::CallLeft { name, .. } if !name.is_empty() => {
+                self.show_toast(format!("📞 {name} left the call"), ToastKind::Info);
             }
             AgentEvent::PersonChat { name, text, .. } => {
                 self.push_block(DisplayBlock::System(format!("💬 {name}: {text}")));

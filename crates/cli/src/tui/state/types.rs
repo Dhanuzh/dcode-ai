@@ -333,6 +333,9 @@ pub struct TuiSessionState {
     pub timeline_open: bool,
     /// The Agent Office (`/office`, dashboard `Alt+5`).
     pub office: crate::tui::office::Office,
+    /// Esc stopped the running shell command at this moment (a second Esc
+    /// soon after stops the whole turn).
+    pub shell_stopped_at: Option<std::time::Instant>,
     /// Chat between people and the shared to-do list.
     pub team: crate::tui::team::Team,
     pub office_open: bool,

@@ -26,18 +26,29 @@ pub fn new_person_id(prefix: &str) -> String {
     format!("{prefix}-{n:016x}")
 }
 
-/// A link as a QR code in half-block characters (light quiet zone, so it
-/// reads on a dark terminal), one string per terminal row.
+/// A link as a QR code in half-block characters, one string per terminal
+/// row, drawn so it reads as dark-on-light whatever the terminal's colours.
 pub fn qr_lines(text: &str) -> Vec<String> {
+    qr_lines_for(text, crate::tui::theme::is_light())
+}
+
+/// `light_terminal`: dark text on a light background.
+pub fn qr_lines_for(text: &str, light_terminal: bool) -> Vec<String> {
     use qrcode::render::unicode::Dense1x2;
     let Ok(code) = qrcode::QrCode::new(text.as_bytes()) else {
         return Vec::new();
     };
-    // Terminal text is light on dark: draw the code's dark modules as the
-    // background and light ones as the foreground.
+    // On a dark terminal, text is light: draw the code's dark modules as
+    // the background and light ones as text. A light terminal is the other
+    // way round.
+    let (dark, light) = if light_terminal {
+        (Dense1x2::Dark, Dense1x2::Light)
+    } else {
+        (Dense1x2::Light, Dense1x2::Dark)
+    };
     code.render::<Dense1x2>()
-        .dark_color(Dense1x2::Light)
-        .light_color(Dense1x2::Dark)
+        .dark_color(dark)
+        .light_color(light)
         .quiet_zone(true)
         .build()
         .lines()

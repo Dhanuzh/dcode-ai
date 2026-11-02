@@ -310,7 +310,6 @@ pub(super) fn handle_key_event(
     g.branch_picker_open = false;
     g.pins_modal_open = false;
     g.subagent_modal_open = false;
-    g.transcript_search_open = false;
     g.composer_history_search_open = false;
 
     if g.anthropic_oauth_modal_open {
@@ -932,7 +931,6 @@ pub(super) fn handle_key_event(
     }
 
     if g.transcript_search_open {
-        let sz = terminal_size;
         match (key.code, key.modifiers) {
             (KeyCode::Esc, _) | (KeyCode::Char('f'), KeyModifiers::CONTROL) => {
                 g.close_transcript_search();
@@ -941,10 +939,8 @@ pub(super) fn handle_key_event(
                 g.transcript_search_query.pop();
                 g.transcript_search_index = 0;
             }
-            (KeyCode::Up, _) => {
-                let inner_w = sz.map(|s| s.width.saturating_sub(2)).unwrap_or(80);
-                let (lines, _, _) = transcript_cache.get_or_rebuild(g, inner_w);
-                let matches = transcript_search_matches(lines, &g.transcript_search_query);
+            (KeyCode::Up, _) | (KeyCode::BackTab, _) => {
+                let matches = g.transcript_matches();
                 if !matches.is_empty() {
                     if g.transcript_search_index == 0 {
                         g.transcript_search_index = matches.len().saturating_sub(1);
@@ -953,10 +949,8 @@ pub(super) fn handle_key_event(
                     }
                 }
             }
-            (KeyCode::Down, _) | (KeyCode::Enter, _) => {
-                let inner_w = sz.map(|s| s.width.saturating_sub(2)).unwrap_or(80);
-                let (lines, _, _) = transcript_cache.get_or_rebuild(g, inner_w);
-                let matches = transcript_search_matches(lines, &g.transcript_search_query);
+            (KeyCode::Down, _) | (KeyCode::Enter, _) | (KeyCode::Tab, _) => {
+                let matches = g.transcript_matches();
                 if !matches.is_empty() {
                     g.transcript_search_index = (g.transcript_search_index + 1) % matches.len();
                 }
@@ -1067,7 +1061,25 @@ pub(super) fn handle_key_event(
     }
 
     match (key.code, key.modifiers) {
+        // A shell command running: Esc stops just it (the agent goes on);
+        // Esc again soon after stops the whole turn.
+        (KeyCode::Esc, _)
+            if g.active_approval.is_none()
+                && g.shell_stopped_at
+                    .is_none_or(|t| t.elapsed() > std::time::Duration::from_secs(3))
+                && g.blocks.iter().rev().take(64).any(|b| {
+                    matches!(b, DisplayBlock::ToolRunning { name, .. } if name == "execute_bash")
+                }) =>
+        {
+            dcode_ai_runtime::bash_tool::stop_signal().notify_waiters();
+            g.shell_stopped_at = Some(std::time::Instant::now());
+            g.show_toast(
+                "stopped the command · Esc again stops the whole turn",
+                crate::tui::state::ToastKind::Info,
+            );
+        }
         (KeyCode::Esc, _) if escape_cancels_active_turn(g) => {
+            g.shell_stopped_at = None;
             request_turn_cancel(g, cancel_flag, cmd_tx);
         }
         // Idle Esc twice with an empty composer: open the rewind picker
