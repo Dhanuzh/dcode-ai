@@ -914,6 +914,8 @@ pub fn run_blocking(
                 crate::tui::terminal::push_key_flags();
                 let _ = dt.clear();
             } else {
+                // The overlay turned mouse capture off; the TUI always uses it.
+                let _ = execute!(stdout(), crossterm::event::EnableMouseCapture);
                 let _ = terminal.clear();
             }
             continue;
@@ -953,10 +955,12 @@ pub fn run_blocking(
                 transcript_cache.invalidate();
             } else if !want_dashboard && dash_terminal.take().is_some() {
                 crate::tui::terminal::pop_key_flags();
+                // Leave the dashboard's screen; the inline view keeps the
+                // mouse (wheel scroll, drag to copy).
                 let _ = execute!(
                     stdout(),
-                    crossterm::event::DisableMouseCapture,
-                    crossterm::terminal::LeaveAlternateScreen
+                    crossterm::terminal::LeaveAlternateScreen,
+                    crossterm::event::EnableMouseCapture
                 );
                 // Repaint the inline pane; blocks produced meanwhile flush
                 // into scrollback below.

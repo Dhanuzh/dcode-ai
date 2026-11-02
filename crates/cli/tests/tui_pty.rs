@@ -25,9 +25,13 @@ impl Tui {
     }
 
     fn start_with(home: &Path, workspace: &Path, args: &[&str]) -> Self {
+        Self::start_sized(home, workspace, args, ROWS)
+    }
+
+    fn start_sized(home: &Path, workspace: &Path, args: &[&str], rows: u16) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
-                rows: ROWS,
+                rows,
                 cols: COLS,
                 pixel_width: 0,
                 pixel_height: 0,
@@ -49,7 +53,7 @@ impl Tui {
         drop(pty.slave);
         let mut reader = pty.master.try_clone_reader().expect("reader");
         let writer = Arc::new(Mutex::new(pty.master.take_writer().expect("writer")));
-        let screen = Arc::new(Mutex::new(vt100::Parser::new(ROWS, COLS, 5000)));
+        let screen = Arc::new(Mutex::new(vt100::Parser::new(rows, COLS, 5000)));
         let sink = screen.clone();
         let answer = writer.clone();
         std::thread::spawn(move || {
@@ -1331,6 +1335,114 @@ fn a_long_reply_is_printed_in_full() {
             "line {i} missing:\n{all}"
         );
     }
+}
+
+/// Resume a real session (a copy) and check every message comes back:
+/// `DCODE_REAL_WS=<copied workspace> DCODE_REAL_SESSION=<id>`.
+#[test]
+#[ignore]
+fn resume_a_real_session() {
+    let (Ok(ws), Ok(id)) = (
+        std::env::var("DCODE_REAL_WS"),
+        std::env::var("DCODE_REAL_SESSION"),
+    ) else {
+        return;
+    };
+    let ws = std::path::PathBuf::from(ws);
+    let (_dir, home, _) = setup_with_model();
+    let log =
+        std::fs::read_to_string(ws.join(format!(".dcode-ai/sessions/{id}.events.jsonl"))).unwrap();
+    let users: Vec<String> = log
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .filter_map(|v| {
+            let e = v.get("event").cloned().unwrap_or(v);
+            (e["type"] == "MessageReceived" && e["role"] == "user")
+                .then(|| e["content"].as_str().unwrap_or("").to_string())
+        })
+        .collect();
+    let rows: u16 = std::env::var("DCODE_REAL_ROWS")
+        .ok()
+        .and_then(|r| r.parse().ok())
+        .unwrap_or(1000);
+    let started = Instant::now();
+    let tui = Tui::start_sized(&home, &ws, &["--resume", &id], rows);
+    tui.wait_for("? for shortcuts");
+    eprintln!("ready after {:?}", started.elapsed());
+    std::thread::sleep(Duration::from_secs(3));
+    let text = {
+        let mut p = tui.screen.lock().unwrap();
+        p.set_scrollback(usize::MAX);
+        let kept = p.screen().scrollback();
+        p.set_scrollback(0);
+        eprintln!("{kept} rows in scrollback");
+        p.screen().contents()
+    };
+    let squash = |s: &str| s.split_whitespace().collect::<String>();
+    let all = squash(&text);
+    let mut missing = 0;
+    for (i, u) in users.iter().enumerate() {
+        let probe: String = squash(u).chars().take(25).collect();
+        let found = !probe.is_empty() && all.contains(&probe);
+        if !found {
+            missing += 1;
+        }
+        eprintln!(
+            "{} #{i}: {}",
+            if found { "ok  " } else { "MISS" },
+            u.chars().take(60).collect::<String>().replace('\n', " ")
+        );
+    }
+    let lines = text.lines().filter(|l| !l.trim().is_empty()).count();
+    eprintln!(
+        "{missing} of {} user messages missing · {lines} non-empty rows on screen",
+        users.len()
+    );
+    for l in text
+        .lines()
+        .filter(|l| l.contains("earlier") || l.contains("not shown"))
+    {
+        eprintln!("note: {l}");
+    }
+}
+
+/// The mouse in the dashboard: the wheel scrolls the conversation — also
+/// after a full-screen view (`/office`) was opened and closed.
+#[test]
+fn the_mouse_scrolls_the_dashboard() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    let run = |tui: &mut Tui, cmd: &str| {
+        tui.send(cmd.as_bytes());
+        std::thread::sleep(Duration::from_millis(200));
+        tui.send(b"\r");
+    };
+    run(&mut tui, "give me a long answer");
+    tui.wait_for("line 70 of the long answer");
+    tui.wait_for("? for shortcuts");
+    // A full-screen view, opened and closed first.
+    run(&mut tui, "/office");
+    tui.wait_for("q close");
+    tui.send(b"q");
+    tui.wait_for("? for shortcuts");
+
+    tui.send(b"\x1c");
+    tui.wait_for("Alt+1-6");
+    tui.wait_for("line 70 of the long answer");
+    // Wheel up over the conversation (SGR mouse: button 64 = wheel up).
+    for _ in 0..12 {
+        tui.send(b"\x1b[<64;60;15M");
+        std::thread::sleep(Duration::from_millis(30));
+    }
+    tui.wait_until("scrolled up", |t| {
+        t.contains("line 30 of the long answer") && !t.contains("line 70 of the long answer")
+    });
+    for _ in 0..30 {
+        tui.send(b"\x1b[<65;60;15M");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    tui.wait_for("line 70 of the long answer");
 }
 
 impl Tui {

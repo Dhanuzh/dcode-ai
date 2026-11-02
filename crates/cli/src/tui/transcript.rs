@@ -267,9 +267,42 @@ pub(crate) fn render_blocks_range(
     let w = width.max(20) as usize;
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut hits: Vec<LineAnswerHit> = Vec::new();
-    for (offset, block) in state.blocks[start..end].iter().enumerate() {
-        let idx = start + offset;
-        render_block_cached(block, idx, state, w, &mut lines, &mut hits);
+    // A long history (resume): render slices on every core — markdown and
+    // syntax colours for a thousand messages take a second on one.
+    let n = end.saturating_sub(start);
+    let cores = std::thread::available_parallelism()
+        .map(|c| c.get())
+        .unwrap_or(1);
+    if n >= 128 && cores > 1 {
+        let per = n.div_ceil(cores);
+        let parts: Vec<(Vec<Line<'static>>, Vec<LineAnswerHit>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (start..end)
+                .step_by(per)
+                .map(|from| {
+                    let to = (from + per).min(end);
+                    scope.spawn(move || {
+                        let (mut l, mut h) = (Vec::new(), Vec::new());
+                        for idx in from..to {
+                            render_block(&state.blocks[idx], idx, state, w, &mut l, &mut h);
+                        }
+                        (l, h)
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap_or_default())
+                .collect()
+        });
+        for (l, h) in parts {
+            lines.extend(l);
+            hits.extend(h);
+        }
+    } else {
+        for (offset, block) in state.blocks[start..end].iter().enumerate() {
+            let idx = start + offset;
+            render_block_cached(block, idx, state, w, &mut lines, &mut hits);
+        }
     }
     let (lines, _) = collapse_blank_runs(lines, hits);
     lines

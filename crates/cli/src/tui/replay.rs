@@ -122,26 +122,57 @@ fn cap_replayed(ev: &mut AgentEvent) {
 
 /// Blocks shown on resume; older ones stay in memory for the transcript
 /// view (ctrl+o) but are not printed again.
-const RESUME_VISIBLE_BLOCKS: usize = 200;
+const RESUME_VISIBLE_BLOCKS: usize = 3000;
 
-/// Read and parse a log off the async runtime.
+/// When a log line was written (`ts` of its envelope), if it says.
+fn line_time(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    let at = line.find("\"ts\":\"")? + 6;
+    let end = at + line[at..].find('"')?;
+    line[at..end].parse().ok()
+}
+
+/// Read and parse a log off the async runtime. A conversation split over
+/// several logs (resumed under a throwaway id before 1.0.32) is put back
+/// in time order: reading log after log put the later continuation before
+/// the earlier one, so the newest messages ended up hidden in the middle.
 fn read_events(log_path: &Path) -> Vec<AgentEvent> {
-    let mut out = Vec::new();
-    for path in session_log_chain(log_path) {
-        let Ok(raw) = std::fs::read_to_string(&path) else {
+    let chain = session_log_chain(log_path);
+    let several = chain.len() > 1;
+    // (when, which log, line in it, event)
+    let mut out: Vec<(
+        Option<chrono::DateTime<chrono::Utc>>,
+        usize,
+        usize,
+        AgentEvent,
+    )> = Vec::new();
+    for (file, path) in chain.iter().enumerate() {
+        let Ok(raw) = std::fs::read_to_string(path) else {
             continue;
         };
-        for line in raw.lines() {
-            for mut ev in events_on_line(line) {
+        // Lines without a time keep the one before them.
+        let mut last = None;
+        for (n, line) in raw.lines().enumerate() {
+            let events = events_on_line(line);
+            if events.is_empty() {
+                continue;
+            }
+            if several && let Some(t) = line_time(line) {
+                last = Some(t);
+            }
+            for mut ev in events {
                 if should_skip_on_replay(&ev) {
                     continue;
                 }
                 cap_replayed(&mut ev);
-                out.push(ev);
+                out.push((last, file, n, ev));
             }
         }
     }
-    out
+    if several {
+        // Time, then log order (a line before any time sorts first).
+        out.sort_by_key(|(t, file, n, _)| (*t, *file, *n));
+    }
+    out.into_iter().map(|(_, _, _, ev)| ev).collect()
 }
 
 /// The conversation so far from a session's log, for someone joining it:
@@ -480,6 +511,50 @@ mod tests {
     /// are read back after the session's own log; a real session's log
     /// (it has saved state) is not.
     #[test]
+    fn a_split_conversation_is_put_back_in_time_order() {
+        // Resumed under a throwaway id on day 2, then back in the main log on
+        // day 3: the day-3 messages must come last, not before day 2.
+        let dir = tempfile::tempdir().unwrap();
+        let at = |ts: &str, ev: &str| format!("{{\"id\":1,\"ts\":\"{ts}\",\"event\":{ev}}}\n");
+        let user = |ts: &str, t: &str| {
+            at(
+                ts,
+                &format!(r#"{{"type":"MessageReceived","role":"user","content":"{t}"}}"#),
+            )
+        };
+        let started = |ts: &str, id: &str| {
+            at(
+                ts,
+                &format!(
+                    r#"{{"type":"SessionStarted","session_id":"{id}","workspace":"/w","model":"m"}}"#
+                ),
+            )
+        };
+        std::fs::write(
+            dir.path().join("s.events.jsonl"),
+            user("2026-10-01T10:00:00Z", "day 1")
+                + &started("2026-10-02T09:00:00Z", "boot")
+                + &user("2026-10-03T10:00:00Z", "day 3")
+                + &user("2026-10-03T11:00:00Z", "day 3, later"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("s.json"), "{}").unwrap();
+        std::fs::write(
+            dir.path().join("boot.events.jsonl"),
+            user("2026-10-02T10:00:00Z", "day 2"),
+        )
+        .unwrap();
+        let said: Vec<String> = read_events(&dir.path().join("s.events.jsonl"))
+            .into_iter()
+            .filter_map(|e| match e {
+                AgentEvent::MessageReceived { content, .. } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(said, ["day 1", "day 2", "day 3", "day 3, later"]);
+    }
+
+    #[test]
     fn replay_follows_logs_of_old_resume_ids() {
         let dir = tempfile::tempdir().unwrap();
         let line = |ev: &str| format!("{{\"id\":1,\"event\":{ev}}}\n");
@@ -529,5 +604,39 @@ mod tests {
             role: "user".into(),
             content: "a".into(),
         }));
+    }
+
+    /// `DCODE_REAL_LOG=<path to a copied .events.jsonl>`: where resume time goes.
+    #[test]
+    #[ignore]
+    fn profile_a_real_resume() {
+        let Ok(path) = std::env::var("DCODE_REAL_LOG") else {
+            return;
+        };
+        let t = std::time::Instant::now();
+        let events = read_events(Path::new(&path));
+        eprintln!("read+parse: {:?} ({} events)", t.elapsed(), events.len());
+        let st = fresh_state();
+        let t = std::time::Instant::now();
+        {
+            let mut g = st.lock().unwrap();
+            g.replaying = true;
+            for ev in &events {
+                g.apply_event(ev);
+            }
+            g.replaying = false;
+        }
+        let g = st.lock().unwrap();
+        eprintln!("apply: {:?} ({} blocks)", t.elapsed(), g.blocks.len());
+        let t = std::time::Instant::now();
+        let lines = crate::tui::transcript::render_blocks_range(&g, 0, g.blocks.len(), 120);
+        eprintln!("render all: {:?} ({} lines)", t.elapsed(), lines.len());
+        let t = std::time::Instant::now();
+        let lines = crate::tui::transcript::render_blocks_range(&g, 0, g.blocks.len(), 120);
+        eprintln!(
+            "render again (cached): {:?} ({} lines)",
+            t.elapsed(),
+            lines.len()
+        );
     }
 }

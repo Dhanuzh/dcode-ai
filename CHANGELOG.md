@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.46 — 2026-11-02
+
+### Fixed
+- **Resuming showed the history out of order, and only part of it.** A
+  session resumed by an older version (before 1.0.32) has its history in two
+  logs; they were read one after the other, so an earlier stretch came
+  *after* the latest one and today's messages ended up hidden in the middle.
+  They're now merged by time. And `/resume` printed only the last 200 blocks
+  ("earlier messages not shown"); it now prints the whole conversation (up
+  to 3,000 blocks), rendered on all cores — a real 1,500-block session
+  resumes in about a second.
+- **The mouse stopped working** after opening a full-screen view
+  (`/office`, `/timeline`, `/diff`, the transcript) or after leaving the
+  dashboard: they turned mouse capture off on the way out. It stays on now.
+
 ## 1.0.45 — 2026-11-02
 
 ### Fixed
