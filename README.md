@@ -11,7 +11,7 @@ One binary · your Claude or GitHub Copilot sign-in · no API keys, no Electron,
 [![Rust](https://img.shields.io/badge/rust-1.88%2B-e8e2dc?style=for-the-badge&logo=rust&logoColor=white&labelColor=211d1b)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-7fbf7f?style=for-the-badge&labelColor=211d1b)](#license)
 
-**[Install](#-install)** · **[Quick start](#-quick-start)** · **[Features](#-features)** · **[Configuration](#%EF%B8%8F-configuration)** · **[Docs](#-documentation)** · **[Changelog](CHANGELOG.md)**
+**[Install](#-install)** · **[Quick start](#-quick-start)** · **[Features](#-features)** · **[Work together](#-work-together)** · **[Configuration](#%EF%B8%8F-configuration)** · **[Docs](#-documentation)** · **[Changelog](CHANGELOG.md)**
 
 <br>
 
@@ -49,6 +49,14 @@ Detached sessions, sub-agents in isolated git worktrees, background agents, `/go
 
 ### ⚡ Small, fast, careful with credit
 One Rust binary that starts instantly. Lean prompts, tools loaded on demand, prompt caching, automatic compaction, and `/usage` shows where every token goes.
+
+</td>
+</tr>
+<tr>
+<td colspan="2" valign="top">
+
+### 👥 Built for a team, not just you
+Invite teammates into a live session with one line: they get the same interface, see the agent work in a pixel-art office, chat, share a to-do list the agent picks up, and **talk to each other in a voice call**. All of it is peer-to-peer and encrypted, with no server in between.
 
 </td>
 </tr>
@@ -141,32 +149,27 @@ dcode-ai spawn --prompt "refactor the auth module"       # detached; attach late
 | --- | --- |
 | **Permission modes** | `Shift+Tab` cycles default → ⏵⏵ accept edits → ⏸ plan → ⏵⏵ **auto** (auto runs everything except deletions and risky commands) |
 | **Talk while it works** | `Enter` steers the running turn, and `Tab` queues a message for after it |
+| **Stop just one thing** | `Esc` stops a running shell command and the agent carries on; `Esc` again stops the turn. Long commands show a spinner, elapsed time and their latest output |
+| **Find** | `Ctrl+F` searches the conversation, with highlighted matches and a match count |
 | **Rewind** | `Esc` `Esc` restores code, conversation or both to any earlier message |
 | **Context** | `@` fuzzy file search, `[Image #N]` paste (`Ctrl+V`, or `Alt+V` on Windows/WSL), `!` shell mode, `# note` memory |
-| **Dashboard** | `Ctrl+\` opens a full-screen view with sessions and agents, the transcript, and context · changes · agents tabs. Review and revert per hunk, drag to select and copy, resize the rails |
+| **Dashboard** | `Ctrl+\` opens a full-screen view: sessions and agents, the transcript, and context · changes · agents · files · office · team tabs (`Alt+1`–`6`). Review and revert per hunk, drag to select and copy, resize the rails |
 | **Diffs** | Approvals show a line-numbered diff, and `/diff` opens a full-screen viewer with hunk revert |
 | **Insight** | `/context` grid, `/usage` token breakdown (fresh, cached, output, cache hit rate), `/cost`, `/effort`, `Ctrl+T` thinking |
 | **Looks** | Claude's dark, light, colorblind-friendly and ANSI themes with live `/theme` preview, plus `tokyonight`, `catppuccin`, `gruvbox`, `dracula`, `nord` … |
 | **Comfort** | Desktop notifications, `c` copies links, `/terminal-setup` for Shift+Enter, `/vim` keys, `--plain` for screen readers |
 
-### 👀 See it, share it
+### 👀 See what it's doing
 
 <p align="center">
 <img src="docs/assets/agent-office.png" alt="The Agent Office in a terminal: pixel-art people at desks — you with a notebook, the dcode-ai agent at its laptop with a “done ✓” bubble — and the selected one's details below" width="860">
-<br><sub><code>/office</code> — you and every agent at a desk, live. Teammates who join sit there too.</sub>
+<br><sub><code>/office</code>: you and every agent at a desk, live. Teammates who join sit there too.</sub>
 </p>
 
-- **Agent Office** (`/office`): every agent as an animated pixel-art character at a desk — typing, reading, running commands, raising a hand when it needs you. People on the session sit there too, under their names: you, whoever joined, whoever is watching.
-- **Live file map**: every file the agent reads and edits, as a tree that lights up while it works (dashboard `Alt+4`, `/files`).
-- **`/timeline`**: scrub through the session step by step; jump back to any of your messages.
-- **`/watch`**: a live, read-only web page of the session for a teammate (or your phone); local by default, `/watch lan` for your network.
-- **`/invite`**: someone on another computer joins with one line it prints (`dcode-ai join 192.168.1.9:8788/… --name Priya`). No SSH. They get the same interface as you, with the conversation so far. Encrypted with the invite's key, and you're asked before anyone gets in; `/invite web` adds a browser link for people without dcode-ai.
-- **`dcode-ai join <id> [--name you]`**: a second terminal (or a teammate over SSH) on the same running session; what they say shows with their name, and the agent knows who asked.
-- **Chat window and menus**: `/chat` opens a chat-app style team panel; `/call`, `/kick` and `/todo done` are pick-from-a-list menus. Teams of five or more fit in the dashboard's office.
-- **Voice calls** (`/call`): talk with the people who joined, like a Teams call, while the agent works — echo reduction, push-to-talk, volume per person, steady on weak Wi-Fi. Encrypted, never recorded, never sent to the agent.
-- **Team chat and a shared to-do list**: `/chat` talks to the people on the session (not the agent); `/todo` keeps a list everyone sees and the agent works from. Dashboard `Alt+6`. `/people` shows who's here, `/kick` removes a guest; guests reconnect on their own after a Wi-Fi drop.
-- **`/handoff <note>`**: hand a session to a teammate as one file, with what's done and what's next.
-- **`/sounds`** and **`/speak`**: a bell when it needs you; the last reply read aloud.
+- **Agent Office** (`/office`, dashboard `Alt+5`): every agent as an animated pixel-art character, typing, reading, running commands, and raising a hand when it needs you. With a team in the room, the dashboard draws everyone small so five or more fit.
+- **Live file map** (`/files`, `Alt+4`): every file the agent reads and edits, as a tree that lights up while it works.
+- **`/timeline`**: scrub through the session step by step, and jump back to any of your messages.
+- **`/sounds`** and **`/speak`**: a bell when it needs you, and the last reply read aloud.
 
 ### 🗂️ Sessions that last
 
@@ -209,6 +212,28 @@ dcode-ai spawn --prompt "refactor the auth module"       # detached; attach late
 **Search:** `search_code`, `code_intel`, `repo_map` · **Shell:** `execute_bash`, `run_background`, `run_validation`
 **Git** · **Web:** `web_search`, `fetch_url`, `browser` · **Agents:** `spawn_subagent`, `ask_question`, `update_plan`, `invoke_skill`
 Rarely used tools load on demand through `tool_search`, which keeps every request small.
+
+## 👥 Work together
+
+Bring teammates into the session you're running. They see everything live and can help steer.
+
+| | |
+| --- | --- |
+| **Invite** | `/invite` prints one line to send: `dcode-ai join 192.168.1.9:8788/Qk3f… --name Priya`. You're asked before anyone gets in. It's encrypted end to end with the invite's key, and there's no SSH or server to set up |
+| **Same interface** | Guests get the full TUI with the conversation so far, the dashboard and the office. They reconnect on their own after a Wi-Fi drop |
+| **Voice calls** | `/call` to talk like a Teams call while the agent works. It has echo reduction, push-to-talk (`Ctrl+Space`), volume per person and copes with weak Wi-Fi. Calls are never recorded and never sent to the agent |
+| **Chat** | `/chat` opens a chat window (the dashboard's team tab) for people only, so the agent doesn't see it |
+| **Shared to-dos** | `/todo fix the login bug`: everyone sees the list, the agent gets the open items with each prompt, and `/todo done` ticks one off |
+| **Who's here** | `/people` lists everyone. `/kick` picks someone to remove. Approvals stay with you unless you use `/invite --let-approve` |
+| **Browser guests** | `/invite web` adds a link (and a QR code) for people without dcode-ai: they can watch, ask to join and send messages |
+| **Read-only page** | `/watch` shares a live page anyone with the link can follow, without joining |
+| **Hand over** | `/handoff <note>` packs the session into one file for a teammate to pick up |
+
+**Where can people join from?**
+
+- **Same machine:** `dcode-ai join <session-id>`. No knock needed.
+- **Same Wi-Fi or office network:** the `/invite` line. On WSL, `/invite` prints the one-time firewall command.
+- **Anywhere else:** run `dcode-ai setup tailscale` once on both computers. It asks before installing Tailscale; then `/invite` adds your Tailscale address and `join` tries each address. If a join fails, it tells you why (different networks, a blocked port, or a Wi-Fi that keeps devices apart).
 
 ## ⚙️ Configuration
 
