@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.47 — 2026-11-02
+
+### Improved
+- **Files tab is easier to read**: a legend (`· read (2r = twice) · ✎
+  edited · ◉ now · time = last touched`); folders the agent only listed are
+  marked on the folder's own line (`webparts/ · listed`) instead of
+  appearing twice; and after a resume the times are the real ones from the
+  log (`2h`, `3d`), not "55s" for everything. `/timeline` keeps real times
+  on resume too.
+- **Team tab says who's here**: `here: Priya · Sam (watching)` above the
+  chat, or — when you're alone — "Nobody else is here yet — /invite to
+  bring someone in".
+
 ## 1.0.46 — 2026-11-02
 
 ### Fixed

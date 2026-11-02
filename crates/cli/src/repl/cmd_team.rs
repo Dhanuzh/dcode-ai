@@ -61,11 +61,14 @@ impl Repl {
                         .lock()
                         .map(|g| {
                             let map = &g.file_map;
-                            let mut lines = vec![format!(
-                                "[files] {} touched · {} edited (dashboard: Ctrl+\\ then Alt+4)",
-                                map.files.len(),
-                                map.edited()
-                            )];
+                            let mut lines = vec![
+                                format!(
+                                    "[files] {} touched · {} edited (dashboard: Ctrl+\\ then Alt+4)",
+                                    map.files.len(),
+                                    map.edited()
+                                ),
+                                "[files] · read (2r = twice) · ✎ edited · time = last touched · \"listed\" = the agent listed that folder".into(),
+                            ];
                             for (depth, name, touch) in map.tree() {
                                 let indent = "  ".repeat(depth + 1);
                                 lines.push(match touch {

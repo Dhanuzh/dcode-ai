@@ -136,6 +136,14 @@ fn line_time(line: &str) -> Option<chrono::DateTime<chrono::Utc>> {
 /// in time order: reading log after log put the later continuation before
 /// the earlier one, so the newest messages ended up hidden in the middle.
 fn read_events(log_path: &Path) -> Vec<AgentEvent> {
+    read_events_timed(log_path)
+        .into_iter()
+        .map(|(_, ev)| ev)
+        .collect()
+}
+
+/// [`read_events`] with when each event happened (from the log).
+fn read_events_timed(log_path: &Path) -> Vec<(Option<chrono::DateTime<chrono::Utc>>, AgentEvent)> {
     let chain = session_log_chain(log_path);
     let several = chain.len() > 1;
     // (when, which log, line in it, event)
@@ -156,7 +164,7 @@ fn read_events(log_path: &Path) -> Vec<AgentEvent> {
             if events.is_empty() {
                 continue;
             }
-            if several && let Some(t) = line_time(line) {
+            if let Some(t) = line_time(line) {
                 last = Some(t);
             }
             for mut ev in events {
@@ -172,7 +180,7 @@ fn read_events(log_path: &Path) -> Vec<AgentEvent> {
         // Time, then log order (a line before any time sorts first).
         out.sort_by_key(|(t, file, n, _)| (*t, *file, *n));
     }
-    out.into_iter().map(|(_, _, _, ev)| ev).collect()
+    out.into_iter().map(|(t, _, _, ev)| (t, ev)).collect()
 }
 
 /// The conversation so far from a session's log, for someone joining it:
@@ -215,7 +223,7 @@ pub fn apply_history(events: &[AgentEvent], state: &Arc<Mutex<TuiSessionState>>)
 /// Load historical events from disk into TUI state (used on resume / reopen same log).
 pub async fn replay_event_log_into_state(log_path: &Path, state: &Arc<Mutex<TuiSessionState>>) {
     let path = log_path.to_path_buf();
-    let events = tokio::task::spawn_blocking(move || read_events(&path))
+    let events = tokio::task::spawn_blocking(move || read_events_timed(&path))
         .await
         .unwrap_or_default();
     if events.is_empty() {
@@ -226,9 +234,12 @@ pub async fn replay_event_log_into_state(log_path: &Path, state: &Arc<Mutex<TuiS
     if let Ok(mut g) = state.lock() {
         let first_block = g.blocks.len();
         g.replaying = true;
-        for ev in &events {
+        for (at, ev) in &events {
+            // Real times for the timeline and the files tab.
+            g.event_time = at.map(|t| t.with_timezone(&chrono::Local));
             g.apply_event(ev);
         }
+        g.event_time = None;
         g.replaying = false;
         g.streaming_assistant = None;
         g.clear_replayed_interaction_state();
@@ -510,6 +521,31 @@ mod tests {
     /// Logs written by the old resume (a throwaway id with no saved state)
     /// are read back after the session's own log; a real session's log
     /// (it has saved state) is not.
+    #[tokio::test]
+    async fn a_resumed_session_keeps_the_real_times() {
+        let dir = tempfile::tempdir().unwrap();
+        let log = dir.path().join("s.events.jsonl");
+        std::fs::write(
+            &log,
+            r#"{"id":1,"ts":"2026-10-01T10:00:00Z","event":{"type":"ToolCallStarted","call_id":"c","tool":"read_file","input":{"path":"src/a.rs"}}}
+"#,
+        )
+        .unwrap();
+        let st = fresh_state();
+        replay_event_log_into_state(&log, &st).await;
+        let g = st.lock().unwrap();
+        let at = g.file_map.files["src/a.rs"].last_at.unwrap();
+        assert_eq!(
+            at.with_timezone(&chrono::Utc).to_rfc3339(),
+            "2026-10-01T10:00:00+00:00"
+        );
+        assert!(
+            crate::tui::activity::ago(Some(at)).ends_with('d'),
+            "days ago, not seconds"
+        );
+        assert!(g.event_time.is_none(), "live events use the clock again");
+    }
+
     #[test]
     fn a_split_conversation_is_put_back_in_time_order() {
         // Resumed under a throwaway id on day 2, then back in the main log on

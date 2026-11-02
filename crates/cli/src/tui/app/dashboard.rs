@@ -519,7 +519,43 @@ fn render_team(frame: &mut ratatui::Frame<'_>, body: Rect, g: &TuiSessionState) 
     if open.len() > 4 {
         top.push(muted(format!("  … {} more (/todo)", open.len() - 4)));
     }
-    let top_h = (top.len() as u16 + 1).min(body.height / 3);
+    // Who's here — or how to get someone here.
+    let others: Vec<String> = g
+        .office
+        .people_ordered()
+        .into_iter()
+        .filter(|p| p.leaving.is_none())
+        .filter(|p| match &g.office.me {
+            Some(me) => *me != p.id,
+            None => p.role != crate::tui::office::PersonRole::Owner,
+        })
+        .map(|p| match p.role {
+            crate::tui::office::PersonRole::Watching => format!("{} (watching)", p.name),
+            crate::tui::office::PersonRole::Owner => format!("{} (host)", p.name),
+            _ => p.name.clone(),
+        })
+        .collect();
+    top.push(Line::default());
+    if others.is_empty() {
+        top.push(muted(
+            "Nobody else is here yet — /invite to bring someone in",
+        ));
+        top.push(muted(
+            "(or dcode-ai join <session-id> from another terminal)",
+        ));
+    } else {
+        top.push(Line::from(vec![
+            Span::styled("● ", Style::default().fg(theme::success())),
+            Span::styled(
+                truncate_chars(
+                    &format!("here: {}", others.join(" · ")),
+                    w.saturating_sub(2),
+                ),
+                Style::default().fg(theme::text()),
+            ),
+        ]));
+    }
+    let top_h = (top.len() as u16 + 1).min(body.height / 2);
     let input_h = 3u16.min(body.height.saturating_sub(top_h));
     let chat_h = body.height.saturating_sub(top_h + input_h);
     let rows = Layout::vertical([
@@ -550,7 +586,7 @@ fn render_team(frame: &mut ratatui::Frame<'_>, body: Rect, g: &TuiSessionState) 
     let mut lines: Vec<Line> = Vec::new();
     if g.team.chat.is_empty() {
         lines.push(muted(
-            "no messages yet — the people here see them; the agent doesn't",
+            "no messages yet — only people see these, not the agent",
         ));
     }
     for c in &g.team.chat {
@@ -629,7 +665,7 @@ pub(super) fn files_lines(
     height: usize,
 ) -> Vec<Line<'static>> {
     use crate::tui::activity::{ago, fresh};
-    if map.files.is_empty() {
+    if map.files.is_empty() && map.listed.is_empty() {
         return vec![
             muted("no files touched yet"),
             Line::default(),
@@ -637,14 +673,17 @@ pub(super) fn files_lines(
             muted("edits light up here live"),
         ];
     }
-    let mut lines = vec![muted(format!(
-        "{} files · {} edited",
-        map.files.len(),
-        map.edited()
-    ))];
+    let mut lines = vec![
+        muted(format!(
+            "{} files · {} edited — what the agent touched",
+            map.files.len(),
+            map.edited()
+        )),
+        muted("· read (2r = twice) · ✎ edited (4✎) · ◉ now · time = last touched"),
+    ];
     let tree = map.tree();
     // The newest stay visible when the tree is long.
-    let room = height.saturating_sub(1);
+    let room = height.saturating_sub(2);
     let skip = tree.len().saturating_sub(room);
     for (depth, name, touch) in tree.into_iter().skip(skip) {
         let indent = "  ".repeat(depth);

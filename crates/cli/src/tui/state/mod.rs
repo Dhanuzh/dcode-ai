@@ -122,6 +122,7 @@ impl TuiSessionState {
             office: Default::default(),
             shell_stopped_at: None,
             team: Default::default(),
+            event_time: None,
             team_typing: false,
             team_input: String::new(),
             chat_sink: None,
@@ -1868,7 +1869,8 @@ impl TuiSessionState {
 
     pub fn apply_event(&mut self, e: &AgentEvent) {
         let mut transcript_dirty = false;
-        self.timeline.apply(e);
+        let at = self.event_time.unwrap_or_else(chrono::Local::now);
+        self.timeline.apply(e, at);
         self.office.apply(e);
         // A ticked-off item's text, before the list forgets it is open.
         let ticked = match e {
@@ -1882,7 +1884,7 @@ impl TuiSessionState {
         };
         self.team.apply(e);
         if let AgentEvent::ToolCallStarted { tool, input, .. } = e {
-            self.file_map.touch(tool, input);
+            self.file_map.touch(tool, input, at);
         }
         match e {
             AgentEvent::SessionStarted {

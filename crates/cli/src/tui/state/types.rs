@@ -339,6 +339,9 @@ pub struct TuiSessionState {
     /// Chat between people and the shared to-do list.
     pub team: crate::tui::team::Team,
     /// Typing in the team tab's chat box (keys go there, not the composer).
+    /// When the event being applied happened (set while replaying a log, so
+    /// the timeline and file map keep real times); None = now.
+    pub event_time: Option<chrono::DateTime<chrono::Local>>,
     pub team_typing: bool,
     pub team_input: String,
     /// Sends a chat line right away (the host's command loop waits while

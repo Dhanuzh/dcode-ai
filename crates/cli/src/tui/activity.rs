@@ -3,8 +3,10 @@
 //! built from the event stream, so a resumed session gets them back from
 //! its log.
 
-use std::collections::BTreeMap;
-use std::time::{Duration, Instant};
+use std::collections::{BTreeMap, BTreeSet};
+
+/// A moment in the session (from the log on resume, so times stay real).
+pub type At = chrono::DateTime<chrono::Local>;
 
 use dcode_ai_common::event::AgentEvent;
 use serde_json::Value;
@@ -16,13 +18,15 @@ pub struct FileTouch {
     pub edits: u32,
     /// Last tool that touched it, and when (for the pulse and "2m ago").
     pub last_tool: String,
-    pub last_at: Option<Instant>,
+    pub last_at: Option<At>,
 }
 
 /// Every file touched this session, by workspace-relative path.
 #[derive(Debug, Default)]
 pub struct FileMap {
     pub files: BTreeMap<String, FileTouch>,
+    /// Folders the agent listed (shown on the folder's own line).
+    pub listed: BTreeSet<String>,
     /// The file of the call that is running now.
     pub current: Option<String>,
 }
@@ -65,10 +69,20 @@ pub fn call_path(tool: &str, input: &Value) -> Option<String> {
 }
 
 impl FileMap {
-    pub fn touch(&mut self, tool: &str, input: &Value) {
+    pub fn touch(&mut self, tool: &str, input: &Value, at: At) {
         let Some(path) = call_path(tool, input) else {
             return;
         };
+        // A folder listing marks the folder, not a file of its own.
+        if tool == "list_directory" {
+            let dir = path.trim_end_matches('/');
+            self.listed.insert(if dir.is_empty() {
+                ".".into()
+            } else {
+                dir.to_string()
+            });
+            return;
+        }
         let entry = self.files.entry(path.clone()).or_default();
         if EDIT_TOOLS.contains(&tool) {
             entry.edits += 1;
@@ -76,7 +90,7 @@ impl FileMap {
             entry.reads += 1;
         }
         entry.last_tool = tool.to_string();
-        entry.last_at = Some(Instant::now());
+        entry.last_at = Some(at);
         self.current = Some(path);
     }
 
@@ -84,13 +98,43 @@ impl FileMap {
         self.files.values().filter(|f| f.edits > 0).count()
     }
 
-    /// Lines for a tree: `(depth, name, touch)`; folders have `None`.
+    /// Lines for a tree: `(depth, name, touch)`; folders have `None` (a
+    /// folder the agent listed says so: `src/ · listed`).
     pub fn tree(&self) -> Vec<(usize, String, Option<&FileTouch>)> {
         let mut out: Vec<(usize, String, Option<&FileTouch>)> = Vec::new();
+        if self.listed.contains(".") {
+            out.push((0, "./ · listed".into(), None));
+        }
+        // Files, plus listed folders with nothing touched inside (as
+        // `path/` entries), in path order.
+        let mut entries: Vec<(String, Option<&FileTouch>)> = self
+            .files
+            .iter()
+            .map(|(p, t)| (p.clone(), Some(t)))
+            .collect();
+        for d in self.listed.iter().filter(|d| d.as_str() != ".") {
+            let prefix = format!("{d}/");
+            if !self.files.keys().any(|p| p.starts_with(&prefix)) {
+                entries.push((prefix, None));
+            }
+        }
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        let folder = |dirs: &[&str], i: usize| -> String {
+            let full = dirs[..=i].join("/");
+            if self.listed.contains(&full) {
+                format!("{}/ · listed", dirs[i])
+            } else {
+                format!("{}/", dirs[i])
+            }
+        };
         let mut open: Vec<String> = Vec::new();
-        for (path, touch) in &self.files {
+        for (path, touch) in entries {
             let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-            let (dirs, name) = parts.split_at(parts.len().saturating_sub(1));
+            let (dirs, name) = if touch.is_none() {
+                (&parts[..], &parts[parts.len()..])
+            } else {
+                parts.split_at(parts.len().saturating_sub(1))
+            };
             // Close folders that this path is not in.
             let common = open
                 .iter()
@@ -98,29 +142,30 @@ impl FileMap {
                 .take_while(|(a, b)| a.as_str() == **b)
                 .count();
             open.truncate(common);
-            for d in &dirs[common..] {
-                out.push((open.len(), format!("{d}/"), None));
+            for (i, d) in dirs.iter().enumerate().skip(common) {
+                out.push((open.len(), folder(dirs, i), None));
                 open.push((*d).to_string());
             }
-            if let Some(n) = name.first() {
-                out.push((open.len(), (*n).to_string(), Some(touch)));
+            if let (Some(n), Some(t)) = (name.first(), touch) {
+                out.push((open.len(), (*n).to_string(), Some(t)));
             }
         }
         out
     }
 }
 
-/// "just now", "45s", "3m", "2h".
-pub fn ago(at: Option<Instant>) -> String {
+/// "now", "45s", "3m", "2h", "4d".
+pub fn ago(at: Option<At>) -> String {
     let Some(at) = at else {
         return String::new();
     };
-    let s = at.elapsed().as_secs();
+    let s = (chrono::Local::now() - at).num_seconds().max(0);
     match s {
         0..=4 => "now".into(),
         5..=59 => format!("{s}s"),
         60..=3599 => format!("{}m", s / 60),
-        _ => format!("{}h", s / 3600),
+        3600..=86_399 => format!("{}h", s / 3600),
+        _ => format!("{}d", s / 86_400),
     }
 }
 
@@ -128,7 +173,7 @@ pub fn ago(at: Option<Instant>) -> String {
 pub fn fresh(touch: &FileTouch) -> bool {
     touch
         .last_at
-        .is_some_and(|t| t.elapsed() < Duration::from_secs(4))
+        .is_some_and(|t| (chrono::Local::now() - t).num_seconds() < 4)
 }
 
 /// One step of the session, for `/timeline`.
@@ -193,8 +238,9 @@ pub struct Timeline {
 const MAX_STEPS: usize = 5_000;
 
 impl Timeline {
-    pub fn apply(&mut self, ev: &AgentEvent) {
-        let now = chrono::Local::now();
+    /// `at`: when it happened (the log's time on resume).
+    pub fn apply(&mut self, ev: &AgentEvent, at: At) {
+        let now = at;
         let step = |kind, label: String, detail: String| Step {
             kind,
             label,
@@ -300,10 +346,36 @@ mod tests {
     #[test]
     fn file_map_counts_reads_and_edits_as_a_tree() {
         let mut m = FileMap::default();
-        m.touch("read_file", &json!({"path": "src/a.rs"}));
-        m.touch("edit_file", &json!({"path": "src/a.rs"}));
-        m.touch("read_file", &json!({"path": "./README.md"}));
-        m.touch("execute_bash", &json!({"command": "ls"}));
+        m.touch(
+            "read_file",
+            &json!({"path": "src/a.rs"}),
+            chrono::Local::now(),
+        );
+        m.touch(
+            "edit_file",
+            &json!({"path": "src/a.rs"}),
+            chrono::Local::now(),
+        );
+        m.touch(
+            "read_file",
+            &json!({"path": "./README.md"}),
+            chrono::Local::now(),
+        );
+        m.touch(
+            "execute_bash",
+            &json!({"command": "ls"}),
+            chrono::Local::now(),
+        );
+        m.touch(
+            "list_directory",
+            &json!({"path": "src"}),
+            chrono::Local::now(),
+        );
+        m.touch(
+            "list_directory",
+            &json!({"path": "docs"}),
+            chrono::Local::now(),
+        );
         assert_eq!(m.files["src/a.rs"].reads, 1);
         assert_eq!(m.files["src/a.rs"].edits, 1);
         assert_eq!(m.edited(), 1);
@@ -313,37 +385,51 @@ mod tests {
             tree,
             [
                 (0, "README.md".into()),
-                (0, "src/".into()),
+                (0, "docs/ · listed".into()),
+                (0, "src/ · listed".into()),
                 (1, "a.rs".into())
-            ]
+            ],
+            "a listed folder shows on its own line, not as a second entry"
         );
     }
 
     #[test]
     fn timeline_records_steps_and_tool_results() {
         let mut t = Timeline::default();
-        t.apply(&AgentEvent::MessageReceived {
-            role: "user".into(),
-            content: "fix the bug".into(),
-        });
-        t.apply(&AgentEvent::ToolCallStarted {
-            call_id: "c1".into(),
-            tool: "edit_file".into(),
-            input: json!({"path": "src/a.rs"}),
-        });
-        t.apply(&AgentEvent::ToolCallCompleted {
-            call_id: "c1".into(),
-            output: dcode_ai_common::tool::ToolResult {
-                call_id: "c1".into(),
-                success: true,
-                output: "done".into(),
-                error: None,
+        t.apply(
+            &AgentEvent::MessageReceived {
+                role: "user".into(),
+                content: "fix the bug".into(),
             },
-        });
-        t.apply(&AgentEvent::MessageReceived {
-            role: "user".into(),
-            content: "thanks".into(),
-        });
+            chrono::Local::now(),
+        );
+        t.apply(
+            &AgentEvent::ToolCallStarted {
+                call_id: "c1".into(),
+                tool: "edit_file".into(),
+                input: json!({"path": "src/a.rs"}),
+            },
+            chrono::Local::now(),
+        );
+        t.apply(
+            &AgentEvent::ToolCallCompleted {
+                call_id: "c1".into(),
+                output: dcode_ai_common::tool::ToolResult {
+                    call_id: "c1".into(),
+                    success: true,
+                    output: "done".into(),
+                    error: None,
+                },
+            },
+            chrono::Local::now(),
+        );
+        t.apply(
+            &AgentEvent::MessageReceived {
+                role: "user".into(),
+                content: "thanks".into(),
+            },
+            chrono::Local::now(),
+        );
         assert_eq!(t.steps.len(), 3);
         assert_eq!(t.steps[1].label, "edit_file src/a.rs");
         assert_eq!(t.steps[1].ok, Some(true));

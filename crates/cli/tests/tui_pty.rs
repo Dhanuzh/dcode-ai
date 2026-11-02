@@ -1293,6 +1293,7 @@ fn a_local_join_gets_the_interface_and_the_call() {
     // The chat window: the dashboard's team tab with a box to type in.
     run(&mut host, "/chat");
     host.wait_for("message the team");
+    host.wait_for("here: Kiran");
     host.send(b"hi team");
     std::thread::sleep(Duration::from_millis(200));
     host.send(b"\r");
