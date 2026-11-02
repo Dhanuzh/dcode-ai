@@ -7,6 +7,7 @@ pub mod branch_picker;
 pub mod bridge;
 pub mod btw;
 pub mod busy_indicator;
+pub mod call_cmd;
 pub mod choice;
 pub mod clipboard;
 pub mod composer;

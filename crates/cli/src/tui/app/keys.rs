@@ -43,6 +43,13 @@ pub(super) fn handle_key_event(
     cancel_flag: Option<&Arc<std::sync::atomic::AtomicBool>>,
 ) -> KeyFlow {
     if matches!(key.kind, KeyEventKind::Release) {
+        // Terminals that report key release: let go of push-to-talk now.
+        if key.code == KeyCode::Char(' ')
+            && key.modifiers.contains(KeyModifiers::CONTROL)
+            && let Some(call) = g.office.voice.as_ref()
+        {
+            call.release();
+        }
         return KeyFlow::Continue;
     }
     // Customizable keybindings: translate the key through the
@@ -1057,6 +1064,15 @@ pub(super) fn handle_key_event(
     if !(key.code == KeyCode::Esc && escape_cancels_active_turn(g))
         && super::vim::handle_vim_key(key, g)
     {
+        return KeyFlow::Continue;
+    }
+
+    // Push-to-talk: Ctrl+Space held (a held key repeats in every terminal).
+    if key.code == KeyCode::Char(' ')
+        && key.modifiers.contains(KeyModifiers::CONTROL)
+        && let Some(call) = g.office.voice.as_ref().filter(|c| c.ptt())
+    {
+        call.hold();
         return KeyFlow::Continue;
     }
 

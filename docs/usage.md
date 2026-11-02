@@ -500,7 +500,7 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 | `/files` | Files the agent read and edited this session (also the dashboard's `files` tab, `Alt+4`) |
 | `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan [port]` shares it on your network (a fixed port such as `/watch lan 8787` lets you allow it in the firewall once; on WSL it prints the commands); `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
 | `/invite` | Let someone on another computer join with one line: prints (and copies) `dcode-ai join <ip>:8788/<key> --name <their name>`. You're asked before each person gets in. `/invite web` also gives a browser link (no install; plain HTTP), `/invite <port>` another port, `/invite --let-approve` lets guests approve and stop too, `/invite stop` ends it |
-| `/call` | A voice call with the people on this session (after `/invite`; guests type `/call` to join). `/mute` toggles your microphone, `/hangup` leaves. Never recorded or logged; headphones avoid echo. Needs PulseAudio/PipeWire on Linux (WSLg on Windows 11) |
+| `/call` | A voice call with the people on this session (guests on `/invite` and `dcode-ai join` terminals type `/call` to join). In a call: `/call ptt` (hold Ctrl+Space to talk), `/call volume <name> <0-200>`, `/call echo on\|off`. `/mute` toggles your microphone, `/hangup` leaves. Never recorded or logged; headphones avoid echo. Needs PulseAudio/PipeWire on Linux (WSLg on Windows 11) |
 | `/chat <text>` | Talk to the people on this session — not sent to the agent. `/chat` alone shows the recent chat; it's also in the dashboard's `team` tab (`Alt+6`) |
 | `/todo` | The shared to-do list: `/todo <text>` adds, `/todo done <n>` ticks off, `/todo` lists. Everyone on the session sees it, and the agent gets the open items with each prompt (not shown in the transcript) |
 | `/people` | Who is with this session: you, guests on `/invite` (terminal or browser), `dcode-ai join` terminals, `/watch` viewers |
@@ -550,7 +550,12 @@ spaces and `-_.`, 24 characters at most); they are not a login.
 - `/invite web` and `/watch lan` also print the link as a QR code.
 - Guests use `/chat`, `/todo` and `/people` too; their header shows your
   project and name.
-- Voice: `/call` (host, then each guest), `/mute`, `/hangup`. Each
+- Voice: `/call` (host, then each guest), `/mute`, `/hangup`. In a call:
+  `/call` lists who's in it, `/call ptt` turns push-to-talk on (hold
+  Ctrl+Space), `/call volume <name> <0-200>` sets someone's volume for you,
+  `/call echo off` turns echo reduction off (with headphones).
+- `dcode-ai join <id>` on the same machine gets the full interface and can
+  join the call too (no knock; it uses the host's private local invite). Each
   person's voice goes to the host, who passes it to everyone else in the
   call; silence isn't sent. The browser page can't join calls (browsers
   allow the microphone only over HTTPS).

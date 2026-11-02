@@ -276,9 +276,16 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
         } else {
             ("🎙", theme::success())
         };
+        let ptt = if !call.ptt() || call.muted() {
+            ""
+        } else if call.held() {
+            " · ● talking"
+        } else {
+            " · hold ctrl+space"
+        };
         left.push(Span::styled(
             format!(
-                " · {icon} call · {} · {}",
+                " · {icon} call · {} · {}{ptt}",
                 g.office.in_call.len().max(1),
                 crate::voice::clock(call.elapsed())
             ),

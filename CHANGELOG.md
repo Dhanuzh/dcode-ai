@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.43 — 2026-11-02
+
+### Calls, phase 2
+- **Less echo without headphones**: your microphone doesn't send what your
+  speakers just played; speaking up over someone still gets through.
+  `/call echo off` with headphones.
+- **Push-to-talk**: `/call ptt`, then hold **Ctrl+Space** to talk (the
+  footer shows `hold ctrl+space` / `● talking`).
+- **Volume per person**: `/call volume Priya 50` (only for you). `/call`
+  alone lists who's in the call and your settings.
+- **Weak Wi-Fi**: each speaker's buffer adapts (grows after a stutter,
+  shrinks when steady), gaps are filled with faded audio instead of
+  clicks, and audio that falls behind is dropped rather than played late
+  (also right after a reconnect).
+- **Local `dcode-ai join` gets everything invited guests get**: the full
+  interface, the call, chat and to-dos, with no knock. The host's TUI opens
+  a private invite on 127.0.0.1 whose key only your user can read. All
+  calls are one call: the host, local joins and LAN guests hear each other.
+  `/invite stop` no longer ends the call for people on this machine.
+
 ## 1.0.42 — 2026-11-02
 
 The 1.0.40 release build stopped on a new lint in Rust 1.99 (and the 1.0.41

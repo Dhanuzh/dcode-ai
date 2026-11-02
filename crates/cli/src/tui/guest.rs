@@ -80,10 +80,17 @@ fn guest_command(text: &str, g: &mut TuiSessionState, send: &GuestSender) -> Gue
             }
         }
         "/call" => {
-            if g.office.voice.is_some() {
-                g.push_block(DisplayBlock::System(
-                    "[call] you're in the call — /mute · /hangup".into(),
-                ));
+            if g.office.voice.is_some() || !rest.is_empty() {
+                match crate::tui::call_cmd::run(rest, g) {
+                    Some(lines) => {
+                        for l in lines {
+                            g.push_block(DisplayBlock::System(l));
+                        }
+                    }
+                    None => g.push_block(DisplayBlock::System(
+                        "[call] you're not in a call — /call to join".into(),
+                    )),
+                }
             } else {
                 let me = g.office.me.clone().unwrap_or_default();
                 match crate::voice::Call::start(&me) {

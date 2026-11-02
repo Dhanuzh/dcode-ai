@@ -989,7 +989,24 @@ async fn try_main() -> anyhow::Result<()> {
                 join_invite(&invite, &name, tui.then_some(config.ui.theme.as_deref())).await?;
             } else {
                 let id = resolve_session_id(&config, &workspace_root, &session_id).await?;
-                join_session(&config, &workspace_root, &id, &name).await?;
+                // The host's TUI opened a private local invite: the full
+                // interface, calls and chat (falls back to the plain join).
+                let local = dcode_ai_cli::invite::read_local_join(&id);
+                let joined = match local {
+                    Some(invite) => {
+                        use std::io::IsTerminal;
+                        let tui = !plain
+                            && std::io::stdout().is_terminal()
+                            && std::io::stdin().is_terminal();
+                        join_invite(&invite, &name, tui.then_some(config.ui.theme.as_deref()))
+                            .await
+                            .is_ok()
+                    }
+                    None => false,
+                };
+                if !joined {
+                    join_session(&config, &workspace_root, &id, &name).await?;
+                }
             }
         }
         Some(Command::Session { command }) => {
@@ -2165,7 +2182,12 @@ async fn join_invite(
                 }
             },
             line = lines.next_line() => {
-                let Ok(Some(line)) = line else { break };
+                let Ok(Some(line)) = line else {
+                    // The terminal closed: say bye before going.
+                    send.bye();
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                    break;
+                };
                 let text = line.trim();
                 let sent = match text {
                     "" => continue,

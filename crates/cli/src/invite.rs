@@ -288,6 +288,18 @@ pub struct HostOptions {
     pub project: String,
     pub session_id: String,
     pub model: String,
+    /// Let people in without asking (the private local invite: only your
+    /// own user can read its key).
+    pub auto_admit: bool,
+    /// The call to share with other invites (one call for everyone).
+    pub hub: Option<CallHubHandle>,
+}
+
+/// One voice call shared by every invite of a session.
+pub type CallHubHandle = Arc<Mutex<CallHub>>;
+
+pub fn new_call_hub() -> CallHubHandle {
+    Arc::new(Mutex::new(CallHub::default()))
 }
 
 /// Someone in through this invite (for `/people` and `/kick`).
@@ -413,6 +425,56 @@ pub async fn host(opts: HostOptions) -> std::io::Result<InviteHandle> {
     host_on(listener, opts, port).await
 }
 
+/// The private local invite: 127.0.0.1 on a free port, nobody asked (only
+/// your own user can read the key from [`local_join_file`]).
+pub async fn host_local(mut opts: HostOptions) -> std::io::Result<InviteHandle> {
+    opts.auto_admit = true;
+    opts.web = false;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let port = listener.local_addr()?.port();
+    let handle = host_on(listener, opts, port).await?;
+    Ok(handle)
+}
+
+/// Where a session's private local invite is written for `dcode-ai join`.
+pub fn local_join_file(session_id: &str) -> PathBuf {
+    dcode_ai_runtime::ipc::runtime_ipc_dir().join(format!("{session_id}.join"))
+}
+
+/// Writes the local invite where only this user can read it.
+pub fn write_local_join(session_id: &str, invite: &Invite) -> std::io::Result<()> {
+    let path = local_join_file(session_id);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let local = Invite {
+        host: "127.0.0.1".into(),
+        ..invite.clone()
+    };
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&path)?;
+        f.write_all(local.as_string().as_bytes())
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::write(&path, local.as_string())
+    }
+}
+
+/// The local invite for a running session, if its host wrote one.
+pub fn read_local_join(session_id: &str) -> Option<Invite> {
+    let text = std::fs::read_to_string(local_join_file(session_id)).ok()?;
+    Invite::parse(text.trim())
+}
+
 async fn host_on(
     listener: TcpListener,
     opts: HostOptions,
@@ -458,7 +520,8 @@ async fn host_on(
         rejoin: Default::default(),
         connected: Default::default(),
         pending_bye: Default::default(),
-        call: Default::default(),
+        call: opts.hub.unwrap_or_else(new_call_hub),
+        auto_admit: opts.auto_admit,
     });
     let accept = shared.clone();
     let mut stop = stop_rx.clone();
@@ -524,19 +587,24 @@ struct Host {
     connected: Mutex<HashMap<String, Connected>>,
     /// Person id → their delayed "left" (cancelled when they come back).
     pending_bye: Mutex<HashMap<String, tokio::task::AbortHandle>>,
-    /// The voice call.
-    call: Mutex<CallHub>,
+    /// The voice call (shared with the session's other invites).
+    call: CallHubHandle,
+    auto_admit: bool,
 }
 
 /// Who is in the call, and where to send them audio. The host forwards
 /// each person's audio to everyone else; nobody's audio comes back to them.
 #[derive(Default)]
-struct CallHub {
-    /// Guests in the call → their connection's outgoing queue.
-    guests: HashMap<String, mpsc::UnboundedSender<Value>>,
+pub struct CallHub {
+    /// Guests in the call → their connection's audio queue (bounded: a
+    /// guest who falls behind loses audio instead of hearing it late).
+    guests: HashMap<String, mpsc::Sender<Value>>,
     /// The host, when they're in the call.
     host: Option<crate::voice::Call>,
 }
+
+/// Audio frames (20 ms each) that may wait for one slow connection.
+const AUDIO_BACKLOG: usize = 25;
 
 /// The host's person id in calls and the office.
 pub const HOST_PERSON: &str = "owner";
@@ -579,12 +647,13 @@ impl Host {
         });
         for (who, tx) in &hub.guests {
             if who != from {
-                let _ = tx.send(msg.clone());
+                // Full: they're behind (weak Wi-Fi) — drop rather than delay.
+                let _ = tx.try_send(msg.clone());
             }
         }
     }
 
-    fn call_join(&self, person: &str, name: &str, tx: mpsc::UnboundedSender<Value>) {
+    fn call_join(&self, person: &str, name: &str, tx: mpsc::Sender<Value>) {
         let fresh = self
             .call
             .lock()
@@ -739,11 +808,12 @@ impl Host {
                 return Ok(());
             }
             None => {
-                let admitted = tokio::select! {
-                    yes = ask_host(&self.knocks, &asked_name, &from) => yes,
-                    _ = stop.changed() => false,
-                    _ = read.read_u8() => false,
-                };
+                let admitted = self.auto_admit
+                    || tokio::select! {
+                        yes = ask_host(&self.knocks, &asked_name, &from) => yes,
+                        _ = stop.changed() => false,
+                        _ = read.read_u8() => false,
+                    };
                 if !admitted {
                     let _ = cipher
                         .send(
@@ -837,7 +907,7 @@ impl Host {
         });
         let fin = |text: &str| json!({"t": "note", "text": text, "final": true});
         // Audio (and call notes) for this guest from the call hub.
-        let (audio_tx, mut audio_rx) = mpsc::unbounded_channel::<Value>();
+        let (audio_tx, mut audio_rx) = mpsc::channel::<Value>(AUDIO_BACKLOG);
         let mut beat = tokio::time::interval(Duration::from_secs(10));
         beat.tick().await;
         let ended = loop {
@@ -1321,6 +1391,11 @@ async fn keep_up(
                         return;
                     };
                     let kind = m.get("t").and_then(Value::as_str);
+                    // Behind (weak Wi-Fi, or just reconnected): old audio is
+                    // dropped, not sent late.
+                    if kind == Some("audio") && out.len() > AUDIO_BACKLOG {
+                        continue;
+                    }
                     let leaving = kind == Some("bye");
                     match kind {
                         Some("call_join") => in_call = true,
@@ -1494,6 +1569,8 @@ mod tests {
                 project: "d-note".into(),
                 session_id: "s-1".into(),
                 model: "m".into(),
+                auto_admit: false,
+                hub: None,
             },
             port,
         )
@@ -1651,6 +1728,8 @@ mod tests {
                 project: "d-note".into(),
                 session_id: "s-1".into(),
                 model: "m".into(),
+                auto_admit: false,
+                hub: None,
             },
             port,
         )
@@ -1753,6 +1832,8 @@ mod tests {
                 project: "d-note".into(),
                 session_id: "s-1".into(),
                 model: "m".into(),
+                auto_admit: false,
+                hub: None,
             },
             port,
         )

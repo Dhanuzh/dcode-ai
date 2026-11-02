@@ -22,6 +22,19 @@ pub const RATE: u32 = 16_000;
 pub const FRAME: usize = 320;
 /// Someone counts as speaking this long after their last voiced frame.
 const SPEAKING_FOR: Duration = Duration::from_millis(350);
+/// Push-to-talk: the mic stays open this long after the key's last
+/// (repeated) press — releasing the key closes it.
+const PTT_HOLD: Duration = Duration::from_millis(650);
+/// Echo: the speakers' sound reaches the mic within this.
+const ECHO_WINDOW: Duration = Duration::from_millis(250);
+/// A mic frame quieter than this share of what just played is echo.
+const ECHO_RATIO: f32 = 0.6;
+
+/// Whether a microphone frame at `mic` RMS is (probably) the speakers'
+/// sound at `playing` RMS coming back.
+pub fn is_echo(mic: f32, playing: f32) -> bool {
+    playing > 0.0 && mic < playing * ECHO_RATIO
+}
 
 /// A call as seen from one person: their microphone, what they hear, who
 /// is speaking. Cheap to clone.
@@ -33,6 +46,11 @@ pub struct Call {
 struct Inner {
     me: String,
     muted: AtomicBool,
+    /// Push-to-talk on, and until when the key is held.
+    ptt: AtomicBool,
+    held_until: Mutex<Instant>,
+    /// Drop mic frames that are the speakers' echo.
+    echo_gate: AtomicBool,
     mixer: Arc<Mutex<mixer::Mixer>>,
     speaking: Mutex<HashMap<String, Instant>>,
     started: Instant,
@@ -59,6 +77,9 @@ impl Call {
             inner: Arc::new(Inner {
                 me: me.to_string(),
                 muted: AtomicBool::new(false),
+                ptt: AtomicBool::new(false),
+                held_until: Mutex::new(Instant::now()),
+                echo_gate: AtomicBool::new(true),
                 mixer,
                 speaking: Default::default(),
                 started: Instant::now(),
@@ -70,7 +91,22 @@ impl Call {
         tokio::spawn(async move {
             let mut gate = vad::Gate::default();
             while let Some(frame) = cap_rx.recv().await {
-                if me_call.muted() || !gate.open(&frame) {
+                if me_call.muted() || (me_call.ptt() && !me_call.held()) {
+                    continue;
+                }
+                // The speakers' own sound coming back: don't send it.
+                if me_call.inner.echo_gate.load(Ordering::Relaxed) {
+                    let playing = me_call
+                        .inner
+                        .mixer
+                        .lock()
+                        .map(|m| m.recent_level(ECHO_WINDOW))
+                        .unwrap_or(0.0);
+                    if is_echo(vad::rms(&frame), playing) {
+                        continue;
+                    }
+                }
+                if !gate.open(&frame) {
                     continue;
                 }
                 me_call.heard(&me_call.inner.me.clone());
@@ -92,6 +128,52 @@ impl Call {
 
     pub fn set_muted(&self, on: bool) {
         self.inner.muted.store(on, Ordering::Relaxed);
+    }
+
+    pub fn ptt(&self) -> bool {
+        self.inner.ptt.load(Ordering::Relaxed)
+    }
+
+    pub fn set_ptt(&self, on: bool) {
+        self.inner.ptt.store(on, Ordering::Relaxed);
+    }
+
+    /// The push-to-talk key is down (pressed or repeating) now.
+    pub fn hold(&self) {
+        if let Ok(mut t) = self.inner.held_until.lock() {
+            *t = Instant::now() + PTT_HOLD;
+        }
+    }
+
+    /// The push-to-talk key was released (terminals that report it).
+    pub fn release(&self) {
+        if let Ok(mut t) = self.inner.held_until.lock() {
+            *t = Instant::now();
+        }
+    }
+
+    pub fn held(&self) -> bool {
+        self.inner
+            .held_until
+            .lock()
+            .map(|t| Instant::now() < *t)
+            .unwrap_or(false)
+    }
+
+    pub fn echo_gate(&self) -> bool {
+        self.inner.echo_gate.load(Ordering::Relaxed)
+    }
+
+    pub fn set_echo_gate(&self, on: bool) {
+        self.inner.echo_gate.store(on, Ordering::Relaxed);
+    }
+
+    pub fn volume(&self, who: &str) -> f32 {
+        self.inner
+            .mixer
+            .lock()
+            .map(|m| m.volume(who))
+            .unwrap_or(1.0)
     }
 
     pub fn elapsed(&self) -> Duration {
@@ -135,7 +217,7 @@ impl Call {
 
     /// Is `who` speaking right now (you included)?
     pub fn speaking(&self, who: &str) -> bool {
-        if who == self.inner.me && self.muted() {
+        if who == self.inner.me && (self.muted() || (self.ptt() && !self.held())) {
             return false;
         }
         self.inner
@@ -187,6 +269,38 @@ mod tests {
         assert_eq!(clock(Duration::from_secs(134)), "2:14");
         a.hang_up();
         b.hang_up();
+    }
+
+    #[tokio::test]
+    async fn push_to_talk_sends_only_while_held() {
+        // SAFETY: tests that touch this set the same value.
+        unsafe { std::env::set_var("DCODE_AI_FAKE_AUDIO", "tone") };
+        let (call, mut out) = Call::start("ptt").unwrap();
+        call.set_echo_gate(false);
+        call.set_ptt(true);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        while out.try_recv().is_ok() {}
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(out.try_recv().is_err(), "nothing while the key is up");
+        call.hold();
+        let got = tokio::time::timeout(Duration::from_secs(1), out.recv()).await;
+        assert!(got.is_ok(), "frames while held");
+        call.release();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        while out.try_recv().is_ok() {}
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(out.try_recv().is_err(), "closed again after release");
+        call.hang_up();
+    }
+
+    #[test]
+    fn quiet_frames_while_the_speakers_play_are_echo() {
+        assert!(is_echo(1000.0, 4000.0));
+        assert!(
+            !is_echo(5000.0, 4000.0),
+            "speaking over someone gets through"
+        );
+        assert!(!is_echo(1000.0, 0.0), "nothing playing: not echo");
     }
 
     /// On a machine with sound: opens the real microphone and speakers.

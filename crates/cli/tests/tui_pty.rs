@@ -1216,6 +1216,58 @@ fn a_running_command_shows_progress_and_esc_stops_only_it() {
     tui.wait_for("Wrote the note.");
 }
 
+/// `dcode-ai join <id>` on the same machine: the full interface (through
+/// the host's private local invite, no knock) and the voice call, with
+/// push-to-talk and per-person volume.
+#[test]
+fn a_local_join_gets_the_interface_and_the_call() {
+    let (_dir, home, ws) = setup_with_model();
+    let mut host = Tui::start(&home, &ws);
+    host.wait_for("? for shortcuts");
+    let run = |tui: &mut Tui, cmd: &str| {
+        tui.send(cmd.as_bytes());
+        std::thread::sleep(Duration::from_millis(200));
+        tui.send(b"\r");
+    };
+    run(&mut host, "hello there");
+    host.wait_for("Reply to: hello there");
+    host.wait_for("? for shortcuts");
+    let id = std::fs::read_dir(ws.join(".dcode-ai/sessions"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .find_map(|n| n.strip_suffix(".json").map(str::to_string))
+        .expect("a session");
+
+    let mut mate = Tui::start_with(&home, &ws, &["join", &id, "--name", "Kiran"]);
+    // No knock: in straight away, with the conversation so far.
+    mate.wait_for("you joined");
+    mate.wait_for("Reply to: hello there");
+    host.wait_for("Kiran joined");
+
+    run(&mut host, "/call");
+    host.wait_for("you started the call");
+    run(&mut mate, "/call");
+    mate.wait_for("you joined the call");
+    host.wait_for("🎙 call · 2");
+
+    run(&mut mate, "/call ptt");
+    mate.wait_for("push-to-talk on");
+    mate.wait_for("hold ctrl+space");
+    mate.send(b"\x00"); // Ctrl+Space
+    mate.wait_for("● talking");
+
+    run(&mut host, "/call volume Kiran 40");
+    host.wait_for("Kiran at 40% for you");
+    run(&mut host, "/call");
+    host.wait_for("Kiran · volume 40");
+
+    run(&mut mate, "/hangup");
+    host.wait_for("Kiran left the call");
+    run(&mut mate, "/quit");
+    host.wait_for("Kiran left");
+}
+
 impl Tui {
     /// The screen with colours, as JSON rows of `[symbol, fg, bg]`.
     fn cells_json(&self) -> serde_json::Value {

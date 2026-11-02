@@ -208,14 +208,7 @@ impl Repl {
             "/invite" => {
                 let words: Vec<&str> = rest.split_whitespace().collect();
                 if words.first() == Some(&"stop") {
-                    if let Some(inv) = &self.invite {
-                        inv.call_leave();
-                    }
-                    if let ReplOutput::Tui(st) = &out
-                        && let Ok(mut g) = st.lock()
-                    {
-                        g.office.voice = None;
-                    }
+                    // The call goes on for people joined on this machine.
                     if self.invite.take().is_some() {
                         out.println("[invite] stopped — the line no longer works and guests were disconnected");
                     } else {
@@ -264,6 +257,8 @@ impl Repl {
                         .unwrap_or_default(),
                     session_id: self.runtime.session_id().to_string(),
                     model: self.runtime.model().to_string(),
+                    auto_admit: false,
+                    hub: Some(self.call_hub.clone()),
                 };
                 match dcode_ai_cli::invite::host(opts).await {
                     Ok(inv) => {
@@ -311,13 +306,24 @@ impl Repl {
                     out.eprintln("[call] calls need the terminal UI");
                     return Ok(true);
                 };
-                let Some(inv) = &self.invite else {
-                    out.println("[call] start /invite first — calls are with the people who join through it");
+                let Some(inv) = self.invite.as_ref().or(self.local_invite.as_ref()) else {
+                    out.println("[call] calls need the session's invite — /invite starts one");
                     return Ok(true);
                 };
                 let already = st.lock().map(|g| g.office.voice.is_some()).unwrap_or(false);
-                if already {
-                    out.println("[call] you're in the call — /mute · /hangup");
+                if already || !rest.trim().is_empty() {
+                    let lines = st
+                        .lock()
+                        .ok()
+                        .and_then(|mut g| crate::tui::call_cmd::run(rest.trim(), &mut g));
+                    match lines {
+                        Some(lines) => {
+                            for l in lines {
+                                out.println(&l);
+                            }
+                        }
+                        None => out.println("[call] you're not in a call — /call starts one"),
+                    }
                     return Ok(true);
                 }
                 match dcode_ai_cli::voice::Call::start(dcode_ai_cli::invite::HOST_PERSON) {

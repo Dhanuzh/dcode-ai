@@ -68,6 +68,43 @@ fn goal_footer_label(cell: &dcode_ai_runtime::goal::GoalCell) -> Option<String> 
 }
 
 impl Repl {
+    /// Opens the private local invite and writes it for `dcode-ai join`.
+    async fn start_local_invite(&mut self) {
+        let Some(socket) = self.runtime.socket_path() else {
+            return;
+        };
+        let (knocks, _) = tokio::sync::mpsc::channel(1);
+        let opts = dcode_ai_cli::invite::HostOptions {
+            port: 0,
+            web: false,
+            let_approve: true,
+            socket,
+            log_path: self.runtime.event_log_path(),
+            title: self
+                .runtime
+                .session_name()
+                .map(str::to_string)
+                .unwrap_or_else(|| self.runtime.session_id().to_string()),
+            knocks,
+            presence: self.runtime.event_tx(),
+            host_name: dcode_ai_cli::people::my_name(self.runtime.workspace_root()),
+            project: self
+                .runtime
+                .workspace_root()
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+            session_id: self.runtime.session_id().to_string(),
+            model: self.runtime.model().to_string(),
+            auto_admit: true,
+            hub: Some(self.call_hub.clone()),
+        };
+        if let Ok(inv) = dcode_ai_cli::invite::host_local(opts).await {
+            let _ = dcode_ai_cli::invite::write_local_join(self.runtime.session_id(), &inv.invite);
+            self.local_invite = Some(inv);
+        }
+    }
+
     /// Ask a cheap model for a session title in the background; the answer
     /// comes back as `TuiCmd::SessionTitle`. `replace` renames a named one.
     fn spawn_session_title(&self, st: &Arc<Mutex<TuiSessionState>>, replace: bool) {
@@ -413,6 +450,10 @@ pub struct Repl {
     watch: Option<crate::watch::WatchHandle>,
     /// `/invite`: people on other computers may knock and join.
     invite: Option<dcode_ai_cli::invite::InviteHandle>,
+    /// The private local invite `dcode-ai join` uses on this machine.
+    local_invite: Option<dcode_ai_cli::invite::InviteHandle>,
+    /// One voice call for everyone (local joins and invited guests).
+    call_hub: dcode_ai_cli::invite::CallHubHandle,
 }
 
 impl Repl {
@@ -436,6 +477,8 @@ impl Repl {
             pending_sudo: None,
             watch: None,
             invite: None,
+            local_invite: None,
+            call_hub: dcode_ai_cli::invite::new_call_hub(),
         }
     }
 
@@ -1306,6 +1349,11 @@ impl Repl {
             g.office.set_owner(&dcode_ai_cli::people::my_name(
                 self.runtime.workspace_root(),
             ));
+        }
+        // `dcode-ai join <id>` on this machine: a private local invite (full
+        // interface, calls; no knock — only this user can read its key).
+        self.start_local_invite().await;
+        if let Ok(mut g) = tui_state.lock() {
             g.mcp_server_count = self
                 .runtime
                 .config()
@@ -2568,6 +2616,11 @@ impl Repl {
         }
 
         let _ = ui.await;
+        if self.local_invite.take().is_some() {
+            let _ = std::fs::remove_file(dcode_ai_cli::invite::local_join_file(
+                self.runtime.session_id(),
+            ));
+        }
         // Claude Code's parting line: how to get back to this conversation.
         let worth_resuming = self
             .runtime
