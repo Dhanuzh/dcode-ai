@@ -1328,7 +1328,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-autoresearch"
-version = "1.0.51"
+version = "1.0.52"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1348,7 +1348,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-cli"
-version = "1.0.51"
+version = "1.0.52"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-common"
-version = "1.0.51"
+version = "1.0.52"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1423,7 +1423,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-core"
-version = "1.0.51"
+version = "1.0.52"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1455,7 +1455,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-runtime"
-version = "1.0.51"
+version = "1.0.52"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -7255,7 +7255,7 @@ dependencies = [
  "log",
  "serde",
  "thiserror 2.0.18",
- "windows 0.61.3",
+ "windows 0.62.2",
  "windows-core 0.62.2",
 ]
 

@@ -1,4 +1,4 @@
-# M46 — Peer-to-peer invites, "what's new", no token pause (v1.0.51)
+# M46 — Peer-to-peer invites, "what's new", no token pause (v1.0.52)
 
 Status: implemented
 
@@ -31,7 +31,7 @@ Tailscale, a relay of yours, or open ports.
 ## 2. "Updated to vX · what's new"
 
 - `~/.dcode-ai/last-version` records the version that ran. The first start
-  of a newer one shows "✓ Updated to v1.0.51 (from v1.0.49) · what's new"
+  of a newer one shows "✓ Updated to v1.0.52 (from v1.0.49) · what's new"
   with the headline of each changelog item since the old version (at most
   6), then records it. Nothing on a first install.
 
@@ -39,3 +39,12 @@ Tailscale, a relay of yours, or open ports.
 
 - The `turn_token_alarm` pause (5M tokens) is removed: the setting is read
   but ignored. The same-tool-call loop guard stays.
+
+## Windows build
+
+`wmi` (iroh's network watcher on Windows) allows `windows` 0.59–0.62 and
+`windows-core` 0.59–0.62, and the lock had paired `windows` 0.61 with
+`windows-core` 0.62, which doesn't compile. `notify-rust` keeps `windows`
+0.61 for itself, so only `wmi`'s entry in `Cargo.lock` points at
+`windows` 0.62.2 (matching its `windows-core`). Re-check this after a
+`cargo update`.

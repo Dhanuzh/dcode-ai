@@ -1,6 +1,8 @@
 # Changelog
 
-## 1.0.51 — 2026-11-03
+## 1.0.52 — 2026-11-04
+
+(1.0.51 was tagged but not released: its Windows build failed.)
 
 ### New
 - **Join from any network, nothing to set up**: `/invite` now adds a direct
