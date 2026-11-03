@@ -1324,6 +1324,7 @@ impl Repl {
         // Cached "newer version" for the welcome box, plus a background check
         // when the cache is stale (it never blocks startup).
         let _ = crate::update_check::init_and_pending_upgrade();
+        let auto_update = self.runtime.config().ui.auto_update;
         // Apply the configured theme before the TUI draws its first frame.
         crate::tui::theme::set_by_name(self.runtime.config().ui.theme.as_deref());
 
@@ -1338,6 +1339,9 @@ impl Repl {
             self.runtime.workspace_root().to_path_buf(),
             self.runtime.config().ui.code_line_numbers,
         )));
+        if auto_update {
+            spawn_auto_update(tui_state.clone());
+        }
         // sudo in agent / `!` commands asks through the TUI's password popup.
         crate::askpass::start(tui_state.clone());
         // Koda-style fullscreen behavior: mouse capture is always on for
@@ -1469,18 +1473,29 @@ impl Repl {
         // `ask_question`, that task never receives `TuiCmd::Submit` or `QuestionAnswer`.
         let (answer_tx, mut answer_rx) =
             tokio::sync::mpsc::unbounded_channel::<(String, QuestionSelection)>();
+        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TuiCmd>();
+        let guard_tx = cmd_tx.clone();
         let qp_dispatch = live.clone();
         let question_state = tui_state.clone();
         tokio::spawn(async move {
             while let Some((qid, sel)) = answer_rx.recv().await {
                 // Someone knocking on `/invite` is asked here too.
                 if dcode_ai_cli::invite::answer_knock(&qid, &sel) {
+                    let mut who = String::new();
                     if let Ok(mut g) = question_state.lock()
-                        && g.active_question.as_ref().map(|q| q.question_id.as_str())
-                            == Some(qid.as_str())
+                        && let Some(q) = g.active_question.as_ref()
+                        && q.question_id == qid
                     {
+                        who = q.header.clone().unwrap_or_default();
                         g.active_question = None;
                         g.close_question_modal();
+                    }
+                    if dcode_ai_cli::invite::admit_for(&sel) == dcode_ai_cli::invite::Admit::Drive {
+                        let who = who
+                            .strip_prefix("Invite · ")
+                            .unwrap_or("a guest")
+                            .to_string();
+                        let _ = guard_tx.send(TuiCmd::GuardAutoMode(who));
                     }
                     continue;
                 }
@@ -1551,7 +1566,6 @@ impl Repl {
         let approval_for_tui = approval_tx.clone();
         drop(approval_tx);
 
-        let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::unbounded_channel::<TuiCmd>();
         self.self_cmd_tx = Some(cmd_tx.clone());
         let st = tui_state.clone();
         let banner = self.run_mode;
@@ -1748,6 +1762,23 @@ impl Repl {
                     if let Ok(mut g) = tui_state.lock() {
                         g.set_agent_profile(&self.current_agent_label);
                         g.set_permission_mode(&format!("{:?}", self.runtime.permission_mode()));
+                    }
+                }
+                TuiCmd::GuardAutoMode(who) => {
+                    if matches!(
+                        self.runtime.permission_mode(),
+                        PermissionMode::Auto
+                            | PermissionMode::BypassPermissions
+                            | PermissionMode::DontAsk
+                    ) {
+                        self.set_mode_and_profile(PermissionMode::Default);
+                        if let Ok(mut g) = tui_state.lock() {
+                            g.set_agent_profile(&self.current_agent_label);
+                            g.set_permission_mode(&format!("{:?}", PermissionMode::Default));
+                            g.push_block(crate::tui::state::DisplayBlock::System(format!(
+                                "[invite] auto mode paused while {who} can drive — the agent asks you before acting (Shift+Tab to turn it back on)"
+                            )));
+                        }
                     }
                 }
                 TuiCmd::CyclePermissionMode => {
@@ -3500,4 +3531,47 @@ mod verifier_tests {
         assert!(!verifier_found_problems("  "));
         assert!(verifier_found_problems("src/a.rs:3 — off by one — use <="));
     }
+}
+
+/// Like Claude Code: install a newer release in the background, used from
+/// the next start. Only when the cached check (refreshed at startup) says
+/// one exists; errors stay quiet. Off with `[ui] auto_update = false` or
+/// `DCODE_AI_AUTO_UPDATE=0`, and never for a build from source.
+fn spawn_auto_update(st: Arc<Mutex<TuiSessionState>>) {
+    if std::env::var("DCODE_AI_AUTO_UPDATE")
+        .is_ok_and(|v| matches!(v.as_str(), "0" | "false" | "off"))
+        || cfg!(debug_assertions)
+    {
+        return;
+    }
+    if let Ok(exe) = std::env::current_exe()
+        && exe.components().any(|c| c.as_os_str() == "target")
+    {
+        return;
+    }
+    tokio::spawn(async move {
+        // Let the startup check refresh the cache first.
+        tokio::time::sleep(std::time::Duration::from_secs(8)).await;
+        let Some(latest) = crate::update_check::cached_newer() else {
+            return;
+        };
+        let line = match crate::self_update::update(false, false, &|_| {}).await {
+            Ok(crate::self_update::Outcome::Updated { tag, .. }) => {
+                format!("⬆ dcode-ai updated to {tag} — restart dcode-ai to use it")
+            }
+            Ok(crate::self_update::Outcome::NeedsSudo { tag, work, .. }) => {
+                let _ = std::fs::remove_dir_all(&work);
+                format!(
+                    "⬆ dcode-ai {tag} is available — /update installs it (it needs your password)"
+                )
+            }
+            Err(e) if e.to_string().contains("brew upgrade") => format!("⬆ {e}"),
+            _ => return,
+        };
+        crate::update_check::mark_notified(&latest);
+        if let Ok(mut g) = st.lock() {
+            g.push_block(crate::tui::state::DisplayBlock::System(line));
+            g.touch_transcript();
+        }
+    });
 }

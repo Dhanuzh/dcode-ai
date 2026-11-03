@@ -626,19 +626,36 @@ fn spawn_knock_prompts(
                     && g.active_question.is_none()
                     && g.active_approval.is_none()
                 {
+                    let auto = matches!(
+                        g.permission_mode.as_str(),
+                        "Auto" | "BypassPermissions" | "DontAsk"
+                    );
+                    let mut prompt = format!(
+                        "{} ({}) wants to join this session — let them in?",
+                        knock.name, knock.from
+                    );
+                    if auto {
+                        prompt.push_str(
+                            "\n\nYou're in auto mode: letting them drive switches it to default, so the agent asks you before acting on their requests.",
+                        );
+                    }
                     g.active_question = Some(InteractiveQuestionPayload {
                         question_id: qid.clone(),
                         call_id: qid.clone(),
-                        prompt: format!(
-                            "{} ({}) wants to join this session — let them in?",
-                            knock.name, knock.from
-                        ),
+                        prompt,
                         options: vec![
                             QuestionOption {
-                                id: "allow".into(),
-                                label: format!("Let {} in", knock.name),
+                                id: "watch".into(),
+                                label: format!("Let {} in to watch and chat", knock.name),
                                 description: Some(
-                                    "they see the session live and can send messages".into(),
+                                    "they see the session live and chat with people — nothing they send reaches the agent".into(),
+                                ),
+                            },
+                            QuestionOption {
+                                id: "drive".into(),
+                                label: format!("Let {} in to drive", knock.name),
+                                description: Some(
+                                    "they can also ask the agent to do things (approvals stay with you)".into(),
                                 ),
                             },
                             QuestionOption {
@@ -649,7 +666,7 @@ fn spawn_knock_prompts(
                         ],
                         allow_custom: false,
                         suggested_answer: "deny".into(),
-                        header: Some("Invite".into()),
+                        header: Some(format!("Invite · {}", knock.name)),
                         ..Default::default()
                     });
                     g.open_question_modal();
@@ -659,7 +676,7 @@ fn spawn_knock_prompts(
                 tokio::time::sleep(std::time::Duration::from_millis(200)).await;
             }
             if !shown {
-                let _ = knock.reply.send(false);
+                let _ = knock.reply.send(dcode_ai_cli::invite::Admit::No);
                 continue;
             }
             register_knock(&qid, knock.reply);

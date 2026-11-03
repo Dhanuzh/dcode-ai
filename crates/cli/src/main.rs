@@ -320,6 +320,9 @@ enum Command {
         /// Its exit code
         #[arg(long, default_value_t = 1)]
         exit: i32,
+        /// Send without showing what goes to the model first
+        #[arg(long)]
+        yes: bool,
     },
     Join {
         /// A session id here, or `host:port/key` from someone's `/invite`
@@ -1054,8 +1057,32 @@ async fn try_main() -> anyhow::Result<()> {
             Some(s) => print!("{s}"),
             None => anyhow::bail!("unknown shell `{shell}` — zsh, bash, fish or powershell"),
         },
-        Some(Command::Fix { cmd, exit }) => {
+        Some(Command::Fix { cmd, exit, yes }) => {
             let prompt = dcode_ai_cli::shell_hook::fix_prompt(&cmd, exit, &workspace_root);
+            // Show exactly what goes to the model, and ask.
+            if !yes {
+                use std::io::{BufRead, IsTerminal, Write};
+                let (_, masked) = dcode_ai_cli::shell_hook::mask_command(&cmd);
+                println!(
+                    "dcode-ai will send this to the model (only this — no output, no environment):"
+                );
+                println!("────────────────────────────────────────");
+                println!("{prompt}");
+                println!("────────────────────────────────────────");
+                if masked > 0 {
+                    println!("{masked} secret(s) in the command were masked.");
+                }
+                if std::io::stdin().is_terminal() {
+                    print!("Send it? [Y/n] ");
+                    std::io::stdout().flush()?;
+                    let mut answer = String::new();
+                    std::io::stdin().lock().read_line(&mut answer)?;
+                    if matches!(answer.trim(), "n" | "N" | "no") {
+                        println!("Not sent.");
+                        return Ok(());
+                    }
+                }
+            }
             let me = std::env::current_exe()?;
             let status = std::process::Command::new(me)
                 .arg("--ask")
@@ -2244,7 +2271,10 @@ async fn join_invite(
     if let Some(theme) = tui {
         return dcode_ai_cli::tui::guest::run(guest, theme).await;
     }
-    let keys = if guest.let_approve {
+    let can_drive = guest.can_drive;
+    let keys = if !can_drive {
+        "you're watching — what you type goes to the people here (team chat), not the agent · /quit"
+    } else if guest.let_approve {
         "type to send a message · /chat · /todo · /approve · /deny · /stop · /quit"
     } else {
         "type to send a message · /chat <text> · /todo <text> · /quit"
@@ -2298,6 +2328,7 @@ async fn join_invite(
                     _ => match text.split_once(' ') {
                         Some(("/chat", rest)) => send.chat(rest),
                         Some(("/todo", rest)) => send.todo(rest),
+                        _ if !can_drive => send.chat(text),
                         _ => send.say(text),
                     },
                 };

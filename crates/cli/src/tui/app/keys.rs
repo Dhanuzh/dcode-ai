@@ -2137,10 +2137,12 @@ pub(super) fn handle_key_event(
 /// does not own; those drop focus and fall through to the composer.
 fn handle_changes_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
     let plain = key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT;
+    // The diff keys only on the changes tab; the others just switch tabs.
+    let diff = g.rail_tab == crate::tui::state::RailTab::Changes;
     match key.code {
-        KeyCode::Down | KeyCode::Char('j') if plain => g.diff_review.move_file(1),
-        KeyCode::Up | KeyCode::Char('k') if plain => g.diff_review.move_file(-1),
-        KeyCode::Char('r') if plain => {
+        KeyCode::Down | KeyCode::Char('j') if plain && diff => g.diff_review.move_file(1),
+        KeyCode::Up | KeyCode::Char('k') if plain && diff => g.diff_review.move_file(-1),
+        KeyCode::Char('r') if plain && diff => {
             let ws = g.workspace_root.clone();
             if let Some(msg) = g.diff_review.press_revert(&ws) {
                 let kind = if msg.starts_with("Reverted") {
@@ -2153,12 +2155,12 @@ fn handle_changes_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
                 g.show_toast(msg, kind);
             }
         }
-        KeyCode::Char('g') if plain => {
+        KeyCode::Char('g') if plain && diff => {
             let ws = g.workspace_root.clone();
             g.diff_review.refresh(&ws);
         }
         // The full-screen diff, opened on the selected file.
-        KeyCode::Enter => g.diff_overlay_open = true,
+        KeyCode::Enter if diff => g.diff_overlay_open = true,
         // Move between the rail tabs; focus stays on the rail.
         KeyCode::Left | KeyCode::BackTab | KeyCode::Char('h')
             if plain || key.code == KeyCode::BackTab =>
@@ -2207,11 +2209,12 @@ fn handle_explorer_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
             g.explorer.move_cursor(&files, -15);
             true
         }
-        KeyCode::Left | KeyCode::Char('h') => {
+        // ←/→ stay free for switching tabs; h/l and Enter/Space open and close.
+        KeyCode::Char('h') => {
             g.explorer.close_or_up(&files);
             true
         }
-        KeyCode::Right | KeyCode::Char('l') | KeyCode::Enter => {
+        KeyCode::Char('l') | KeyCode::Char(' ') | KeyCode::Enter => {
             let cursor = g.explorer.cursor;
             if let Some(path) = g.explorer.activate(&files, cursor)
                 && key.code == KeyCode::Enter
@@ -2239,4 +2242,61 @@ fn handle_explorer_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
     };
     g.file_map = files;
     handled
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::state::RailTab;
+
+    fn state() -> TuiSessionState {
+        let dir = std::env::temp_dir();
+        TuiSessionState::new(
+            "s".into(),
+            "m".into(),
+            "@build".into(),
+            "Default".into(),
+            dir,
+            false,
+        )
+    }
+
+    fn press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn ctrl_d_focuses_the_tab_showing() {
+        let mut g = state();
+        g.rail_tab = RailTab::Agents;
+        g.toggle_changes_focus();
+        assert!(g.rail_focus);
+        assert_eq!(g.rail_tab, RailTab::Agents);
+        g.toggle_changes_focus();
+        assert!(!g.rail_focus);
+    }
+
+    #[test]
+    fn arrows_switch_tabs_from_the_files_tab() {
+        let mut g = state();
+        g.rail_tab = RailTab::Files;
+        g.rail_focus = true;
+        // The explorer leaves ←/→ alone…
+        assert!(!handle_explorer_key(press(KeyCode::Right), &mut g));
+        // …so they move between tabs.
+        assert!(handle_changes_key(press(KeyCode::Right), &mut g));
+        assert_eq!(g.rail_tab, RailTab::Office);
+        assert!(handle_changes_key(press(KeyCode::Left), &mut g));
+        assert_eq!(g.rail_tab, RailTab::Files);
+        assert!(g.rail_focus);
+    }
+
+    #[test]
+    fn diff_keys_only_act_on_the_changes_tab() {
+        let mut g = state();
+        g.rail_tab = RailTab::Agents;
+        g.rail_focus = true;
+        assert!(!handle_changes_key(press(KeyCode::Enter), &mut g));
+        assert!(!g.diff_overlay_open);
+    }
 }

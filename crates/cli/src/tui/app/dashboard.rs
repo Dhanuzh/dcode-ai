@@ -668,7 +668,7 @@ fn render_explorer(frame: &mut ratatui::Frame<'_>, body: Rect, g: &mut TuiSessio
     let focused = g.rail_focus;
     let mut lines = vec![
         muted(if focused {
-            "↑↓ · → open ← close · Enter @file · t touched"
+            "↑↓ · Enter open/@file · ←→ tabs · t touched"
         } else {
             "project files · click to browse · t touched"
         }),

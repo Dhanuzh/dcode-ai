@@ -118,6 +118,9 @@ pub enum TuiCmd {
     /// Answer for the current `ask_question` (from question mode or `/auto-answer`).
     QuestionAnswer(dcode_ai_common::event::QuestionSelection),
     CycleAgent,
+    /// Someone was let in to drive: leave auto / bypass / don't-ask so their
+    /// requests ask the host.
+    GuardAutoMode(String),
     /// Shift+Tab: Default → Accept edits → Plan → Default.
     CyclePermissionMode,
     /// Re-load MCP servers and hooks into the live session (`/reload`).
@@ -290,6 +293,12 @@ pub fn banner_lines(model: &str, workspace: &str, width: u16) -> Vec<Line<'stati
         row(vec![]),
         row(vec![Span::styled(
             fit("  /help for help, /model to switch model"),
+            Style::default()
+                .fg(theme::muted())
+                .add_modifier(Modifier::ITALIC),
+        )]),
+        row(vec![Span::styled(
+            fit("  Ctrl+\\ dashboard view · Shift+Tab modes"),
             Style::default()
                 .fg(theme::muted())
                 .add_modifier(Modifier::ITALIC),

@@ -255,22 +255,40 @@ async fn handshake_host(stream: &mut TcpStream, key: &str) -> std::io::Result<Ci
 
 // ── Knocking: the host decides ───────────────────────────────────────
 
+/// How the host lets someone in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    No,
+    /// Sees everything, chats with people, joins calls — nothing they send
+    /// reaches the agent.
+    Watch,
+    /// Can also ask the agent to do things (their messages become prompts,
+    /// under the host's permission mode; approvals stay with the host).
+    Drive,
+}
+
+impl Admit {
+    pub fn admitted(self) -> bool {
+        self != Admit::No
+    }
+}
+
 /// Someone asks to join. Answer on `reply` (dropping it means no).
 pub struct Knock {
     pub name: String,
     pub from: String,
-    pub reply: oneshot::Sender<bool>,
+    pub reply: oneshot::Sender<Admit>,
 }
 
 /// Knocks waiting for an answer in the TUI, by question id.
-static KNOCKS: LazyLock<Mutex<HashMap<String, oneshot::Sender<bool>>>> =
+static KNOCKS: LazyLock<Mutex<HashMap<String, oneshot::Sender<Admit>>>> =
     LazyLock::new(Default::default);
 
 /// The question id prefix of a knock shown in the TUI.
 pub const KNOCK_QUESTION: &str = "invite-knock-";
 
 /// Wait for the TUI's answer to the knock shown as question `id`.
-pub fn register_knock(id: &str, reply: oneshot::Sender<bool>) {
+pub fn register_knock(id: &str, reply: oneshot::Sender<Admit>) {
     if let Ok(mut m) = KNOCKS.lock() {
         m.insert(id.to_string(), reply);
     }
@@ -284,11 +302,21 @@ pub fn answer_knock(id: &str, selection: &QuestionSelection) -> bool {
     }
     let reply = KNOCKS.lock().ok().and_then(|mut m| m.remove(id));
     if let Some(reply) = reply {
-        let yes =
-            matches!(selection, QuestionSelection::Option { option_id } if option_id == "allow");
-        let _ = reply.send(yes);
+        let _ = reply.send(admit_for(selection));
     }
     true
+}
+
+/// What the host picked in the knock prompt.
+pub fn admit_for(selection: &QuestionSelection) -> Admit {
+    match selection {
+        QuestionSelection::Option { option_id } => match option_id.as_str() {
+            "drive" | "allow" => Admit::Drive,
+            "watch" => Admit::Watch,
+            _ => Admit::No,
+        },
+        _ => Admit::No,
+    }
 }
 
 /// Unanswered after a while: no. Returns whether it was still waiting.
@@ -297,12 +325,12 @@ pub fn expire_knock(id: &str) -> bool {
         .lock()
         .ok()
         .and_then(|mut m| m.remove(id))
-        .map(|r| r.send(false))
+        .map(|r| r.send(Admit::No))
         .is_some()
 }
 
-/// Ask the host; `false` when they say no, don't answer, or are gone.
-pub async fn ask_host(knocks: &mpsc::Sender<Knock>, name: &str, from: &str) -> bool {
+/// Ask the host; `No` when they say no, don't answer, or are gone.
+pub async fn ask_host(knocks: &mpsc::Sender<Knock>, name: &str, from: &str) -> Admit {
     let (tx, rx) = oneshot::channel();
     let knock = Knock {
         name: name.to_string(),
@@ -310,12 +338,12 @@ pub async fn ask_host(knocks: &mpsc::Sender<Knock>, name: &str, from: &str) -> b
         reply: tx,
     };
     if knocks.send(knock).await.is_err() {
-        return false;
+        return Admit::No;
     }
-    matches!(
-        tokio::time::timeout(Duration::from_secs(90), rx).await,
-        Ok(Ok(true))
-    )
+    match tokio::time::timeout(Duration::from_secs(90), rx).await {
+        Ok(Ok(a)) => a,
+        _ => Admit::No,
+    }
 }
 
 // ── Host ─────────────────────────────────────────────────────────────
@@ -754,8 +782,8 @@ struct Host {
     session_id: String,
     model: String,
     guests: AtomicUsize,
-    /// Rejoin token → (person id, name), while the invite is open.
-    rejoin: Mutex<HashMap<String, (String, String)>>,
+    /// Rejoin token → (person id, name, role), while the invite is open.
+    rejoin: Mutex<HashMap<String, (String, String, Admit)>>,
     /// Person id → who is connected now.
     connected: Mutex<HashMap<String, Connected>>,
     /// Person id → their delayed "left" (cancelled when they come back).
@@ -869,7 +897,7 @@ impl Host {
             }
         }
         if let Ok(mut r) = self.rejoin.lock() {
-            r.retain(|_, (_, nm)| nm.to_lowercase() != want);
+            r.retain(|_, (_, nm, _)| nm.to_lowercase() != want);
         }
         if let Some(chat) = &self.web_chat {
             let gone: Vec<String> = chat
@@ -969,8 +997,8 @@ impl Host {
                 self.rejoin.lock().ok().and_then(|m| m.get(t).cloned()),
             )
         });
-        let (person, name, token, resumed) = match rejoining {
-            Some((token, Some((person, name)))) => (person, name, token, true),
+        let (person, name, token, resumed, role) = match rejoining {
+            Some((token, Some((person, name, role)))) => (person, name, token, true, role),
             Some((_, None)) => {
                 let _ = cipher
                     .send(
@@ -981,13 +1009,16 @@ impl Host {
                 return Ok(());
             }
             None => {
-                let admitted = self.auto_admit
-                    || tokio::select! {
-                        yes = ask_host(&self.knocks, &asked_name, &from) => yes,
-                        _ = stop.changed() => false,
-                        _ = read.read_u8() => false,
-                    };
-                if !admitted {
+                let role = if self.auto_admit {
+                    Admit::Drive
+                } else {
+                    tokio::select! {
+                        a = ask_host(&self.knocks, &asked_name, &from) => a,
+                        _ = stop.changed() => Admit::No,
+                        _ = read.read_u8() => Admit::No,
+                    }
+                };
+                if !role.admitted() {
                     let _ = cipher
                         .send(
                             &mut write,
@@ -999,9 +1030,9 @@ impl Host {
                 let person = crate::people::new_person_id("guest");
                 let token = new_key();
                 if let Ok(mut m) = self.rejoin.lock() {
-                    m.insert(token.clone(), (person.clone(), asked_name.clone()));
+                    m.insert(token.clone(), (person.clone(), asked_name.clone(), role));
                 }
-                (person, asked_name, token, false)
+                (person, asked_name, token, false, role)
             }
         };
 
@@ -1013,7 +1044,8 @@ impl Host {
                 &json!({
                     "t": "admitted",
                     "title": self.title,
-                    "let_approve": self.let_approve,
+                    "let_approve": self.let_approve && role == Admit::Drive,
+                    "role": if role == Admit::Drive { "drive" } else { "watch" },
                     "host": self.host_name,
                     "project": self.project,
                     "session_id": self.session_id,
@@ -1146,7 +1178,7 @@ impl Host {
                         }
                         _ => {}
                     }
-                    let note = self.carry_out(&ipc, &person, &name, &m).await;
+                    let note = self.carry_out(&ipc, &person, &name, role, &m).await;
                     if let Some(text) = note {
                         let _ = cipher.send(&mut write, &json!({"t": "note", "text": text})).await;
                     }
@@ -1211,9 +1243,23 @@ impl Host {
         ipc: &dcode_ai_runtime::ipc::IpcClient,
         person: &str,
         name: &str,
+        role: Admit,
         m: &Value,
     ) -> Option<String> {
         let text = |k: &str| m.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        let kind = m.get("t").and_then(Value::as_str)?;
+        // Watching: chat and calls only — nothing reaches the agent.
+        if role != Admit::Drive
+            && matches!(
+                kind,
+                "say" | "todo" | "todo_done" | "approve" | "deny" | "stop"
+            )
+        {
+            return Some(
+                "you're watching: /chat talks to the people here; ask the host to let you drive to ask the agent"
+                    .into(),
+            );
+        }
         let person = person.to_string();
         let name = Some(name.to_string());
         let cmd = match m.get("t").and_then(Value::as_str)? {
@@ -1327,6 +1373,8 @@ impl GuestSender {
 pub struct Guest {
     pub title: String,
     pub let_approve: bool,
+    /// Let in to drive (ask the agent) — else to watch and chat.
+    pub can_drive: bool,
     /// The host's name, their project, the session, its model, and this
     /// guest's person id.
     pub host: String,
@@ -1540,6 +1588,8 @@ impl Guest {
             .get("let_approve")
             .and_then(Value::as_bool)
             .unwrap_or(false);
+        // Hosts before 1.0.50 didn't say: they let everyone drive.
+        let can_drive = link.admitted.get("role").and_then(Value::as_str) != Some("watch");
         let (tx, updates) = mpsc::channel(256);
         let (out_tx, out_rx) = mpsc::unbounded_channel::<Value>();
         let invite = invite.clone();
@@ -1548,6 +1598,7 @@ impl Guest {
         Ok(Self {
             title,
             let_approve,
+            can_drive,
             host,
             project,
             session_id,
@@ -1796,11 +1847,16 @@ mod tests {
         // The host says yes to Priya.
         tokio::spawn(async move {
             while let Some(k) = knock_rx.recv().await {
-                let yes = k.name == "Priya";
-                let _ = k.reply.send(yes);
+                let a = match k.name.as_str() {
+                    "Priya" => Admit::Drive,
+                    "Wendy" => Admit::Watch,
+                    _ => Admit::No,
+                };
+                let _ = k.reply.send(a);
             }
         });
         let mut guest = Guest::connect(&invite, "Priya", || {}).await.unwrap();
+        assert!(guest.can_drive);
         assert_eq!(guest.title, "demo");
         assert_eq!(guest.host, "Dhanush");
         assert!(guest.me.starts_with("guest-"));
@@ -1875,6 +1931,40 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(bye, person);
+
+        // Let in to watch: chat reaches people, nothing reaches the agent.
+        let mut wendy = Guest::connect(&invite, "Wendy", || {}).await.unwrap();
+        assert!(!wendy.can_drive);
+        let ws = wendy.sender();
+        assert!(ws.say("rm -rf everything"));
+        let note = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match wendy.updates.recv().await {
+                    Some(GuestUpdate::Note(t)) => break t,
+                    Some(_) => continue,
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(note.contains("you're watching"), "{note}");
+        assert!(ws.chat("hello all"));
+        let got = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match commands.recv().await {
+                    Some(AgentCommand::Say { .. }) => panic!("a watcher reached the agent"),
+                    Some(AgentCommand::Chat { text, .. }) => break text,
+                    Some(_) => continue,
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(got, "hello all");
+        drop(ws);
+        drop(wendy);
 
         // Someone the host turns down doesn't get in.
         let refused = Guest::connect(&invite, "Mallory", || {}).await;
@@ -1954,7 +2044,7 @@ mod tests {
         tokio::spawn(async move {
             while let Some(k) = knock_rx.recv().await {
                 counted.fetch_add(1, Ordering::SeqCst);
-                let _ = k.reply.send(true);
+                let _ = k.reply.send(Admit::Drive);
             }
         });
         let proxy = Proxy::start(port).await;
@@ -2056,7 +2146,7 @@ mod tests {
         .unwrap();
         tokio::spawn(async move {
             while let Some(k) = knock_rx.recv().await {
-                let _ = k.reply.send(true);
+                let _ = k.reply.send(Admit::Drive);
             }
         });
         let invite = Invite {
@@ -2113,7 +2203,7 @@ mod tests {
         let (knock_tx, mut knock_rx) = mpsc::channel::<Knock>(4);
         tokio::spawn(async move {
             while let Some(k) = knock_rx.recv().await {
-                let _ = k.reply.send(true);
+                let _ = k.reply.send(Admit::Drive);
             }
         });
         let handle = host_relay(

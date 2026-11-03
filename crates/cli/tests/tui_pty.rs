@@ -1031,7 +1031,8 @@ fn invite_someone_to_join() {
     // Priya knocks; the host lets her in.
     let mut priya = join_as("Priya", &invite);
     tui.wait_for("Priya (127.0.0.1) wants to join");
-    tui.send(b"1");
+    tui.wait_for("in to drive");
+    tui.send(b"2");
     tui.wait_for("⇢ Priya joined");
     if let Some(stdin) = priya.stdin.as_mut() {
         writeln!(stdin, "hello over the network").unwrap();
@@ -1043,7 +1044,7 @@ fn invite_someone_to_join() {
     // Mallory is turned down.
     let mallory = join_as("Mallory", &invite);
     tui.wait_for("Mallory (127.0.0.1) wants to join");
-    tui.send(b"2");
+    tui.send(b"3");
     let out = mallory.wait_with_output().unwrap();
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("not let in"),
@@ -1072,7 +1073,7 @@ fn invite_someone_to_join() {
     let knock_path = format!("/knock?t={token}&name=Ravi");
     let knock = std::thread::spawn(move || post(&knock_path, ""));
     tui.wait_for("Ravi (127.0.0.1) wants to join");
-    tui.send(b"1");
+    tui.send(b"2");
     let answer = knock.join().unwrap();
     let p = answer
         .split("\"p\":\"")
@@ -1131,7 +1132,7 @@ fn invited_guest_gets_the_full_interface() {
         &["join", &invite, "--name", "Sam"],
     );
     host.wait_for("Sam (127.0.0.1) wants to join");
-    host.send(b"1");
+    host.send(b"2");
     host.wait_for("⇢ Sam joined");
     // The same interface, with the conversation so far.
     guest.wait_for("you joined");
@@ -1458,8 +1459,25 @@ fn the_mouse_scrolls_the_dashboard() {
 #[test]
 fn fix_opens_dcode_ai_on_a_failed_command() {
     let (_dir, home, ws) = setup_with_model();
-    let tui = Tui::start_with(&home, &ws, &["fix", "--cmd", "make build", "--exit", "2"]);
+    let mut tui = Tui::start_with(
+        &home,
+        &ws,
+        &[
+            "fix",
+            "--cmd",
+            "curl -H \"Authorization: Bearer s3cr3t-token\" https://x",
+            "--exit",
+            "2",
+        ],
+    );
+    // First it shows exactly what will be sent, secrets masked, and asks.
+    tui.wait_for("dcode-ai will send this to the model");
+    tui.wait_for("secret(s) in the command were masked");
+    assert!(!tui.text().contains("s3cr3t-token"), "{}", tui.text());
+    tui.wait_for("Send it? [Y/n]");
+    tui.send(b"\r");
     tui.wait_for("This command just failed in my terminal (exit code 2)");
+    assert!(!tui.text().contains("s3cr3t-token"));
     tui.wait_for("Reply to: This command just");
 }
 

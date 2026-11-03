@@ -209,6 +209,8 @@ pub struct WebChat {
     pub socket: PathBuf,
     /// Guests let in: their page token → (person id, name).
     pub guests: std::sync::Mutex<std::collections::HashMap<String, (String, String)>>,
+    /// Page tokens let in only to watch and chat (not to ask the agent).
+    pub watchers: std::sync::Mutex<std::collections::HashSet<String>>,
 }
 
 impl WebChat {
@@ -217,7 +219,12 @@ impl WebChat {
             knocks,
             socket,
             guests: Default::default(),
+            watchers: Default::default(),
         }
+    }
+
+    fn can_drive(&self, token: &str) -> bool {
+        self.watchers.lock().is_ok_and(|w| !w.contains(token))
     }
 
     fn guest(&self, token: &str) -> Option<(String, String)> {
@@ -348,8 +355,8 @@ pub(crate) async fn serve(
                 .map(url_decode)
                 .unwrap_or_default();
             let name = dcode_ai_runtime::supervisor::clean_person_name(&name);
-            let yes = crate::invite::ask_host(&chat.knocks, &name, &from).await;
-            let body = if yes {
+            let role = crate::invite::ask_host(&chat.knocks, &name, &from).await;
+            let body = if role.admitted() {
                 let p = crate::invite::new_key();
                 if let Ok(mut g) = chat.guests.lock() {
                     g.insert(
@@ -357,7 +364,12 @@ pub(crate) async fn serve(
                         (crate::people::new_person_id("web"), name.clone()),
                     );
                 }
-                format!("{{\"ok\":true,\"p\":\"{p}\"}}")
+                let drive = role == crate::invite::Admit::Drive;
+                if !drive && let Ok(mut w) = chat.watchers.lock() {
+                    w.insert(p.clone());
+                }
+                let role = if drive { "drive" } else { "watch" };
+                format!("{{\"ok\":true,\"p\":\"{p}\",\"role\":\"{role}\"}}")
             } else {
                 "{\"ok\":false}".to_string()
             };
@@ -367,6 +379,9 @@ pub(crate) async fn serve(
             let Some((person, name)) = chat.guest(guest_token) else {
                 return respond(&mut write, "403 Forbidden", "text/plain", "not let in").await;
             };
+            if path == "/todo" && !chat.can_drive(guest_token) {
+                return respond(&mut write, "403 Forbidden", "text/plain", "watching").await;
+            }
             let mut body = vec![0u8; body_len.min(2000)];
             reader.read_exact(&mut body).await?;
             let text = String::from_utf8_lossy(&body).trim().to_string();
@@ -394,6 +409,9 @@ pub(crate) async fn serve(
             let Some((person, name)) = chat.guest(guest_token) else {
                 return respond(&mut write, "403 Forbidden", "text/plain", "not let in").await;
             };
+            if !chat.can_drive(guest_token) {
+                return respond(&mut write, "403 Forbidden", "text/plain", "watching").await;
+            }
             let mut body = vec![0u8; body_len.min(8000)];
             reader.read_exact(&mut body).await?;
             let content = String::from_utf8_lossy(&body).trim().to_string();

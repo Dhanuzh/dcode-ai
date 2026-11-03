@@ -1511,15 +1511,16 @@ impl TuiSessionState {
         self.touch_transcript();
     }
 
-    /// `Ctrl+D` in the dashboard: show the changes tab and focus it, or hand
+    /// `Ctrl+D` in the dashboard: focus the tab that is showing, or hand
     /// focus back to the composer when it already has it.
     pub fn toggle_changes_focus(&mut self) {
         if self.rail_focus {
             self.rail_focus = false;
         } else {
-            self.rail_tab = RailTab::Changes;
             self.rail_focus = true;
-            self.diff_review.refresh(&self.workspace_root);
+            if self.rail_tab == RailTab::Changes {
+                self.diff_review.refresh(&self.workspace_root);
+            }
         }
     }
 

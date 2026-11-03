@@ -263,7 +263,10 @@
         sendBtn = document.getElementById('send'), chatNote = document.getElementById('chatnote');
   function joined() {
     knockBtn.hidden = true; chatNote.hidden = true; sayIn.hidden = false; sendBtn.hidden = false;
+    if (watching) sayIn.placeholder = 'Message the people here (you\'re watching)';
   }
+  let watching = false;
+  try { watching = !!sessionStorage.getItem('dcode-ai-watching'); } catch (_) {}
   if (CHAT) {
     document.body.classList.add('chat');
     if (guest) joined();
@@ -274,8 +277,8 @@
         const r = await fetch('/knock?t=__TOKEN__&name=' + encodeURIComponent(myName), { method: 'POST' });
         const j = await r.json();
         if (j.ok) {
-          guest = j.p;
-          try { sessionStorage.setItem('dcode-ai-guest', guest); } catch (_) {}
+          guest = j.p; watching = j.role === 'watch';
+          try { sessionStorage.setItem('dcode-ai-guest', guest); sessionStorage.setItem('dcode-ai-watching', watching ? '1' : ''); } catch (_) {}
           joined(); connect(); sayIn.focus();
         } else { chatNote.textContent = 'The host didn\'t let you in.'; }
       } catch (_) { chatNote.textContent = 'Could not reach the host.'; }
@@ -286,7 +289,7 @@
       if (!text || !guest) return;
       sendBtn.disabled = true;
       try {
-        let route = '/say', body = text;
+        let route = watching ? '/chat' : '/say', body = text;
         if (text.startsWith('/chat ')) { route = '/chat'; body = text.slice(6); }
         else if (text.startsWith('/todo ')) { route = '/todo'; body = text.slice(6); }
         const r = await fetch(route + '?t=__TOKEN__&p=' + encodeURIComponent(guest), { method: 'POST', body });

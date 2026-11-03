@@ -86,7 +86,7 @@ irm https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.ps1 | iex
 
 Prebuilt for **Linux** (x86_64, arm64), **macOS** (Intel, Apple silicon) and **Windows** (x86_64). Every archive ships a `.sha256` checksum, and the installer verifies it.
 
-**Staying current:** run `/update` inside a session, or `dcode-ai update` (`--check` only looks). When `/usr/local/bin` needs sudo, the installer offers `~/.local/bin` instead, so updates never need sudo. If you do pick a system folder, `/update` asks for the password in a masked popup.
+**Staying current:** new releases install themselves in the background, like Claude Code (`[ui] auto_update = false` or `DCODE_AI_AUTO_UPDATE=0` turns that off). Or run `/update` inside a session, or `dcode-ai update` (`--check` only looks). When `/usr/local/bin` needs sudo, the installer offers `~/.local/bin` instead, so updates never need sudo. If you do pick a system folder, `/update` asks for the password in a masked popup.
 
 <details>
 <summary><b>Pin a version, install without sudo, or build from source</b></summary>
@@ -236,7 +236,7 @@ Click, scroll, drag to select and copy, and resize the side panels. `/timeline` 
 
 | | |
 | --- | --- |
-| **Invite** | `/invite` prints one line to send: `dcode-ai join 192.168.1.9:8788/Qk3f… --name Priya`. You're asked before anyone gets in. End-to-end encrypted with the invite's key |
+| **Invite** | `/invite` prints one line to send: `dcode-ai join 192.168.1.9:8788/Qk3f… --name Priya`. You're asked before anyone gets in, and choose whether they **watch and chat** or **drive** (ask the agent). Letting someone drive pauses auto mode. End-to-end encrypted with the invite's key |
 | **Same interface** | Guests get the full TUI with the conversation so far, the dashboard and the office. They reconnect on their own after a Wi-Fi drop |
 | **Voice calls** | `/call` opens a menu for mute, push-to-talk (`Ctrl+Space`), echo reduction and volume per person. Steady on weak Wi-Fi |
 | **Chat** | `/chat` opens a chat window for people only; the agent never sees it |
@@ -262,7 +262,7 @@ If a join fails, dcode-ai tells you why: different networks, a blocked port, or 
 eval "$(dcode-ai hook zsh)"     # in ~/.zshrc — also bash, fish, powershell
 ```
 
-When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` and dcode-ai opens in that folder, already asking why the command failed and how to fix it. It re-runs the command only if that's safe.
+When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` and dcode-ai opens in that folder, already asking why the command failed and how to fix it. It re-runs the command only if that's safe. Only the command, its exit code and the folder are sent — no output, no environment — with secrets in the command masked, and you see the exact text and confirm first.
 
 ### 🗂️ Sessions that last
 

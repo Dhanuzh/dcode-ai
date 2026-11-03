@@ -119,8 +119,137 @@ Set-PSReadLineKeyHandler -Chord 'Alt+{k}' -ScriptBlock {{
     })
 }
 
-/// What dcode-ai is asked when Alt+F opens it on a failed command.
+const MASK: &str = "[masked]";
+
+/// Words that mark a value as secret (`API_KEY=…`, `?token=…`, `--password …`).
+fn secret_name(name: &str) -> bool {
+    let n = name.trim_start_matches('-').to_ascii_lowercase();
+    [
+        "key",
+        "token",
+        "secret",
+        "password",
+        "passwd",
+        "pass",
+        "pwd",
+        "auth",
+        "credential",
+        "cookie",
+        "session",
+    ]
+    .iter()
+    .any(|m| n.contains(m))
+}
+
+/// Masks secrets typed into a command line: `Bearer …`/`Basic …`, `-u
+/// user:pass`, `--password …`-style flags, `NAME=…` where the name says
+/// secret, `?token=…` in URLs, `user:pass@` in URLs — then the known token
+/// shapes and secret env values (`redact_secrets`). Returns the masked text
+/// and how many were masked.
+pub fn mask_command(cmd: &str) -> (String, usize) {
+    let mut count = 0;
+    let words: Vec<&str> = cmd.split_whitespace().collect();
+    // `-p` is a password only for these (cargo's `-p` is a package).
+    let program = words
+        .first()
+        .map(|p| p.rsplit('/').next().unwrap_or(p))
+        .unwrap_or("");
+    let p_is_password = matches!(program, "mysql" | "mysqldump" | "mysqladmin" | "sshpass");
+    let mut out: Vec<String> = Vec::with_capacity(words.len());
+    for (i, w) in words.iter().enumerate() {
+        let prev = if i > 0 { words[i - 1] } else { "" };
+        let prev_bare = prev.trim_matches(['"', '\'']).to_ascii_lowercase();
+        let quote_end = |s: &str| -> String {
+            // Keep a closing quote so the command still reads right.
+            let tail: String = s
+                .chars()
+                .rev()
+                .take_while(|c| *c == '"' || *c == '\'')
+                .collect();
+            format!("{MASK}{tail}")
+        };
+        // `Authorization: Bearer <token>`, `Basic <b64>`.
+        if prev_bare == "bearer"
+            || prev_bare == "basic"
+            || prev_bare == "token" && prev.ends_with(':')
+        {
+            out.push(quote_end(w));
+            count += 1;
+            continue;
+        }
+        // `-u user:pass` (curl), `--password x`, `--token x`, `-p x`.
+        if prev == "-u" || prev == "--user" {
+            match w.split_once(':') {
+                Some((user, pass)) if !pass.is_empty() => {
+                    out.push(format!("{user}:{}", quote_end(pass)));
+                    count += 1;
+                }
+                _ => out.push(w.to_string()),
+            }
+            continue;
+        }
+        if (prev.starts_with("--") && secret_name(prev) && !prev.contains('='))
+            || (prev == "-p" && p_is_password)
+        {
+            out.push(quote_end(w));
+            count += 1;
+            continue;
+        }
+        // `mysql -pS3cret` (attached).
+        if p_is_password && w.starts_with("-p") && w.len() > 2 {
+            out.push(format!("-p{MASK}"));
+            count += 1;
+            continue;
+        }
+        let mut word = w.to_string();
+        // `--token=x`, `API_KEY=x`.
+        if let Some((name, value)) = word.split_once('=')
+            && !value.is_empty()
+            && !name.contains('/')
+            && !name.contains('?')
+            && secret_name(name)
+        {
+            word = format!("{name}={}", quote_end(value));
+            count += 1;
+        }
+        // URLs: `user:pass@host` and `?token=…&`.
+        if let Some(scheme) = word.find("://") {
+            let rest_start = scheme + 3;
+            if let Some(at) = word[rest_start..].find('@').map(|a| a + rest_start)
+                && let Some(colon) = word[rest_start..at].find(':').map(|c| c + rest_start)
+            {
+                word = format!("{}{MASK}{}", &word[..colon + 1], &word[at..]);
+                count += 1;
+            }
+            if let Some(q) = word.find('?') {
+                let (base, query) = word.split_at(q + 1);
+                let parts: Vec<String> = query
+                    .split('&')
+                    .map(|kv| match kv.split_once('=') {
+                        Some((k, v)) if !v.is_empty() && secret_name(k) => {
+                            count += 1;
+                            format!("{k}={MASK}")
+                        }
+                        _ => kv.to_string(),
+                    })
+                    .collect();
+                word = format!("{base}{}", parts.join("&"));
+            }
+        }
+        out.push(word);
+    }
+    let joined = out.join(" ");
+    let shaped = dcode_ai_common::redact::redact_secrets(&joined);
+    if shaped != joined {
+        count += 1;
+    }
+    (shaped, count)
+}
+
+/// What dcode-ai is asked when Alt+F opens it on a failed command (secrets
+/// in the command line masked — see [`mask_command`]).
 pub fn fix_prompt(cmd: &str, exit: i32, cwd: &Path) -> String {
+    let (cmd, _) = mask_command(cmd);
     format!(
         "This command just failed in my terminal (exit code {exit}), in {}:\n\n```\n{}\n```\n\n\
          Find out why it failed and fix it. If running it again is safe and \
@@ -145,5 +274,40 @@ mod tests {
         assert!(snippet("tcsh").is_none());
         let p = fix_prompt("cargo build", 101, Path::new("/w"));
         assert!(p.contains("exit code 101") && p.contains("```\ncargo build\n```"));
+    }
+
+    #[test]
+    fn secrets_typed_into_a_command_are_masked() {
+        let cases = [
+            (
+                r#"curl -H "Authorization: Bearer abc123secret" https://api.x.com"#,
+                "abc123secret",
+            ),
+            ("curl -u admin:hunter22 https://x.com", "hunter22"),
+            ("mysql -p S3cretPw db", "S3cretPw"),
+            (
+                "deploy --token tok_live_9f8e7d --env prod",
+                "tok_live_9f8e7d",
+            ),
+            ("API_KEY=k-12345 node app.js", "k-12345"),
+            (
+                "curl https://x.com/v1?user=me&access_token=zz99&x=1",
+                "zz99",
+            ),
+            ("git clone https://me:pa55word@github.com/a/b", "pa55word"),
+            (
+                "echo ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+                "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ012345",
+            ),
+        ];
+        for (cmd, secret) in cases {
+            let (masked, n) = mask_command(cmd);
+            assert!(!masked.contains(secret), "{cmd} → {masked}");
+            assert!(n >= 1, "{cmd}");
+        }
+        // Nothing secret: unchanged.
+        let (plain, n) = mask_command("cargo test --release -p dcode-ai");
+        assert_eq!((plain.as_str(), n), ("cargo test --release -p dcode-ai", 0));
+        assert!(!fix_prompt("curl -u a:b-pass x", 1, Path::new("/w")).contains("b-pass"));
     }
 }

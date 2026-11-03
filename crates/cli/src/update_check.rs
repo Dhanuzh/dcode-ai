@@ -103,6 +103,27 @@ pub fn init_and_pending_upgrade() -> Option<String> {
     pending
 }
 
+/// The newest release the cache knows of, when it is newer than this build
+/// and the cache was checked recently (no network).
+pub fn cached_newer() -> Option<String> {
+    let info = read_cache()?;
+    let fresh = info.last_checked_at >= Utc::now() - chrono::Duration::hours(CHECK_INTERVAL_HOURS);
+    (fresh && is_newer(&info.latest_version, CURRENT)).then_some(info.latest_version)
+}
+
+/// Don't tell about `version` again (it was installed or reported already).
+pub fn mark_notified(version: &str) {
+    if let Some(mut info) = read_cache() {
+        info.notified_version = Some(version.trim_start_matches('v').to_string());
+        write_cache(&info);
+    }
+    if let Ok(mut p) = PENDING_UPGRADE.lock()
+        && p.as_deref() == Some(version.trim_start_matches('v'))
+    {
+        *p = None;
+    }
+}
+
 fn set_pending(v: Option<String>) {
     if let Ok(mut p) = PENDING_UPGRADE.lock() {
         *p = v;

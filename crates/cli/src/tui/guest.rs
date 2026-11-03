@@ -156,6 +156,7 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
     // The host's project, not this folder (whose files aren't the session's).
     let workspace = std::path::PathBuf::from(&project);
     let let_approve = guest.let_approve;
+    let can_drive = guest.can_drive;
     let state = Arc::new(Mutex::new(TuiSessionState::new(
         guest.session_id.clone(),
         guest.model.clone(),
@@ -185,14 +186,20 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
         } else {
             format!(" (“{title}”)")
         };
-        g.push_block(DisplayBlock::System(format!(
-            "[join] you joined {whose}{topic} — type to send a message to the agent · /chat <text> to the people · /todo · /help · /quit{}",
-            if let_approve {
-                " · you may approve and stop turns"
-            } else {
-                " · approvals stay with the host"
-            }
-        )));
+        g.push_block(DisplayBlock::System(if can_drive {
+            format!(
+                "[join] you joined {whose}{topic} to drive — type to send a message to the agent · /chat <text> to the people · /todo · /help · /quit{}",
+                if let_approve {
+                    " · you may approve and stop turns"
+                } else {
+                    " · approvals stay with the host"
+                }
+            )
+        } else {
+            format!(
+                "[join] you joined {whose}{topic} to watch — what you type goes to the people here (team chat), not the agent · /help · /quit"
+            )
+        }));
     }
     let (send, mut updates) = guest.into_parts();
     if let Ok(mut g) = state.lock() {
@@ -281,7 +288,11 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
                             leave = true;
                         }
                     } else if !text.trim().is_empty() {
-                        send.say(text.trim());
+                        if can_drive {
+                            send.say(text.trim());
+                        } else {
+                            send.chat(text.trim());
+                        }
                     }
                 }
                 if leave {
@@ -304,7 +315,11 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
                             if matches!(action, GuestAction::Leave) {
                                 break;
                             }
-                        } else if !send.say(&text) {
+                        } else if !(if can_drive {
+                            send.say(&text)
+                        } else {
+                            send.chat(&text)
+                        }) {
                             note(&state, "not connected any more");
                         }
                     }

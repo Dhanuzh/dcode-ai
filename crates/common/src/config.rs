@@ -347,6 +347,10 @@ pub struct UiConfig {
     /// `/quiet` command toggles it. Failures are always shown regardless.
     #[serde(default = "default_quiet_startup")]
     pub quiet_startup: bool,
+    /// Install new releases in the background (takes effect on the next
+    /// start). `DCODE_AI_AUTO_UPDATE=0` also turns it off.
+    #[serde(default = "default_true")]
+    pub auto_update: bool,
     /// Lines per scroll event (default 3).
     #[serde(default = "default_scroll_speed")]
     pub scroll_speed: u16,
@@ -427,6 +431,7 @@ impl Default for UiConfig {
             hide_tips: false,
             vim_mode: false,
             quiet_startup: default_quiet_startup(),
+            auto_update: true,
             scroll_speed: default_scroll_speed(),
             mouse_capture: default_mouse_capture(),
             code_line_numbers: false,
@@ -460,6 +465,9 @@ impl UiConfig {
         }
         if let Some(quiet_startup) = partial.quiet_startup {
             self.quiet_startup = quiet_startup;
+        }
+        if let Some(v) = partial.auto_update {
+            self.auto_update = v;
         }
         if let Some(scroll_speed) = partial.scroll_speed {
             self.scroll_speed = scroll_speed;
@@ -2013,6 +2021,7 @@ struct PartialUiConfig {
     hide_tips: Option<bool>,
     vim_mode: Option<bool>,
     quiet_startup: Option<bool>,
+    auto_update: Option<bool>,
     scroll_speed: Option<u16>,
     mouse_capture: Option<bool>,
     code_line_numbers: Option<bool>,

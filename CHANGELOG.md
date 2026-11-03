@@ -1,5 +1,33 @@
 # Changelog
 
+## 1.0.50 — 2026-11-03
+
+### New
+- **Guest roles on `/invite`**: when someone knocks you pick **Let them in
+  to watch and chat** (they see everything, chat with people and join
+  calls; nothing they send reaches the agent), **Let them in to drive**
+  (they can ask the agent to do things; approvals stay with you), or
+  **No**. Browser guests get the same choice.
+- **Auto mode pauses for drivers**: letting someone drive while you're in
+  auto mode switches you to default mode, so the agent asks you before
+  acting on their requests (Shift+Tab turns it back on).
+- **Alt+F shows what it sends**: `dcode-ai fix` sends only the command, its
+  exit code and the folder (no output, no environment). Secrets in the
+  command (bearer tokens, passwords, `API_KEY=…`, `user:pass@` URLs, …) are
+  masked, and it shows the exact text and asks `Send it? [Y/n]` first
+  (`--yes` skips the question).
+- **Automatic updates**, like Claude Code: a new release is installed in the
+  background and used the next time you start dcode-ai. Turn it off with
+  `[ui] auto_update = false` or `DCODE_AI_AUTO_UPDATE=0`. Homebrew installs
+  and system folders that need sudo get a note instead.
+
+### Fixed
+- `Ctrl+D` in the dashboard focuses the tab you're on instead of jumping to
+  the changes tab.
+- In the files tab, `←`/`→` move between tabs again (`Enter`/`Space` open
+  and close folders).
+- The welcome box shows the `Ctrl+\` dashboard shortcut.
+
 ## 1.0.49 — 2026-11-03
 
 ### Security

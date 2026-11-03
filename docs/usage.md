@@ -70,11 +70,12 @@ go), and drag a rail's inner edge to make it wider or narrower.
 | Key | Action |
 | --- | --- |
 | `Alt+1` … `Alt+6` | Context · changes · agents · files · office · team tab (team: the shared to-dos and the people's chat; files: every file the agent read or edited, live, the current one marked ◉) |
-| `Ctrl+D` | Focus the rail (again to return to the prompt) |
+| `Ctrl+D` | Focus the tab that is showing (again to return to the prompt) |
 | `←` / `→` (rail focused) | Previous / next tab |
 | `j` / `k` (changes) | Select a hunk |
 | `r` `r` (changes) | Revert the selected hunk |
 | `g` (changes) | Refresh |
+| `Enter` / `Space` (files) | Open or close a folder; `Enter` on a file adds `@file` to your message |
 
 Tabs, hunks, transcript items and sub-agents are also clickable.
 
@@ -140,6 +141,7 @@ dcode-ai session import <file>       # add it here; /resume finds it (with its h
 dcode-ai join <id> [--name you]      # another terminal on a running session: watch it live and send messages
 dcode-ai relay serve [--port 8790]   # a relay so people on other networks can join (/invite relay host:port)
 eval "$(dcode-ai hook zsh)"          # in ~/.zshrc: "Alt+F to fix" after a failed command (also bash, fish, powershell)
+                                     #   sends only the command (secrets masked), exit code and folder; shows it and asks first
 dcode-ai --ask "message"             # start a session and send this first
 dcode-ai sessions --tidy             # shrink every session log (streaming pieces, huge old tool results)
 dcode-ai status                   # running sessions
@@ -151,6 +153,7 @@ dcode-ai login anthropic|copilot  # sign in
 dcode-ai models                   # models on the active provider
 dcode-ai doctor                   # diagnose setup
 dcode-ai update [--check]         # install the latest release over this binary
+                                  # (new releases also install in the background; [ui] auto_update = false or DCODE_AI_AUTO_UPDATE=0 turns that off)
 dcode-ai setup                    # starter packs for your role and languages
 dcode-ai policy show|test         # permission rules
 dcode-ai worktrees list|prune|merge <id>
@@ -530,7 +533,13 @@ spaces and `-_.`, 24 characters at most); they are not a login.
 1. The host types `/invite`. It prints one line (and copies it):
    `dcode-ai join 192.168.1.9:8788/Qk3f… --name <your name>`.
 2. The guest runs that line with their name. The host sees
-   **"Priya (192.168.1.20) wants to join — let them in?"** and picks yes.
+   **"Priya (192.168.1.20) wants to join — let them in?"** and picks:
+   - **to watch and chat**: they see everything live, chat with people
+     and join calls; nothing they send reaches the agent;
+   - **to drive**: they can also ask the agent to do things;
+   - **No**.
+   Letting someone drive while you're in auto mode switches you to default
+   mode, so the agent asks you before acting on their requests.
 3. The guest gets the same dcode-ai interface as the host, with the
    conversation so far, and types to send messages. `/office` and
    `/timeline` work (the host's desk says "(host)", theirs "(you)");
@@ -541,7 +550,7 @@ spaces and `-_.`, 24 characters at most); they are not a login.
 - The connection is encrypted and authenticated with the invite's key
   (Noise `NNpsk0`); a wrong or old key can't even knock. Each `/invite`
   makes a new key; `/invite stop` ends it and disconnects guests.
-- Guests send messages only; approvals and stopping a turn stay with you
+- Drivers send messages only; approvals and stopping a turn stay with you
   unless you use `/invite --let-approve`.
 - `/invite web` also prints a browser link on the same port, for people
   without dcode-ai: they type a name, press "Ask to join", and after your
