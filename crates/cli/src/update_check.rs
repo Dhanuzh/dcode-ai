@@ -103,6 +103,33 @@ pub fn init_and_pending_upgrade() -> Option<String> {
     pending
 }
 
+/// The version that ran last time (to say "updated" once).
+fn last_run_file() -> Option<PathBuf> {
+    dcode_ai_common::config::dcode_ai_home_dir().map(|d| d.join("last-version"))
+}
+
+/// The version that ran before this one, when it was older: this run is
+/// the first after an update (said once — this run is recorded). `None` on
+/// a first install and on every later run.
+pub fn updated_from() -> Option<String> {
+    let file = last_run_file()?;
+    let before = std::fs::read_to_string(&file)
+        .ok()
+        .map(|s| s.trim().to_string());
+    if before.as_deref() != Some(CURRENT) {
+        if let Some(parent) = file.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(&file, CURRENT);
+    }
+    before.filter(|b| is_newer(CURRENT, b))
+}
+
+/// Whether `v` is newer than `than` (`1.2.3`, a leading `v` allowed).
+pub fn version_newer(v: &str, than: &str) -> bool {
+    is_newer(v, than)
+}
+
 /// The newest release the cache knows of, when it is newer than this build
 /// and the cache was checked recently (no network).
 pub fn cached_newer() -> Option<String> {

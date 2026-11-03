@@ -800,9 +800,84 @@ pub(crate) fn release_notes(changelog: &str, versions: usize) -> Vec<String> {
     out
 }
 
+/// "What's new" after an update from `old`: the headline of each item in
+/// the versions newer than `old` (first line of each bullet, no Markdown
+/// bold), at most `max` of them.
+pub(crate) fn whats_new_since(changelog: &str, old: &str, max: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut take = false;
+    let mut current: Option<String> = None;
+    let flush = |cur: &mut Option<String>, out: &mut Vec<String>| {
+        if let Some(item) = cur.take() {
+            out.push(item);
+        }
+    };
+    for line in changelog.lines() {
+        if let Some(head) = line.strip_prefix("## ") {
+            flush(&mut current, &mut out);
+            let version = head.split_whitespace().next().unwrap_or("");
+            take = crate::update_check::version_newer(version, old);
+            continue;
+        }
+        if !take {
+            continue;
+        }
+        if let Some(item) = line.strip_prefix("- ") {
+            flush(&mut current, &mut out);
+            current = Some(item.trim().to_string());
+        } else if line.starts_with("  ") && current.is_some() {
+            if let Some(c) = current.as_mut() {
+                c.push(' ');
+                c.push_str(line.trim());
+            }
+        } else {
+            flush(&mut current, &mut out);
+        }
+    }
+    flush(&mut current, &mut out);
+    out.into_iter()
+        .map(|item| {
+            let plain = item.replace("**", "");
+            // The headline: up to the first sentence end or colon.
+            let bytes = plain.as_bytes();
+            let end = plain
+                .char_indices()
+                .find(|&(i, c)| {
+                    matches!(c, '.' | ':')
+                        && i > 12
+                        && bytes.get(i + 1).is_none_or(|b| b.is_ascii_whitespace())
+                })
+                .map_or(plain.len(), |(i, _)| i);
+            let cut = &plain[..end];
+            let cut = cut.trim();
+            if cut.chars().count() > 90 {
+                format!("{}…", cut.chars().take(89).collect::<String>())
+            } else {
+                cut.to_string()
+            }
+        })
+        .take(max)
+        .collect()
+}
+
 #[cfg(test)]
 mod release_notes_tests {
     use super::*;
+
+    #[test]
+    fn whats_new_lists_the_versions_since_the_old_one() {
+        let log = "# Changelog\n\n## 1.0.3 — x\n### New\n- **Calls**: talk to people.\n  More text.\n- Faster resume\n\n## 1.0.2\n- **Roles**: watch or drive\n\n## 1.0.1\n- old\n";
+        assert_eq!(
+            whats_new_since(log, "1.0.1", 10),
+            vec![
+                "Calls: talk to people",
+                "Faster resume",
+                "Roles: watch or drive"
+            ]
+        );
+        assert!(whats_new_since(log, "1.0.3", 10).is_empty());
+        assert_eq!(whats_new_since(log, "1.0.1", 1).len(), 1);
+    }
 
     #[test]
     fn newest_versions_only() {

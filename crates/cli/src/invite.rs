@@ -221,16 +221,25 @@ impl Cipher {
     }
 }
 
-async fn handshake_guest(stream: &mut TcpStream, key: &str) -> std::io::Result<Cipher> {
+/// One side of a guest connection (TCP, or a peer-to-peer QUIC stream).
+pub(crate) type LinkRead = Box<dyn AsyncRead + Unpin + Send>;
+pub(crate) type LinkWrite = Box<dyn AsyncWrite + Unpin + Send>;
+
+async fn handshake_guest(
+    read: &mut LinkRead,
+    write: &mut LinkWrite,
+    key: &str,
+) -> std::io::Result<Cipher> {
     let mut noise = snow::Builder::new(PATTERN.parse().map_err(io_err)?)
         .psk(0, &psk(key))
         .build_initiator()
         .map_err(io_err)?;
-    stream.write_all(MAGIC).await?;
+    write.write_all(MAGIC).await?;
     let mut buf = vec![0u8; 1024];
     let n = noise.write_message(&[], &mut buf).map_err(io_err)?;
-    write_frame(stream, &buf[..n]).await?;
-    let reply = read_frame(stream).await?;
+    write_frame(write, &buf[..n]).await?;
+    write.flush().await?;
+    let reply = read_frame(read).await?;
     noise.read_message(&reply, &mut buf).map_err(io_err)?;
     Ok(Cipher(Arc::new(Mutex::new(
         noise.into_transport_mode().map_err(io_err)?,
@@ -238,16 +247,21 @@ async fn handshake_guest(stream: &mut TcpStream, key: &str) -> std::io::Result<C
 }
 
 /// After [`MAGIC`] was read.
-async fn handshake_host(stream: &mut TcpStream, key: &str) -> std::io::Result<Cipher> {
+async fn handshake_host(
+    read: &mut LinkRead,
+    write: &mut LinkWrite,
+    key: &str,
+) -> std::io::Result<Cipher> {
     let mut noise = snow::Builder::new(PATTERN.parse().map_err(io_err)?)
         .psk(0, &psk(key))
         .build_responder()
         .map_err(io_err)?;
     let mut buf = vec![0u8; 1024];
-    let first = read_frame(stream).await?;
+    let first = read_frame(read).await?;
     noise.read_message(&first, &mut buf).map_err(io_err)?;
     let n = noise.write_message(&[], &mut buf).map_err(io_err)?;
-    write_frame(stream, &buf[..n]).await?;
+    write_frame(write, &buf[..n]).await?;
+    write.flush().await?;
     Ok(Cipher(Arc::new(Mutex::new(
         noise.into_transport_mode().map_err(io_err)?,
     ))))
@@ -395,6 +409,8 @@ pub struct InviteHandle {
     pub tailscale: Option<String>,
     pub web_url: Option<String>,
     pub let_approve: bool,
+    /// The line has a peer-to-peer id: joins work from any network.
+    pub p2p: bool,
     host: Arc<Host>,
     stop: tokio::sync::watch::Sender<bool>,
 }
@@ -515,6 +531,68 @@ pub async fn host(opts: HostOptions) -> std::io::Result<InviteHandle> {
         handle.tailscale = Some(ts);
     }
     Ok(handle)
+}
+
+/// [`host`], plus a direct peer-to-peer id in the line, so people on other
+/// networks join without a VPN or a relay of yours.
+pub async fn host_with_p2p(opts: HostOptions) -> std::io::Result<InviteHandle> {
+    let mut handle = host(opts).await?;
+    attach_p2p(&mut handle).await;
+    Ok(handle)
+}
+
+async fn attach_p2p(handle: &mut InviteHandle) {
+    match crate::p2p::listen().await {
+        Ok(ep) => {
+            // A moment to reach the network, so the first knock finds us.
+            let _ = tokio::time::timeout(Duration::from_secs(4), ep.online()).await;
+            handle.invite.host =
+                format!("{},{}", handle.invite.host, crate::p2p::encode_id(&ep.id()));
+            handle.p2p = true;
+            tokio::spawn(p2p_accept(handle.host.clone(), ep, handle.stop.subscribe()));
+        }
+        Err(e) => tracing::warn!("peer-to-peer invite unavailable: {e}"),
+    }
+}
+
+/// Takes guests arriving over the peer-to-peer endpoint until the invite
+/// stops.
+async fn p2p_accept(
+    shared: Arc<Host>,
+    ep: iroh::Endpoint,
+    stop_rx: tokio::sync::watch::Receiver<bool>,
+) {
+    let mut stop = stop_rx.clone();
+    loop {
+        let next = tokio::select! {
+            _ = stop.changed() => break,
+            n = crate::p2p::accept(&ep) => n,
+        };
+        let Some(next) = next else { break };
+        let shared = shared.clone();
+        let stop = stop_rx.clone();
+        tokio::spawn(async move {
+            let Ok((mut read, write, conn)) = next else {
+                return;
+            };
+            let mut first = [0u8; 5];
+            let magic =
+                tokio::time::timeout(Duration::from_secs(10), read.read_exact(&mut first)).await;
+            if !matches!(magic, Ok(Ok(_))) || &first != MAGIC {
+                return;
+            }
+            if shared.guests.fetch_add(1, Ordering::SeqCst) >= MAX_GUESTS {
+                shared.guests.fetch_sub(1, Ordering::SeqCst);
+                return;
+            }
+            let _ = shared
+                .guest(read, write, "a direct link".into(), stop)
+                .await;
+            shared.guests.fetch_sub(1, Ordering::SeqCst);
+            drop(conn);
+        });
+    }
+    ep.close().await;
 }
 
 /// The private local invite: 127.0.0.1 on a free port, nobody asked (only
@@ -694,6 +772,7 @@ async fn host_on(
         tailscale: None,
         web_url,
         let_approve: opts.let_approve,
+        p2p: false,
         host: shared,
         stop: stop_tx,
     })
@@ -950,7 +1029,10 @@ impl Host {
         }
         if &first == MAGIC {
             stream.read_exact(&mut first).await?;
-            return self.guest(stream, from, stop).await;
+            let (read, write) = stream.into_split();
+            return self
+                .guest(Box::new(read), Box::new(write), from, stop)
+                .await;
         }
         match (&self.web_token, &self.web_chat) {
             (Some(token), Some(chat)) => {
@@ -969,26 +1051,26 @@ impl Host {
         }
     }
 
-    async fn guest(
+    /// A guest that sent [`MAGIC`]: handshake, knock, then the session.
+    pub(crate) async fn guest(
         self: &Arc<Self>,
-        mut stream: TcpStream,
+        mut read: LinkRead,
+        mut write: LinkWrite,
         from: String,
         mut stop: tokio::sync::watch::Receiver<bool>,
     ) -> std::io::Result<()> {
         let cipher = tokio::time::timeout(
             Duration::from_secs(10),
-            handshake_host(&mut stream, &self.key),
+            handshake_host(&mut read, &mut write, &self.key),
         )
         .await
         .map_err(io_err)??;
-        let hello = tokio::time::timeout(Duration::from_secs(10), cipher.recv(&mut stream))
+        let hello = tokio::time::timeout(Duration::from_secs(10), cipher.recv(&mut read))
             .await
             .map_err(io_err)??;
         let asked_name = dcode_ai_runtime::supervisor::clean_person_name(
             hello.get("name").and_then(Value::as_str).unwrap_or(""),
         );
-        let (read, mut write) = stream.into_split();
-        let mut read = read;
 
         // Coming back after a drop: no knock, same person.
         let rejoining = hello.get("rejoin").and_then(Value::as_str).map(|t| {
@@ -1389,9 +1471,11 @@ pub struct Guest {
 /// One live connection.
 struct Link {
     cipher: Cipher,
-    read: tokio::net::tcp::OwnedReadHalf,
-    write: tokio::net::tcp::OwnedWriteHalf,
+    read: LinkRead,
+    write: LinkWrite,
     admitted: Value,
+    /// A peer-to-peer link's connection, kept open as long as the link.
+    _p2p: Option<iroh::endpoint::Connection>,
 }
 
 enum LinkError {
@@ -1417,15 +1501,36 @@ async fn open_link(
     // Try each of the host's addresses (LAN, Tailscale…), first answer wins.
     let hosts = invite.hosts();
     let per_host = if hosts.len() > 1 { 5 } else { 10 };
-    let mut found = None;
+    let mut found: Option<(
+        LinkRead,
+        LinkWrite,
+        String,
+        Option<iroh::endpoint::Connection>,
+    )> = None;
     let mut relay_err = None;
-    for h in &hosts {
+    // Direct addresses first (fast when they work), peer-to-peer last.
+    let mut ordered: Vec<&String> = hosts.iter().filter(|h| !crate::p2p::is_id(h)).collect();
+    ordered.extend(hosts.iter().filter(|h| crate::p2p::is_id(h)));
+    for h in ordered {
+        if crate::p2p::is_id(h) {
+            match crate::p2p::dial(h).await {
+                Ok((read, write, conn)) => {
+                    found = Some((read, write, "a direct peer-to-peer link".into(), Some(conn)));
+                    break;
+                }
+                Err(e) => {
+                    tracing::debug!("p2p dial failed: {e}");
+                    continue;
+                }
+            }
+        }
         // `ROOM@relayhost`: through a relay.
         if let Some((room, relay_host)) = h.split_once('@') {
             let addr = format!("{relay_host}:{}", invite.port);
             match crate::relay::guest_connect(&addr, room).await {
                 Ok(s) => {
-                    found = Some((s, addr));
+                    let (r, w) = s.into_split();
+                    found = Some((Box::new(r), Box::new(w), addr, None));
                     break;
                 }
                 Err(e) => {
@@ -1442,7 +1547,8 @@ async fn open_link(
         if let Ok(Ok(s)) =
             tokio::time::timeout(Duration::from_secs(per_host), TcpStream::connect(&addr)).await
         {
-            found = Some((s, addr));
+            let (r, w) = s.into_split();
+            found = Some((Box::new(r), Box::new(w), addr, None));
             break;
         }
     }
@@ -1451,28 +1557,38 @@ async fn open_link(
     {
         return Err(LinkError::Refused(e));
     }
-    let Some((mut stream, addr)) = found else {
+    let Some((mut read, mut write, addr, p2p)) = found else {
+        let direct: Vec<String> = hosts
+            .iter()
+            .filter(|h| !crate::p2p::is_id(h))
+            .cloned()
+            .collect();
+        let p2p_note = if direct.len() < hosts.len() {
+            " The direct peer-to-peer link didn't connect either (the host may have closed the invite)."
+        } else {
+            ""
+        };
         return Err(LinkError::Unreachable(format!(
-            "no answer from {} on port {} — {}",
-            hosts.join(" or "),
+            "no answer from {} on port {} — {}{p2p_note}",
+            direct.join(" or "),
             invite.port,
-            unreachable_hint(&hosts)
+            unreachable_hint(&direct)
         )));
     };
     let cipher = tokio::time::timeout(
         Duration::from_secs(10),
-        handshake_guest(&mut stream, &invite.key),
+        handshake_guest(&mut read, &mut write, &invite.key),
     )
     .await
     .map_err(|_| LinkError::Unreachable(format!("{addr} didn't answer the invite")))?
     .map_err(|_| LinkError::Refused("the invite was refused (old or mistyped key?)".into()))?;
     cipher
-        .send(&mut stream, &hello)
+        .send(&mut write, &hello)
         .await
         .map_err(|e| LinkError::Unreachable(e.to_string()))?;
     on_wait();
     let answer = cipher
-        .recv(&mut stream)
+        .recv(&mut read)
         .await
         .map_err(|_| LinkError::Unreachable("the host closed the invite".into()))?;
     if answer.get("t").and_then(Value::as_str) != Some("admitted") {
@@ -1484,21 +1600,17 @@ async fn open_link(
                 .unwrap_or("the host said no")
         )));
     }
-    let (read, write) = stream.into_split();
     Ok(Link {
         cipher,
         read,
         write,
         admitted: answer,
+        _p2p: p2p,
     })
 }
 
 /// Reads one link until it ends; whether the host ended it for good.
-async fn read_link(
-    cipher: Cipher,
-    mut read: tokio::net::tcp::OwnedReadHalf,
-    tx: mpsc::Sender<GuestUpdate>,
-) -> bool {
+async fn read_link(cipher: Cipher, mut read: LinkRead, tx: mpsc::Sender<GuestUpdate>) -> bool {
     while let Ok(m) = cipher.recv(&mut read).await {
         let fin = m.get("final").and_then(Value::as_bool).unwrap_or(false);
         let update = match m.get("t").and_then(Value::as_str) {
@@ -1633,10 +1745,12 @@ async fn keep_up(
     // Whether we're in the call (to rejoin it after a reconnect).
     let mut in_call = false;
     loop {
+        // `_p2p` held to the end of this round: dropping it closes the link.
         let Link {
             cipher,
             read,
             mut write,
+            _p2p,
             ..
         } = link;
         let mut reader = tokio::spawn(read_link(cipher.clone(), read, tx.clone()));
@@ -1748,6 +1862,11 @@ mod tests {
         assert_eq!(new_key().len(), 24);
     }
 
+    fn halves(s: TcpStream) -> (LinkRead, LinkWrite) {
+        let (r, w) = s.into_split();
+        (Box::new(r), Box::new(w))
+    }
+
     #[tokio::test]
     async fn messages_round_trip_across_frames() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1756,19 +1875,20 @@ mod tests {
             let (mut s, _) = listener.accept().await.unwrap();
             let mut m = [0u8; 5];
             s.read_exact(&mut m).await.unwrap();
-            let c = handshake_host(&mut s, "k3y-for-tests-only-123")
+            let (mut r, mut w) = halves(s);
+            let c = handshake_host(&mut r, &mut w, "k3y-for-tests-only-123")
                 .await
                 .unwrap();
-            let got = c.recv(&mut s).await.unwrap();
-            c.send(&mut s, &got).await.unwrap();
+            let got = c.recv(&mut r).await.unwrap();
+            c.send(&mut w, &got).await.unwrap();
         });
-        let mut s = TcpStream::connect(addr).await.unwrap();
-        let c = handshake_guest(&mut s, "k3y-for-tests-only-123")
+        let (mut r, mut w) = halves(TcpStream::connect(addr).await.unwrap());
+        let c = handshake_guest(&mut r, &mut w, "k3y-for-tests-only-123")
             .await
             .unwrap();
         let big = json!({"t": "say", "text": "x".repeat(150_000)});
-        c.send(&mut s, &big).await.unwrap();
-        assert_eq!(c.recv(&mut s).await.unwrap(), big);
+        c.send(&mut w, &big).await.unwrap();
+        assert_eq!(c.recv(&mut r).await.unwrap(), big);
         server.await.unwrap();
     }
 
@@ -1780,12 +1900,13 @@ mod tests {
             let (mut s, _) = listener.accept().await.unwrap();
             let mut m = [0u8; 5];
             s.read_exact(&mut m).await.unwrap();
-            handshake_host(&mut s, "the-right-key-000000")
+            let (mut r, mut w) = halves(s);
+            handshake_host(&mut r, &mut w, "the-right-key-000000")
                 .await
                 .is_err()
         });
-        let mut s = TcpStream::connect(addr).await.unwrap();
-        let _ = handshake_guest(&mut s, "a-wrong-key-00000000").await;
+        let (mut r, mut w) = halves(TcpStream::connect(addr).await.unwrap());
+        let _ = handshake_guest(&mut r, &mut w, "a-wrong-key-00000000").await;
         assert!(server.await.unwrap(), "host must refuse the wrong key");
     }
 
@@ -1975,6 +2096,75 @@ mod tests {
             ..invite.clone()
         };
         assert!(Guest::connect(&wrong, "Eve", || {}).await.is_err());
+        drop(handle);
+    }
+
+    #[tokio::test]
+    async fn a_guest_joins_over_a_direct_peer_to_peer_link() {
+        let _ = crate::p2p::TEST_LOOKUP.set(iroh::address_lookup::MemoryLookup::new());
+        let (socket, mut commands, _events, dir) = fake_session().await;
+        let (knock_tx, mut knock_rx) = mpsc::channel::<Knock>(4);
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let mut handle = host_on(
+            Some(listener),
+            HostOptions {
+                port,
+                web: false,
+                let_approve: false,
+                socket,
+                log_path: dir.path().join("x.events.jsonl"),
+                title: "demo".into(),
+                knocks: knock_tx,
+                presence: None,
+                host_name: "Dhanush".into(),
+                project: "d-note".into(),
+                session_id: "s-1".into(),
+                model: "m".into(),
+                auto_admit: false,
+                hub: None,
+            },
+            port,
+            None,
+        )
+        .await
+        .unwrap();
+        attach_p2p(&mut handle).await;
+        assert!(handle.p2p);
+        // Only the peer-to-peer id: no address on this network works.
+        let id = handle
+            .invite
+            .hosts()
+            .into_iter()
+            .find(|h| crate::p2p::is_id(h))
+            .unwrap();
+        let invite = Invite {
+            host: id,
+            ..handle.invite.clone()
+        };
+        assert!(Invite::parse(&invite.as_string()).is_some());
+        tokio::spawn(async move {
+            while let Some(k) = knock_rx.recv().await {
+                assert_eq!(k.from, "a direct link");
+                let _ = k.reply.send(Admit::Drive);
+            }
+        });
+        let guest = Guest::connect(&invite, "Arun", || {}).await.unwrap();
+        assert_eq!(guest.title, "demo");
+        assert!(guest.sender().say("hello from far away"));
+        let said = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                match commands.recv().await {
+                    Some(AgentCommand::Say { content, .. }) => break content,
+                    Some(_) => continue,
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(said, "hello from far away");
+        drop(guest);
         drop(handle);
     }
 

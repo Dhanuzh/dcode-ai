@@ -508,6 +508,7 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 | `/watch` | A live, read-only web page of this session (link copied). This machine only; `/watch lan [port]` shares it on your network (a fixed port such as `/watch lan 8787` lets you allow it in the firewall once; on WSL it prints the commands); `/watch stop` ends it. Each link has its own token, nothing goes through an outside service |
 | `/invite` | Let someone on another computer join with one line: prints (and copies) `dcode-ai join <ip>:8788/<key> --name <their name>`. You're asked before each person gets in. `/invite web` also gives a browser link (no install; plain HTTP), `/invite <port>` another port, `/invite --let-approve` lets guests approve and stop too, `/invite stop` ends it |
 | `/call` | A voice call with the people on this session (guests on `/invite` and `dcode-ai join` terminals type `/call` to join). In a call: `/call ptt` (hold Ctrl+Space to talk), `/call volume <name> <0-200>`, `/call echo on\|off`. `/mute` toggles your microphone, `/hangup` leaves. Never recorded or logged; headphones avoid echo. Needs PulseAudio/PipeWire on Linux (WSLg on Windows 11) |
+| `/invite lan` | An invite for this network (and Tailscale) only, without the peer-to-peer link |
 | `/invite relay <host:port>` | Invite through a relay you run (`dcode-ai relay serve` on a machine both sides can reach): people join from any network, no VPN. The relay only passes encrypted bytes |
 | `/chat` | The chat window: the dashboard's team tab, with a box to type in (Enter sends, Esc back). `/chat <text>` sends a line directly |
 | `/chat <text>` | Talk to the people on this session — not sent to the agent. `/chat` alone shows the recent chat; it's also in the dashboard's `team` tab (`Alt+6`) |
@@ -558,7 +559,15 @@ spaces and `-_.`, 24 characters at most); they are not a login.
   could read that page.
 - WSL: allow the port once with the firewall commands `/invite` prints
   (the default port 8788 stays the same, so it's once).
-- Outside your network: run `dcode-ai setup tailscale` once on both
+- **Any network, nothing to set up**: the line also has a direct
+  peer-to-peer id (`p2p-…`). `join` tries your network's addresses first,
+  then dials that id: a direct, hole-punched QUIC link, or through iroh's
+  public relays when the two networks can't be punched through. The link
+  is authenticated with the host's key and the usual invite handshake runs
+  inside it, so relays only ever pass encrypted bytes and never see the
+  invite key. Each `/invite` gets a fresh id. `/invite lan` (or
+  `DCODE_AI_P2P=0`) leaves it out.
+- With Tailscale: run `dcode-ai setup tailscale` once on both
   computers (it asks before installing; you sign in through Tailscale).
   `/invite` then adds this machine's Tailscale address to the line, and
   `join` tries each address. Don't open the port on your router.
@@ -580,9 +589,9 @@ spaces and `-_.`, 24 characters at most); they are not a login.
 
 ## Guards against runaway turns
 
-- A turn pauses once it has processed `[session] turn_token_alarm` tokens
-  (default 5,000,000; 0 = off), or when the same tool call repeats 4 times
-  in a row. Send "continue" to go on.
+- A turn pauses only when the same tool call repeats 4 times in a row (a
+  loop). Send "continue" to go on. Long turns are never paused for their
+  size.
 - A tool output over 16,000 characters is shortened in the conversation
   (head and tail); the whole output is saved under `.dcode-ai/tool-output/`
   (the last 50) and the agent reads the part it needs.

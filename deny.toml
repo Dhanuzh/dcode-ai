@@ -5,6 +5,9 @@
 # RustSec advisory DB: fail the build on known-vulnerable or yanked crates.
 yanked = "deny"
 ignore = [
+    # paste is unmaintained (a compile-time macro, no vulnerability); pulled by
+    # netlink-packet-core through iroh's network watcher (p2p invites).
+    "RUSTSEC-2024-0436",
     # ttf-parser is unmaintained (no vulnerability); pulled by lopdf through
     # pdf-extract, which read_file uses for PDF text. Extraction runs on a
     # blocking thread with panics caught; replace when lopdf drops it.
@@ -46,6 +49,9 @@ allow = [
     # Data-only license used by webpki-root-certs / webpki-roots (Mozilla CA
     # bundle); permissive, MIT-compatible.
     "CDLA-Permissive-2.0",
+    # Public-domain dedication; ws_stream_wasm, async_io_stream and pharos
+    # (iroh-relay's browser transport, not built for our targets).
+    "Unlicense",
 ]
 confidence-threshold = 0.8
 

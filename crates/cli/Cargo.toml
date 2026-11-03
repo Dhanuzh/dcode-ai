@@ -50,6 +50,8 @@ urlencoding = "2"
 url = "2"
 notify-rust = { version = "4", optional = true }
 snow = "0.9"
+# Direct peer-to-peer invites: hole-punched QUIC, dialed by public key.
+iroh = { version = "1.4", default-features = false, features = ["tls-ring", "portmapper"] }
 qrcode = { version = "0.14", default-features = false }
 
 # No `scrolling-regions`: with it, `Terminal::insert_before` flushes history

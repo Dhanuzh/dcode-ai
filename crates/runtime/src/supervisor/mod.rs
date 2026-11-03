@@ -406,7 +406,6 @@ impl Supervisor {
             hook_runner.clone(),
         );
         agent.max_cost_usd = config.session.max_cost_usd;
-        agent.turn_token_alarm = config.session.turn_token_alarm;
         agent.fallback_models = config.model.fallback_models.clone();
         let mut system_prompt =
             build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());

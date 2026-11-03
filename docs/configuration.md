@@ -103,7 +103,6 @@ checkpoint_interval    = 1
 auto_compact_on_finish = false
 cleanup_period_days    = 30   # delete sessions untouched this long, at startup (0 = keep)
 max_cost_usd           = 0.0  # stop the agent at this estimated spend (0 = off)
-turn_token_alarm       = 5000000  # pause a turn after this many tokens (0 = off)
 verify_after_edits     = false
 ```
 

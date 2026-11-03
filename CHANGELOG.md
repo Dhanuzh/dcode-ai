@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.51 — 2026-11-03
+
+### New
+- **Join from any network, nothing to set up**: `/invite` now adds a direct
+  peer-to-peer link to the line (via iroh: hole-punched QUIC, dialed by the
+  host's key). People on another Wi-Fi, at home or abroad, join with the
+  same `dcode-ai join …` line: no Tailscale, no relay of your own, no open
+  ports. When two networks can't be punched through, the encrypted packets
+  go through iroh's public relays. The usual invite handshake runs inside
+  it, so nobody on the way can read anything or learn the key.
+  `/invite lan` (or `DCODE_AI_P2P=0`) keeps an invite to your network.
+- **"Updated to vX" with what's new**: the first start after an update says
+  which version you came from and lists what's new since then (once).
+
+### Changed
+- Long turns are no longer paused after 5M tokens
+  (`[session] turn_token_alarm` is gone; old config files still load).
+  The loop guard stays: the same tool call 4 times in a row still pauses.
+
 ## 1.0.50 — 2026-11-03
 
 ### New

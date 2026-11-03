@@ -134,8 +134,6 @@ pub struct AgentLoop {
     context_token_limit: usize,
     /// Stop once the estimated session cost reaches this (USD). 0 = off.
     pub max_cost_usd: f64,
-    /// Pause a turn after it processed this many tokens. 0 = off.
-    pub turn_token_alarm: u64,
     /// Auto mode: the model's safe/ask verdict per command, this session.
     auto_verdicts: std::collections::HashMap<String, bool>,
     /// Models to try, in order, when the model is overloaded or unavailable.
@@ -184,7 +182,6 @@ impl AgentLoop {
             undo: UndoManager::default(),
             context_token_limit: 0,
             max_cost_usd: 0.0,
-            turn_token_alarm: 0,
             auto_verdicts: std::collections::HashMap::new(),
             fallback_models: Vec::new(),
         }
@@ -361,9 +358,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         let mut consecutive_tool_failures: u32 = 0;
         let mut last_failed_tool: String = String::new();
         const MAX_CONSECUTIVE_TOOL_FAILURES: u32 = 3;
-        // Burn alarm: tokens this turn has processed, and the same tool call
-        // repeated back to back.
-        let tokens_at_start = self.tokens_processed();
+        // Loop guard: the same tool call repeated back to back.
         let mut last_call = String::new();
         let mut same_call_repeats = 0u32;
         const MAX_SAME_CALL: u32 = 4;
@@ -1139,9 +1134,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                     same_call_repeats = 1;
                 }
             }
-            if let Some(msg) = burn_alarm(
-                self.tokens_processed().saturating_sub(tokens_at_start),
-                self.turn_token_alarm,
+            if let Some(msg) = loop_alarm(
                 same_call_repeats,
                 MAX_SAME_CALL,
                 tool_calls.last().map(|c| c.name.as_str()),
@@ -1193,12 +1186,6 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             tracing::warn!("undo finalize failed: {error}");
         }
         Ok(final_text)
-    }
-
-    /// Every token the provider processed so far (input, cache reads and
-    /// writes, output).
-    fn tokens_processed(&self) -> u64 {
-        self.cost_tracker.total_input_tokens() + self.cost_tracker.output_tokens
     }
 
     /// The conversation's size right after this turn's mid-turn compaction,
@@ -1634,22 +1621,9 @@ fn cap_tool_output_with(s: &str, hint: &str) -> String {
 /// final content (see the TUI's hunk picker).
 const PARTIAL_WRITE_MARKER: &str = "__dcode_partial_write";
 
-/// Why a turn should pause: it processed more than `alarm` tokens, or it
-/// sent the same tool call `max_same` times in a row.
-fn burn_alarm(
-    turn_tokens: u64,
-    alarm: u64,
-    same_call_repeats: u32,
-    max_same: u32,
-    tool: Option<&str>,
-) -> Option<String> {
-    if alarm > 0 && turn_tokens >= alarm {
-        return Some(format!(
-            "Paused: this turn has used {:.1}M tokens (limit `[session] turn_token_alarm`). \
-             Send \"continue\" to keep going.",
-            turn_tokens as f64 / 1e6
-        ));
-    }
+/// Why a turn should pause: it sent the same tool call `max_same` times in
+/// a row (a loop). Long turns are never paused for their size.
+fn loop_alarm(same_call_repeats: u32, max_same: u32, tool: Option<&str>) -> Option<String> {
     if same_call_repeats >= max_same {
         return Some(format!(
             "Paused: `{}` ran {same_call_repeats} times in a row with the same input, which \
@@ -1824,15 +1798,9 @@ mod tests {
     }
 
     #[test]
-    fn burn_alarm_pauses_runaway_turns() {
-        assert!(burn_alarm(10, 5_000_000, 1, 4, None).is_none());
-        assert!(
-            burn_alarm(6_000_000, 5_000_000, 1, 4, None)
-                .unwrap()
-                .contains("6.0M")
-        );
-        assert!(burn_alarm(6_000_000, 0, 1, 4, None).is_none(), "0 = off");
-        let looped = burn_alarm(0, 0, 4, 4, Some("browser")).unwrap();
+    fn only_loops_pause_a_turn() {
+        assert!(loop_alarm(1, 4, None).is_none());
+        let looped = loop_alarm(4, 4, Some("browser")).unwrap();
         assert!(looped.contains("`browser` ran 4 times"));
     }
 

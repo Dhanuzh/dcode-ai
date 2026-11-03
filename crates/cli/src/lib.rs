@@ -8,6 +8,7 @@ pub mod image_attach;
 pub mod invite;
 pub mod ipc_pending;
 pub mod oauth_login;
+pub mod p2p;
 pub mod people;
 pub mod prompt;
 pub mod relay;

@@ -251,6 +251,7 @@ Click, scroll, drag to select and copy, and resize the side panels. `/timeline` 
 | --- | --- |
 | 💻 The same machine | `dcode-ai join <session-id>`. No knock needed |
 | 🏠 The same Wi-Fi or office | The `/invite` line. On WSL, `/invite` prints the one-time firewall command |
+| 🌍 Anywhere, nothing to set up | `/invite` adds a direct peer-to-peer link (hole-punched, end-to-end encrypted): people on other networks join with the same line. `/invite lan` keeps it to your network |
 | 🌍 Anywhere, with Tailscale | `dcode-ai setup tailscale` once on both computers; `/invite` adds the address |
 | 🌍 Anywhere, no VPN | `dcode-ai relay serve` on a small server you both reach, then `/invite relay <host:port>`. The relay only passes encrypted bytes |
 

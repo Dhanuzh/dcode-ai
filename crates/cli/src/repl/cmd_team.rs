@@ -277,7 +277,11 @@ impl Repl {
                         out.eprintln("usage: /invite relay <host:port> — the machine running `dcode-ai relay serve`");
                         return Ok(true);
                     }
-                    None => dcode_ai_cli::invite::host(opts).await,
+                    // `/invite lan`: this network (and Tailscale) only.
+                    None if words.contains(&"lan") || !dcode_ai_cli::p2p::enabled() => {
+                        dcode_ai_cli::invite::host(opts).await
+                    }
+                    None => dcode_ai_cli::invite::host_with_p2p(opts).await,
                 };
                 let via_relay = relay.is_some();
                 match hosted {
@@ -312,10 +316,14 @@ impl Repl {
                                 out.println(&format!("[invite] {line}"));
                             }
                         }
+                        if inv.p2p {
+                            out.println("[invite] works from any network too: a direct peer-to-peer link (encrypted end to end; /invite lan for this network only)");
+                        }
                         match &inv.tailscale {
                             Some(ip) => out.println(&format!(
-                                "[invite] works over Tailscale too ({ip}) — from any network, when they run Tailscale"
+                                "[invite] works over Tailscale too ({ip})"
                             )),
+                            None if inv.p2p => {}
                             None => out.println(
                                 "[invite] from another network: `dcode-ai setup tailscale` on both computers, or /invite relay <host:port> (a `dcode-ai relay serve` you run)",
                             ),

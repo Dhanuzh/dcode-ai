@@ -1342,6 +1342,22 @@ impl Repl {
         if auto_update {
             spawn_auto_update(tui_state.clone());
         }
+        // First start after an update: what's new, once.
+        if let Some(old) = crate::update_check::updated_from()
+            && let Ok(mut g) = tui_state.lock()
+        {
+            let items =
+                crate::repl_helpers::whats_new_since(crate::repl_helpers::CHANGELOG, &old, 6);
+            let mut text = format!("✓ Updated to v{} (from v{old})", env!("CARGO_PKG_VERSION"));
+            if !items.is_empty() {
+                text.push_str(" · what's new:");
+                for item in items {
+                    text.push_str(&format!("\n  • {item}"));
+                }
+            }
+            text.push_str("\n  /release-notes for everything");
+            g.push_block(crate::tui::state::DisplayBlock::System(text));
+        }
         // sudo in agent / `!` commands asks through the TUI's password popup.
         crate::askpass::start(tui_state.clone());
         // Koda-style fullscreen behavior: mouse capture is always on for

@@ -1530,10 +1530,9 @@ pub struct SessionConfig {
     /// USD (API list prices; 0 = no limit).
     #[serde(default)]
     pub max_cost_usd: f64,
-    /// Pause a turn once it has processed this many tokens (input, cache
-    /// and output across its requests), so a runaway turn can't drain a
-    /// plan. Send "continue" to go on. 0 = no limit.
-    #[serde(default = "default_turn_token_alarm")]
+    /// No longer used (turns aren't paused for their token count since
+    /// 1.0.51); still read so older config files load, never written.
+    #[serde(default, skip_serializing)]
     pub turn_token_alarm: u64,
     /// After a turn that changed files, run the read-only verifier (`/verify`).
     #[serde(default)]
@@ -1563,7 +1562,7 @@ impl Default for SessionConfig {
             last_session_file: PathBuf::from(".dcode-ai/.last_session"),
             auto_compact_on_finish: false,
             max_cost_usd: 0.0,
-            turn_token_alarm: default_turn_token_alarm(),
+            turn_token_alarm: 0,
             verify_after_edits: false,
             cross_review: false,
             second_opinion_model: None,
@@ -1953,10 +1952,6 @@ impl HookConfig {
             self.subagent_stop = subagent_stop;
         }
     }
-}
-
-fn default_turn_token_alarm() -> u64 {
-    5_000_000
 }
 
 impl SessionConfig {
