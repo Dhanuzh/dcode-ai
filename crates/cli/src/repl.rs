@@ -1400,6 +1400,11 @@ impl Repl {
                 },
             ));
         }
+        // The board's Jira space keeps in step in the background.
+        let syncer = self.board_syncer();
+        if let Ok(mut g) = tui_state.lock() {
+            g.board_syncer = syncer;
+        }
         if let Ok(mut g) = tui_state.lock() {
             g.mcp_server_count = self
                 .runtime

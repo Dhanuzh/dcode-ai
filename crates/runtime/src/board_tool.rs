@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 
-use dcode_ai_common::board::{Board, NewCard, Priority, Status};
+use dcode_ai_common::board::{Board, NewCard, Priority, Space, Status};
 use dcode_ai_common::tool::{ToolCall, ToolDefinition, ToolResult};
 use dcode_ai_core::tools::ToolExecutor;
 use serde_json::{Value, json};
@@ -113,7 +113,9 @@ impl ToolExecutor for BoardAddTool {
 plan: each card can name a milestone, the cards it is blocked by (keys of existing cards, or \
 `#n` for the n-th card in this same call), a priority, and `gate: true` for a review gate (the \
 card then waits in Review until a person moves it to Done). Cards start in To do unless `status` \
-says otherwise. Returns the new keys."
+says otherwise. Cards are personal (this computer only) unless `space` is `jira`: then each becomes \
+a ticket in the linked Jira project at the next sync — use that only when the user asks for Jira \
+tickets. Returns the new keys."
                     .into(),
             parameters: json!({
                 "type": "object",
@@ -130,7 +132,8 @@ says otherwise. Returns the new keys."
                                 "milestone": { "type": "string", "description": "Milestone title (made if new)." },
                                 "blocked_by": { "type": "array", "items": { "type": "string" }, "description": "Keys like DCO-2, or #1 for the first card of this call." },
                                 "gate": { "type": "boolean" },
-                                "assignee": { "type": "string" }
+                                "assignee": { "type": "string" },
+                                "space": { "type": "string", "enum": ["personal", "jira"], "description": "personal (default) or jira (makes a ticket in the linked project)" }
                             },
                             "required": ["title"]
                         }
@@ -150,6 +153,15 @@ says otherwise. Returns the new keys."
         }
         let cards = cards.clone();
         let result = Board::update(&self.workspace, |b| {
+            let wants_jira = cards
+                .iter()
+                .any(|c| s(c, "space").and_then(Space::parse) == Some(Space::Jira));
+            if wants_jira && b.jira.is_none() {
+                return Err(
+                    "the board isn't linked to Jira (the user links it with /board jira <PROJECT>)"
+                        .to_string(),
+                );
+            }
             let mut keys: Vec<String> = Vec::new();
             for c in &cards {
                 let Some(title) = s(c, "title") else { continue };
@@ -173,19 +185,24 @@ says otherwise. Returns the new keys."
                         blocked_by,
                         milestone: s(c, "milestone").map(str::to_string),
                         gate: c.get("gate").and_then(Value::as_bool).unwrap_or(false),
+                        space: s(c, "space").and_then(Space::parse).unwrap_or_default(),
                     },
                     "agent",
                 );
                 keys.push(key);
             }
-            keys
+            Ok(keys)
         });
         match result {
-            Ok(keys) if keys.is_empty() => fail(call, "no card had a title"),
-            Ok(keys) => ok(
+            Ok(Ok(keys)) if keys.is_empty() => fail(call, "no card had a title"),
+            Ok(Ok(keys)) => ok(
                 call,
-                format!("Added {}. The user sees them with /board.", keys.join(", ")),
+                format!(
+                    "Added {}. The user sees them with /board (Jira cards get their ticket key at the next sync).",
+                    keys.join(", ")
+                ),
             ),
+            Ok(Err(e)) => fail(call, e),
             Err(e) => fail(call, format!("could not save the board: {e}")),
         }
     }

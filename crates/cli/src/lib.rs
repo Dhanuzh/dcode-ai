@@ -8,6 +8,7 @@ pub mod file_mentions;
 pub mod image_attach;
 pub mod invite;
 pub mod ipc_pending;
+pub mod jira_sync;
 pub mod oauth_login;
 pub mod p2p;
 pub mod people;

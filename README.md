@@ -235,13 +235,14 @@ Click, scroll, drag to select and copy, and resize the side panels. `/timeline` 
 
 ### 📋 A task board with a head agent (`/board`)
 
-A Jira-style kanban for the project: **Backlog · To do · In progress · Review · Done**, with keys (`DCO-12`), priorities, blockers, milestones and review gates. Shared by every session in the project.
+A Jira-style kanban for the project: **Backlog · To do · In progress · Review · Done**, with keys (`DCO-12`), priorities, blockers, milestones and review gates. Shared by every session in the project. Two spaces, kept apart: **Personal** (yours, this computer only) and **Jira** (synced with a Jira project).
 
 | | |
 | --- | --- |
 | **Plan** | `/board plan <goal>`: the agent splits the goal into milestones and cards, with what blocks what and gates where you should check |
 | **Run** | `/board run [n]`: the head agent takes the ready cards (nothing blocking them), starts up to `n` sub-agents in their own worktrees in parallel, moves each card along and picks up what became unblocked. Gated cards wait in Review for you |
-| **Work it yourself** | `←/→/↑/↓` move, `Shift+←/→` (or `<` `>`) move a card, `n` new, `e` rename, `p` priority, `b` blockers, `g` gate, `Enter` details, `r` run |
+| **Jira** | `/board jira SHOP` links the Jira space through Atlassian's MCP server: tickets come in, new Jira cards become tickets, moving a card moves its ticket. Personal cards never leave your computer |
+| **Work it yourself** | `t` Personal/Jira, `←/→/↑/↓` move, `Shift+←/→` (or `<` `>`) move a card, `n` new, `e` rename, `p` priority, `b` blockers, `g` gate, `Enter` details, `o` open in Jira, `s` sync, `r` run |
 
 ### 👥 Work together
 

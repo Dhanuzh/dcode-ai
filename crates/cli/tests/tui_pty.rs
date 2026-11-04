@@ -279,15 +279,21 @@ fn the_board_and_the_scratch_tab() {
     tui.send(b"/board");
     std::thread::sleep(Duration::from_millis(300));
     tui.send(b"\r");
-    tui.wait_for("board · 0 cards");
+    tui.wait_for("0 cards · 0 ready");
+    tui.wait_for("Personal · 0");
     tui.send(b"n");
-    tui.wait_for("New card title");
+    tui.wait_for("New personal card in To do");
     tui.send(b"Login page");
     tui.send(b"\r");
     tui.wait_for("added ");
     tui.wait_for("Login page");
     tui.send(b">");
     tui.wait_for("→ In progress");
+    // Jira is a separate space; not linked yet, it says how.
+    tui.send(b"t");
+    tui.wait_for("Jira isn't linked yet");
+    tui.send(b"n");
+    tui.wait_for("link Jira first");
     tui.send(b"q");
     tui.wait_for("? for shortcuts");
     let board = std::fs::read_to_string(ws.join(".dcode-ai/board/board.json")).unwrap();

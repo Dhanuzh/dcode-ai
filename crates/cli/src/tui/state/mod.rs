@@ -132,6 +132,7 @@ impl TuiSessionState {
             office_open: false,
             board_open: false,
             scratch: Default::default(),
+            board_syncer: None,
             office_selected: 0,
             busy: false,
             current_busy_state: BusyState::Idle,

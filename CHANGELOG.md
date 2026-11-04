@@ -3,6 +3,16 @@
 ## 1.0.53 — 2026-11-04
 
 ### New
+- **Jira on the board, kept apart from your own tasks**: the board has two
+  spaces, **Personal** (this computer only) and **Jira**. `/board jira
+  <PROJECT>` links the Jira space to a project through Atlassian's MCP
+  server: the project's open and recent tickets come in, with their status,
+  priority and assignee; a card you (or the agent) add to the Jira space
+  becomes a ticket; moving a card moves its ticket. It syncs every minute and
+  right away after a change (`s` in the board, `/board sync`). Personal cards
+  never go to Jira. `t` switches spaces, `o` opens a ticket in the browser.
+  Setup: `dcode-ai mcp add atlassian --transport http
+  https://mcp.atlassian.com/v1/mcp`, then `dcode-ai mcp login atlassian`.
 - **A task board with a head agent (`/board`)**: a Jira-style kanban for the
   project (Backlog · To do · In progress · Review · Done) with keys like
   `DCO-12`, priorities, blockers, milestones and review gates.

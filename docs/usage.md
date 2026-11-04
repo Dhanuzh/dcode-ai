@@ -278,7 +278,40 @@ session of the project, sub-agents included, sees the same board.
   board, `q` closes. Click a card to select it. The agent's changes appear
   live.
 - The agent's tools: `board_view`, `board_add`, `board_update` (they write
-  only the board file, so they never ask).
+  only the board file, so they never ask). The agent's cards are personal
+  unless you ask for Jira tickets.
+
+### Personal and Jira
+
+The board has two spaces, kept apart: **Personal** (your own tasks, this
+computer only) and **Jira** (a Jira project's tickets). `t` (or Tab)
+switches; `n` adds to the space you're in; `/board add jira <title>` makes a
+ticket from the prompt.
+
+Linking Jira, once per project:
+
+```bash
+dcode-ai mcp add atlassian --transport http https://mcp.atlassian.com/v1/mcp
+dcode-ai mcp login atlassian          # signs in with your Atlassian account
+```
+
+then in a session `/board jira SHOP` (or `/board jira SHOP acme` to pick
+the site `acme.atlassian.net`). dcode-ai calls the server's tools itself
+(no model, no tokens):
+
+- the project's open tickets and those changed in the last two weeks come
+  in, with status, priority, assignee and description (Jira's status
+  categories decide the column; a status named like "review" or "QA" goes
+  to Review);
+- a new card in the Jira space becomes a ticket (type Task, or the
+  project's first type) and takes its key (`SHOP-42`);
+- moving a card moves its ticket (the workflow transition that lands in
+  that column);
+- removing a Jira card only takes it off the board; the ticket stays.
+
+It syncs every minute and right away after a change; `s` in the board or
+`/board sync` syncs now, and the header shows when it last did (or what
+went wrong). `/board jira` shows the link, `/board jira off` unlinks.
 
 ## Scratch folder
 

@@ -63,6 +63,26 @@ A full-screen kanban: **Backlog · To do · In progress · Review · Done**.
   (and merge its branch through the usual prompt); the head agent stops and
   tells you what waits for you.
 
+### Personal and Jira (added in the same release)
+
+- Cards have a `space`: `personal` (default, never leaves the computer) or
+  `jira`. The board shows one space at a time (`t` switches); counts for
+  both in the header.
+- `board.jira` links the Jira space to a project: the MCP server's name,
+  the site's cloud id and URL, the project key, an optional JQL.
+- Sync (`jira_sync`, in the CLI; no model involved), every minute, at once
+  when kicked, and whenever something is waiting:
+  1. cards with `push: create` → `createJiraIssue` (Task, else the project's
+     first non-subtask type); the card takes the ticket's key;
+  2. cards with `push: status` → `getTransitionsForJiraIssue`, then
+     `transitionJiraIssue` with the transition landing in the card's column;
+  3. `searchJiraIssuesUsingJql` (open, or updated in 14 days) → new cards or
+     updates (status unless a move here is still going out, title,
+     description from ADF, priority, assignee).
+- Tool names are Atlassian's remote MCP server's; matched also when a
+  server prefixes them. Tested with an in-memory fake and with a stdio
+  stand-in server through the real MCP client.
+
 ## 2. Scratch tab
 
 - Every session has a scratch folder,

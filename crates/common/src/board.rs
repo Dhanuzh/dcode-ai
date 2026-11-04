@@ -145,8 +145,87 @@ pub struct Card {
     pub branch: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<Note>,
+    /// Personal (here only) or Jira (synced with the linked project).
+    #[serde(default, skip_serializing_if = "is_personal")]
+    pub space: Space,
+    /// The ticket this card is in an issue tracker (Jira), once linked.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<Remote>,
+    /// Changed here and not sent to the tracker yet (a new card, a move).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push: Option<Push>,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
+}
+
+/// Which list a card is on: your own tasks, or the team's Jira tickets.
+/// They stay apart: a personal card never goes to Jira.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Space {
+    #[default]
+    Personal,
+    Jira,
+}
+
+impl Space {
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "personal" | "mine" | "local" | "me" => Some(Space::Personal),
+            "jira" | "team" | "ticket" | "tickets" => Some(Space::Jira),
+            _ => None,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Space::Personal => "Personal",
+            Space::Jira => "Jira",
+        }
+    }
+}
+
+/// A card's ticket in the tracker.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Remote {
+    /// `PROJ-42`.
+    pub key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// The tracker's own status name ("In QA").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub status: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub issue_type: String,
+}
+
+/// What's waiting to go to the tracker.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Push {
+    /// Make a ticket for it.
+    Create,
+    /// Move the ticket to the card's column.
+    Status,
+}
+
+/// The board's link to a Jira project, through an MCP server (Atlassian's).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JiraLink {
+    /// The MCP server's name in `.mcp.json`.
+    pub server: String,
+    pub cloud_id: String,
+    /// The site (`https://acme.atlassian.net`), for links.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub site: String,
+    pub project: String,
+    /// What to pull (defaults to the project's open and recent issues).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jql: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_sync: Option<DateTime<Utc>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -165,6 +244,13 @@ pub struct Board {
     pub milestones: Vec<Milestone>,
     #[serde(default)]
     pub cards: Vec<Card>,
+    /// Synced with a Jira project, when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jira: Option<JiraLink>,
+}
+
+fn is_personal(s: &Space) -> bool {
+    *s == Space::Personal
 }
 
 fn one() -> u32 {
@@ -182,6 +268,8 @@ pub struct NewCard {
     pub blocked_by: Vec<String>,
     pub milestone: Option<String>,
     pub gate: bool,
+    /// Personal by default; Jira makes a ticket in the linked project.
+    pub space: Space,
 }
 
 /// `<project>/.dcode-ai/board/board.json`. A sub-agent's worktree
@@ -284,6 +372,7 @@ impl Board {
             next: 1,
             milestones: Vec::new(),
             cards: Vec::new(),
+            jira: None,
         }
     }
 
@@ -319,14 +408,69 @@ impl Board {
 
     pub fn card(&self, key: &str) -> Option<&Card> {
         let key = key.trim();
-        self.cards.iter().find(|c| c.key.eq_ignore_ascii_case(key))
+        self.cards.iter().find(|c| c.matches(key))
     }
 
     pub fn card_mut(&mut self, key: &str) -> Option<&mut Card> {
         let key = key.trim();
-        self.cards
-            .iter_mut()
-            .find(|c| c.key.eq_ignore_ascii_case(key))
+        self.cards.iter_mut().find(|c| c.matches(key))
+    }
+
+    /// A card made here got its ticket: it takes the ticket's key
+    /// (blockers pointing at it follow).
+    pub fn rename(&mut self, from: &str, to: &str) {
+        for c in &mut self.cards {
+            if c.key == from {
+                c.key = to.to_string();
+            }
+            for b in &mut c.blocked_by {
+                if b == from {
+                    *b = to.to_string();
+                }
+            }
+        }
+    }
+
+    /// A ticket pulled from the tracker that isn't on the board yet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn insert_remote(
+        &mut self,
+        remote: Remote,
+        title: &str,
+        description: &str,
+        status: Status,
+        priority: Priority,
+        assignee: Option<String>,
+    ) {
+        let now = Utc::now();
+        self.cards.push(Card {
+            key: remote.key.clone(),
+            title: title.chars().take(200).collect(),
+            description: description.chars().take(4000).collect(),
+            status,
+            priority,
+            assignee,
+            blocked_by: Vec::new(),
+            milestone: None,
+            gate: false,
+            branch: None,
+            notes: Vec::new(),
+            space: Space::Jira,
+            remote: Some(remote),
+            push: None,
+            created: now,
+            updated: now,
+        });
+    }
+
+    /// Cards waiting to go to the tracker.
+    pub fn pending(&self) -> usize {
+        self.cards.iter().filter(|c| c.push.is_some()).count()
+    }
+
+    /// The cards of one space.
+    pub fn in_space(&self, space: Space) -> impl Iterator<Item = &Card> {
+        self.cards.iter().filter(move |c| c.space == space)
     }
 
     /// The canonical key for `k` (`dco-3` → `DCO-3`; `3` → `DCO-3`).
@@ -362,6 +506,10 @@ impl Board {
             gate: new.gate,
             branch: None,
             notes: Vec::new(),
+            space: new.space,
+            remote: None,
+            // A Jira card gets its ticket at the next sync.
+            push: (new.space == Space::Jira).then_some(Push::Create),
             created: now,
             updated: now,
         };
@@ -452,6 +600,13 @@ impl Board {
             out.push_str(&format!("## {} ({})\n", status.label(), cards.len()));
             for c in cards {
                 out.push_str(&format!("- {} [{}] {}", c.key, c.priority.id(), c.title));
+                if c.space == Space::Jira {
+                    out.push_str(if c.push == Some(Push::Create) {
+                        " · jira (ticket being made)"
+                    } else {
+                        " · jira"
+                    });
+                }
                 if let Some(a) = &c.assignee {
                     out.push_str(&format!(" · @{a}"));
                 }
@@ -528,7 +683,24 @@ impl Card {
             let text = format!("{} → {}", self.status.label(), status.label());
             self.status = status;
             self.note(by, &text);
+            // A ticket follows the card (a card still to be made goes as is).
+            if self.remote.is_some() && self.push != Some(Push::Create) {
+                self.push = Some(Push::Status);
+            }
         }
+    }
+
+    fn matches(&self, key: &str) -> bool {
+        self.key.eq_ignore_ascii_case(key)
+            || self
+                .remote
+                .as_ref()
+                .is_some_and(|r| r.key.eq_ignore_ascii_case(key))
+    }
+
+    /// The key shown: the ticket's when it has one.
+    pub fn shown_key(&self) -> &str {
+        self.remote.as_ref().map_or(&self.key, |r| &r.key)
     }
 }
 

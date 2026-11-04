@@ -47,18 +47,108 @@ impl Repl {
                         }
                     }
                     "add" if !arg.is_empty() => {
+                        use dcode_ai_common::board::Space;
+                        // `/board add jira <title>` makes a ticket; plain is personal.
+                        let (space, title) = match arg.split_once(' ') {
+                            Some((w, t)) if Space::parse(w).is_some() => {
+                                (Space::parse(w).unwrap_or_default(), t.trim())
+                            }
+                            _ => (Space::Personal, arg),
+                        };
                         let by = dcode_ai_cli::people::my_name(&ws);
+                        let linked = Board::load(&ws).jira.is_some();
+                        if space == Space::Jira && !linked {
+                            out.eprintln("[board] link Jira first: /board jira <PROJECT-KEY>");
+                            return Ok(true);
+                        }
                         match Board::update(&ws, |b| {
                             b.add(
                                 NewCard {
-                                    title: arg.to_string(),
+                                    title: title.to_string(),
+                                    space,
                                     ..Default::default()
                                 },
                                 &by,
                             )
                         }) {
-                            Ok(k) => out.println(&format!("[board] added {k} — /board to see it")),
+                            Ok(k) if space == Space::Jira => {
+                                self.kick_board_sync(&out);
+                                out.println(&format!("[board] added {k} — its Jira ticket is being made"))
+                            }
+                            Ok(k) => out.println(&format!("[board] added {k} (personal) — /board to see it")),
                             Err(e) => out.eprintln(&format!("[board] could not save: {e}")),
+                        }
+                    }
+                    "jira" if arg == "off" || arg == "unlink" => {
+                        let _ = Board::update(&ws, |b| b.jira = None);
+                        if let ReplOutput::Tui(st) = &out
+                            && let Ok(mut g) = st.lock()
+                        {
+                            g.board_syncer = None;
+                        }
+                        out.println("[board] unlinked from Jira — the Jira cards stay on the board, nothing syncs any more");
+                    }
+                    "jira" if !arg.is_empty() => {
+                        let mut words = arg.split_whitespace();
+                        let project = words.next().unwrap_or_default().to_string();
+                        let site = words.next().map(str::to_string);
+                        out.println(&format!("[board] linking Jira project {project}…"));
+                        let manager = self.runtime.mcp_manager().clone();
+                        let servers = self.runtime.config().mcp.servers.clone();
+                        let server = match dcode_ai_cli::jira_sync::find_server(&manager, &servers).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                out.eprintln(&format!("[board] {e}"));
+                                return Ok(true);
+                            }
+                        };
+                        let mcp = dcode_ai_cli::jira_sync::ServerMcp::new(manager.clone(), server.clone());
+                        match dcode_ai_cli::jira_sync::connect(&mcp, &server.name, &project, site.as_deref()).await {
+                            Ok(link) => {
+                                let (p, s) = (link.project.clone(), link.site.clone());
+                                if let Err(e) = Board::update(&ws, |b| b.jira = Some(link)) {
+                                    out.eprintln(&format!("[board] could not save: {e}"));
+                                    return Ok(true);
+                                }
+                                out.println(&format!("[board] linked to Jira {p} ({s}) through `{}` — its tickets are coming in", server.name));
+                                match dcode_ai_cli::jira_sync::sync(&mcp, &ws).await {
+                                    Ok(r) => out.println(&format!("[board] {}", r.summary())),
+                                    Err(e) => out.eprintln(&format!("[board] {e}")),
+                                }
+                                self.start_board_sync(&out);
+                                out.println("[board] /board shows them under Jira (t switches between Personal and Jira)");
+                            }
+                            Err(e) => out.eprintln(&format!("[board] {e}")),
+                        }
+                    }
+                    "jira" => {
+                        let b = Board::load(&ws);
+                        match &b.jira {
+                            Some(l) => out.println(&format!(
+                                "[board] linked to Jira {} ({}) through `{}` · last sync {} · /board sync · /board jira off",
+                                l.project,
+                                l.site,
+                                l.server,
+                                l.last_sync.map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_else(|| "never".into())
+                            )),
+                            None => out.println("[board] /board jira <PROJECT-KEY> [site] links the board's Jira space to a project, through Atlassian's MCP server (dcode-ai mcp add atlassian --transport http https://mcp.atlassian.com/v1/mcp, then dcode-ai mcp login atlassian)"),
+                        }
+                    }
+                    "sync" => {
+                        let b = Board::load(&ws);
+                        let Some(link) = b.jira.clone() else {
+                            out.eprintln("[board] not linked to Jira — /board jira <PROJECT-KEY>");
+                            return Ok(true);
+                        };
+                        let manager = self.runtime.mcp_manager().clone();
+                        let Some(server) = self.runtime.config().mcp.servers.iter().find(|s| s.name == link.server).cloned() else {
+                            out.eprintln(&format!("[board] the MCP server `{}` isn't configured any more", link.server));
+                            return Ok(true);
+                        };
+                        let mcp = dcode_ai_cli::jira_sync::ServerMcp::new(manager, server);
+                        match dcode_ai_cli::jira_sync::sync(&mcp, &ws).await {
+                            Ok(r) => out.println(&format!("[board] synced with Jira {}: {}", link.project, r.summary())),
+                            Err(e) => out.eprintln(&format!("[board] {e}")),
                         }
                     }
                     "plan" if !arg.is_empty() => {
@@ -93,7 +183,7 @@ Extra instructions from the user:
                         self.run_preset(&prompt, extra, out).await?
                     }
                     _ => out.println(
-                        "[board] /board opens the board · /board add <title> · /board list · /board plan <goal> (the agent lays out cards) · /board run [n] (the head agent works the ready cards, n at a time)",
+                        "[board] /board opens the board · /board add [jira] <title> · /board list · /board plan <goal> (the agent lays out cards) · /board run [n] (the head agent works the ready cards, n at a time) · /board jira <PROJECT> links Jira · /board sync",
                     ),
                 }
             }
@@ -639,4 +729,46 @@ fn pr_comments(ws: &std::path::Path, pr: &str) -> Result<String, String> {
         return Err(format!("PR #{number} has no comments yet"));
     }
     Ok(out)
+}
+
+impl Repl {
+    /// A syncer for the board's Jira link, when it's linked and its MCP
+    /// server is configured.
+    pub(super) fn board_syncer(&self) -> Option<std::sync::Arc<dcode_ai_cli::jira_sync::Syncer>> {
+        let ws = self.runtime.workspace_root().to_path_buf();
+        let link = dcode_ai_common::board::Board::load(&ws).jira?;
+        let server = self
+            .runtime
+            .config()
+            .mcp
+            .servers
+            .iter()
+            .find(|s| s.name == link.server && s.enabled)
+            .cloned()?;
+        let mcp =
+            dcode_ai_cli::jira_sync::ServerMcp::new(self.runtime.mcp_manager().clone(), server);
+        Some(dcode_ai_cli::jira_sync::Syncer::spawn(
+            std::sync::Arc::new(mcp),
+            ws,
+        ))
+    }
+
+    /// Starts (or restarts) the background Jira sync for the TUI.
+    pub(super) fn start_board_sync(&self, out: &ReplOutput<'_>) {
+        if let ReplOutput::Tui(st) = out
+            && let Ok(mut g) = st.lock()
+        {
+            g.board_syncer = self.board_syncer();
+        }
+    }
+
+    /// Sync now (a Jira card was made or moved).
+    pub(super) fn kick_board_sync(&self, out: &ReplOutput<'_>) {
+        if let ReplOutput::Tui(st) = out
+            && let Ok(g) = st.lock()
+            && let Some(s) = &g.board_syncer
+        {
+            s.kick();
+        }
+    }
 }

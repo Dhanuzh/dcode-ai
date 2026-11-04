@@ -361,6 +361,8 @@ pub struct TuiSessionState {
     pub office_open: bool,
     /// `/board`: the task board full screen.
     pub board_open: bool,
+    /// Keeps the board's Jira space in step (when the board is linked).
+    pub board_syncer: Option<std::sync::Arc<crate::jira_sync::Syncer>>,
     /// The dashboard's scratch tab.
     pub scratch: crate::tui::scratch::Scratch,
     pub office_selected: usize,
