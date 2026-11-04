@@ -86,7 +86,7 @@ irm https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.ps1 | iex
 
 Prebuilt for **Linux** (x86_64, arm64), **macOS** (Intel, Apple silicon) and **Windows** (x86_64). Every archive ships a `.sha256` checksum, and the installer verifies it.
 
-**Staying current:** new releases install themselves in the background, like Claude Code (`[ui] auto_update = false` or `DCODE_AI_AUTO_UPDATE=0` turns that off). Or run `/update` inside a session, or `dcode-ai update` (`--check` only looks). When `/usr/local/bin` needs sudo, the installer offers `~/.local/bin` instead, so updates never need sudo. If you do pick a system folder, `/update` asks for the password in a masked popup.
+**Staying current:** new releases install themselves in the background, like Claude Code (`[ui] auto_update = false` or `DCODE_AI_AUTO_UPDATE=0` turns that off). The next start says which version you came from and what's new since then. Or run `/update` inside a session, or `dcode-ai update` (`--check` only looks). When `/usr/local/bin` needs sudo, the installer offers `~/.local/bin` instead, so updates never need sudo. If you do pick a system folder, `/update` asks for the password in a masked popup.
 
 <details>
 <summary><b>Pin a version, install without sudo, or build from source</b></summary>
@@ -236,7 +236,7 @@ Click, scroll, drag to select and copy, and resize the side panels. `/timeline` 
 
 | | |
 | --- | --- |
-| **Invite** | `/invite` prints one line to send: `dcode-ai join 192.168.1.9:8788/Qk3f… --name Priya`. You're asked before anyone gets in, and choose whether they **watch and chat** or **drive** (ask the agent). Letting someone drive pauses auto mode. End-to-end encrypted with the invite's key |
+| **Invite** | `/invite` prints one line to send: `dcode-ai join 192.168.1.9,p2p-…:8788/Qk3f… --name Priya`. It works on your Wi-Fi **and from any other network**, with nothing to set up. You're asked before anyone gets in, and choose whether they **watch and chat** or **drive** (ask the agent). Letting someone drive pauses auto mode. End-to-end encrypted with the invite's key |
 | **Same interface** | Guests get the full TUI with the conversation so far, the dashboard and the office. They reconnect on their own after a Wi-Fi drop |
 | **Voice calls** | `/call` opens a menu for mute, push-to-talk (`Ctrl+Space`), echo reduction and volume per person. Steady on weak Wi-Fi |
 | **Chat** | `/chat` opens a chat window for people only; the agent never sees it |
@@ -251,9 +251,9 @@ Click, scroll, drag to select and copy, and resize the side panels. `/timeline` 
 | --- | --- |
 | 💻 The same machine | `dcode-ai join <session-id>`. No knock needed |
 | 🏠 The same Wi-Fi or office | The `/invite` line. On WSL, `/invite` prints the one-time firewall command |
-| 🌍 Anywhere, nothing to set up | `/invite` adds a direct peer-to-peer link (hole-punched, end-to-end encrypted): people on other networks join with the same line. `/invite lan` keeps it to your network |
-| 🌍 Anywhere, with Tailscale | `dcode-ai setup tailscale` once on both computers; `/invite` adds the address |
-| 🌍 Anywhere, no VPN | `dcode-ai relay serve` on a small server you both reach, then `/invite relay <host:port>`. The relay only passes encrypted bytes |
+| 🌍 Anywhere, nothing to set up | The same `/invite` line. It carries a direct peer-to-peer link ([iroh](https://github.com/n0-computer/iroh): hole-punched QUIC, dialed by the host's key), so people on other networks join with no VPN, no server and no open ports. When two networks can't connect directly, iroh's public relays pass the encrypted bytes. `/invite lan` keeps an invite to your network |
+| 🌍 Anywhere, with Tailscale (optional) | `dcode-ai setup tailscale` once on both computers; `/invite` adds the address too |
+| 🌍 Anywhere, your own relay (optional) | `dcode-ai relay serve` on a small server you both reach, then `/invite relay <host:port>`. The relay only passes encrypted bytes |
 
 If a join fails, dcode-ai tells you why: different networks, a blocked port, or a Wi-Fi that keeps devices apart.
 
