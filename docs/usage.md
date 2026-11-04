@@ -69,13 +69,15 @@ go), and drag a rail's inner edge to make it wider or narrower.
 
 | Key | Action |
 | --- | --- |
-| `Alt+1` … `Alt+6` | Context · changes · agents · files · office · team tab (team: the shared to-dos and the people's chat; files: every file the agent read or edited, live, the current one marked ◉) |
+| `Alt+1` … `Alt+7` | Context · changes · agents · files · office · team · scratch tab (team: the shared to-dos and the people's chat; files: the project explorer, what the agent read or edited marked; scratch: the agent's working files) |
 | `Ctrl+D` | Focus the tab that is showing (again to return to the prompt) |
 | `←` / `→` (rail focused) | Previous / next tab |
 | `j` / `k` (changes) | Select a hunk |
 | `r` `r` (changes) | Revert the selected hunk |
 | `g` (changes) | Refresh |
 | `Enter` / `Space` (files) | Open or close a folder; `Enter` on a file adds `@file` to your message |
+| `↑` / `↓`, `Enter`, `o` (scratch) | Pick a file (newest first, previewed below), add `@file`, open it in your viewer |
+| `Ctrl+V` (team chat box) | Send the screenshot on your clipboard (text is pasted into the box) |
 
 Tabs, hunks, transcript items and sub-agents are also clickable.
 
@@ -249,6 +251,44 @@ when the same blocker stops it three turns running). A goal also stops at
 its token budget, after 50 automatic turns, or when you press Esc. The
 footer shows `◎ goal · turn N` while it runs. The goal is saved with the
 session: after `/resume` it comes back paused, and `/goal resume` carries on.
+
+## Task board
+
+`/board` is a kanban for the project, like a small Jira: cards with keys
+(`DCO-12`, from the project's name), priorities, blockers, milestones and
+review gates, in **Backlog · To do · In progress · Review · Done**. It's
+stored in `.dcode-ai/board/board.json` (git-ignored by its own
+`.gitignore`; delete that file to share the board through git), and every
+session of the project, sub-agents included, sees the same board.
+
+- **Plan with the agent:** `/board plan add Stripe checkout` — it lays out
+  milestones and cards (`board_add`), with what blocks what and a review
+  gate on cards you should check, without starting the work.
+- **The head agent:** `/board run [n]` — it takes the ready cards (in To do,
+  every blocker done), starts up to `n` (default 3) sub-agents in their own
+  worktrees in parallel, moves each card to In progress and then Review with
+  a note and its branch, and continues with what became unblocked. It stops
+  and tells you what waits for you: gated cards in Review, branches to
+  merge, blocked cards. A card with a gate can't be moved to Done by the
+  agent.
+- **By hand**, in the board: `←/→/↑/↓` (or `h j k l`) move, `Shift+←/→` or
+  `<` `>` move the selected card, `n` new card in this column, `e` rename,
+  `p` priority, `b` blocked by (keys or numbers), `g` review gate on/off,
+  `x` twice deletes, `Enter` shows the card with its notes, `r` runs the
+  board, `q` closes. Click a card to select it. The agent's changes appear
+  live.
+- The agent's tools: `board_view`, `board_add`, `board_update` (they write
+  only the board file, so they never ask).
+
+## Scratch folder
+
+Each session has a folder for what the agent makes along the way:
+`.dcode-ai/scratch/<session-id>/` (git-ignored). The agent is told to put
+test and command logs, screenshots, API responses and generated data there.
+The dashboard's **scratch** tab (`Alt+7`) lists them newest first, live,
+with the selected one previewed: the end of a log (errors in red), JSON
+pretty-printed, a picture as a colour thumbnail. `Enter` adds `@file`, `o`
+opens it in your viewer. Sub-agents' files show under `@<id>/`.
 
 ## Extra working folders
 
@@ -512,6 +552,8 @@ theft). Sign in once in dcode-ai's browser instead — the logins stay.
 | `/invite relay <host:port>` | Invite through a relay you run (`dcode-ai relay serve` on a machine both sides can reach): people join from any network, no VPN. The relay only passes encrypted bytes |
 | `/chat` | The chat window: the dashboard's team tab, with a box to type in (Enter sends, Esc back). `/chat <text>` sends a line directly |
 | `/chat <text>` | Talk to the people on this session — not sent to the agent. `/chat` alone shows the recent chat; it's also in the dashboard's `team` tab (`Alt+6`) |
+| `/board` | The project's task board, full screen (kanban: Backlog · To do · In progress · Review · Done). `/board add <title>`, `/board list`, `/board plan <goal>` (the agent lays out milestones and cards with blockers and review gates), `/board run [n]` (the head agent works the ready cards with up to `n` sub-agents in parallel, each in its own worktree; gated cards wait in Review for you). Kept in `.dcode-ai/board/board.json`, shared by the project's sessions |
+| `/chat image <file>`, `/chat open [n]` | Send a picture to the people here (shrunk to 1280 px); open the n-th picture of the chat (the last by default) in your viewer |
 | `/todo` | The shared to-do list: `/todo <text>` adds, `/todo done <n>` ticks off, `/todo` lists. Everyone on the session sees it, and the agent gets the open items with each prompt (not shown in the transcript) |
 | `/people` | Who is with this session: you, guests on `/invite` (terminal or browser), `dcode-ai join` terminals, `/watch` viewers |
 | `/kick <name>` | Remove an invited guest; their invite no longer lets them back in |

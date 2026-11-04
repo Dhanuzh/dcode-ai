@@ -243,6 +243,7 @@ pub(super) fn handle_key_event(
             KeyCode::Char('4') => Some(RailTab::Files),
             KeyCode::Char('5') => Some(RailTab::Office),
             KeyCode::Char('6') => Some(RailTab::Team),
+            KeyCode::Char('7') => Some(RailTab::Scratch),
             _ => None,
         };
         if let Some(tab) = tab {
@@ -273,6 +274,11 @@ pub(super) fn handle_key_event(
                 g.team_input.pop();
                 return KeyFlow::Continue;
             }
+            // A screenshot on the clipboard goes to the chat.
+            KeyCode::Char('v') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                g.chat_paste_request = true;
+                return KeyFlow::Continue;
+            }
             KeyCode::Char(c)
                 if !key
                     .modifiers
@@ -283,6 +289,14 @@ pub(super) fn handle_key_event(
             }
             _ => {}
         }
+    }
+    // The scratch tab, focused.
+    if dashboard_free
+        && g.rail_focus
+        && g.rail_tab == crate::tui::state::RailTab::Scratch
+        && handle_scratch_key(key, g)
+    {
+        return KeyFlow::Continue;
     }
     // The files tab's explorer, focused.
     if dashboard_free
@@ -2174,6 +2188,52 @@ fn handle_changes_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
             g.diff_review.confirm_revert = false;
             return false;
         }
+    }
+    true
+}
+
+/// Keys for the scratch tab. False = not ours (←/→ switch tabs).
+fn handle_scratch_key(key: KeyEvent, g: &mut TuiSessionState) -> bool {
+    let plain = key.modifiers == KeyModifiers::NONE || key.modifiers == KeyModifiers::SHIFT;
+    if !plain {
+        return false;
+    }
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => g.scratch.move_selection(1),
+        KeyCode::Up | KeyCode::Char('k') => g.scratch.move_selection(-1),
+        KeyCode::PageDown => g.scratch.move_selection(10),
+        KeyCode::PageUp => g.scratch.move_selection(-10),
+        KeyCode::Enter => {
+            let Some(f) = g.scratch.selected_file() else {
+                return true;
+            };
+            let path = f
+                .path
+                .strip_prefix(&g.workspace_root)
+                .unwrap_or(&f.path)
+                .to_string_lossy()
+                .into_owned();
+            let mut text = g.input_buffer.clone();
+            if !text.is_empty() && !text.ends_with(' ') {
+                text.push(' ');
+            }
+            text.push_str(&format!("@{path} "));
+            g.set_input_text(text);
+            g.rail_focus = false;
+        }
+        KeyCode::Char('o') => {
+            if let Some(f) = g.scratch.selected_file() {
+                let target = f.path.to_string_lossy().into_owned();
+                if let Err(e) = crate::tui::app::open_link_in_system(&target) {
+                    g.show_toast(
+                        format!("couldn't open it: {e}"),
+                        crate::tui::state::ToastKind::Error,
+                    );
+                }
+            }
+        }
+        KeyCode::Esc => g.rail_focus = false,
+        _ => return false,
     }
     true
 }

@@ -193,6 +193,8 @@ pub enum RailTab {
     Office,
     /// The people's chat and the shared to-do list.
     Team,
+    /// What the agent made along the way (`.dcode-ai/scratch/`).
+    Scratch,
 }
 
 /// Something clickable in the dashboard, recorded while drawing.
@@ -351,7 +353,16 @@ pub struct TuiSessionState {
     /// Sends a chat line right away (the host's command loop waits while
     /// the agent works; chat shouldn't).
     pub chat_sink: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+    /// Sends a picture to team chat (host or guest).
+    pub chat_image_sink:
+        Option<std::sync::Arc<dyn Fn(dcode_ai_common::event::ChatImage) + Send + Sync>>,
+    /// Ctrl+V in the team chat box: read the clipboard off the UI thread.
+    pub chat_paste_request: bool,
     pub office_open: bool,
+    /// `/board`: the task board full screen.
+    pub board_open: bool,
+    /// The dashboard's scratch tab.
+    pub scratch: crate::tui::scratch::Scratch,
     pub office_selected: usize,
     pub busy: bool,
     /// Current busy state (for animated indicator).

@@ -18,11 +18,18 @@ pub struct TeamTodo {
     pub done_by: Option<String>,
 }
 
+/// Thumbnail size of a picture in the chat (cells).
+pub const THUMB_COLS: u16 = 28;
+pub const THUMB_ROWS: u16 = 8;
+
 #[derive(Debug, Clone)]
 pub struct ChatLine {
     pub name: String,
     pub text: String,
     pub at: chrono::DateTime<chrono::Local>,
+    /// A picture sent with it, and its thumbnail (drawn once).
+    pub image: Option<dcode_ai_common::event::ChatImage>,
+    pub thumb: Vec<ratatui::text::Line<'static>>,
 }
 
 #[derive(Debug, Default)]
@@ -34,11 +41,20 @@ pub struct Team {
 impl Team {
     pub fn apply(&mut self, ev: &AgentEvent) {
         match ev {
-            AgentEvent::PersonChat { name, text, .. } => {
+            AgentEvent::PersonChat {
+                name, text, image, ..
+            } => {
+                let thumb = image
+                    .as_ref()
+                    .and_then(crate::chat_image::bytes)
+                    .and_then(|b| crate::tui::thumbnail::from_bytes(&b, THUMB_COLS, THUMB_ROWS))
+                    .unwrap_or_default();
                 self.chat.push_back(ChatLine {
                     name: name.clone(),
                     text: text.clone(),
                     at: chrono::Local::now(),
+                    image: image.clone(),
+                    thumb,
                 });
                 while self.chat.len() > CHAT_KEEP {
                     self.chat.pop_front();
@@ -61,6 +77,11 @@ impl Team {
             }
             _ => {}
         }
+    }
+
+    /// The pictures in the chat, oldest first (`/chat open <n>`).
+    pub fn images(&self) -> Vec<&dcode_ai_common::event::ChatImage> {
+        self.chat.iter().filter_map(|c| c.image.as_ref()).collect()
     }
 
     pub fn open(&self) -> impl Iterator<Item = &TeamTodo> {
@@ -107,6 +128,66 @@ impl Team {
             "{TODO_BLOCK_START}\nThe people on this session keep a shared to-do list. Open items:\n{}\nWork on them when they fit what you're asked; when you finish one, say so (\"done: #n\") so someone can tick it off.\n{TODO_BLOCK_END}",
             open.join("\n")
         ))
+    }
+}
+
+/// `/chat open [n]` and `/chat image <path>`, for the host and guests:
+/// `Some(note)` when `rest` was one of them.
+pub fn chat_picture_command(
+    rest: &str,
+    g: &mut crate::tui::state::TuiSessionState,
+    workspace: &std::path::Path,
+) -> Option<String> {
+    let (word, arg) = rest.split_once(' ').unwrap_or((rest, ""));
+    let arg = arg.trim();
+    match word {
+        "open" => {
+            let images = g.team.images();
+            if images.is_empty() {
+                return Some("[chat] no pictures in the chat yet".into());
+            }
+            let n = arg.parse::<usize>().unwrap_or(images.len());
+            let Some(img) = n.checked_sub(1).and_then(|i| images.get(i)) else {
+                return Some(format!(
+                    "[chat] there are {} pictures: /chat open 1…{}",
+                    images.len(),
+                    images.len()
+                ));
+            };
+            let img = (*img).clone();
+            Some(
+                match crate::chat_image::to_temp_file(&img).and_then(|p| {
+                    crate::tui::app::open_link_in_system(&p.to_string_lossy()).map(|_| p)
+                }) {
+                    Ok(p) => format!("[chat] opened {} ({})", img.name, p.display()),
+                    Err(e) => format!("[chat] couldn't open it: {e}"),
+                },
+            )
+        }
+        "image" | "img" | "picture" if !arg.is_empty() => {
+            let path = std::path::Path::new(arg.trim_matches(['"', '\'']));
+            let path = if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                workspace.join(path)
+            };
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let prepared = std::fs::read(&path)
+                .map_err(|e| e.to_string())
+                .and_then(|b| crate::chat_image::prepare(&b, &name));
+            Some(match (prepared, g.chat_image_sink.clone()) {
+                (Ok(img), Some(sink)) => {
+                    sink(img);
+                    String::new()
+                }
+                (Ok(_), None) => "[chat] pictures need the terminal UI".into(),
+                (Err(e), _) => format!("[chat] couldn't send {}: {e}", path.display()),
+            })
+        }
+        _ => None,
     }
 }
 
@@ -158,7 +239,23 @@ mod tests {
             person: "p".into(),
             name: "Priya".into(),
             text: "lunch?".into(),
+            image: None,
         });
         assert_eq!(t.chat.back().unwrap().text, "lunch?");
+        // A picture gets a thumbnail.
+        let mut png = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgb8(image::RgbImage::from_pixel(64, 32, image::Rgb([9, 9, 9])))
+            .write_to(&mut png, image::ImageFormat::Png)
+            .unwrap();
+        let pic = crate::chat_image::prepare(png.get_ref(), "bug.png").unwrap();
+        t.apply(&AgentEvent::PersonChat {
+            person: "p".into(),
+            name: "Priya".into(),
+            text: String::new(),
+            image: Some(pic),
+        });
+        let last = t.chat.back().unwrap();
+        assert!(!last.thumb.is_empty() && last.thumb.len() <= THUMB_ROWS as usize);
+        assert_eq!(t.images().len(), 1);
     }
 }

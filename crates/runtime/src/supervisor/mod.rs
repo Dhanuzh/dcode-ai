@@ -260,6 +260,18 @@ impl Supervisor {
         if !cfg.safe_mode {
             tools.register(Box::new(crate::goal::UpdateGoalTool::new(goal.clone())));
         }
+        // The project's task board (`/board`).
+        tools.register(Box::new(crate::board_tool::BoardViewTool::new(
+            workspace_root.clone(),
+        )));
+        if !cfg.safe_mode {
+            tools.register(Box::new(crate::board_tool::BoardAddTool::new(
+                workspace_root.clone(),
+            )));
+            tools.register(Box::new(crate::board_tool::BoardUpdateTool::new(
+                workspace_root.clone(),
+            )));
+        }
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
         let mode_cell: dcode_ai_core::approval::ModeCell =
             Arc::new(std::sync::RwLock::new(config.permissions.mode));
@@ -411,6 +423,16 @@ impl Supervisor {
             build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
         if let Some(section) = memory_prompt_section(&config, &workspace_root) {
             system_prompt.push_str(&section);
+        }
+        if !cfg.safe_mode {
+            let scratch = dcode_ai_common::scratch::scratch_dir(&workspace_root, &session_id);
+            let made = scratch
+                .parent()
+                .map_or(Ok(()), dcode_ai_common::board::ensure_ignored_dir)
+                .and_then(|_| std::fs::create_dir_all(&scratch));
+            if made.is_ok() {
+                system_prompt.push_str(&dcode_ai_common::scratch::prompt_section(&scratch));
+            }
         }
         agent.set_system_prompt(system_prompt);
 
@@ -2306,17 +2328,33 @@ pub fn spawn_command_consumer_with_store(
                         let _ = tx.send(AgentEvent::PersonLeft { person, name }).await;
                     }
                 }
-                AgentCommand::Chat { person, text, name } => {
+                AgentCommand::Chat {
+                    person,
+                    text,
+                    name,
+                    image,
+                } => {
                     let name = people
                         .get(&person)
                         .cloned()
                         .or_else(|| name.map(|n| clean_person_name(&n)))
                         .unwrap_or_else(|| "someone".into());
                     let text: String = text.trim().chars().take(2000).collect();
+                    let image = image.filter(|i| i.is_acceptable()).map(|mut i| {
+                        i.name = i.name.chars().take(80).collect();
+                        i
+                    });
                     if let Some(ref tx) = event_tx
-                        && !text.is_empty()
+                        && (!text.is_empty() || image.is_some())
                     {
-                        let _ = tx.send(AgentEvent::PersonChat { person, name, text }).await;
+                        let _ = tx
+                            .send(AgentEvent::PersonChat {
+                                person,
+                                name,
+                                text,
+                                image,
+                            })
+                            .await;
                     }
                 }
                 AgentCommand::TodoAdd { person, text, name } => {
@@ -3222,6 +3260,34 @@ mod tests {
                 person: "w".into(),
                 text: "lunch?".into(),
                 name: Some("Ravi".into()),
+                image: None,
+            })
+            .unwrap();
+        // A picture alone is a message; one of the wrong kind is dropped.
+        let pic = dcode_ai_common::event::ChatImage {
+            name: "bug.png".into(),
+            mime: "image/png".into(),
+            w: 4,
+            h: 4,
+            data: "iVBORw0KGgo=".into(),
+        };
+        cmd_tx
+            .send(AgentCommand::Chat {
+                person: "w".into(),
+                text: String::new(),
+                name: Some("Ravi".into()),
+                image: Some(pic.clone()),
+            })
+            .unwrap();
+        cmd_tx
+            .send(AgentCommand::Chat {
+                person: "w".into(),
+                text: String::new(),
+                name: Some("Ravi".into()),
+                image: Some(dcode_ai_common::event::ChatImage {
+                    mime: "text/html".into(),
+                    ..pic.clone()
+                }),
             })
             .unwrap();
         cmd_tx
@@ -3239,6 +3305,8 @@ mod tests {
         };
         assert!(matches!(next(&mut event_rx).await,
             AgentEvent::PersonChat { ref name, ref text, .. } if name == "Ravi" && text == "lunch?"));
+        assert!(matches!(next(&mut event_rx).await,
+            AgentEvent::PersonChat { ref image, .. } if image.as_ref() == Some(&pic)));
         let AgentEvent::TeamTodoAdded { id, text, by } = next(&mut event_rx).await else {
             panic!("expected a to-do");
         };

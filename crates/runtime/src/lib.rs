@@ -2,6 +2,7 @@
 // clippy 1.99+ reports that as `double_must_use`.
 #![allow(clippy::double_must_use)]
 pub mod bash_tool;
+pub mod board_tool;
 pub mod context_manager;
 pub mod goal;
 pub mod interactive_exec;

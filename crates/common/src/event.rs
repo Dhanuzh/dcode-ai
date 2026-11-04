@@ -114,6 +114,33 @@ impl BackgroundJobStatus {
     }
 }
 
+/// A picture in team chat: people only, the agent never sees it. Shrunk
+/// before sending (at most 1280 px and [`MAX_CHAT_IMAGE_BASE64`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChatImage {
+    pub name: String,
+    /// `image/png` or `image/jpeg`.
+    pub mime: String,
+    pub w: u32,
+    pub h: u32,
+    /// The bytes, base64.
+    pub data: String,
+}
+
+/// Largest picture accepted in chat (base64 characters, ~1.5 MB of image).
+pub const MAX_CHAT_IMAGE_BASE64: usize = 2_100_000;
+
+impl ChatImage {
+    /// Whether it's a picture of an accepted kind and size.
+    pub fn is_acceptable(&self) -> bool {
+        matches!(self.mime.as_str(), "image/png" | "image/jpeg")
+            && !self.data.is_empty()
+            && self.data.len() <= MAX_CHAT_IMAGE_BASE64
+            && self.w > 0
+            && self.h > 0
+    }
+}
+
 /// Events emitted by the agent runtime, broadcast over IPC to the CLI.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
@@ -223,6 +250,9 @@ pub enum AgentEvent {
         person: String,
         name: String,
         text: String,
+        /// A picture sent with it (a pasted screenshot).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<ChatImage>,
     },
     /// Someone added to the session's shared to-do list.
     TeamTodoAdded {
@@ -437,6 +467,8 @@ pub enum AgentCommand {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        image: Option<ChatImage>,
     },
     /// Add to / tick off the shared to-do list (`id` is the item's).
     TodoAdd {

@@ -24,6 +24,79 @@ impl Repl {
                 self.run_review(rest.trim(), &out, ReviewKind::Security)
                     .await?;
             }
+            "/board" => {
+                use dcode_ai_common::board::{Board, NewCard};
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let (sub, arg) = rest
+                    .trim()
+                    .split_once(char::is_whitespace)
+                    .map(|(a, b)| (a, b.trim()))
+                    .unwrap_or((rest.trim(), ""));
+                match sub {
+                    "" | "open" => match &out {
+                        ReplOutput::Tui(st) => {
+                            if let Ok(mut g) = st.lock() {
+                                g.board_open = true;
+                            }
+                        }
+                        _ => out.println(&Board::load(&ws).render_text()),
+                    },
+                    "list" | "ls" => {
+                        for l in Board::load(&ws).render_text().lines() {
+                            out.println(&format!("[board] {l}"));
+                        }
+                    }
+                    "add" if !arg.is_empty() => {
+                        let by = dcode_ai_cli::people::my_name(&ws);
+                        match Board::update(&ws, |b| {
+                            b.add(
+                                NewCard {
+                                    title: arg.to_string(),
+                                    ..Default::default()
+                                },
+                                &by,
+                            )
+                        }) {
+                            Ok(k) => out.println(&format!("[board] added {k} — /board to see it")),
+                            Err(e) => out.eprintln(&format!("[board] could not save: {e}")),
+                        }
+                    }
+                    "plan" if !arg.is_empty() => {
+                        self.run_preset(
+                            "Plan this work on the project's task board (the kanban the user sees with /board). First read it with `board_view` so you don't duplicate cards. Then break the goal into milestones and cards with `board_add` (send them in one call): small, testable cards with clear titles and a short description of what done means; `blocked_by` for real ordering (#n for cards in the same call); priorities; and `gate: true` on cards a person should check before they count as done (risky changes, releases, anything user-facing). Don't start the work. End with a short summary of the milestones and which cards are ready to start.
+
+Goal:
+",
+                            arg,
+                            out,
+                        )
+                        .await?
+                    }
+                    "run" => {
+                        let n: usize = arg.parse().unwrap_or(3).clamp(1, 8);
+                        let prompt = format!(
+                            "You are the head agent for the project's task board (/board). Run it:
+1. `board_view` to see the board and which cards are ready (To do, every blocker done).
+2. Take up to {n} ready cards, highest priority first. For each: `board_update` it to in_progress with assignee `agent`, then start a sub-agent with `spawn_subagent` (its own worktree) with the card's key, title and description as the task, and what done means. Start them in parallel (several spawn calls in one turn).
+3. When a sub-agent finishes: note what it did on the card (`board_update` with `note` and its `branch`), and move the card to review. Cards without a review gate whose work is merged or verified can go to done; a card with a gate stays in review for a person.
+4. Repeat with the cards that became ready, until nothing is ready or everything left waits for a person.
+Stop and tell the user plainly what waits for them: cards in review behind a gate, branches to merge, and blocked cards. Don't take cards from Backlog.
+
+Extra instructions from the user:
+"
+                        );
+                        let extra = if arg.is_empty() || arg.parse::<usize>().is_ok() {
+                            "none"
+                        } else {
+                            arg
+                        };
+                        self.run_preset(&prompt, extra, out).await?
+                    }
+                    _ => out.println(
+                        "[board] /board opens the board · /board add <title> · /board list · /board plan <goal> (the agent lays out cards) · /board run [n] (the head agent works the ready cards, n at a time)",
+                    ),
+                }
+            }
             "/plan" if rest.trim().is_empty() => {
                 self.set_mode_and_profile(PermissionMode::Plan);
                 if let ReplOutput::Tui(st) = &out

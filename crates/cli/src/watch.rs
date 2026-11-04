@@ -392,6 +392,7 @@ pub(crate) async fn serve(
                         person,
                         text,
                         name: Some(name),
+                        image: None,
                     }
                 } else {
                     AgentCommand::TodoAdd {

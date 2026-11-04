@@ -1360,6 +1360,10 @@ impl Host {
                 person,
                 text: text("text"),
                 name,
+                image: m
+                    .get("image")
+                    .cloned()
+                    .and_then(|i| serde_json::from_value(i).ok()),
             },
             "todo" => AgentCommand::TodoAdd {
                 person,
@@ -1418,6 +1422,10 @@ impl GuestSender {
     }
     pub fn chat(&self, text: &str) -> bool {
         self.send(json!({"t": "chat", "text": text}))
+    }
+    /// A picture to the people (shrunk already, see [`crate::chat_image`]).
+    pub fn chat_image(&self, img: dcode_ai_common::event::ChatImage) -> bool {
+        self.send(json!({"t": "chat", "text": "", "image": img}))
     }
     pub fn todo(&self, text: &str) -> bool {
         self.send(json!({"t": "todo", "text": text}))
@@ -2084,6 +2092,27 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(got, "hello all");
+        // A picture travels the same way (watchers may send them too).
+        let pic = dcode_ai_common::event::ChatImage {
+            name: "bug.png".into(),
+            mime: "image/png".into(),
+            w: 2,
+            h: 2,
+            data: "iVBORw0KGgo=".into(),
+        };
+        assert!(ws.chat_image(pic.clone()));
+        let got = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match commands.recv().await {
+                    Some(AgentCommand::Chat { image, .. }) => break image,
+                    Some(_) => continue,
+                    None => panic!("closed"),
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(got, Some(pic));
         drop(ws);
         drop(wendy);
 

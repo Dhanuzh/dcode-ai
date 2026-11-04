@@ -247,9 +247,9 @@ fn typing_pasting_modes_and_dashboard() {
 
     // Ctrl+\ opens the dashboard and closes it again.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-6");
+    tui.wait_for("Alt+1-7");
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-6"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-7"));
 
     // Ctrl+C twice quits.
     tui.send(b"\x03");
@@ -267,6 +267,41 @@ fn typing_pasting_modes_and_dashboard() {
         );
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[test]
+fn the_board_and_the_scratch_tab() {
+    let (_dir, home, ws) = setup();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+
+    // /board opens the kanban; n adds a card, > moves it along.
+    tui.send(b"/board");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.send(b"\r");
+    tui.wait_for("board · 0 cards");
+    tui.send(b"n");
+    tui.wait_for("New card title");
+    tui.send(b"Login page");
+    tui.send(b"\r");
+    tui.wait_for("added ");
+    tui.wait_for("Login page");
+    tui.send(b">");
+    tui.wait_for("→ In progress");
+    tui.send(b"q");
+    tui.wait_for("? for shortcuts");
+    let board = std::fs::read_to_string(ws.join(".dcode-ai/board/board.json")).unwrap();
+    assert!(
+        board.contains("Login page") && board.contains("in_progress"),
+        "{board}"
+    );
+    assert!(ws.join(".dcode-ai/board/.gitignore").exists());
+
+    // The dashboard's scratch tab (Alt+7).
+    tui.send(b"\x1c");
+    tui.wait_for("Alt+1-7");
+    tui.send(b"\x1b7");
+    tui.wait_for("nothing yet");
 }
 
 fn tui_has(tui: &Tui, needle: &str) -> bool {
@@ -849,7 +884,7 @@ fn see_and_share_a_session() {
 
     // The dashboard's files tab shows it too.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-6");
+    tui.wait_for("Alt+1-7");
     tui.send(b"\x1b4");
     // The project explorer, with what the agent touched marked.
     tui.wait_until("the files tab", |t| {
@@ -862,7 +897,7 @@ fn see_and_share_a_session() {
     });
     tui.send(b"t");
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-6"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-7"));
 
     run(&mut tui, "/office");
     tui.wait_until("the office", |t| {
@@ -1308,7 +1343,7 @@ fn a_local_join_gets_the_interface_and_the_call() {
     mate.wait_for("hi team");
     host.send(b"\x1b");
     host.send(b"\x1c");
-    host.wait_until("back to the inline view", |t| !t.contains("Alt+1-6"));
+    host.wait_until("back to the inline view", |t| !t.contains("Alt+1-7"));
 
     run(&mut mate, "/hangup");
     host.wait_for("Kiran left the call");
@@ -1437,7 +1472,7 @@ fn the_mouse_scrolls_the_dashboard() {
     tui.wait_for("? for shortcuts");
 
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-6");
+    tui.wait_for("Alt+1-7");
     tui.wait_for("line 70 of the long answer");
     // Wheel up over the conversation (SGR mouse: button 64 = wheel up).
     for _ in 0..12 {
@@ -1531,12 +1566,12 @@ fn office_screenshots() {
     tui.send(b"\r");
     tui.wait_for("part0");
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-6");
+    tui.wait_for("Alt+1-7");
     tui.send(b"\x1b5");
     std::thread::sleep(Duration::from_millis(900));
     shots.push(tui.cells_json());
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-6"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-7"));
     tui.wait_for("? for shortcuts");
     // Waiting for an approval.
     tui.send(b"please create the note");

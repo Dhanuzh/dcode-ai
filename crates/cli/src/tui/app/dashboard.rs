@@ -337,7 +337,28 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
         (RailTab::Files, "files"),
         (RailTab::Office, "office"),
         (RailTab::Team, "team"),
+        (RailTab::Scratch, "scratch"),
     ];
+    // A narrow rail gets short names, so every tab stays clickable.
+    let full: usize = tabs
+        .iter()
+        .map(|(_, l)| l.chars().count() + 1)
+        .sum::<usize>()
+        + 3;
+    let short = |t: RailTab| match t {
+        RailTab::Context => "ctx",
+        RailTab::Changes => "diff",
+        RailTab::Agents => "agt",
+        RailTab::Files => "files",
+        RailTab::Office => "office",
+        RailTab::Team => "team",
+        RailTab::Scratch => "scr",
+    };
+    let tabs: Vec<(RailTab, &str)> = if full > rect.width as usize {
+        tabs.iter().map(|(t, _)| (*t, short(*t))).collect()
+    } else {
+        tabs.to_vec()
+    };
     let mut spans = vec![Span::raw(" ")];
     let mut x = rect.x + 2;
     for (i, (tab, label)) in tabs.iter().enumerate() {
@@ -375,7 +396,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             if focused {
                 " ←/→ tabs · Esc back "
             } else {
-                " Alt+1-6 · Ctrl+D focus "
+                " Alt+1-7 · Ctrl+D focus "
             },
             Style::default().fg(theme::muted()),
         )))
@@ -477,6 +498,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             }
         }
         RailTab::Team => render_team(frame, body, g),
+        RailTab::Scratch => render_scratch(frame, body, g),
         RailTab::Files if g.explorer.touched_only => frame.render_widget(
             Paragraph::new(Text::from(files_lines(
                 &g.file_map,
@@ -617,8 +639,23 @@ fn render_team(frame: &mut ratatui::Frame<'_>, body: Rect, g: &TuiSessionState) 
                 .add_modifier(ratatui::style::Modifier::BOLD),
         )));
         let bubble = Style::default().fg(theme::text()).bg(theme::surface());
-        for part in textwrap::wrap(&c.text, bubble_w.saturating_sub(2)) {
-            lines.push(Line::from(Span::styled(pad(format!(" {part} ")), bubble)));
+        if !c.text.is_empty() {
+            for part in textwrap::wrap(&c.text, bubble_w.saturating_sub(2)) {
+                lines.push(Line::from(Span::styled(pad(format!(" {part} ")), bubble)));
+            }
+        }
+        if let Some(img) = &c.image {
+            let thumb_w = c.thumb.first().map_or(0, |l| l.spans.len());
+            let indent = if mine { w.saturating_sub(thumb_w) } else { 0 };
+            for row in &c.thumb {
+                let mut spans = vec![Span::raw(" ".repeat(indent))];
+                spans.extend(row.spans.iter().cloned());
+                lines.push(Line::from(spans));
+            }
+            lines.push(Line::from(Span::styled(
+                pad(format!("▣ {} · {}×{} · /chat open", img.name, img.w, img.h)),
+                Style::default().fg(theme::muted()),
+            )));
         }
     }
     let skip = lines.len().saturating_sub(rows[1].height as usize);
@@ -634,7 +671,7 @@ fn render_team(frame: &mut ratatui::Frame<'_>, body: Rect, g: &TuiSessionState) 
         )
     } else if g.team_input.is_empty() {
         Span::styled(
-            "message the team… (Enter send · Esc back)",
+            "message the team… (Enter send · Ctrl+V a screenshot · Esc back)",
             Style::default().fg(theme::muted()),
         )
     } else {
@@ -656,6 +693,52 @@ fn render_team(frame: &mut ratatui::Frame<'_>, body: Rect, g: &TuiSessionState) 
         ),
         rows[2],
     );
+}
+
+/// The scratch tab: the agent's working files (its sub-agents' too), newest
+/// first, and the selected one previewed below.
+fn render_scratch(frame: &mut ratatui::Frame<'_>, body: Rect, g: &mut TuiSessionState) {
+    let mut dirs = vec![(
+        String::new(),
+        dcode_ai_common::scratch::scratch_dir(&g.workspace_root, &g.session_id),
+    )];
+    for s in &g.subagents {
+        dirs.push((
+            format!("@{}", s.id.chars().take(8).collect::<String>()),
+            dcode_ai_common::scratch::scratch_dir(&g.workspace_root, &s.id),
+        ));
+    }
+    g.scratch.refresh(&dirs);
+    let focused = g.rail_focus;
+    let w = body.width as usize;
+    let list_rows = ((body.height as usize).saturating_sub(2) / 3).clamp(3, 12);
+    let mut lines = vec![muted(if focused {
+        "↑↓ · Enter @file · o open · ←→ tabs"
+    } else {
+        "the agent's logs, screenshots, API responses · click to browse"
+    })];
+    lines.extend(g.scratch.list_lines(w, list_rows, focused));
+    let used = lines.len() as u16 + 1;
+    frame.render_widget(Paragraph::new(Text::from(lines)), body);
+    if body.height > used + 2
+        && let Some(f) = g.scratch.selected_file().cloned()
+    {
+        let area = Rect {
+            y: body.y + used,
+            height: body.height - used,
+            ..body
+        };
+        let head = Line::from(Span::styled(
+            format!("── {} ", f.name),
+            Style::default().fg(theme::accent()),
+        ));
+        let mut preview = vec![head];
+        preview.extend(
+            g.scratch
+                .preview_lines(area.width, area.height.saturating_sub(1)),
+        );
+        frame.render_widget(Paragraph::new(Text::from(preview)), area);
+    }
 }
 
 /// The project explorer: every file in the project (minus .gitignore'd),
@@ -1152,7 +1235,8 @@ mod tests {
         // The status bar shows a live session timer; keep the snapshot stable.
         let text = mask_timer(&text);
         assert!(text.contains("session"));
-        assert!(text.contains("context"));
+        // A narrow rail names its tabs short (`ctx` for context).
+        assert!(text.contains("ctx│diff") && text.contains("scr"), "{text}");
         assert!(text.contains("Fixed the off-by-one"));
         insta::assert_snapshot!("dashboard_frame", text);
     }

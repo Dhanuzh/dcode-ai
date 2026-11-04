@@ -228,9 +228,20 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 | `Alt+3` **agents** | Sub-agents and what each one is doing right now |
 | `Alt+4` **files** | Your **project explorer** (`.gitignore` respected), marking what the agent read (`·`), edited (`✎`) and is on now (`◉`). `Enter` adds `@file` to your message |
 | `Alt+5` **office** | The Agent Office. Teams are drawn small so everyone fits |
-| `Alt+6` **team** | Chat with the people on the session, plus the shared to-do list |
+| `Alt+6` **team** | Chat with the people on the session (paste a screenshot with `Ctrl+V`), plus the shared to-do list |
+| `Alt+7` **scratch** | What the agent made along the way, live: test logs, screenshots, API responses, previewed (pictures as colour thumbnails) |
 
 Click, scroll, drag to select and copy, and resize the side panels. `/timeline` scrubs through the session step by step.
+
+### 📋 A task board with a head agent (`/board`)
+
+A Jira-style kanban for the project: **Backlog · To do · In progress · Review · Done**, with keys (`DCO-12`), priorities, blockers, milestones and review gates. Shared by every session in the project.
+
+| | |
+| --- | --- |
+| **Plan** | `/board plan <goal>`: the agent splits the goal into milestones and cards, with what blocks what and gates where you should check |
+| **Run** | `/board run [n]`: the head agent takes the ready cards (nothing blocking them), starts up to `n` sub-agents in their own worktrees in parallel, moves each card along and picks up what became unblocked. Gated cards wait in Review for you |
+| **Work it yourself** | `←/→/↑/↓` move, `Shift+←/→` (or `<` `>`) move a card, `n` new, `e` rename, `p` priority, `b` blockers, `g` gate, `Enter` details, `r` run |
 
 ### 👥 Work together
 
@@ -239,7 +250,7 @@ Click, scroll, drag to select and copy, and resize the side panels. `/timeline` 
 | **Invite** | `/invite` prints one line to send: `dcode-ai join 192.168.1.9,p2p-…:8788/Qk3f… --name Priya`. It works on your Wi-Fi **and from any other network**, with nothing to set up. You're asked before anyone gets in, and choose whether they **watch and chat** or **drive** (ask the agent). Letting someone drive pauses auto mode. End-to-end encrypted with the invite's key |
 | **Same interface** | Guests get the full TUI with the conversation so far, the dashboard and the office. They reconnect on their own after a Wi-Fi drop |
 | **Voice calls** | `/call` opens a menu for mute, push-to-talk (`Ctrl+Space`), echo reduction and volume per person. Steady on weak Wi-Fi |
-| **Chat** | `/chat` opens a chat window for people only; the agent never sees it |
+| **Chat** | `/chat` opens a chat window for people only; the agent never sees it. `Ctrl+V` sends a screenshot (shown as a thumbnail; `/chat open` views it full size), `/chat image <file>` a picture from disk |
 | **Shared to-dos** | `/todo fix the login bug`: everyone sees the list and the agent gets the open items with every prompt. `/todo done` ticks one off |
 | **Who's here** | `/people` lists everyone and `/kick` removes someone. Approvals stay with you unless you use `/invite --let-approve` |
 | **No dcode-ai?** | `/invite web` adds a browser link and a QR code. `/watch` shares a read-only live page |

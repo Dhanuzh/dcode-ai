@@ -127,7 +127,11 @@ impl TuiSessionState {
             team_typing: false,
             team_input: String::new(),
             chat_sink: None,
+            chat_image_sink: None,
+            chat_paste_request: false,
             office_open: false,
+            board_open: false,
+            scratch: Default::default(),
             office_selected: 0,
             busy: false,
             current_busy_state: BusyState::Idle,
@@ -1526,13 +1530,14 @@ impl TuiSessionState {
 
     /// Next/previous right-rail tab, keeping keyboard focus on the rail.
     pub fn cycle_rail_tab(&mut self, step: i32) {
-        const TABS: [RailTab; 6] = [
+        const TABS: [RailTab; 7] = [
             RailTab::Context,
             RailTab::Changes,
             RailTab::Agents,
             RailTab::Files,
             RailTab::Office,
             RailTab::Team,
+            RailTab::Scratch,
         ];
         let i = TABS.iter().position(|t| *t == self.rail_tab).unwrap_or(0) as i32;
         self.rail_tab = TABS[(i + step).rem_euclid(TABS.len() as i32) as usize];
@@ -1554,8 +1559,8 @@ impl TuiSessionState {
         if tab == RailTab::Changes {
             self.diff_review.refresh(&self.workspace_root);
         } else {
-            // The files tab is browsed with the keys right away.
-            self.rail_focus = tab == RailTab::Files;
+            // The files and scratch tabs are browsed with the keys right away.
+            self.rail_focus = matches!(tab, RailTab::Files | RailTab::Scratch);
         }
     }
 
@@ -2270,8 +2275,25 @@ impl TuiSessionState {
             AgentEvent::CallLeft { name, .. } if !name.is_empty() => {
                 self.show_toast(format!("📞 {name} left the call"), ToastKind::Info);
             }
-            AgentEvent::PersonChat { name, text, .. } => {
-                self.push_block(DisplayBlock::System(format!("💬 {name}: {text}")));
+            AgentEvent::PersonChat {
+                name, text, image, ..
+            } => {
+                let line = match image {
+                    Some(i) => {
+                        let n = self.team.images().len();
+                        let caption = if text.is_empty() {
+                            String::new()
+                        } else {
+                            format!(" — {text}")
+                        };
+                        format!(
+                            "💬 {name} sent a picture: {} ({}×{}){caption} · Alt+6 shows it · /chat open {n}",
+                            i.name, i.w, i.h
+                        )
+                    }
+                    None => format!("💬 {name}: {text}"),
+                };
+                self.push_block(DisplayBlock::System(line));
                 transcript_dirty = true;
             }
             AgentEvent::TeamTodoAdded { text, by, .. } => {

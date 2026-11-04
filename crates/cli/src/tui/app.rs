@@ -479,6 +479,52 @@ fn spawn_clipboard_paste(state: Arc<Mutex<TuiSessionState>>, text_fallback: bool
     });
 }
 
+/// Ctrl+V in the team chat box: the clipboard's picture goes to the chat;
+/// text is typed into the box.
+fn spawn_chat_image_paste(state: Arc<Mutex<TuiSessionState>>) {
+    let Some((ws, sid)) = state
+        .lock()
+        .ok()
+        .map(|g| (g.workspace_root.clone(), g.session_id.clone()))
+    else {
+        return;
+    };
+    std::thread::spawn(move || {
+        let saved = crate::image_attach::paste_clipboard_image(&ws, &sid);
+        let picture = saved.as_ref().ok().map(|att| {
+            let path = ws.join(&att.path);
+            let bytes = std::fs::read(&path).map_err(|e| e.to_string());
+            // The copy under the session's attachments isn't needed.
+            let _ = std::fs::remove_file(&path);
+            bytes.and_then(|b| crate::chat_image::prepare(&b, "screenshot.png"))
+        });
+        let Ok(mut g) = state.lock() else { return };
+        match picture {
+            Some(Ok(img)) => match g.chat_image_sink.clone() {
+                Some(sink) => {
+                    drop(g);
+                    sink(img);
+                }
+                None => g.show_toast(
+                    "pictures in chat need a session others can join",
+                    crate::tui::state::ToastKind::Info,
+                ),
+            },
+            Some(Err(e)) => g.show_toast(
+                format!("couldn't send it: {e}"),
+                crate::tui::state::ToastKind::Error,
+            ),
+            None => {
+                // No picture: paste the text instead.
+                if let Some(text) = Clipboard::new().ok().and_then(|mut cb| cb.get_text().ok()) {
+                    let one_line = text.replace(['\r', '\n'], " ");
+                    g.team_input.push_str(one_line.trim());
+                }
+            }
+        }
+    });
+}
+
 fn stage_pasted_image_paths(
     state: &mut TuiSessionState,
     pasted: &str,
@@ -855,6 +901,13 @@ pub fn run_blocking(
         if let Some(text_fallback) = paste {
             spawn_clipboard_paste(Arc::clone(&state), text_fallback);
         }
+        if state
+            .lock()
+            .map(|mut g| std::mem::take(&mut g.chat_paste_request))
+            .unwrap_or(false)
+        {
+            spawn_chat_image_paste(Arc::clone(&state));
+        }
 
         // Pick up async workspace file discovery when it completes.
         if let Ok(files) = workspace_files_rx.try_recv() {
@@ -892,7 +945,13 @@ pub fn run_blocking(
 
         // Full-screen transcript overlay (Codex `/transcript`). Runs its own
         // alt-screen loop; on return we force a full redraw of the inline pane.
-        let (overlay_requested, diff_requested, timeline_requested, office_requested) = state
+        let (
+            overlay_requested,
+            diff_requested,
+            timeline_requested,
+            office_requested,
+            board_requested,
+        ) = state
             .lock()
             .map(|g| {
                 (
@@ -900,11 +959,19 @@ pub fn run_blocking(
                     g.diff_overlay_open,
                     g.timeline_open,
                     g.office_open,
+                    g.board_open,
                 )
             })
-            .unwrap_or((false, false, false, false));
-        if overlay_requested || diff_requested || timeline_requested || office_requested {
-            if office_requested {
+            .unwrap_or((false, false, false, false, false));
+        if overlay_requested
+            || diff_requested
+            || timeline_requested
+            || office_requested
+            || board_requested
+        {
+            if board_requested {
+                let _ = crate::tui::board_overlay::run_board_overlay(&state, &cmd_tx);
+            } else if office_requested {
                 let _ = crate::tui::office_overlay::run_office_overlay(&state);
             } else if timeline_requested {
                 let _ = crate::tui::timeline_overlay::run_timeline_overlay(&state);
@@ -1389,7 +1456,7 @@ pub fn office_tick() -> u64 {
 }
 
 /// Open a URL in the default browser or a file path in the system editor.
-fn open_link_in_system(target: &str) -> std::io::Result<()> {
+pub(crate) fn open_link_in_system(target: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
         std::process::Command::new("cmd")

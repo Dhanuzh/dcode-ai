@@ -62,6 +62,7 @@
   #todos { list-style: none; padding: 0; margin: 0 0 18px; font-size: 13px; }
   #todos li.r { color: var(--muted); text-decoration: line-through; }
   .chatline { color: var(--accent); margin: 0 0 10px 14px; }
+  .chatpic { max-width: min(420px, 90%); max-height: 320px; margin-top: 6px; border-radius: 6px; border: 1px solid var(--border, #444); cursor: zoom-in; }
   .said { color: #3f7fbf; margin: 0 0 10px 14px; }
   #chat { position: fixed; bottom: 0; left: 0; right: 0; z-index: 3; display: none; gap: 8px; align-items: center;
     padding: 8px 20px; background: var(--panel); border-top: 1px solid var(--line); }
@@ -203,7 +204,18 @@
         if (people.delete(ev.person)) { renderPeople(); if (ev.name) add(el('note', '⇠ ' + ev.name + ' left')); }
         break;
       case 'PersonSaid': add(el('said', ev.name + ': ' + ev.text)); break;
-      case 'PersonChat': add(el('chatline', '💬 ' + ev.name + ': ' + ev.text)); break;
+      case 'PersonChat': {
+        const line = el('chatline', '💬 ' + ev.name + ': ' + (ev.text || (ev.image ? 'sent a picture' : '')));
+        const im = ev.image;
+        if (im && (im.mime === 'image/png' || im.mime === 'image/jpeg') && /^[A-Za-z0-9+/=]+$/.test(im.data || '')) {
+          const pic = document.createElement('img');
+          pic.className = 'chatpic'; pic.alt = im.name || 'picture';
+          pic.src = 'data:' + im.mime + ';base64,' + im.data;
+          pic.addEventListener('click', () => window.open(pic.src, '_blank'));
+          line.appendChild(document.createElement('br')); line.appendChild(pic);
+        }
+        add(line); break;
+      }
       case 'TeamTodoAdded': todos.push({ id: ev.id, text: ev.text, by: ev.by, done: false });
         add(el('note', '☐ ' + ev.by + ' added a to-do: ' + ev.text)); renderTodos(); break;
       case 'TeamTodoDone': { const t = todos.find(x => x.id === ev.id);

@@ -1044,7 +1044,8 @@ impl Repl {
                 }
             }
             "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/goal"
-            | "/plan" | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit" => {
+            | "/plan" | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit"
+            | "/board" => {
                 return self.cmd_work(input, command, rest, parts, out).await;
             }
             _ => {
@@ -1379,13 +1380,25 @@ impl Repl {
         // The team chat box sends straight away, even mid-turn.
         if let (Some(tx), Ok(mut g)) = (self.runtime.event_tx(), tui_state.lock()) {
             let name = dcode_ai_cli::people::my_name(self.runtime.workspace_root());
+            let (tx2, name2) = (tx.clone(), name.clone());
             g.chat_sink = Some(std::sync::Arc::new(move |text: String| {
                 let _ = tx.try_send(dcode_ai_common::event::AgentEvent::PersonChat {
                     person: "owner".into(),
                     name: name.clone(),
                     text: text.chars().take(2000).collect(),
+                    image: None,
                 });
             }));
+            g.chat_image_sink = Some(std::sync::Arc::new(
+                move |img: dcode_ai_common::event::ChatImage| {
+                    let _ = tx2.try_send(dcode_ai_common::event::AgentEvent::PersonChat {
+                        person: "owner".into(),
+                        name: name2.clone(),
+                        text: String::new(),
+                        image: Some(img),
+                    });
+                },
+            ));
         }
         if let Ok(mut g) = tui_state.lock() {
             g.mcp_server_count = self

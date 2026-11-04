@@ -20,6 +20,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/invite",
     "/chat",
     "/todo",
+    "/board",
     "/people",
     "/kick",
     "/call",
@@ -154,6 +155,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         }
         "/chat" => "chat with the people on this session (not sent to the agent): /chat <text>",
         "/todo" => "the shared to-do list the agent sees: /todo, /todo <text>, /todo done <n>",
+        "/board" => {
+            "the project's task board (kanban): /board, /board add, /board plan <goal>, /board run [n]"
+        }
         "/people" => "who is with this session: you, invited guests, joined terminals, watchers",
         "/kick" => "remove an invited guest: /kick <name>",
         "/call" => "talk with the people on this session (voice call over /invite)",

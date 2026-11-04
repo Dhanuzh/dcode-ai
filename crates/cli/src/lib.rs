@@ -3,6 +3,7 @@
 #![allow(clippy::double_must_use)]
 pub mod activity;
 pub mod approval_prompts;
+pub mod chat_image;
 pub mod file_mentions;
 pub mod image_attach;
 pub mod invite;

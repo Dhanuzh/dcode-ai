@@ -1,6 +1,7 @@
 // dcode-ai common types — shared across all crates
 // test edit: second comment line
 pub mod auth;
+pub mod board;
 pub mod config;
 pub mod credentials;
 pub mod event;
@@ -16,6 +17,7 @@ pub mod packs;
 pub mod plugins;
 pub mod provider_runtime;
 pub mod redact;
+pub mod scratch;
 pub mod session;
 pub mod shell;
 pub mod tool;

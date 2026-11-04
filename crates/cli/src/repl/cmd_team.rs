@@ -437,6 +437,18 @@ impl Repl {
                     }
                     return Ok(true);
                 }
+                if let ReplOutput::Tui(st) = &out {
+                    let ws = self.runtime.workspace_root().to_path_buf();
+                    let note = st.lock().ok().and_then(|mut g| {
+                        crate::tui::team::chat_picture_command(text, &mut g, &ws)
+                    });
+                    if let Some(note) = note {
+                        if !note.is_empty() {
+                            out.println(&note);
+                        }
+                        return Ok(true);
+                    }
+                }
                 let name = dcode_ai_cli::people::my_name(self.runtime.workspace_root());
                 if let Some(tx) = self.runtime.event_tx() {
                     let _ = tx
@@ -444,6 +456,7 @@ impl Repl {
                             person: "owner".into(),
                             name,
                             text: text.chars().take(2000).collect(),
+                            image: None,
                         })
                         .await;
                 }

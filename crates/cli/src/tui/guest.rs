@@ -20,7 +20,15 @@ fn guest_command(text: &str, g: &mut TuiSessionState, send: &GuestSender) -> Gue
             send.stop_turn();
         }
         "/chat" if !rest.is_empty() => {
-            send.chat(rest);
+            // Pictures: from a file on this computer, or open one.
+            let here = std::env::current_dir().unwrap_or_default();
+            match crate::tui::team::chat_picture_command(rest, g, &here) {
+                Some(note) if !note.is_empty() => g.push_block(DisplayBlock::System(note)),
+                Some(_) => {}
+                None => {
+                    send.chat(rest);
+                }
+            }
         }
         "/chat" => g.open_team_chat(),
         "/todo" if rest.is_empty() => {
@@ -207,6 +215,12 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
         g.chat_sink = Some(std::sync::Arc::new(move |text: String| {
             s.chat(&text);
         }));
+        let s = send.clone();
+        g.chat_image_sink = Some(std::sync::Arc::new(
+            move |img: dcode_ai_common::event::ChatImage| {
+                s.chat_image(img);
+            },
+        ));
     }
 
     // Events → the same state the host's TUI uses.

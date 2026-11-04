@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.53 — 2026-11-04
+
+### New
+- **A task board with a head agent (`/board`)**: a Jira-style kanban for the
+  project (Backlog · To do · In progress · Review · Done) with keys like
+  `DCO-12`, priorities, blockers, milestones and review gates.
+  `/board plan <goal>` has the agent lay out the cards; `/board run [n]`
+  makes it the head agent: it starts up to `n` sub-agents in their own
+  worktrees on the ready cards, in parallel, moves cards along as they
+  finish and picks up what became unblocked. Gated cards wait in Review for
+  you. Move cards yourself with `Shift+←/→`, add with `n`, and more.
+- **Scratch tab** (`Alt+7` in the dashboard): what the agent made along the
+  way — test logs, screenshots, API responses — live, with a preview
+  (pictures as colour thumbnails, JSON pretty-printed, logs from the end).
+- **Pictures in team chat**: `Ctrl+V` in the chat box sends the screenshot
+  on your clipboard; guests too. Shown as a thumbnail in the team tab and
+  as a picture on the browser page; `/chat open` views it full size,
+  `/chat image <file>` sends one from disk. Pictures are for people only:
+  the agent never sees them.
+
+### Changed
+- On a narrow dashboard the tab names are short (`ctx · diff · agt …`) so
+  all seven fit.
+
 ## 1.0.52 — 2026-11-04
 
 (1.0.51 was tagged but not released: its Windows build failed.)

@@ -271,6 +271,10 @@ impl ApprovalPolicy {
                 // (.dcode-ai/memory.json), never arbitrary files — same risk
                 // tier as update_plan's plan state.
                 | "save_memory"
+                // Write only the app-owned task board (.dcode-ai/board/).
+                | "board_view"
+                | "board_add"
+                | "board_update"
         );
         let file_edit = matches!(
             tool_name,
