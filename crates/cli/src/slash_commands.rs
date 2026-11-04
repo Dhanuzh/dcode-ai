@@ -156,7 +156,7 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/chat" => "chat with the people on this session (not sent to the agent): /chat <text>",
         "/todo" => "the shared to-do list the agent sees: /todo, /todo <text>, /todo done <n>",
         "/board" => {
-            "the task board (kanban, Personal and Jira): /board, /board add [jira] <title>, /board plan <goal>, /board run [n], /board jira <PROJECT>, /board sync"
+            "the task board (kanban, Personal and Jira): /board, /board add [jira] <title>, /board plan <goal>, /board run [n], /board jira <PROJECT>, /board jira assignee <name>|all, /board sync"
         }
         "/people" => "who is with this session: you, invited guests, joined terminals, watchers",
         "/kick" => "remove an invited guest: /kick <name>",

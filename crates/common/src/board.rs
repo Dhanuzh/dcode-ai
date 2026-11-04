@@ -222,6 +222,10 @@ pub struct JiraLink {
     /// What to pull (defaults to the project's open and recent issues).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jql: Option<String>,
+    /// Only this person's tickets come in (their Jira name or email, as
+    /// the user typed it).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_sync: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -468,6 +472,17 @@ impl Board {
         self.cards.iter().filter(|c| c.push.is_some()).count()
     }
 
+    /// Forgets the Jira tickets a sync brought in that have nothing waiting
+    /// to go back (the next sync brings back those that still match what's
+    /// pulled). Cards not yet sent, or with a move not yet sent, stay.
+    /// Returns how many went.
+    pub fn drop_synced(&mut self) -> usize {
+        let before = self.cards.len();
+        self.cards
+            .retain(|c| !(c.space == Space::Jira && c.remote.is_some() && c.push.is_none()));
+        before - self.cards.len()
+    }
+
     /// The cards of one space.
     pub fn in_space(&self, space: Space) -> impl Iterator<Item = &Card> {
         self.cards.iter().filter(move |c| c.space == space)
@@ -707,6 +722,58 @@ impl Card {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changing_the_jira_filter_keeps_unsent_work() {
+        let mut b = Board::new("DCO");
+        let remote = |k: &str| Remote {
+            key: k.into(),
+            url: String::new(),
+            status: "To Do".into(),
+            issue_type: String::new(),
+        };
+        b.insert_remote(
+            remote("BSI-1"),
+            "synced",
+            "",
+            Status::Todo,
+            Priority::Medium,
+            None,
+        );
+        b.insert_remote(
+            remote("BSI-2"),
+            "moved here",
+            "",
+            Status::Todo,
+            Priority::Medium,
+            None,
+        );
+        b.card_mut("BSI-2").unwrap().push = Some(Push::Status);
+        b.add(
+            NewCard {
+                title: "no ticket yet".into(),
+                space: Space::Jira,
+                ..Default::default()
+            },
+            "",
+        );
+        b.add(
+            NewCard {
+                title: "personal".into(),
+                ..Default::default()
+            },
+            "",
+        );
+        assert_eq!(b.drop_synced(), 1);
+        assert!(b.card("BSI-1").is_none());
+        assert!(b.card("BSI-2").is_some());
+        assert_eq!(b.cards.len(), 3);
+        // Boards saved before the assignee filter still load.
+        let l: JiraLink =
+            serde_json::from_str(r#"{"server":"atlassian","cloud_id":"c","project":"BSI"}"#)
+                .unwrap();
+        assert_eq!(l.assignee, None);
+    }
 
     #[test]
     fn cards_get_keys_and_blockers_decide_what_is_ready() {

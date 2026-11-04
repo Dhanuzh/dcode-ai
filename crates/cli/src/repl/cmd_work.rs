@@ -88,6 +88,66 @@ impl Repl {
                         }
                         out.println("[board] unlinked from Jira — the Jira cards stay on the board, nothing syncs any more");
                     }
+                    "jira" if matches!(
+                        arg.split_whitespace().next(),
+                        Some("assignee" | "for" | "all")
+                    ) => {
+                        let (word, name) = arg
+                            .split_once(char::is_whitespace)
+                            .map(|(w, n)| (w, n.trim().trim_matches('"').trim()))
+                            .unwrap_or((arg, ""));
+                        if word != "all" && name.is_empty() {
+                            out.eprintln("[board] whose tickets? /board jira assignee <name or email as in Jira>, or `me`");
+                            return Ok(true);
+                        }
+                        let Some(link) = Board::load(&ws).jira else {
+                            out.eprintln("[board] link Jira first: /board jira <PROJECT-KEY>");
+                            return Ok(true);
+                        };
+                        let manager = self.runtime.mcp_manager().clone();
+                        let Some(server) = self.runtime.config().mcp.servers.iter().find(|s| s.name == link.server).cloned() else {
+                            out.eprintln(&format!("[board] the MCP server `{}` isn't configured any more", link.server));
+                            return Ok(true);
+                        };
+                        let mcp = dcode_ai_cli::jira_sync::ServerMcp::new(manager, server);
+                        let assignee = if word == "all" {
+                            None
+                        } else if name.eq_ignore_ascii_case("me") {
+                            match dcode_ai_cli::jira_sync::whoami(&mcp).await {
+                                Ok(me) => Some(me),
+                                Err(e) => {
+                                    out.eprintln(&format!("[board] {e} — try /board jira assignee <your name or email>"));
+                                    return Ok(true);
+                                }
+                            }
+                        } else {
+                            Some(name.to_string())
+                        };
+                        // Tickets pulled under the old filter go; the sync
+                        // below brings back the ones that still match.
+                        let mut dropped = 0;
+                        if let Err(e) = Board::update(&ws, |b| {
+                            if let Some(l) = b.jira.as_mut() {
+                                l.assignee = assignee.clone();
+                            }
+                            dropped = b.drop_synced();
+                        }) {
+                            out.eprintln(&format!("[board] could not save: {e}"));
+                            return Ok(true);
+                        }
+                        out.println(&format!(
+                            "[board] Jira {}: {} (cleared {dropped} synced tickets, re-syncing…)",
+                            link.project,
+                            match &assignee {
+                                Some(n) => format!("only tickets assigned to {n}"),
+                                None => "all the project's open and recent tickets".into(),
+                            }
+                        ));
+                        match dcode_ai_cli::jira_sync::sync(&mcp, &ws).await {
+                            Ok(r) => out.println(&format!("[board] {}", r.summary())),
+                            Err(e) => out.eprintln(&format!("[board] {e}")),
+                        }
+                    }
                     "jira" if !arg.is_empty() => {
                         let mut words = arg.split_whitespace();
                         let project = words.next().unwrap_or_default().to_string();
@@ -116,7 +176,7 @@ impl Repl {
                                     Err(e) => out.eprintln(&format!("[board] {e}")),
                                 }
                                 self.start_board_sync(&out);
-                                out.println("[board] /board shows them under Jira (t switches between Personal and Jira)");
+                                out.println("[board] /board shows them under Jira (t switches between Personal and Jira) · /board jira assignee <name> keeps only one person's tickets");
                             }
                             Err(e) => out.eprintln(&format!("[board] {e}")),
                         }
@@ -125,9 +185,10 @@ impl Repl {
                         let b = Board::load(&ws);
                         match &b.jira {
                             Some(l) => out.println(&format!(
-                                "[board] linked to Jira {} ({}) through `{}` · last sync {} · /board sync · /board jira off",
+                                "[board] linked to Jira {} ({}){} through `{}` · last sync {} · /board sync · /board jira assignee <name>|all · /board jira off",
                                 l.project,
                                 l.site,
+                                l.assignee.as_deref().map(|n| format!(", only tickets assigned to {n}")).unwrap_or_default(),
                                 l.server,
                                 l.last_sync.map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_else(|| "never".into())
                             )),
@@ -183,7 +244,7 @@ Extra instructions from the user:
                         self.run_preset(&prompt, extra, out).await?
                     }
                     _ => out.println(
-                        "[board] /board opens the board · /board add [jira] <title> · /board list · /board plan <goal> (the agent lays out cards) · /board run [n] (the head agent works the ready cards, n at a time) · /board jira <PROJECT> links Jira · /board sync",
+                        "[board] /board opens the board · /board add [jira] <title> · /board list · /board plan <goal> (the agent lays out cards) · /board run [n] (the head agent works the ready cards, n at a time) · /board jira <PROJECT> links Jira · /board jira assignee <name>|all · /board sync",
                     ),
                 }
             }

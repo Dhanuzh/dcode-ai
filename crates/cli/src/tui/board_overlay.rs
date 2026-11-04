@@ -9,6 +9,10 @@
 //! syncs now, `r` asks the agent to run the board (the head agent), `q`
 //! closes.
 //!
+//! The mouse: click a tab to switch spaces, a card to select it (again to
+//! show it in full), drag a card to another column to move it, the wheel
+//! scrolls the column under the pointer, a click closes the details.
+//!
 //! The board lives in `.dcode-ai/board/board.json`; it's re-read twice a
 //! second, so the agent's and Jira's changes show up live.
 
@@ -51,6 +55,172 @@ pub struct BoardUi {
     confirm_delete: Option<String>,
     detail: bool,
     message: Option<String>,
+    /// The left button is down on this card.
+    press: Option<Press>,
+    /// While dragging a card: the column it would land in.
+    drop_col: Option<usize>,
+}
+
+/// A left-button press on a card, until the button comes up.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Press {
+    key: String,
+    col: usize,
+    /// The card was already selected: releasing on it shows it in full.
+    was_selected: bool,
+}
+
+/// Where things were drawn in the last frame, for the mouse.
+#[derive(Debug, Default)]
+struct Hits {
+    /// (rect, column, index in the column).
+    cards: Vec<(Rect, usize, usize)>,
+    /// Each column's rect by status index (zero-sized when not shown).
+    cols: Vec<Rect>,
+    tabs: Vec<(Rect, Space)>,
+    detail: Option<Rect>,
+}
+
+fn inside(r: &Rect, col: u16, row: u16) -> bool {
+    r.width > 0
+        && col >= r.x
+        && col < r.x.saturating_add(r.width)
+        && row >= r.y
+        && row < r.y.saturating_add(r.height)
+}
+
+impl Hits {
+    fn card_at(&self, col: u16, row: u16) -> Option<(usize, usize)> {
+        self.cards
+            .iter()
+            .find(|(r, _, _)| inside(r, col, row))
+            .map(|(_, c, i)| (*c, *i))
+    }
+    fn col_at(&self, col: u16, row: u16) -> Option<usize> {
+        self.cols.iter().position(|r| inside(r, col, row))
+    }
+}
+
+/// What a mouse event asks the board for, beyond moving the selection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum MouseAct {
+    Nothing,
+    /// The space tab was clicked.
+    Space,
+    /// A card was dropped on another column.
+    Move(String, Status),
+}
+
+/// Applies a mouse event to the view; `columns` are the shown space's cards.
+fn on_mouse(
+    ui: &mut BoardUi,
+    hits: &Hits,
+    columns: &[Vec<Card>],
+    m: crossterm::event::MouseEvent,
+) -> MouseAct {
+    let (x, y) = (m.column, m.row);
+    // Typing on the bottom line owns the input.
+    if ui.typing.is_some() {
+        return MouseAct::Nothing;
+    }
+    let left_down = m.kind == MouseEventKind::Down(MouseButton::Left);
+    if ui.confirm_delete.is_some() && left_down {
+        ui.confirm_delete = None;
+        ui.message = Some("kept it".into());
+        return MouseAct::Nothing;
+    }
+    if ui.detail {
+        if left_down && !hits.detail.is_some_and(|r| inside(&r, x, y)) {
+            ui.detail = false;
+        }
+        return MouseAct::Nothing;
+    }
+    match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            ui.message = None;
+            if let Some((_, space)) = hits.tabs.iter().find(|(r, _)| inside(r, x, y)) {
+                if ui.space != *space {
+                    ui.space = *space;
+                    ui.row = 0;
+                }
+                return MouseAct::Space;
+            }
+            if let Some((ci, i)) = hits.card_at(x, y) {
+                let was_selected = ui.col == ci && ui.row == i;
+                ui.col = ci;
+                ui.row = i;
+                ui.press = columns.get(ci).and_then(|c| c.get(i)).map(|c| Press {
+                    key: c.key.clone(),
+                    col: ci,
+                    was_selected,
+                });
+            } else if let Some(ci) = hits.col_at(x, y)
+                && ui.col != ci
+            {
+                ui.col = ci;
+                ui.row = 0;
+            }
+            MouseAct::Nothing
+        }
+        MouseEventKind::Drag(MouseButton::Left) => {
+            ui.drop_col = match &ui.press {
+                Some(p) => hits.col_at(x, y).filter(|c| *c != p.col),
+                None => None,
+            };
+            MouseAct::Nothing
+        }
+        MouseEventKind::Up(MouseButton::Left) => {
+            ui.drop_col = None;
+            let Some(p) = ui.press.take() else {
+                return MouseAct::Nothing;
+            };
+            match hits.col_at(x, y) {
+                Some(ci) if ci != p.col => MouseAct::Move(p.key, Status::ALL[ci]),
+                _ => {
+                    let same = hits.card_at(x, y) == Some((ui.col, ui.row));
+                    if same && p.was_selected {
+                        ui.detail = true;
+                    }
+                    MouseAct::Nothing
+                }
+            }
+        }
+        MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+            // The column under the pointer scrolls, focused or not.
+            if let Some(ci) = hits.col_at(x, y)
+                && ci != ui.col
+            {
+                ui.col = ci;
+                ui.row = 0;
+            }
+            let len = columns.get(ui.col).map_or(0, Vec::len);
+            ui.row = if m.kind == MouseEventKind::ScrollDown {
+                (ui.row + 1).min(len.saturating_sub(1))
+            } else {
+                ui.row.saturating_sub(1)
+            };
+            MouseAct::Nothing
+        }
+        _ => MouseAct::Nothing,
+    }
+}
+
+/// Moves card `key` to column `to` and selects it there.
+fn move_card_to(ws: &std::path::Path, key: &str, to: Status, board: &mut Board, ui: &mut BoardUi) {
+    let _ = Board::update(ws, |b| {
+        if let Some(c) = b.card_mut(key) {
+            c.set_status(to, "you");
+        }
+    });
+    *board = Board::load(ws);
+    ui.col = to.index();
+    ui.row = board
+        .column(to)
+        .iter()
+        .filter(|c| c.space == ui.space)
+        .position(|c| c.key == key)
+        .unwrap_or(0);
+    ui.message = Some(format!("{key} → {}", to.label()));
 }
 
 impl Default for BoardUi {
@@ -64,6 +234,8 @@ impl Default for BoardUi {
             confirm_delete: None,
             detail: false,
             message: None,
+            press: None,
+            drop_col: None,
         }
     }
 }
@@ -276,9 +448,8 @@ pub(crate) fn run_board_overlay(
             s.kick();
         }
     };
-    // Where each card was drawn: (rect, column, index), for clicks.
-    let mut hits: Vec<(Rect, usize, usize)> = Vec::new();
-    let mut col_rects: Vec<Rect> = Vec::new();
+    // Where things were drawn, for the mouse.
+    let mut hits = Hits::default();
 
     let res: anyhow::Result<()> = (|| {
         loop {
@@ -332,8 +503,10 @@ pub(crate) fn run_board_overlay(
             )
             .spacing(1)
             .split(rows[1]);
-            hits.clear();
-            col_rects = vec![Rect::default(); Status::ALL.len()];
+            hits = Hits {
+                cols: vec![Rect::default(); Status::ALL.len()],
+                ..Default::default()
+            };
 
             // The header: the two spaces as tabs, counts, the sync note.
             let personal = board.in_space(Space::Personal).count();
@@ -352,6 +525,11 @@ pub(crate) fn run_board_overlay(
                 }
             };
             let jira_label = match &board.jira {
+                Some(l) if l.assignee.is_some() => format!(
+                    "Jira {} · {} · {jira_n}",
+                    l.project,
+                    l.assignee.as_deref().unwrap_or_default()
+                ),
                 Some(l) => format!("Jira {} · {jira_n}", l.project),
                 None => "Jira".into(),
             };
@@ -371,6 +549,18 @@ pub(crate) fn run_board_overlay(
                 Span::styled(
                     format!("   {total} cards · {ready} ready · {done} done"),
                     Style::default().fg(theme::muted()),
+                ),
+            ];
+            // The tabs are clickable.
+            let x_of = |n: usize| -> u16 { head[..n].iter().map(|s| s.width() as u16).sum() };
+            hits.tabs = vec![
+                (
+                    Rect::new(rows[0].x + x_of(1), rows[0].y, head[1].width() as u16, 1),
+                    Space::Personal,
+                ),
+                (
+                    Rect::new(rows[0].x + x_of(3), rows[0].y, head[3].width() as u16, 1),
+                    Space::Jira,
                 ),
             ];
             let right = format!("{sync_text}  ");
@@ -418,14 +608,17 @@ pub(crate) fn run_board_overlay(
                 );
                 for (slot, &ci) in visible.iter().enumerate() {
                     let rect = cols[slot];
-                    col_rects[ci] = rect;
+                    hits.cols[ci] = rect;
                     let status = Status::ALL[ci];
                     let cards = &columns[ci];
                     let focused = ci == ui.col;
+                    let drop_here = ui.drop_col == Some(ci);
                     let col_block = Block::default()
                         .borders(Borders::TOP)
                         .border_type(BorderType::Thick)
-                        .border_style(Style::default().fg(if focused {
+                        .border_style(Style::default().fg(if drop_here {
+                            theme::accent()
+                        } else if focused {
                             status_color(status)
                         } else {
                             theme::border()
@@ -521,7 +714,7 @@ pub(crate) fn run_board_overlay(
                             b = b.style(Style::default().bg(theme::surface()));
                         }
                         frame.render_widget(Paragraph::new(Text::from(lines)).block(b), r);
-                        hits.push((r, ci, i));
+                        hits.cards.push((r, ci, i));
                         y += h;
                     }
                 }
@@ -544,6 +737,7 @@ pub(crate) fn run_board_overlay(
                             text.push_str(&format!(" ({})", rm.status));
                         }
                     }
+                    hits.detail = Some(r);
                     frame.render_widget(Clear, r);
                     frame.render_widget(
                         Paragraph::new(text)
@@ -592,27 +786,23 @@ pub(crate) fn run_board_overlay(
             }
             let ev = read()?;
             match ev {
-                Event::Mouse(m) if m.kind == MouseEventKind::Down(MouseButton::Left) => {
-                    let inside = |r: &Rect| {
-                        m.column >= r.x
-                            && m.column < r.x + r.width
-                            && m.row >= r.y
-                            && m.row < r.y + r.height
-                    };
-                    if let Some((_, ci, i)) = hits.iter().find(|(r, _, _)| inside(r)) {
-                        ui.col = *ci;
-                        ui.row = *i;
-                    } else if let Some(ci) = col_rects.iter().position(|r| r.width > 0 && inside(r))
-                    {
-                        ui.col = ci;
+                Event::Mouse(m) => match on_mouse(&mut ui, &hits, &columns, m) {
+                    MouseAct::Nothing => {}
+                    MouseAct::Space => {
+                        if ui.space == Space::Jira && board.jira.is_none() {
+                            ui.message = Some(
+                                "Jira isn't linked yet — close the board and run /board jira <PROJECT-KEY>"
+                                    .into(),
+                            );
+                        }
                     }
-                }
-                Event::Mouse(m) if m.kind == MouseEventKind::ScrollDown => {
-                    ui.row = (ui.row + 1).min(columns[ui.col].len().saturating_sub(1));
-                }
-                Event::Mouse(m) if m.kind == MouseEventKind::ScrollUp => {
-                    ui.row = ui.row.saturating_sub(1);
-                }
+                    MouseAct::Move(key, to) => {
+                        move_card_to(&ws, &key, to, &mut board, &mut ui);
+                        if space == Space::Jira {
+                            kick(state);
+                        }
+                    }
+                },
                 Event::Key(key) if !matches!(key.kind, KeyEventKind::Release) => {
                     ui.message = None;
                     // Typing on the bottom line.
@@ -725,24 +915,9 @@ pub(crate) fn run_board_overlay(
                     let move_card = |step: i32, board: &mut Board, ui: &mut BoardUi| {
                         let Some(c) = &selected else { return };
                         let to = c.status.step(step);
-                        if to == c.status {
-                            return;
+                        if to != c.status {
+                            move_card_to(&ws, &c.key, to, board, ui);
                         }
-                        let key = c.key.clone();
-                        let _ = Board::update(&ws, |b| {
-                            if let Some(c) = b.card_mut(&key) {
-                                c.set_status(to, "you");
-                            }
-                        });
-                        *board = Board::load(&ws);
-                        ui.col = to.index();
-                        ui.row = board
-                            .column(to)
-                            .iter()
-                            .filter(|c| c.space == ui.space)
-                            .position(|c| c.key == key)
-                            .unwrap_or(0);
-                        ui.message = Some(format!("{key} → {}", to.label()));
                     };
                     let step = match key.code {
                         KeyCode::Right if shift => Some(1),
@@ -946,5 +1121,144 @@ mod tests {
         );
         let c = b.card("DCO-1").unwrap().clone();
         assert!(text(&card_lines(&b, &c, 30)).contains("⟳ making ticket"));
+    }
+
+    fn ev(kind: MouseEventKind, column: u16, row: u16) -> crossterm::event::MouseEvent {
+        crossterm::event::MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+
+    /// Two columns (To do at x 0..20, In progress at 20..40), two cards in To do.
+    fn layout() -> (Hits, Vec<Vec<Card>>) {
+        let mut b = Board::new("DCO");
+        for t in ["one", "two"] {
+            b.add(
+                NewCard {
+                    title: t.into(),
+                    ..Default::default()
+                },
+                "",
+            );
+        }
+        let todo = Status::Todo.index();
+        let doing = Status::InProgress.index();
+        let mut columns = vec![Vec::new(); Status::ALL.len()];
+        columns[todo] = b.column(Status::Todo).into_iter().cloned().collect();
+        let mut cols = vec![Rect::default(); Status::ALL.len()];
+        cols[todo] = Rect::new(0, 2, 20, 20);
+        cols[doing] = Rect::new(20, 2, 20, 20);
+        let hits = Hits {
+            cards: vec![
+                (Rect::new(0, 3, 20, 4), todo, 0),
+                (Rect::new(0, 7, 20, 4), todo, 1),
+            ],
+            cols,
+            tabs: vec![
+                (Rect::new(10, 0, 8, 1), Space::Personal),
+                (Rect::new(19, 0, 6, 1), Space::Jira),
+            ],
+            detail: None,
+        };
+        (hits, columns)
+    }
+
+    const DOWN: MouseEventKind = MouseEventKind::Down(MouseButton::Left);
+    const UP: MouseEventKind = MouseEventKind::Up(MouseButton::Left);
+    const DRAG: MouseEventKind = MouseEventKind::Drag(MouseButton::Left);
+
+    #[test]
+    fn clicking_a_tab_switches_space() {
+        let (hits, columns) = layout();
+        let mut ui = BoardUi::default();
+        assert_eq!(
+            on_mouse(&mut ui, &hits, &columns, ev(DOWN, 20, 0)),
+            MouseAct::Space
+        );
+        assert_eq!(ui.space, Space::Jira);
+        on_mouse(&mut ui, &hits, &columns, ev(DOWN, 12, 0));
+        assert_eq!(ui.space, Space::Personal);
+    }
+
+    #[test]
+    fn click_selects_and_a_second_click_shows_the_card() {
+        let (hits, columns) = layout();
+        let mut ui = BoardUi::default();
+        on_mouse(&mut ui, &hits, &columns, ev(DOWN, 5, 8));
+        on_mouse(&mut ui, &hits, &columns, ev(UP, 5, 8));
+        assert_eq!(
+            (ui.col, ui.row, ui.detail),
+            (Status::Todo.index(), 1, false)
+        );
+        on_mouse(&mut ui, &hits, &columns, ev(DOWN, 5, 8));
+        on_mouse(&mut ui, &hits, &columns, ev(UP, 5, 8));
+        assert!(ui.detail);
+        // A click outside the details closes them.
+        let hits = Hits {
+            detail: Some(Rect::new(30, 5, 10, 5)),
+            ..hits
+        };
+        on_mouse(&mut ui, &hits, &columns, ev(DOWN, 1, 1));
+        assert!(!ui.detail);
+    }
+
+    #[test]
+    fn dragging_a_card_to_another_column_moves_it() {
+        let (hits, columns) = layout();
+        let mut ui = BoardUi::default();
+        on_mouse(&mut ui, &hits, &columns, ev(DOWN, 5, 4));
+        on_mouse(&mut ui, &hits, &columns, ev(DRAG, 25, 6));
+        assert_eq!(ui.drop_col, Some(Status::InProgress.index()));
+        let act = on_mouse(&mut ui, &hits, &columns, ev(UP, 25, 6));
+        assert_eq!(act, MouseAct::Move("DCO-1".into(), Status::InProgress));
+        assert_eq!(ui.drop_col, None);
+        // Released in the same column: nothing moves.
+        on_mouse(&mut ui, &hits, &columns, ev(DOWN, 5, 4));
+        assert_eq!(
+            on_mouse(&mut ui, &hits, &columns, ev(UP, 5, 15)),
+            MouseAct::Nothing
+        );
+    }
+
+    #[test]
+    fn the_wheel_scrolls_the_column_under_the_pointer() {
+        let (hits, columns) = layout();
+        let mut ui = BoardUi::default();
+        on_mouse(
+            &mut ui,
+            &hits,
+            &columns,
+            ev(MouseEventKind::ScrollDown, 5, 10),
+        );
+        assert_eq!(ui.row, 1);
+        on_mouse(
+            &mut ui,
+            &hits,
+            &columns,
+            ev(MouseEventKind::ScrollDown, 5, 10),
+        );
+        assert_eq!(ui.row, 1, "stops at the last card");
+        on_mouse(
+            &mut ui,
+            &hits,
+            &columns,
+            ev(MouseEventKind::ScrollUp, 25, 10),
+        );
+        assert_eq!((ui.col, ui.row), (Status::InProgress.index(), 0));
+    }
+
+    #[test]
+    fn the_mouse_leaves_typing_alone() {
+        let (hits, columns) = layout();
+        let mut ui = BoardUi {
+            typing: Some((Typing::NewCard, "half".into())),
+            ..Default::default()
+        };
+        on_mouse(&mut ui, &hits, &columns, ev(DOWN, 25, 6));
+        assert_eq!(ui.col, Status::Todo.index());
+        assert!(ui.typing.is_some());
     }
 }

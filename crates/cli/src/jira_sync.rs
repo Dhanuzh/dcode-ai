@@ -27,6 +27,7 @@ const TRANSITIONS: &str = "getTransitionsForJiraIssue";
 const TRANSITION: &str = "transitionJiraIssue";
 const RESOURCES: &str = "getAccessibleAtlassianResources";
 const ISSUE_TYPES: &str = "getJiraProjectIssueTypesMetadata";
+const USERINFO: &str = "atlassianUserInfo";
 
 /// Calls an MCP server's tools (the real server, or a fake in tests).
 #[async_trait::async_trait]
@@ -269,6 +270,50 @@ pub async fn find_server(
     })
 }
 
+/// What a sync pulls by default: the project's open and recent tickets.
+pub fn project_jql(project: &str) -> String {
+    format!(
+        "project = \"{project}\" AND (statusCategory != Done OR updated >= -14d) ORDER BY updated DESC"
+    )
+}
+
+/// Who's signed in, as Jira would name them in an `assignee` field —
+/// their email if the server gives one, else their display name.
+pub async fn whoami(mcp: &dyn Mcp) -> Result<String, String> {
+    let tools = mcp.tools().await?;
+    let who = mcp
+        .call(&need(&tools, USERINFO)?, json!({}))
+        .await
+        .map_err(|e| {
+            format!(
+                "can't tell who's signed in: {}",
+                e.lines().next().unwrap_or("")
+            )
+        })?;
+    let v: Value = serde_json::from_str(&who).unwrap_or(Value::Null);
+    [
+        "email",
+        "emailAddress",
+        "name",
+        "displayName",
+        "account_id",
+        "accountId",
+    ]
+    .into_iter()
+    .find_map(|k| v.get(k).and_then(Value::as_str))
+    .map(str::to_string)
+    .ok_or_else(|| format!("can't tell who's signed in from: {who}"))
+}
+
+/// Only the project's tickets assigned to `name` (a Jira display name,
+/// email or account id), open or touched in the last two weeks.
+pub fn assignee_jql(project: &str, name: &str) -> String {
+    let name = name.trim().replace('\\', "\\\\").replace('"', "\\\"");
+    format!(
+        "project = \"{project}\" AND assignee = \"{name}\" AND (statusCategory != Done OR updated >= -14d) ORDER BY updated DESC"
+    )
+}
+
 /// Links the board to Jira project `project` (on `site`, or the first site
 /// the account can see).
 pub async fn connect(
@@ -290,7 +335,7 @@ pub async fn connect(
         .find(|s| {
             site.is_some_and(|want| {
                 let want = want.to_ascii_lowercase();
-                ["url", "name", "id"].iter().any(|k| {
+                ["url", "name", "cloudId", "id"].iter().any(|k| {
                     s.get(*k)
                         .and_then(Value::as_str)
                         .is_some_and(|v| v.to_ascii_lowercase().contains(&want))
@@ -299,11 +344,26 @@ pub async fn connect(
         })
         .or_else(|| site.is_none().then(|| sites.first()).flatten())
         .ok_or_else(|| match site {
-            Some(s) => format!("your Atlassian account can't see a site matching `{s}`"),
+            Some(s) => {
+                let seen: Vec<&str> = sites
+                    .iter()
+                    .filter_map(|x| x.get("url").and_then(Value::as_str))
+                    .collect();
+                if seen.is_empty() {
+                    format!("your Atlassian account can't see a site matching `{s}`")
+                } else {
+                    format!(
+                        "your Atlassian account can't see a site matching `{s}` (it sees: {})",
+                        seen.join(", ")
+                    )
+                }
+            }
             None => "your Atlassian account can't see any Jira site (signed in? dcode-ai mcp login <name>)".into(),
         })?;
+    // Atlassian's remote MCP names it `cloudId`; the REST API names it `id`.
     let cloud_id = pick
-        .get("id")
+        .get("cloudId")
+        .or_else(|| pick.get("id"))
         .and_then(Value::as_str)
         .ok_or("the site has no id")?
         .to_string();
@@ -325,6 +385,7 @@ pub async fn connect(
         site: site_url,
         project,
         jql: None,
+        assignee: None,
         last_sync: None,
         last_error: None,
     })
@@ -571,11 +632,9 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
     }
 
     // 3. The project's tickets come in.
-    let jql = link.jql.clone().unwrap_or_else(|| {
-        format!(
-            "project = \"{}\" AND (statusCategory != Done OR updated >= -14d) ORDER BY updated DESC",
-            link.project
-        )
+    let jql = link.jql.clone().unwrap_or_else(|| match &link.assignee {
+        Some(name) => assignee_jql(&link.project, name),
+        None => project_jql(&link.project),
     });
     let found = mcp
         .call(
@@ -810,6 +869,58 @@ mod tests {
     use super::fake::FakeJira;
     use super::*;
     use dcode_ai_common::board::NewCard;
+
+    /// Answers like Atlassian's remote MCP: sites keyed by `cloudId`, no `name`.
+    struct RemoteShape;
+
+    #[async_trait::async_trait]
+    impl Mcp for RemoteShape {
+        async fn tools(&self) -> Result<Vec<String>, String> {
+            Ok(vec![RESOURCES.to_string(), SEARCH.to_string()])
+        }
+        async fn call(&self, tool: &str, args: Value) -> Result<String, String> {
+            match tool {
+                RESOURCES => Ok(r#"{"data":{"resources":[{"cloudId":"c-42","url":"https://karmic-sandbox.atlassian.net","products":[{"id":"jira","access":"read-write"}]}]}}"#.into()),
+                SEARCH => {
+                    assert_eq!(args["cloudId"], "c-42");
+                    Ok(r#"{"issues":[]}"#.into())
+                }
+                _ => Err(format!("unexpected {tool}")),
+            }
+        }
+    }
+
+    #[test]
+    fn the_assignee_filter_uses_the_given_name() {
+        let q = assignee_jql("BSI", " Dhanush D ");
+        assert!(
+            q.starts_with("project = \"BSI\" AND assignee = \"Dhanush D\" AND "),
+            "{q}"
+        );
+        assert!(!q.contains("currentUser"));
+        let q = assignee_jql("BSI", "a\"b");
+        assert!(q.contains(r#"assignee = "a\"b""#), "{q}");
+    }
+
+    #[tokio::test]
+    async fn connect_reads_cloud_id_from_atlassians_remote_mcp() {
+        let link = connect(&RemoteShape, "atlassian", "bsi", None)
+            .await
+            .unwrap();
+        assert_eq!(link.cloud_id, "c-42");
+        assert_eq!(link.project, "BSI");
+        let link = connect(&RemoteShape, "atlassian", "BSI", Some("karmic"))
+            .await
+            .unwrap();
+        assert_eq!(link.site, "https://karmic-sandbox.atlassian.net");
+        let err = connect(&RemoteShape, "atlassian", "BSI", Some("Solution-Internal"))
+            .await
+            .unwrap_err();
+        assert!(
+            err.contains("it sees: https://karmic-sandbox.atlassian.net"),
+            "{err}"
+        );
+    }
 
     #[tokio::test]
     async fn personal_cards_stay_here_and_jira_cards_sync_both_ways() {

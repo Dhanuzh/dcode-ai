@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.54 — 2026-11-04
+
+### New
+- **Only your Jira tickets**: `/board jira assignee <name or email>` (or
+  `me`) keeps only one person's tickets on the board; `/board jira assignee
+  all` brings back the whole project. The header shows whose tickets these
+  are. Cards you haven't sent yet stay when the filter changes.
+- **The board with the mouse**: click Personal / Jira to switch, click a card
+  to select it (again to see it in full), drag a card to another column to
+  move it (and its Jira ticket), scroll the column under the pointer, click
+  outside the details to close them.
+
+### Fixed
+- Linking Jira through Atlassian's remote MCP server: the site's id is read
+  from `cloudId` (the server's name for it). A site that doesn't match now
+  lists the sites your account can see.
+
 ## 1.0.53 — 2026-11-04
 
 ### New

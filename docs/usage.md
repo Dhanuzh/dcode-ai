@@ -313,6 +313,15 @@ It syncs every minute and right away after a change; `s` in the board or
 `/board sync` syncs now, and the header shows when it last did (or what
 went wrong). `/board jira` shows the link, `/board jira off` unlinks.
 
+`/board jira assignee <name or email>` keeps only that person's tickets
+(`me` is whoever is signed in to the MCP server; `all` goes back to the
+whole project). Changing it clears the tickets pulled before and syncs
+again; cards still waiting to go to Jira stay.
+
+With the mouse: click Personal / Jira to switch, click a card to select it
+and again to see it in full, drag a card onto another column to move it,
+scroll the column under the pointer.
+
 ## Scratch folder
 
 Each session has a folder for what the agent makes along the way:
