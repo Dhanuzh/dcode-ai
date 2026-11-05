@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.0.55 — 2026-11-05
+
+### Fixed
+- **"Only my tickets" stays on**: a dcode-ai session from an older version
+  still open in the same folder could rewrite the board without the
+  assignee filter, and every ticket in the project came back. The board now
+  keeps fields it doesn't know when it saves, a ticket that isn't yours is
+  dropped even if the server's search lets it through, and narrowing the
+  filter clears the tickets pulled before. Close older sessions, then
+  `/board jira <PROJECT> me` once.
+- **Making tickets on Atlassian's v2 server**: the issue type goes as
+  `issueType`; fields the project requires (a "Task Type" choice, planned
+  start and end dates, an estimate) are filled from `/board jira field`,
+  your latest ticket of that type, or today's date — the card's notes say
+  which. With a filter on your account the new ticket is assigned to you
+  (so it doesn't vanish at the next sync). A refusal the server doesn't
+  flag as an error is shown as one, and a create whose answer names no
+  ticket is never sent again (no duplicates).
+- **Moving tickets on the v2 server**: transitions and issue types are read
+  through `executeRead` when the server has no tool of its own for them;
+  the compact view's named status category picks the right column.
+- A create Jira keeps refusing is retried once a minute, not every few
+  seconds.
+
+### New
+- Renaming a Jira card or changing its description updates the ticket.
+- `/board jira <PROJECT> me` (or `assignee <name>`) links and filters at
+  once; `/board jira field <name> = <value>` sets a value new tickets get.
+
 ## 1.0.54 — 2026-11-04
 
 ### New

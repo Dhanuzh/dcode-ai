@@ -88,6 +88,46 @@ impl Repl {
                         }
                         out.println("[board] unlinked from Jira — the Jira cards stay on the board, nothing syncs any more");
                     }
+                    "jira" if matches!(arg.split_whitespace().next(), Some("field" | "fields")) => {
+                        // `/board jira field Task Type = Build and Development`
+                        // sets a value new tickets get for a field the project
+                        // requires; `… field Task Type =` forgets it.
+                        let rest = arg.split_once(char::is_whitespace).map(|(_, r)| r.trim()).unwrap_or("");
+                        let Some(mut link) = Board::load(&ws).jira else {
+                            out.eprintln("[board] link Jira first: /board jira <PROJECT-KEY>");
+                            return Ok(true);
+                        };
+                        if rest.is_empty() {
+                            if link.fields.is_empty() {
+                                out.println("[board] no field values set — new tickets take the project's required fields from your latest ticket of the same type (dates from today). Set one: /board jira field <name> = <value>");
+                            } else {
+                                for (k, v) in &link.fields {
+                                    out.println(&format!("[board] {k} = {v}"));
+                                }
+                            }
+                            return Ok(true);
+                        }
+                        let Some((name, value)) = rest.split_once('=') else {
+                            out.eprintln("[board] /board jira field <name> = <value> (e.g. Task Type = Build and Development)");
+                            return Ok(true);
+                        };
+                        let (name, value) = (name.trim().trim_matches('"').to_string(), value.trim().trim_matches('"').to_string());
+                        if value.is_empty() {
+                            link.fields.remove(&name);
+                        } else {
+                            link.fields.insert(name.clone(), value.clone());
+                        }
+                        let saved = Board::update(&ws, |b| {
+                            if let Some(l) = b.jira.as_mut() {
+                                l.fields = link.fields.clone();
+                            }
+                        });
+                        match saved {
+                            Err(e) => out.eprintln(&format!("[board] could not save: {e}")),
+                            Ok(()) if value.is_empty() => out.println(&format!("[board] new tickets no longer set {name}")),
+                            Ok(()) => out.println(&format!("[board] new Jira tickets get {name} = {value}")),
+                        }
+                    }
                     "jira" if matches!(
                         arg.split_whitespace().next(),
                         Some("assignee" | "for" | "all")
@@ -151,7 +191,28 @@ impl Repl {
                     "jira" if !arg.is_empty() => {
                         let mut words = arg.split_whitespace();
                         let project = words.next().unwrap_or_default().to_string();
-                        let site = words.next().map(str::to_string);
+                        let rest: Vec<&str> = words.collect();
+                        let mut site = None;
+                        let mut assignee_spec: Option<String> = None;
+                        let mut i = 0;
+                        while i < rest.len() {
+                            match rest[i] {
+                                "me" => {
+                                    assignee_spec = Some("me".into());
+                                    i += 1;
+                                }
+                                "assignee" | "for" => {
+                                    assignee_spec = Some(rest.get(i + 1).copied().unwrap_or("").to_string());
+                                    i += 2;
+                                }
+                                other => {
+                                    if site.is_none() {
+                                        site = Some(other.to_string());
+                                    }
+                                    i += 1;
+                                }
+                            }
+                        }
                         out.println(&format!("[board] linking Jira project {project}…"));
                         let manager = self.runtime.mcp_manager().clone();
                         let servers = self.runtime.config().mcp.servers.clone();
@@ -164,19 +225,39 @@ impl Repl {
                         };
                         let mcp = dcode_ai_cli::jira_sync::ServerMcp::new(manager.clone(), server.clone());
                         match dcode_ai_cli::jira_sync::connect(&mcp, &server.name, &project, site.as_deref()).await {
-                            Ok(link) => {
+                            Ok(mut link) => {
+                                let assignee = match assignee_spec.as_deref() {
+                                    None => None,
+                                    Some("me") => match dcode_ai_cli::jira_sync::whoami(&mcp).await {
+                                        Ok(me) => Some(me),
+                                        Err(e) => {
+                                            out.eprintln(&format!("[board] {e} — linking without a filter; try /board jira assignee me later"));
+                                            None
+                                        }
+                                    },
+                                    Some("") => {
+                                        out.eprintln("[board] whose tickets? /board jira <PROJECT> assignee <name>");
+                                        None
+                                    }
+                                    Some(n) => Some(n.to_string()),
+                                };
+                                link.assignee = assignee.clone();
                                 let (p, s) = (link.project.clone(), link.site.clone());
                                 if let Err(e) = Board::update(&ws, |b| b.jira = Some(link)) {
                                     out.eprintln(&format!("[board] could not save: {e}"));
                                     return Ok(true);
                                 }
-                                out.println(&format!("[board] linked to Jira {p} ({s}) through `{}` — its tickets are coming in", server.name));
+                                out.println(&format!(
+                                    "[board] linked to Jira {p} ({s}){} through `{}` — its tickets are coming in",
+                                    assignee.map(|n| format!(", only tickets assigned to {n}")).unwrap_or_default(),
+                                    server.name
+                                ));
                                 match dcode_ai_cli::jira_sync::sync(&mcp, &ws).await {
                                     Ok(r) => out.println(&format!("[board] {}", r.summary())),
                                     Err(e) => out.eprintln(&format!("[board] {e}")),
                                 }
                                 self.start_board_sync(&out);
-                                out.println("[board] /board shows them under Jira (t switches between Personal and Jira) · /board jira assignee <name> keeps only one person's tickets");
+                                out.println("[board] /board shows them under Jira (t switches between Personal and Jira) · /board jira assignee <name>|me keeps only one person's tickets");
                             }
                             Err(e) => out.eprintln(&format!("[board] {e}")),
                         }
@@ -185,14 +266,14 @@ impl Repl {
                         let b = Board::load(&ws);
                         match &b.jira {
                             Some(l) => out.println(&format!(
-                                "[board] linked to Jira {} ({}){} through `{}` · last sync {} · /board sync · /board jira assignee <name>|all · /board jira off",
+                                "[board] linked to Jira {} ({}){} through `{}` · last sync {} · /board sync · /board jira assignee <name>|all · /board jira field <name> = <value> · /board jira off",
                                 l.project,
                                 l.site,
                                 l.assignee.as_deref().map(|n| format!(", only tickets assigned to {n}")).unwrap_or_default(),
                                 l.server,
                                 l.last_sync.map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_else(|| "never".into())
                             )),
-                            None => out.println("[board] /board jira <PROJECT-KEY> [site] links the board's Jira space to a project, through Atlassian's MCP server (dcode-ai mcp add atlassian --transport http https://mcp.atlassian.com/v1/mcp, then dcode-ai mcp login atlassian)"),
+                            None => out.println("[board] /board jira <PROJECT-KEY> [site] [me|assignee <name>] links the board's Jira space to a project, through Atlassian's MCP server (dcode-ai mcp add atlassian --transport http https://mcp.atlassian.com/v1/mcp, then dcode-ai mcp login atlassian)"),
                         }
                     }
                     "sync" => {

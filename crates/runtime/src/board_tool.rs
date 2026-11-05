@@ -306,6 +306,9 @@ by you: leave it in review for a person."
                 changed.push("note".into());
             }
             card.updated = chrono::Utc::now();
+            if s(&input, "title").is_some() || s(&input, "description").is_some() {
+                card.edited();
+            }
             if changed.is_empty() {
                 return Err("nothing to change".into());
             }

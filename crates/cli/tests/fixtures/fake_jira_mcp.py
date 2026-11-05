@@ -33,7 +33,7 @@ def call(name, a):
     if name == "transitionJiraIssue":
         for i in issues:
             if i["key"] == a["issueIdOrKey"]:
-                i["status"], i["cat"] = ("Done", "done") if a["transition"]["id"] == "41" else ("In Progress", "indeterminate")
+                i["status"], i["cat"] = ("Done", "done") if a["transitionId"] == "41" else ("In Progress", "indeterminate")
         return {"content": [{"type": "text", "text": "ok"}]}
     return {"content": [{"type": "text", "text": "unknown tool"}], "isError": True}
 

@@ -42,6 +42,8 @@ enum Typing {
     NewCard,
     Rename(String),
     Blockers(String),
+    Describe(String),
+    Assignee(String),
 }
 
 /// The board view's state while it's open.
@@ -590,6 +592,10 @@ pub(crate) fn run_board_overlay(
                 (Some((Typing::Blockers(k), buf)), _, _) => {
                     format!(" {k} is blocked by (keys or numbers, comma separated): {buf}▏")
                 }
+                (Some((Typing::Describe(k), buf)), _, _) => format!(" {k} description: {buf}▏"),
+                (Some((Typing::Assignee(k), buf)), _, _) => {
+                    format!(" {k} assignee (blank clears it): {buf}▏")
+                }
                 (None, _, Some(k)) => {
                     format!(" Delete {k}? x again deletes, any other key keeps it")
                 }
@@ -737,6 +743,9 @@ pub(crate) fn run_board_overlay(
                             text.push_str(&format!(" ({})", rm.status));
                         }
                     }
+                    text.push_str(
+                        "\n\n ←→ status · p priority · e description · u assignee · o open in Jira · q close",
+                    );
                     hits.detail = Some(r);
                     frame.render_widget(Clear, r);
                     frame.render_widget(
@@ -843,7 +852,7 @@ pub(crate) fn run_board_overlay(
                                         Board::update(&ws, |b| {
                                             if let Some(c) = b.card_mut(k) {
                                                 c.title = text.chars().take(200).collect();
-                                                c.updated = chrono::Utc::now();
+                                                c.edited();
                                             }
                                         })
                                         .map(|_| format!("renamed {k}"))
@@ -866,6 +875,26 @@ pub(crate) fn run_board_overlay(
                                             format!("{k} isn't blocked")
                                         } else {
                                             format!("{k} is blocked by {}", keys.join(", "))
+                                        }
+                                    }),
+                                    Typing::Describe(k) => Board::update(&ws, |b| {
+                                        if let Some(c) = b.card_mut(k) {
+                                            c.description = text.chars().take(4000).collect();
+                                            c.edited();
+                                        }
+                                    })
+                                    .map(|_| format!("{k}: description updated")),
+                                    Typing::Assignee(k) => Board::update(&ws, |b| {
+                                        if let Some(c) = b.card_mut(k) {
+                                            c.assignee = (!text.is_empty()).then(|| text.clone());
+                                            c.updated = chrono::Utc::now();
+                                        }
+                                    })
+                                    .map(|_| {
+                                        if text.is_empty() {
+                                            format!("{k}: assignee cleared")
+                                        } else {
+                                            format!("{k}: assigned to {text}")
                                         }
                                     }),
                                     _ => Ok(String::new()),
@@ -905,8 +934,58 @@ pub(crate) fn run_board_overlay(
                     }
                     if ui.detail {
                         match key.code {
-                            KeyCode::Esc | KeyCode::Enter | KeyCode::Char('q') => ui.detail = false,
+                            KeyCode::Esc | KeyCode::Char('q') => ui.detail = false,
                             KeyCode::Char('o') => open_remote(&selected, &mut ui),
+                            KeyCode::Char('e') => {
+                                if let Some(c) = &selected {
+                                    ui.typing = Some((
+                                        Typing::Describe(c.key.clone()),
+                                        c.description.clone(),
+                                    ));
+                                }
+                            }
+                            KeyCode::Char('u') => {
+                                if let Some(c) = &selected {
+                                    ui.typing = Some((
+                                        Typing::Assignee(c.key.clone()),
+                                        c.assignee.clone().unwrap_or_default(),
+                                    ));
+                                }
+                            }
+                            KeyCode::Char('p') => {
+                                if let Some(c) = &selected {
+                                    let key = c.key.clone();
+                                    let _ = Board::update(&ws, |b| {
+                                        if let Some(c) = b.card_mut(&key) {
+                                            c.priority = c.priority.next();
+                                            c.updated = chrono::Utc::now();
+                                        }
+                                    });
+                                    board = Board::load(&ws);
+                                }
+                            }
+                            KeyCode::Right | KeyCode::Char('>') | KeyCode::Char('.') => {
+                                if let Some(c) = &selected {
+                                    let to = c.status.step(1);
+                                    if to != c.status {
+                                        move_card_to(&ws, &c.key, to, &mut board, &mut ui);
+                                        if space == Space::Jira {
+                                            kick(state);
+                                        }
+                                    }
+                                }
+                            }
+                            KeyCode::Left | KeyCode::Char('<') | KeyCode::Char(',') => {
+                                if let Some(c) = &selected {
+                                    let to = c.status.step(-1);
+                                    if to != c.status {
+                                        move_card_to(&ws, &c.key, to, &mut board, &mut ui);
+                                        if space == Space::Jira {
+                                            kick(state);
+                                        }
+                                    }
+                                }
+                            }
                             _ => {}
                         }
                         continue;

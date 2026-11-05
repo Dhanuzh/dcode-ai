@@ -304,16 +304,21 @@ the site `acme.atlassian.net`). dcode-ai calls the server's tools itself
   categories decide the column; a status named like "review" or "QA" goes
   to Review);
 - a new card in the Jira space becomes a ticket (type Task, or the
-  project's first type) and takes its key (`SHOP-42`);
+  project's first type) and takes its key (`SHOP-42`). Fields the project
+  requires (a "Task Type", planned dates, an estimate) are filled in: what
+  you set with `/board jira field <name> = <value>`, else what your latest
+  ticket of that type has, dates from today; the card's notes say what was
+  used. With an assignee filter on your account the ticket is yours;
 - moving a card moves its ticket (the workflow transition that lands in
   that column);
+- renaming a card or changing its description updates the ticket;
 - removing a Jira card only takes it off the board; the ticket stays.
 
 It syncs every minute and right away after a change; `s` in the board or
 `/board sync` syncs now, and the header shows when it last did (or what
 went wrong). `/board jira` shows the link, `/board jira off` unlinks.
 
-`/board jira assignee <name or email>` keeps only that person's tickets
+`/board jira SHOP me` links and filters in one go. `/board jira assignee <name or email>` keeps only that person's tickets
 (`me` is whoever is signed in to the MCP server; `all` goes back to the
 whole project). Changing it clears the tickets pulled before and syncs
 again; cards still waiting to go to Jira stay.

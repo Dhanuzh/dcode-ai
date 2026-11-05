@@ -154,6 +154,10 @@ pub struct Card {
     /// Changed here and not sent to the tracker yet (a new card, a move).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push: Option<Push>,
+    /// Its title or description changed here and the ticket doesn't have
+    /// it yet.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub push_fields: bool,
     pub created: DateTime<Utc>,
     pub updated: DateTime<Utc>,
 }
@@ -197,6 +201,12 @@ pub struct Remote {
     pub status: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub issue_type: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reporter: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub due_date: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// What's waiting to go to the tracker.
@@ -230,6 +240,14 @@ pub struct JiraLink {
     pub last_sync: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Values for fields the project requires on a new ticket, by field
+    /// name or id (`Task Type` → `Build and Development`); the rest are
+    /// taken from your latest ticket of the same type.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub fields: std::collections::BTreeMap<String, String>,
+    /// See [`Board::extra`].
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -251,7 +269,15 @@ pub struct Board {
     /// Synced with a Jira project, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jira: Option<JiraLink>,
+    /// Fields this version doesn't know (a newer dcode-ai wrote them), kept
+    /// so saving here doesn't drop them.
+    #[serde(flatten)]
+    pub extra: Extra,
 }
+
+/// Unknown fields, carried through a load and save untouched — several
+/// dcode-ai sessions (maybe different versions) share one board file.
+pub type Extra = serde_json::Map<String, serde_json::Value>;
 
 fn is_personal(s: &Space) -> bool {
     *s == Space::Personal
@@ -377,6 +403,7 @@ impl Board {
             milestones: Vec::new(),
             cards: Vec::new(),
             jira: None,
+            extra: Extra::new(),
         }
     }
 
@@ -462,6 +489,7 @@ impl Board {
             space: Space::Jira,
             remote: Some(remote),
             push: None,
+            push_fields: false,
             created: now,
             updated: now,
         });
@@ -469,7 +497,10 @@ impl Board {
 
     /// Cards waiting to go to the tracker.
     pub fn pending(&self) -> usize {
-        self.cards.iter().filter(|c| c.push.is_some()).count()
+        self.cards
+            .iter()
+            .filter(|c| c.push.is_some() || c.push_fields)
+            .count()
     }
 
     /// Forgets the Jira tickets a sync brought in that have nothing waiting
@@ -479,7 +510,7 @@ impl Board {
     pub fn drop_synced(&mut self) -> usize {
         let before = self.cards.len();
         self.cards
-            .retain(|c| !(c.space == Space::Jira && c.remote.is_some() && c.push.is_none()));
+            .retain(|c| !(c.space == Space::Jira && c.remote.is_some() && c.unsent_nothing()));
         before - self.cards.len()
     }
 
@@ -525,6 +556,7 @@ impl Board {
             remote: None,
             // A Jira card gets its ticket at the next sync.
             push: (new.space == Space::Jira).then_some(Push::Create),
+            push_fields: false,
             created: now,
             updated: now,
         };
@@ -666,6 +698,17 @@ impl Board {
         if c.gate {
             out.push_str("\nreview gate: a person moves it to done");
         }
+        if let Some(rm) = &c.remote {
+            if !rm.reporter.is_empty() {
+                out.push_str(&format!("\nreporter: {}", rm.reporter));
+            }
+            if !rm.due_date.is_empty() {
+                out.push_str(&format!("\ndue: {}", rm.due_date));
+            }
+            if !rm.labels.is_empty() {
+                out.push_str(&format!("\nlabels: {}", rm.labels.join(", ")));
+            }
+        }
         if !c.description.is_empty() {
             out.push_str(&format!("\n\n{}", c.description));
         }
@@ -690,6 +733,20 @@ impl Card {
             text: text.trim().chars().take(2000).collect(),
         });
         self.updated = now;
+    }
+
+    /// Nothing here waits to go to the tracker.
+    pub fn unsent_nothing(&self) -> bool {
+        self.push.is_none() && !self.push_fields
+    }
+
+    /// Its title or description changed: the ticket gets them next sync
+    /// (a card still to be made goes with them anyway).
+    pub fn edited(&mut self) {
+        self.updated = Utc::now();
+        if self.remote.is_some() && self.push != Some(Push::Create) {
+            self.push_fields = true;
+        }
     }
 
     /// Move it; a note says who did.
@@ -731,6 +788,9 @@ mod tests {
             url: String::new(),
             status: "To Do".into(),
             issue_type: String::new(),
+            reporter: String::new(),
+            due_date: String::new(),
+            labels: Vec::new(),
         };
         b.insert_remote(
             remote("BSI-1"),
@@ -810,6 +870,23 @@ mod tests {
         assert!(text.contains("Launch") && text.contains("review gate"));
         assert!(b.remove("DCO-1"));
         assert!(b.card("DCO-2").unwrap().blocked_by.is_empty());
+    }
+
+    #[test]
+    fn fields_from_another_version_survive_a_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path();
+        let json = r#"{"prefix":"BSI","next":1,"cards":[],"future":7,
+            "jira":{"server":"a","cloud_id":"c","project":"BSI","assignee":"me","filter2":"x"}}"#;
+        let path = board_path(ws);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, json).unwrap();
+        Board::update(ws, |b| b.next = 2).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["future"], 7);
+        assert_eq!(v["jira"]["filter2"], "x");
+        assert_eq!(v["jira"]["assignee"], "me");
     }
 
     #[test]
