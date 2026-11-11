@@ -9,6 +9,7 @@ pub mod bridge;
 pub mod btw;
 pub mod busy_indicator;
 pub mod call_cmd;
+pub mod card_view;
 pub mod choice;
 pub mod clipboard;
 pub mod composer;

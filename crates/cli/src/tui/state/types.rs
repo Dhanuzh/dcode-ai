@@ -342,6 +342,9 @@ pub struct TuiSessionState {
     pub shell_stopped_at: Option<std::time::Instant>,
     /// Chat between people and the shared to-do list.
     pub team: crate::tui::team::Team,
+    /// People can be here: `/invite` is open, you joined someone, or you
+    /// opened the chat. Until then the team tab stays out of the way.
+    pub team_live: bool,
     /// The files tab's project explorer.
     pub explorer: crate::tui::explorer::Explorer,
     /// Typing in the team tab's chat box (keys go there, not the composer).

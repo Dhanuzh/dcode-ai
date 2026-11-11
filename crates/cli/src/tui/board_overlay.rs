@@ -867,52 +867,55 @@ pub(crate) fn run_board_overlay(
                 if ui.detail
                     && let Some(c) = &selected
                 {
-                    let w = (area.width * 3 / 5).max(44).min(area.width);
-                    let h = (area.height * 3 / 4).max(12).min(rows[1].height);
+                    let w = (area.width * 4 / 5).clamp(44.min(area.width), 120.min(area.width));
+                    let h = (rows[1].height * 9 / 10).max(12).min(rows[1].height);
                     let r = Rect::new(
                         area.width.saturating_sub(w) / 2,
                         rows[1].y + rows[1].height.saturating_sub(h) / 2,
                         w,
                         h,
                     );
-                    let mut text = board.render_card(c);
-                    text.push_str(&format!("\n\nspace: {}", c.space.label()));
-                    if let Some(rm) = &c.remote {
-                        text.push_str(&format!("\nJira: {} {}", rm.key, rm.url));
-                        if !rm.status.is_empty() {
-                            text.push_str(&format!(" ({})", rm.status));
-                        }
-                    }
-                    text.push_str(
-                        "\n\n ←→ status · t transition · c comment · C internal note · R reply · w log time · a attachments · ↑↓ scroll · p priority · e description · u assignee · o open in Jira · q close",
-                    );
                     hits.detail = Some(r);
                     frame.render_widget(Clear, r);
+                    let block = Block::default()
+                        .borders(Borders::ALL)
+                        .border_type(BorderType::Rounded)
+                        .border_style(Style::default().fg(theme::accent()))
+                        .style(Style::default().bg(theme::bg()))
+                        .title(Span::styled(
+                            format!(" {} ", c.shown_key()),
+                            Style::default()
+                                .fg(theme::accent())
+                                .add_modifier(Modifier::BOLD),
+                        ))
+                        .padding(Padding::new(2, 2, 1, 0));
+                    let inner = block.inner(r);
+                    frame.render_widget(block, r);
+                    // The body scrolls; the key hints stay at the bottom.
+                    let parts =
+                        Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(inner);
+                    let lines =
+                        crate::tui::card_view::card_view_lines(&board, c, parts[0].width as usize);
+                    let max_scroll = (lines.len() as u16).saturating_sub(parts[0].height);
+                    ui.detail_scroll = ui.detail_scroll.min(max_scroll);
+                    let more = ui.detail_scroll < max_scroll;
                     frame.render_widget(
-                        Paragraph::new(text)
-                            .wrap(Wrap { trim: false })
+                        Paragraph::new(Text::from(lines))
                             .scroll((ui.detail_scroll, 0))
-                            .style(Style::default().fg(theme::text()).bg(theme::bg()))
-                            .block(
-                                Block::default()
-                                    .borders(Borders::ALL)
-                                    .border_type(BorderType::Rounded)
-                                    .border_style(Style::default().fg(theme::accent()))
-                                    .title(Span::styled(
-                                        format!(
-                                            " {} · Esc closes{} ",
-                                            c.shown_key(),
-                                            if c.remote.is_some() {
-                                                " · o opens in Jira"
-                                            } else {
-                                                ""
-                                            }
-                                        ),
-                                        Style::default().fg(theme::accent()),
-                                    ))
-                                    .padding(Padding::uniform(1)),
-                            ),
-                        r,
+                            .style(Style::default().fg(theme::text()).bg(theme::bg())),
+                        parts[0],
+                    );
+                    let mut hint = crate::tui::card_view::hints(
+                        c.remote.is_some(),
+                        parts[1].width.saturating_sub(4) as usize,
+                    );
+                    if more {
+                        hint.spans
+                            .push(Span::styled("↓ more", Style::default().fg(theme::warn())));
+                    }
+                    frame.render_widget(
+                        Paragraph::new(hint).style(Style::default().bg(theme::bg())),
+                        parts[1],
                     );
                 }
                 frame.render_widget(

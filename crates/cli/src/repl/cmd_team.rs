@@ -212,6 +212,12 @@ impl Repl {
                 let words: Vec<&str> = rest.split_whitespace().collect();
                 if words.first() == Some(&"stop") {
                     // The call goes on for people joined on this machine.
+                    if let ReplOutput::Tui(st) = &out
+                        && let Ok(mut g) = st.lock()
+                    {
+                        // The tab stays while there's chat to read.
+                        g.team_live = false;
+                    }
                     if self.invite.take().is_some() {
                         out.println("[invite] stopped — the line no longer works and guests were disconnected");
                     } else {
@@ -286,6 +292,11 @@ impl Repl {
                 let via_relay = relay.is_some();
                 match hosted {
                     Ok(inv) => {
+                        // People can join now: the team tab (chat, to-dos)
+                        // shows from here on.
+                        if let Ok(mut g) = st.lock() {
+                            g.team_live = true;
+                        }
                         let line = inv.command();
                         let _ = crate::tui::clipboard::copy_to_clipboard(&line);
                         // The browser link (and its QR code) first, so the

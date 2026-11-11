@@ -354,11 +354,25 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
         RailTab::Team => "team",
         RailTab::Scratch => "scr",
     };
-    let tabs: Vec<(RailTab, &str)> = if full > rect.width as usize {
-        tabs.iter().map(|(t, _)| (*t, short(*t))).collect()
-    } else {
-        tabs.to_vec()
-    };
+    // The team tab only once people can be here (`/invite`, joined).
+    let team = g.team_visible();
+    let tabs: Vec<(RailTab, &str)> = tabs
+        .iter()
+        .filter(|(t, _)| *t != RailTab::Team || team)
+        .map(|(t, l)| {
+            (
+                *t,
+                if full > rect.width as usize {
+                    short(*t)
+                } else {
+                    *l
+                },
+            )
+        })
+        .collect();
+    if !team && g.rail_tab == RailTab::Team {
+        g.rail_tab = RailTab::Context;
+    }
     let mut spans = vec![Span::raw(" ")];
     let mut x = rect.x + 2;
     for (i, (tab, label)) in tabs.iter().enumerate() {

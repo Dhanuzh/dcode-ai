@@ -175,6 +175,8 @@ pub async fn run(guest: Guest, theme: Option<&str>) -> anyhow::Result<()> {
     )));
     if let Ok(mut g) = state.lock() {
         g.mouse_capture_on = true;
+        // A guest is with people from the start.
+        g.team_live = true;
         g.workspace_display = if host.is_empty() {
             project.clone()
         } else {

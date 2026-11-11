@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.58 — 2026-11-11
+
+### Changed
+- **A card, beautifully**: Enter on a board card opens a redesigned view —
+  key and type with status and priority as chips, the title in bold, a
+  two-column grid of who and when (assignee, reporter, created, updated,
+  due, parent, branch), then sections: activity, Details (the ticket's
+  fields, aligned), Description (headings, `•` bullets, quotes), Linked,
+  Attachments, Comments (author and time), Move (the workflow's moves as
+  numbered chips), Waiting to sync, and History. Bigger panel; the key
+  hints stay pinned at the bottom with a `↓ more` cue while you scroll.
+  Jira's `[CHART] Time in Status` plumbing is no longer shown or stored.
+- **Team chat only once people can join**: the dashboard's team tab (and
+  Alt+6, and tab cycling) stays hidden until `/invite` opens a session,
+  you join someone, or you open `/chat`; after `/invite stop` it goes
+  again unless there's chat to read.
+
 ## 1.0.57 — 2026-11-11
 
 ### Fixed

@@ -122,6 +122,7 @@ impl TuiSessionState {
             office: Default::default(),
             shell_stopped_at: None,
             team: Default::default(),
+            team_live: false,
             explorer: Default::default(),
             event_time: None,
             team_typing: false,
@@ -1529,6 +1530,11 @@ impl TuiSessionState {
         }
     }
 
+    /// The team tab shows once people can be here (or have chatted).
+    pub fn team_visible(&self) -> bool {
+        self.team_live || !self.team.chat.is_empty()
+    }
+
     /// Next/previous right-rail tab, keeping keyboard focus on the rail.
     pub fn cycle_rail_tab(&mut self, step: i32) {
         const TABS: [RailTab; 7] = [
@@ -1540,8 +1546,12 @@ impl TuiSessionState {
             RailTab::Team,
             RailTab::Scratch,
         ];
-        let i = TABS.iter().position(|t| *t == self.rail_tab).unwrap_or(0) as i32;
-        self.rail_tab = TABS[(i + step).rem_euclid(TABS.len() as i32) as usize];
+        let tabs: Vec<RailTab> = TABS
+            .into_iter()
+            .filter(|t| *t != RailTab::Team || self.team_visible())
+            .collect();
+        let i = tabs.iter().position(|t| *t == self.rail_tab).unwrap_or(0) as i32;
+        self.rail_tab = tabs[(i + step).rem_euclid(tabs.len() as i32) as usize];
         if self.rail_tab == RailTab::Changes {
             self.diff_review.refresh(&self.workspace_root);
         }
@@ -1550,11 +1560,18 @@ impl TuiSessionState {
 
     /// The dashboard's team tab, ready to type in its chat box.
     pub fn open_team_chat(&mut self) {
+        self.team_live = true;
         self.view_mode = crate::tui::state::ViewMode::Dashboard;
         self.select_rail_tab(RailTab::Team);
     }
 
     pub fn select_rail_tab(&mut self, tab: RailTab) {
+        // No team tab before anyone can join.
+        let tab = if tab == RailTab::Team && !self.team_visible() {
+            RailTab::Context
+        } else {
+            tab
+        };
         self.rail_tab = tab;
         self.team_typing = tab == RailTab::Team;
         if tab == RailTab::Changes {

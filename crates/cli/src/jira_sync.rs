@@ -2307,6 +2307,10 @@ struct Details {
 /// Custom fields not worth a line: board plumbing and service-desk timers.
 fn noise_field(name: &str) -> bool {
     let n = name.to_ascii_lowercase();
+    // `[CHART] Time in Status` and friends: Jira's internal encodings.
+    if n.starts_with('[') {
+        return true;
+    }
     [
         "rank",
         "issue color",
@@ -2404,7 +2408,9 @@ async fn details(mcp: &dyn Mcp, tools: &[String], link: &JiraLink, key: &str) ->
             if noise_field(n) {
                 continue;
             }
-            if let Some(t) = c.get("value").and_then(field_text) {
+            if let Some(t) = c.get("value").and_then(field_text)
+                && !t.contains("_*:*")
+            {
                 d.fields.push((n.clone(), t));
             }
         }
