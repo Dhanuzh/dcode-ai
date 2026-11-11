@@ -125,7 +125,7 @@ pub fn merge_stacked_summaries(messages: &[Message]) -> Option<Vec<Message>> {
 /// triggers, compared with the provider's measured prompt size.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ContextBudget {
-    /// The model's input window (200k working window, or 1M for `[1m]`).
+    /// The window worked within (the model's whole window unless capped).
     pub window: usize,
     /// Room kept for the reply.
     pub output_reserve: usize,
@@ -133,6 +133,12 @@ pub struct ContextBudget {
     pub buffer: usize,
     /// `[memory.context] auto_compact_at` (% of the window); `None` = automatic.
     pub compact_at_percent: Option<u8>,
+    /// `compact_at_tokens`: compact here even when the window is bigger, so
+    /// a turn (which re-sends the context) stays cheap.
+    pub soft_compact: Option<usize>,
+    /// `turn_headroom_tokens`: inside a turn, room to grow past the soft
+    /// point before compacting mid-work.
+    pub turn_headroom: Option<usize>,
 }
 
 impl ContextBudget {
@@ -143,12 +149,21 @@ impl ContextBudget {
             output_reserve: max_output.min(32_000).min(window / 4),
             buffer: (window * 75 / 1000).clamp(13_000.min(window / 5), window / 5),
             compact_at_percent: compact_at_percent.filter(|p| (10..=95).contains(p)),
+            soft_compact: None,
+            turn_headroom: None,
         }
     }
 
-    /// Compact once the prompt reaches this: the window minus the reply and
-    /// the summary request, kept between 60% and 90% of the window.
-    pub fn compact_at(&self) -> usize {
+    /// With a soft compaction point (`0` = none) and room inside a turn.
+    pub fn with_soft_limits(mut self, compact_at_tokens: usize, turn_headroom: usize) -> Self {
+        self.soft_compact = (compact_at_tokens > 0).then(|| compact_at_tokens.max(20_000));
+        self.turn_headroom = (turn_headroom > 0).then_some(turn_headroom);
+        self
+    }
+
+    /// Where the window itself says to compact: the window minus the reply
+    /// and the summary request, kept between 60% and 90% of the window.
+    fn window_compact_at(&self) -> usize {
         match self.compact_at_percent {
             Some(p) => self.window * p as usize / 100,
             None => (self.window - self.output_reserve - self.buffer)
@@ -156,9 +171,33 @@ impl ContextBudget {
         }
     }
 
+    /// Compact once the prompt reaches this (between turns): the window's
+    /// point, or the soft one when that's earlier.
+    pub fn compact_at(&self) -> usize {
+        let w = self.window_compact_at();
+        self.soft_compact.map_or(w, |s| s.min(w))
+    }
+
     /// Clear old tool output (no model call) from here.
     pub fn prune_at(&self) -> usize {
-        self.compact_at().saturating_sub(self.window / 10)
+        let c = self.compact_at();
+        c.saturating_sub((c / 6).min(self.window / 10))
+    }
+
+    /// Inside a turn (a tool loop): compact only here, past the soft point
+    /// up to the turn's headroom — never past the window's own point.
+    pub fn mid_turn_compact_at(&self) -> usize {
+        let c = self.compact_at();
+        match self.turn_headroom {
+            Some(h) => h.max(c).min(self.window_compact_at()),
+            None => c,
+        }
+    }
+
+    /// Clear old tool output inside a turn from here.
+    pub fn mid_turn_prune_at(&self) -> usize {
+        let c = self.mid_turn_compact_at();
+        c.saturating_sub((c / 6).min(self.window / 10))
     }
 
     /// Hard ceiling for the agent's last-resort trimming: the window minus
@@ -169,7 +208,7 @@ impl ContextBudget {
 
     /// What a compaction aims to leave.
     pub fn target_after(&self) -> usize {
-        self.window * 35 / 100
+        (self.window * 35 / 100).min(self.compact_at() * 46 / 100)
     }
 
     pub fn percent(&self, tokens: usize) -> u8 {
@@ -945,6 +984,31 @@ mod tests {
             ContextBudget::new(200_000, 64_000, Some(70)).compact_at(),
             140_000
         );
+    }
+
+    #[test]
+    fn a_big_window_compacts_at_the_soft_point() {
+        // 1M window, compact at 160k, let a turn run to 400k.
+        let b = ContextBudget::new(1_000_000, 128_000, None).with_soft_limits(160_000, 400_000);
+        assert_eq!(b.compact_at(), 160_000);
+        assert!(
+            b.prune_at() < 160_000 && b.prune_at() >= 130_000,
+            "{}",
+            b.prune_at()
+        );
+        assert_eq!(b.mid_turn_compact_at(), 400_000);
+        assert!(b.mid_turn_prune_at() < 400_000);
+        assert!(b.target_after() <= 80_000);
+        // The hard ceiling is still the whole window.
+        assert!(b.hard_limit() > 800_000);
+        // A small window: its own point wins over a later soft one.
+        let small = ContextBudget::new(128_000, 32_000, None).with_soft_limits(160_000, 400_000);
+        assert!(small.compact_at() < 128_000);
+        assert_eq!(small.mid_turn_compact_at(), small.compact_at());
+        // No soft point: as before.
+        let plain = ContextBudget::new(200_000, 64_000, None).with_soft_limits(0, 0);
+        assert_eq!(plain.compact_at(), 200_000 - 32_000 - 15_000);
+        assert_eq!(plain.prune_at(), plain.compact_at() - 20_000);
     }
 
     fn tool_round(i: usize, words: usize) -> [Message; 2] {

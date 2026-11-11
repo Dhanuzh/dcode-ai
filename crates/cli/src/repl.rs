@@ -1406,6 +1406,16 @@ impl Repl {
         if let Ok(mut g) = tui_state.lock() {
             g.board_syncer = syncer;
         }
+        // Once a day: the Jira day at a glance (no model call).
+        if let Some(lines) = daily_jira_summary(self.runtime.workspace_root())
+            && let Ok(mut g) = tui_state.lock()
+        {
+            g.push_block(DisplayBlock::System(format!(
+                "{}\n(/board jira today shows it again · /board jira today off stops it)",
+                lines.join("\n")
+            )));
+            g.touch_transcript();
+        }
         if let Ok(mut g) = tui_state.lock() {
             g.mcp_server_count = self
                 .runtime
@@ -1623,6 +1633,7 @@ impl Repl {
 
         let steer_inbox = self.runtime.steer_handle();
         if let Ok(mut g) = tui_state.lock() {
+            g.agents_registry = Some(self.runtime.background_agents());
             g.steer_inbox = Some(steer_inbox.clone());
         }
         let mut pending_cmds: VecDeque<TuiCmd> = VecDeque::new();
@@ -3057,6 +3068,33 @@ pub struct ContextBreakdown {
     pub window: u64,
     pub compact_at: u64,
     pub prune_at: u64,
+    /// Inside a turn, compaction waits until here.
+    pub turn_at: u64,
+    /// The model's whole window (the session may work within less).
+    pub full_window: u64,
+}
+
+/// The Jira summary, the first time today a session starts on this board
+/// (and the board wants it). Remembers the day in the board folder.
+fn daily_jira_summary(ws: &std::path::Path) -> Option<Vec<String>> {
+    use dcode_ai_common::board::Board;
+    let board = Board::load(ws);
+    let link = board.jira.as_ref()?;
+    if !link.daily_summary {
+        return None;
+    }
+    let today = chrono::Local::now().date_naive();
+    let marker = dcode_ai_common::board::board_path(ws).with_file_name("today-shown");
+    if std::fs::read_to_string(&marker)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        == Some(&today.to_string())
+    {
+        return None;
+    }
+    let _ = std::fs::write(&marker, today.to_string());
+    Some(dcode_ai_cli::jira_sync::today_lines(&board, today))
 }
 
 fn context_usage_lines(
@@ -3073,7 +3111,9 @@ fn context_usage_lines(
     let window = if b.window > 0 { b.window } else { window };
     let window = window.max(used).max(1);
     let fmt = |n: u64| -> String {
-        if n >= 1_000 {
+        if n >= 1_000_000 {
+            format!("{:.1}M", n as f64 / 1_000_000.0)
+        } else if n >= 1_000 {
             format!("{:.1}k", n as f64 / 1_000.0)
         } else {
             n.to_string()
@@ -3145,6 +3185,23 @@ fn context_usage_lines(
             fmt(b.compact_at),
             pct(b.compact_at)
         ));
+        if b.turn_at > b.compact_at {
+            lines.push(format!(
+                "  Inside a turn it may grow to {} before compacting mid-work",
+                fmt(b.turn_at)
+            ));
+        }
+    }
+    if b.full_window > 0 {
+        lines.push(format!(
+            "  Window {}{} · /context window full|200k|<tokens>|default",
+            fmt(window),
+            if b.full_window > window {
+                format!(" of the model's {}", fmt(b.full_window))
+            } else {
+                " (the model's whole window)".into()
+            }
+        ));
     }
     lines.push(format!(
         "{message_count} messages · estimates (~4 chars/token) · /compact frees space now"
@@ -3197,6 +3254,41 @@ mod context_usage_tests {
                 .any(|l| l.contains("Provider extra") && l.contains("50.0k"))
         );
         assert!(lines.iter().any(|l| l.contains("Fixed part 10.0k")));
+    }
+
+    #[test]
+    fn a_1m_window_shows_its_soft_points() {
+        let b = ContextBreakdown {
+            conversation: 50_000,
+            window: 1_000_000,
+            full_window: 1_000_000,
+            compact_at: 160_000,
+            prune_at: 133_000,
+            turn_at: 400_000,
+            ..Default::default()
+        };
+        let lines = context_usage_lines("claude-opus-5-5", b, 1_000_000, 4);
+        assert!(lines[0].contains("50.0k / 1.0M"), "{lines:?}");
+        assert!(lines.iter().any(|l| l.contains("Auto-compact at 160.0k")));
+        assert!(lines.iter().any(|l| l.contains("grow to 400.0k")));
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Window 1.0M (the model's whole window)"))
+        );
+        // Capped: says of how much.
+        let capped = ContextBreakdown {
+            window: 200_000,
+            full_window: 1_000_000,
+            ..b
+        };
+        let lines = context_usage_lines("claude-opus-5-5", capped, 200_000, 4);
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("Window 200.0k of the model's 1.0M")),
+            "{lines:?}"
+        );
     }
 }
 

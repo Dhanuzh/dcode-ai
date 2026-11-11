@@ -1,5 +1,60 @@
 # Changelog
 
+## 1.0.59 — 2026-11-11
+
+### Fewer credits
+- **The prompt cache stays intact**: the tool list (which the provider
+  caches first) now only grows at its end — tools `tool_search` loads are
+  appended in the order loaded, `tool_search` keeps its definition and
+  place once sent, and MCP servers that connect late go behind
+  `tool_search` (announced once) instead of changing the list. Each of
+  these used to make the next request a full-price cache miss.
+- **Cache-miss notice**: when a turn reads little from the cache after
+  turns that read a lot, a note says so and why (tools changed, compacted,
+  expired while idle, prompt changed).
+- **`/cost today|week|month`**: tokens, cache-hit rate and cost by day and
+  model, sub-agents counted separately. Each turn's split (fresh, cache
+  reads/writes, output, cost, session, parent) is now kept in
+  `usage.jsonl`.
+- **Sub-agent budgets**: `[harness] subagent_max_tokens = 2000000` and
+  `subagent_max_minutes = 20` (0 = no limit); past either a sub-agent is
+  stopped and returns what it had. `x` in the sub-agents list stops a
+  background agent.
+
+### Jira
+- **`/board jira doctor`**: a live, read-only check of the link — the
+  server and its tools, who you are, the site, the project, what the pull
+  finds, and a ticket's workflow — each problem with how to fix it.
+- **`/board jira today`**: your Jira day from the board, no model call —
+  new activity, overdue and due today, waiting on you, in progress,
+  blocked, new. Shown once a day when a session starts
+  (`/board jira today off` stops that).
+
+### Changed
+- **The whole context window, at today's cost**: dcode-ai no longer caps
+  every model at 200k. The window is the model's own (1M for Claude 5.x on
+  the Anthropic API), while compaction still happens early —
+  `[memory.context] compact_at_tokens = 160000` — so each turn re-sends
+  about as much as before. Inside a tool loop the context may grow to
+  `turn_headroom_tokens` (400k) instead of compacting mid-work; it's
+  compacted at the next turn or while idle. `max_window = "200k"` (or a
+  number, or per model under `[memory.context.model_windows]`) caps it;
+  `/context window full|200k|<n>|default` changes it for the session.
+  `/context` shows the window, the compaction points and the model's full
+  window; the footer gauge shows `% of 1.0M`.
+
+### Fixed
+- **Copilot limits come from Copilot**: the window for a Copilot model is
+  what this account's Copilot catalog accepts (e.g. 200k for
+  `claude-sonnet-5`, 272k for `gpt-5.3-codex`), not the model maker's
+  figure — requests could exceed it before.
+- Switching models mid-session no longer drops the context budget to a
+  fixed 128k window.
+- `model[1m]` works: the marker is stripped before the request (the
+  `claude` binary still gets it), and the session uses the whole window.
+- Summaries use the cheap model only when what it must read fits its own
+  window.
+
 ## 1.0.58 — 2026-11-11
 
 ### Changed

@@ -384,25 +384,41 @@ pub fn detect_context_window(model: &str) -> usize {
     128_000
 }
 
-/// Context Claude Code works within by default; 1M only for `…[1m]` models.
-pub const DEFAULT_WORKING_WINDOW: usize = 200_000;
-
-/// The window to work within: the model's, capped at 200k unless the model
-/// id asks for more (`claude-sonnet-5[1m]`). A huge window lets every step
-/// re-read a huge context, which is what uses up a plan; Claude Code caps it
-/// the same way.
-pub fn working_context_window(model: &str, detected: usize) -> usize {
+/// The window to work within: the model's whole window, or less when
+/// `cap` says so (`[memory.context] max_window`, a per-model entry, or
+/// `/context window`). A `…[1m]` model id always gets the whole window.
+/// How early compaction happens — what keeps turns cheap — is the budget's
+/// job (`compact_at_tokens`), not the window's.
+pub fn working_context_window(model: &str, detected: usize, cap: Option<usize>) -> usize {
     if model.to_ascii_lowercase().contains("[1m]") {
-        detected
-    } else {
-        detected.min(DEFAULT_WORKING_WINDOW)
+        return detected;
+    }
+    cap.map_or(detected, |c| c.min(detected))
+}
+
+/// The window this session works within, set when its budget is made, so
+/// the gauges show the same number the compaction uses.
+static SESSION_WINDOW: std::sync::Mutex<Option<(String, usize)>> = std::sync::Mutex::new(None);
+
+pub fn set_session_window(model: &str, window: usize) {
+    if let Ok(mut w) = SESSION_WINDOW.lock() {
+        *w = Some((model.to_string(), window));
     }
 }
 
-/// [`working_context_window`] for a model name (UI gauges, `/context`).
+/// The window for `model` (UI gauges, `/context`): this session's when it's
+/// the session's model, else the model's whole window.
 pub fn effective_context_window(model: &str) -> usize {
-    working_context_window(model, detect_context_window(model))
+    if let Ok(w) = SESSION_WINDOW.lock()
+        && let Some((m, n)) = w.as_ref()
+        && m == model
+    {
+        return *n;
+    }
+    detect_context_window(model)
 }
+
+pub use dcode_ai_core::provider::api_model_id;
 
 /// Detect the max output tokens for a given model name.
 pub fn detect_max_output_tokens(model: &str) -> usize {
@@ -547,15 +563,39 @@ mod working_window_tests {
     use super::*;
 
     #[test]
-    fn big_windows_are_capped_unless_asked_for() {
+    fn the_whole_window_unless_capped() {
+        // Claude 5.x: the whole 1M by default.
         assert_eq!(
-            working_context_window("claude-sonnet-5", 1_000_000),
-            200_000
-        );
-        assert_eq!(
-            working_context_window("claude-sonnet-5[1m]", 1_000_000),
+            working_context_window("claude-sonnet-5", 1_000_000, None),
             1_000_000
         );
-        assert_eq!(working_context_window("gpt-4o", 128_000), 128_000);
+        assert_eq!(
+            working_context_window("claude-sonnet-5", 1_000_000, Some(200_000)),
+            200_000
+        );
+        // `[1m]` always gets it all.
+        assert_eq!(
+            working_context_window("claude-sonnet-5[1m]", 1_000_000, Some(200_000)),
+            1_000_000
+        );
+        // A cap never raises a small window.
+        assert_eq!(
+            working_context_window("gpt-4o", 128_000, Some(400_000)),
+            128_000
+        );
+    }
+
+    #[test]
+    fn the_1m_marker_is_not_sent_to_apis() {
+        assert_eq!(api_model_id("claude-opus-5-5[1m]"), "claude-opus-5-5");
+        assert_eq!(api_model_id("claude-opus-5-5[1M]"), "claude-opus-5-5");
+        assert_eq!(api_model_id("gpt-5.3-codex"), "gpt-5.3-codex");
+    }
+
+    #[test]
+    fn the_session_window_drives_the_gauges() {
+        set_session_window("claude-test-window-x", 160_000);
+        assert_eq!(effective_context_window("claude-test-window-x"), 160_000);
+        assert_eq!(effective_context_window("claude-opus-5-5"), 1_000_000);
     }
 }

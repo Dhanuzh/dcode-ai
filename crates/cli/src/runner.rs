@@ -248,7 +248,20 @@ impl SessionRuntime {
         b.window = budget.window as u64;
         b.compact_at = budget.compact_at() as u64;
         b.prune_at = budget.prune_at() as u64;
+        b.turn_at = budget.mid_turn_compact_at() as u64;
+        b.full_window =
+            dcode_ai_runtime::model_limits::detect_context_window(&self.supervisor.model) as u64;
         b
+    }
+
+    /// The session's background sub-agents.
+    pub fn background_agents(&self) -> dcode_ai_core::tools::spawn_subagent::BackgroundAgents {
+        self.supervisor.background_agents()
+    }
+
+    /// `/context window full|200k|<n>|default` for this session.
+    pub fn set_window_override(&mut self, w: Option<dcode_ai_common::config::WindowSetting>) {
+        self.supervisor.set_window_override(w);
     }
 
     /// Where the `user_index_from_end`-th user message (0 = most recent) of

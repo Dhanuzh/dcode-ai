@@ -415,6 +415,25 @@ need the result now; otherwise a <task-notification> arrives when it ends."
     }
 }
 
+/// Stops a running background sub-agent (`agent_kill`, or the user from the
+/// TUI). Returns whether the agent exists, and what happened in words.
+pub fn stop_agent(registry: &BackgroundAgents, id: &str, why: &str) -> (bool, String) {
+    let mut map = registry.lock().unwrap_or_else(|e| e.into_inner());
+    match map.get_mut(id) {
+        Some(r) if r.status == "running" => {
+            if let Some(a) = r.abort.take() {
+                a.abort();
+            }
+            r.status = "stopped".into();
+            r.finished = Some(Instant::now());
+            r.output = why.to_string();
+            (true, format!("Agent {id} stopped."))
+        }
+        Some(r) => (true, format!("Agent {id} already {}.", r.status)),
+        None => (false, format!("no agent `{id}`")),
+    }
+}
+
 /// `agent_kill`: stop a running sub-agent.
 pub struct AgentKillTool {
     registry: BackgroundAgents,
@@ -446,20 +465,7 @@ impl ToolExecutor for AgentKillTool {
             .unwrap_or("")
             .trim()
             .to_string();
-        let mut map = self.registry.lock().unwrap_or_else(|e| e.into_inner());
-        let (success, text) = match map.get_mut(&id) {
-            Some(r) if r.status == "running" => {
-                if let Some(a) = r.abort.take() {
-                    a.abort();
-                }
-                r.status = "stopped".into();
-                r.finished = Some(Instant::now());
-                r.output = "Stopped before it finished.".into();
-                (true, format!("Agent {id} stopped."))
-            }
-            Some(r) => (true, format!("Agent {id} already {}.", r.status)),
-            None => (false, format!("no agent `{id}`")),
-        };
+        let (success, text) = stop_agent(&self.registry, &id, "Stopped before it finished.");
         ToolResult {
             call_id: call.id.clone(),
             success,

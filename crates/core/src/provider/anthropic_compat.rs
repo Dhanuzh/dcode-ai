@@ -128,7 +128,7 @@ pub fn anthropic_request_body_with(
     };
 
     let mut body = json!({
-        "model": model,
+        "model": crate::provider::api_model_id(model),
         "max_tokens": max_tokens,
         "messages": anthropic_messages,
         "stream": true,

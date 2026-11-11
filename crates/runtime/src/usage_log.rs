@@ -8,13 +8,170 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 /// One finished turn.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct TurnUsage {
     pub at: DateTime<Utc>,
     pub workspace: String,
     pub model: String,
     /// Every token processed: input, cache reads and writes, output.
     pub tokens: u64,
+    /// The split, when known (lines from older versions have only `tokens`).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub input: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub output: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_read: u64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cache_write: u64,
+    /// At API list prices.
+    #[serde(default, skip_serializing_if = "is_zero_f")]
+    pub cost_usd: f64,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub session: String,
+    /// The parent session, for a sub-agent's turn.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent: String,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
+}
+
+fn is_zero_f(n: &f64) -> bool {
+    *n == 0.0
+}
+
+/// `/cost today|week|month`: tokens, cache hits and cost for the period, by
+/// day and model, with sub-agents counted separately.
+pub fn cost_lines(entries: &[TurnUsage], today: NaiveDate, days: i64) -> Vec<String> {
+    let since = today - Duration::days(days - 1);
+    let picked: Vec<&TurnUsage> = entries
+        .iter()
+        .filter(|e| {
+            let d = e.at.with_timezone(&Local).date_naive();
+            d >= since && d <= today
+        })
+        .collect();
+    let period = match days {
+        1 => "today".to_string(),
+        7 => "the last 7 days".to_string(),
+        n => format!("the last {n} days"),
+    };
+    if picked.is_empty() {
+        return vec![format!("No turns recorded {period}.")];
+    }
+    #[derive(Default)]
+    struct Sum {
+        turns: u32,
+        tokens: u64,
+        input: u64,
+        output: u64,
+        read: u64,
+        write: u64,
+        cost: f64,
+        split: bool,
+    }
+    impl Sum {
+        fn add(&mut self, e: &TurnUsage) {
+            self.turns += 1;
+            self.tokens += e.tokens;
+            self.input += e.input;
+            self.output += e.output;
+            self.read += e.cache_read;
+            self.write += e.cache_write;
+            self.cost += e.cost_usd;
+            self.split |= e.input + e.cache_read + e.cache_write > 0;
+        }
+        fn hit(&self) -> Option<u64> {
+            (self.read * 100).checked_div(self.input + self.read + self.write)
+        }
+    }
+    let mut all = Sum::default();
+    let mut agents = Sum::default();
+    let mut by_model: BTreeMap<String, Sum> = BTreeMap::new();
+    let mut by_day: BTreeMap<NaiveDate, Sum> = BTreeMap::new();
+    for e in &picked {
+        all.add(e);
+        if !e.parent.is_empty() {
+            agents.add(e);
+        }
+        by_model.entry(e.model.clone()).or_default().add(e);
+        by_day
+            .entry(e.at.with_timezone(&Local).date_naive())
+            .or_default()
+            .add(e);
+    }
+    let money = |c: f64| {
+        if c > 0.0 {
+            format!("  ~${c:.2}")
+        } else {
+            String::new()
+        }
+    };
+    let hit = |s: &Sum| s.hit().map(|h| format!("  cache {h}%")).unwrap_or_default();
+    let mut lines = vec![
+        format!(
+            "Usage {period}: {} tokens in {} turns{}{}",
+            fmt_tokens(all.tokens),
+            all.turns,
+            hit(&all),
+            money(all.cost)
+        ),
+        String::new(),
+    ];
+    if all.split {
+        lines.push(format!(
+            "  fresh input {:>8} · cache reads {:>8} · cache writes {:>8} · output {:>8}",
+            fmt_tokens(all.input),
+            fmt_tokens(all.read),
+            fmt_tokens(all.write),
+            fmt_tokens(all.output)
+        ));
+        if let Some(h) = all.hit()
+            && h < 50
+        {
+            lines.push(format!(
+                "  ⚠ only {h}% of input came from the cache — long idle gaps, model switches and changing tools re-send everything at full price"
+            ));
+        }
+        lines.push(String::new());
+    }
+    if by_day.len() > 1 {
+        lines.push("By day:".into());
+        for (d, s) in &by_day {
+            lines.push(format!(
+                "  {} {:>8}{}{}",
+                d.format("%a %d %b"),
+                fmt_tokens(s.tokens),
+                hit(s),
+                money(s.cost)
+            ));
+        }
+        lines.push(String::new());
+    }
+    lines.push("By model:".into());
+    let mut models: Vec<(&String, &Sum)> = by_model.iter().collect();
+    models.sort_by_key(|(_, s)| std::cmp::Reverse(s.tokens));
+    for (m, s) in models {
+        lines.push(format!(
+            "  {m:<28} {:>8}{}{}",
+            fmt_tokens(s.tokens),
+            hit(s),
+            money(s.cost)
+        ));
+    }
+    if agents.turns > 0 {
+        lines.push(String::new());
+        lines.push(format!(
+            "Sub-agents: {} tokens in {} runs ({}% of the total){}",
+            fmt_tokens(agents.tokens),
+            agents.turns,
+            (agents.tokens * 100).checked_div(all.tokens).unwrap_or(0),
+            money(agents.cost)
+        ));
+    }
+    lines
 }
 
 /// The log is cut back to this many lines when it grows past twice that.
@@ -146,6 +303,7 @@ mod tests {
             workspace: ws.into(),
             model: "m".into(),
             tokens,
+            ..Default::default()
         }
     }
 
@@ -183,5 +341,53 @@ mod tests {
         let loaded = load(&path);
         assert_eq!(loaded.len(), 2);
         assert_eq!(loaded[1].tokens, 20);
+    }
+
+    #[test]
+    fn cost_shows_cache_hits_money_and_sub_agents() {
+        let t = |model: &str, read: u64, fresh: u64, parent: &str| TurnUsage {
+            at: Utc::now(),
+            model: model.into(),
+            tokens: read + fresh + 1_000,
+            input: fresh,
+            cache_read: read,
+            output: 1_000,
+            cost_usd: 0.25,
+            parent: parent.into(),
+            ..Default::default()
+        };
+        let entries = [
+            t("claude-opus-5-5", 90_000, 10_000, ""),
+            t("claude-opus-5-5", 80_000, 20_000, ""),
+            t("claude-haiku-5-5", 0, 50_000, "s1"),
+        ];
+        let lines = cost_lines(&entries, Local::now().date_naive(), 1);
+        assert!(
+            lines[0].starts_with("Usage today: 253.0k tokens in 3 turns"),
+            "{lines:?}"
+        );
+        assert!(
+            lines[0].contains("cache 68%") && lines[0].contains("~$0.75"),
+            "{lines:?}"
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.contains("claude-opus-5-5") && l.contains("cache 85%"))
+        );
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.starts_with("Sub-agents: 51.0k tokens in 1 runs"))
+        );
+        // Old lines (tokens only) still count, without a split.
+        let old = [TurnUsage {
+            at: Utc::now(),
+            tokens: 5_000,
+            model: "m".into(),
+            ..Default::default()
+        }];
+        let lines = cost_lines(&old, Local::now().date_naive(), 7);
+        assert!(lines[0].contains("5.0k tokens in 1 turns"), "{lines:?}");
     }
 }

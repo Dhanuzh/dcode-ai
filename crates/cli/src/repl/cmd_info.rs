@@ -192,6 +192,32 @@ impl Repl {
                     }
                 }
             }
+            "/context" if rest.trim_start().starts_with("window") => {
+                let arg = rest.trim_start().trim_start_matches("window").trim();
+                let setting = match arg {
+                    "" => None,
+                    "default" | "reset" | "config" => Some(None),
+                    a => dcode_ai_common::config::WindowSetting::parse(a).map(Some),
+                };
+                match setting {
+                    None => out.eprintln(
+                        "usage: /context window full|200k|<tokens>|default — full: the model's whole window (no early compaction); a number: work within it; default: back to [memory.context]",
+                    ),
+                    Some(w) => {
+                        let label = match &w {
+                            None => "default ([memory.context])".to_string(),
+                            Some(s) if s.cap().is_none() => "the model's whole window, no early compaction".to_string(),
+                            Some(s) => format!("{} tokens", s.cap().unwrap_or(0)),
+                        };
+                        self.runtime.set_window_override(w);
+                        let b = self.runtime.context_breakdown();
+                        out.println(&format!(
+                            "[context] window for this session: {label} — window {} · compacts at {}",
+                            b.window, b.compact_at
+                        ));
+                    }
+                }
+            }
             "/context" => {
                 let lines = context_usage_lines(
                     self.runtime.model(),
@@ -345,6 +371,32 @@ impl Repl {
                     out.println("[transcript] full-screen view — q to close");
                 } else {
                     out.println("[transcript] available in TUI mode");
+                }
+            }
+            "/cost" | "/usage"
+                if matches!(rest.trim(), "today" | "day" | "week" | "month" | "7" | "30") =>
+            {
+                let days = match rest.trim() {
+                    "today" | "day" => 1,
+                    "week" | "7" => 7,
+                    _ => 30,
+                };
+                let history = dcode_ai_runtime::usage_log::log_path()
+                    .map(|p| dcode_ai_runtime::usage_log::load(&p))
+                    .unwrap_or_default();
+                let lines = dcode_ai_runtime::usage_log::cost_lines(
+                    &history,
+                    chrono::Local::now().date_naive(),
+                    days,
+                );
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        g.open_info_modal("usage", lines);
+                    }
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
                 }
             }
             "/cost" | "/usage" => {

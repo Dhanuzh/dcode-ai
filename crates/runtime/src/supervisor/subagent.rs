@@ -809,16 +809,67 @@ pub async fn spawn_child_session(
     let log_path = handle.event_log_path.clone();
 
     let parent_forward = event_tx.clone().map(|tx| (child_id.clone(), tx));
-    let fanout = event_rx.map(|rx| spawn_event_fanout(rx, log_path, None, None, parent_forward));
+    // Budgets (`[harness] subagent_max_tokens` / `subagent_max_minutes`):
+    // past either, the child is cancelled and returns what it has.
+    let cancel = sup.cancel_handle();
+    let stopped: Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let max_tokens = cfg.config.harness.subagent_max_tokens;
+    let on_event: Option<super::EventFanoutCallback> = (max_tokens > 0).then(|| {
+        let (cancel, stopped) = (cancel.clone(), stopped.clone());
+        Box::new(move |env: &dcode_ai_common::event::EventEnvelope| {
+            if let AgentEvent::CostUpdated {
+                input_tokens,
+                output_tokens,
+                ..
+            } = &env.event
+                && input_tokens + output_tokens > max_tokens
+                && !cancel.swap(true, std::sync::atomic::Ordering::SeqCst)
+                && let Ok(mut s) = stopped.lock()
+            {
+                *s = Some(format!("its token budget ({max_tokens} tokens) ran out"));
+            }
+        }) as super::EventFanoutCallback
+    });
+    let fanout =
+        event_rx.map(|rx| spawn_event_fanout(rx, log_path, None, on_event, parent_forward));
+    let minutes = cfg.config.harness.subagent_max_minutes;
+    let timer = (minutes > 0).then(|| {
+        let (cancel, stopped) = (cancel.clone(), stopped.clone());
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_secs(minutes * 60)).await;
+            if !cancel.swap(true, std::sync::atomic::Ordering::SeqCst)
+                && let Ok(mut s) = stopped.lock()
+            {
+                *s = Some(format!("its time limit ({minutes} min) ran out"));
+            }
+        })
+    });
 
     let result = sup.run_turn(&context_prompt).await;
+    if let Some(t) = timer {
+        t.abort();
+    }
+    let budget_stop = stopped.lock().ok().and_then(|s| s.clone());
 
-    let (status, output) = match result {
-        Ok(text) => {
+    let (status, output) = match (result, budget_stop) {
+        (r, Some(why)) => {
+            sup.finish(EndReason::Error).await;
+            let got = match r {
+                Ok(text) if !text.trim().is_empty() => format!("\n\nWhat it had so far:\n{text}"),
+                _ => String::new(),
+            };
+            (
+                "stopped".to_string(),
+                format!(
+                    "Stopped: {why} (raise [harness] subagent_max_tokens / subagent_max_minutes, 0 = no limit).{got}"
+                ),
+            )
+        }
+        (Ok(text), None) => {
             sup.finish(EndReason::Completed).await;
             ("completed".to_string(), text)
         }
-        Err(e) => {
+        (Err(e), None) => {
             sup.finish(EndReason::Error).await;
             ("error".to_string(), e.to_string())
         }

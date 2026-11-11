@@ -41,7 +41,7 @@ pub use self::subagent::*;
 
 pub type ApprovalPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<ApprovalVerdict>>>>;
 pub type QuestionPendingMap = Arc<Mutex<HashMap<String, oneshot::Sender<QuestionSelection>>>>;
-type EventFanoutCallback = Box<dyn Fn(&EventEnvelope) + Send>;
+pub(crate) type EventFanoutCallback = Box<dyn Fn(&EventEnvelope) + Send>;
 
 /// Reusable runtime supervisor that owns session lifecycle, IPC, event fanout,
 /// and command handling.
@@ -91,6 +91,15 @@ pub struct Supervisor {
     /// The session's `/goal`, shared with the `update_goal` tool.
     goal: crate::goal::GoalCell,
     background_default: Arc<std::sync::atomic::AtomicBool>,
+    /// `/context window …` for this session (over the config).
+    window_override: Option<dcode_ai_common::config::WindowSetting>,
+    /// Tools that became available late (behind `tool_search`), to mention
+    /// with the next prompt.
+    late_tools_note: Option<String>,
+    /// The last turn's prompt-cache hit rate (%), to spot a cache break.
+    last_cache_hit: Option<u8>,
+    /// Background sub-agents, so the user can stop one from the TUI.
+    background_agents: dcode_ai_core::tools::spawn_subagent::BackgroundAgents,
 }
 
 type McpLoad = tokio::task::JoinHandle<(
@@ -101,6 +110,26 @@ type McpLoad = tokio::task::JoinHandle<(
 /// How long session start waits for MCP servers before going on without the
 /// slow ones (they keep connecting in the background).
 const MCP_STARTUP_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// One line telling the model about tools that arrived late: they're
+/// behind `tool_search`, grouped by server.
+fn late_tools_note(names: &[String]) -> String {
+    let mut servers: Vec<String> = names
+        .iter()
+        .filter_map(|n| {
+            n.strip_prefix("mcp__")?
+                .split("__")
+                .next()
+                .map(str::to_string)
+        })
+        .collect();
+    servers.dedup();
+    format!(
+        "(Note from dcode-ai: more tools are available now from {} — load them with tool_search: {}.)",
+        servers.join(", "),
+        names.join(", ")
+    )
+}
 
 /// Register loaded MCP tools, deferring them behind `tool_search` when there
 /// are many.
@@ -445,7 +474,7 @@ impl Supervisor {
         agent.set_system_prompt(system_prompt);
 
         let context_manager =
-            Self::make_context_manager(&config, &config.model.default_model).await;
+            Self::make_context_manager(&config, &config.model.default_model, None);
         // Give the agent the same input budget compaction uses, so a long
         // tool-heavy turn trims older tool outputs mid-turn instead of
         // ballooning the prompt (which slows every model call to a crawl).
@@ -504,6 +533,10 @@ impl Supervisor {
             pending_mcp,
             goal,
             background_default,
+            window_override: None,
+            late_tools_note: None,
+            last_cache_hit: None,
+            background_agents: background_agents.clone(),
         };
         sup.attach_checkpoints();
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
@@ -645,7 +678,7 @@ impl Supervisor {
         sup.spawn_reason = loaded.meta.spawn_reason;
         sup.session_summary = loaded.meta.session_summary;
         sup.orchestration = loaded.meta.orchestration;
-        sup.context_manager = Self::make_context_manager(&sup.config, &sup.model).await;
+        sup.context_manager = Self::make_context_manager(&sup.config, &sup.model, None);
         sup.agent
             .set_context_token_limit(sup.context_manager.budget().hard_limit());
 
@@ -756,6 +789,22 @@ impl Supervisor {
         }
         if let Some(handle) = self.pending_mcp.take() {
             match handle.await {
+                Ok((loaded, errors)) if self.agent.tools.list_sent() => {
+                    // The model has seen the tool list: adding tools to it
+                    // would make the next request a full prompt-cache miss.
+                    // They go behind `tool_search` instead, announced once.
+                    for (server, error) in errors {
+                        tracing::warn!("MCP server `{server}` failed: {error}");
+                    }
+                    for tool in loaded {
+                        self.agent.tools.register(tool);
+                    }
+                    let names = self.agent.tools.defer_late(|n| n.starts_with("mcp__"));
+                    if !names.is_empty() {
+                        tracing::info!("{} late MCP tool(s) behind tool_search", names.len());
+                        self.late_tools_note = Some(late_tools_note(&names));
+                    }
+                }
                 Ok((loaded, errors)) => register_mcp_tools(
                     &mut self.agent.tools,
                     loaded,
@@ -764,6 +813,58 @@ impl Supervisor {
                 ),
                 Err(e) => tracing::warn!("MCP load task failed: {e}"),
             }
+        }
+    }
+
+    /// The tool list as the provider sees it, hashed (a change to it makes
+    /// the next request a prompt-cache miss).
+    fn tool_list_fingerprint(&self) -> String {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(&self.agent.tools.definitions())
+            .unwrap_or_default()
+            .hash(&mut h);
+        format!("{:x}", h.finish())
+    }
+
+    /// After a turn: if it read little from the prompt cache while earlier
+    /// turns read a lot, say so — and why, when we can tell — since that turn
+    /// was billed at full price.
+    async fn note_cache_break(
+        &mut self,
+        turn: &crate::usage_log::TurnUsage,
+        tools_before: &str,
+        idle_before: Option<std::time::Duration>,
+    ) {
+        let input = turn.input + turn.cache_read + turn.cache_write;
+        if input == 0 {
+            return;
+        }
+        let hit = (turn.cache_read * 100 / input) as u8;
+        let was = self.last_cache_hit.replace(hit);
+        let broke =
+            was.is_some_and(|w| w >= 70) && hit < 30 && turn.input + turn.cache_write > 20_000;
+        if !broke {
+            return;
+        }
+        let why = if self.tool_list_fingerprint() != tools_before {
+            "the tool list changed (tools were loaded or connected)"
+        } else if self.agent.compacted_this_turn().is_some() {
+            "the conversation was compacted (expected)"
+        } else if idle_before.is_some_and(|d| d >= std::time::Duration::from_secs(300)) {
+            "the cache expired while the session was idle"
+        } else {
+            "the start of the prompt changed (model, system prompt or settings)"
+        };
+        if let Some(tx) = self.agent.event_sender() {
+            let _ = tx
+                .send(AgentEvent::Notice {
+                    message: format!(
+                        "Prompt cache missed this turn ({hit}% cached, ~{}k at full price): {why}.",
+                        (turn.input + turn.cache_write) / 1000
+                    ),
+                })
+                .await;
         }
     }
 
@@ -778,6 +879,14 @@ impl Supervisor {
         attachments: &[dcode_ai_common::message::ImageAttachment],
     ) -> Result<String, ProviderError> {
         self.adopt_ready_mcp().await;
+        let with_note;
+        let prompt = match self.late_tools_note.take() {
+            Some(note) => {
+                with_note = format!("{prompt}\n\n{note}");
+                with_note.as_str()
+            }
+            None => prompt,
+        };
         if let Some(hooks) = &self.hooks
             && let Err(reason) = hooks
                 .run(
@@ -793,13 +902,31 @@ impl Supervisor {
             )));
         }
         let tokens_before = self.tokens_processed();
+        let before = self.agent.cost_tracker.clone();
+        let tools_before = self.tool_list_fingerprint();
+        let idle_before = self.agent.idle_for();
         let result = self.run_turn_inner(prompt, attachments).await;
-        crate::usage_log::record(&crate::usage_log::TurnUsage {
+        let after = &self.agent.cost_tracker;
+        let turn = crate::usage_log::TurnUsage {
             at: Utc::now(),
             workspace: self.workspace_root.display().to_string(),
             model: self.model.clone(),
             tokens: self.tokens_processed().saturating_sub(tokens_before),
-        });
+            input: after.input_tokens.saturating_sub(before.input_tokens),
+            output: after.output_tokens.saturating_sub(before.output_tokens),
+            cache_read: after
+                .cache_read_tokens
+                .saturating_sub(before.cache_read_tokens),
+            cache_write: after
+                .cache_creation_tokens
+                .saturating_sub(before.cache_creation_tokens),
+            cost_usd: (after.estimated_cost_usd() - before.estimated_cost_usd()).max(0.0),
+            session: self.session_id.clone(),
+            parent: self.parent_session_id.clone().unwrap_or_default(),
+        };
+        crate::usage_log::record(&turn);
+        self.note_cache_break(&turn, &tools_before, idle_before)
+            .await;
         let status = if result.is_ok() { "completed" } else { "error" };
         self.run_session_hook(
             HookEventKind::Stop,
@@ -978,47 +1105,66 @@ impl Supervisor {
         self.context_manager.stats(&self.agent.messages)
     }
 
-    async fn make_context_manager(config: &DcodeAiConfig, model: &str) -> ContextManager {
-        // Startup must not block on the network. Use the on-disk cached window
-        // (from a previous run's background refresh) if present, else the static
-        // built-in table. The accurate value is refreshed in the background (see
-        // `create`) and persisted for the next launch.
-        let raw_window = if config.memory.context.auto_detect_context_window {
-            let window = model_limits_api::cached_context_window(config, model)
-                .unwrap_or_else(|| crate::model_limits::detect_context_window(model));
-            let working = crate::model_limits::working_context_window(model, window);
-            tracing::info!(
-                "Context window for {model}: {window} tokens (cached/static), working within {working}"
-            );
-            working
-        } else if config.memory.context.context_window_target > 0 {
-            config.memory.context.context_window_target
+    /// The session's context budget: the window to work within (the model's
+    /// whole window — 1M for Claude 5.x — unless capped by
+    /// `[memory.context] max_window`, a per-model entry, or `/context
+    /// window`), compacted early at `compact_at_tokens` so turns stay cheap,
+    /// with `turn_headroom_tokens` of room inside a tool loop.
+    fn make_context_manager(
+        config: &DcodeAiConfig,
+        model: &str,
+        window_override: Option<&dcode_ai_common::config::WindowSetting>,
+    ) -> ContextManager {
+        let ctx = &config.memory.context;
+        // Startup must not block on the network: the on-disk cached window
+        // (from a previous run's background refresh), else the built-in
+        // table. The accurate value is refreshed in the background.
+        let detected = if ctx.auto_detect_context_window {
+            model_limits_api::cached_context_window(config, model)
+                .unwrap_or_else(|| crate::model_limits::detect_context_window(model))
         } else {
-            // No window given: the model's, not zero (a zero window made the
-            // system prompt alone look 75% full and compacted every turn).
-            crate::model_limits::effective_context_window(model)
+            crate::model_limits::detect_context_window(model)
         };
-
-        // One window for everything (M31): the footer, `/context` and the
-        // triggers compare the provider's measured prompt with it. Room for
-        // the reply and the summary request is in the budget, not taken off
-        // the window.
+        // `/context window full` lifts the cap and the soft point;
+        // `/context window <n>` works within n.
+        let (cap, soft, headroom) = match window_override {
+            Some(w) => (w.cap(), 0, 0),
+            None => (
+                ctx.window_cap(model),
+                ctx.compact_at_tokens,
+                ctx.turn_headroom_tokens,
+            ),
+        };
+        let window = crate::model_limits::working_context_window(model, detected, cap);
+        crate::model_limits::set_session_window(model, window);
         let context_config = ContextManagerConfig {
-            context_window_target: raw_window.max(8_000),
-            max_retained_messages: config.memory.context.max_retained_messages,
-            auto_summarize_threshold: config.memory.context.auto_summarize_threshold,
-            enable_auto_summarize: config.memory.context.enable_auto_summarize,
+            context_window_target: window.max(8_000),
+            max_retained_messages: ctx.max_retained_messages,
+            auto_summarize_threshold: ctx.auto_summarize_threshold,
+            enable_auto_summarize: ctx.enable_auto_summarize,
             max_message_chars_for_summary: 10000,
         };
         let mut manager = ContextManager::new(context_config, model.to_string());
         let budget = crate::context_manager::ContextBudget::new(
-            raw_window,
+            window,
             crate::model_limits::detect_max_output_tokens(model),
-            Some(config.memory.context.auto_compact_at).filter(|p| *p > 0),
+            Some(ctx.auto_compact_at).filter(|p| *p > 0),
+        )
+        .with_soft_limits(soft, headroom);
+        tracing::info!(
+            "context for {model}: window {window} of {detected}, compacting at {}, up to {} inside a turn",
+            budget.compact_at(),
+            budget.mid_turn_compact_at()
         );
         crate::context_manager::set_auto_compact_percent(budget.percent(budget.compact_at()));
         manager.set_budget(budget);
         manager
+    }
+
+    /// `/context window full|200k|<n>|default` for this session.
+    pub fn set_window_override(&mut self, w: Option<dcode_ai_common::config::WindowSetting>) {
+        self.window_override = w;
+        self.rebuild_context_manager_sync();
     }
 
     /// Before each turn: at the prune point clear old tool outputs (no
@@ -1378,11 +1524,12 @@ impl Supervisor {
                 ) as dcode_ai_core::agent::PruneFn
             });
         Some(dcode_ai_core::agent::Compactor {
-            prune_at: budget.prune_at(),
-            compact_at: budget.compact_at(),
+            // Inside a tool loop: room past the soft point before compacting.
+            prune_at: budget.mid_turn_prune_at(),
+            compact_at: budget.mid_turn_compact_at(),
             estimate: Arc::new(move |messages| cm3.stats(messages).estimated_tokens),
             prune,
-            model: utility_model(&self.config).unwrap_or_else(|| self.model.clone()),
+            model: self.summary_model_for(budget.mid_turn_compact_at()),
             prompt: Arc::new(move |messages| {
                 let old = cm.get_messages_to_summarize(messages);
                 (!old.is_empty()).then(|| cm.summary_prompt(&old))
@@ -1402,10 +1549,19 @@ impl Supervisor {
 
     /// Use AI to generate a summary of the conversation.
     async fn summarize_with_ai(&self, prompt: &str) -> Result<String, String> {
-        // Summaries go to a cheap model: `[model] compact_model`, else Haiku
-        // on Claude, else the session's model.
-        let summary_model = utility_model(&self.config).unwrap_or_else(|| self.model.clone());
+        // ~4 characters a token.
+        let summary_model = self.summary_model_for(prompt.len() / 4);
         self.complete_with_model(&summary_model, prompt).await
+    }
+
+    /// Summaries go to a cheap model (`[model] compact_model`, else Haiku on
+    /// Claude) — unless what's to be summarized (`tokens`) wouldn't fit its
+    /// window; then the session's own model writes it.
+    fn summary_model_for(&self, tokens: usize) -> String {
+        match utility_model(&self.config) {
+            Some(m) if tokens <= crate::model_limits::detect_context_window(&m) * 85 / 100 => m,
+            _ => self.model.clone(),
+        }
     }
 
     /// One tool-less request to the session's model (e.g. writing an agent
@@ -1772,34 +1928,21 @@ impl Supervisor {
         self.agent.replace_system_prompt(system_prompt);
     }
 
-    /// Rebuild context_manager from current config (sync, uses configured window target).
+    /// Rebuild the context budget (model switch, `/context window`).
     fn rebuild_context_manager_sync(&mut self) {
-        let ctx = &self.config.memory.context;
-        let window = if ctx.context_window_target > 0 {
-            ctx.context_window_target
-        } else {
-            128_000
-        };
-        let context_config = ContextManagerConfig {
-            context_window_target: window,
-            max_retained_messages: ctx.max_retained_messages,
-            auto_summarize_threshold: ctx.auto_summarize_threshold,
-            enable_auto_summarize: ctx.enable_auto_summarize,
-            max_message_chars_for_summary: 10000,
-        };
-        let mut manager = ContextManager::new(context_config, self.model.clone());
-        manager.set_budget(crate::context_manager::ContextBudget::new(
-            window,
-            crate::model_limits::detect_max_output_tokens(&self.model),
-            Some(ctx.auto_compact_at).filter(|p| *p > 0),
-        ));
-        self.context_manager = manager;
+        self.context_manager =
+            Self::make_context_manager(&self.config, &self.model, self.window_override.as_ref());
         self.agent
             .set_context_token_limit(self.context_manager.budget().hard_limit());
     }
 
     pub fn request_cancel(&self) {
         self.agent.request_cancel();
+    }
+
+    /// This session's background sub-agents (to stop one from the TUI).
+    pub fn background_agents(&self) -> dcode_ai_core::tools::spawn_subagent::BackgroundAgents {
+        self.background_agents.clone()
     }
 
     pub fn cancel_handle(&self) -> Arc<AtomicBool> {

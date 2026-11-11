@@ -227,6 +227,7 @@ impl TuiSessionState {
             pins_modal_index: 0,
             subagent_modal_open: false,
             subagent_modal_index: 0,
+            agents_registry: None,
             transcript_search_open: false,
             transcript_search_query: String::new(),
             transcript_search_index: 0,

@@ -411,6 +411,35 @@ pub async fn list_copilot_models(config: &CopilotConfig) -> Result<Vec<String>, 
     Ok(ids)
 }
 
+/// A Copilot model's limits on this account, from `GET {api}/models`: the
+/// most prompt it accepts and its output cap. `None` when the catalog
+/// doesn't list the model. (Copilot often serves a model with a smaller
+/// prompt limit than its maker does — e.g. 200k for a 1M Claude.)
+pub async fn copilot_model_limits(
+    config: &CopilotConfig,
+    model: &str,
+) -> Result<Option<(u64, Option<u64>)>, ProviderError> {
+    let auth = CopilotAuthSource::from_config(config)?;
+    Ok(prompt_limits(&fetch_models(&auth).await?, model))
+}
+
+fn prompt_limits(value: &Value, model: &str) -> Option<(u64, Option<u64>)> {
+    let norm = |s: &str| s.trim().to_ascii_lowercase().replace('.', "-");
+    let want = norm(model);
+    let m = value["data"]
+        .as_array()?
+        .iter()
+        .find(|m| m["id"].as_str().is_some_and(|id| norm(id) == want))?;
+    let lim = &m["capabilities"]["limits"];
+    let out = lim["max_output_tokens"].as_u64();
+    let prompt = lim["max_prompt_tokens"].as_u64().or_else(|| {
+        lim["max_context_window_tokens"]
+            .as_u64()
+            .map(|w| w.saturating_sub(out.unwrap_or(0)))
+    })?;
+    (prompt > 0).then_some((prompt, out))
+}
+
 fn model_infos(value: &Value) -> HashMap<String, ModelInfo> {
     let strings = |v: &Value| -> Vec<String> {
         v.as_array()
@@ -518,6 +547,26 @@ mod tests {
             {"id": "gpt-4o-mini-hidden", "capabilities": {"type": "chat"}, "model_picker_enabled": false},
         ]}));
         assert_eq!(ids, vec!["claude-sonnet-4.5", "gpt-4.1"]);
+    }
+
+    #[test]
+    fn prompt_limits_come_from_the_catalog() {
+        let catalog = json!({"data": [
+            {"id": "claude-sonnet-5", "capabilities": {"limits": {
+                "max_prompt_tokens": 200000, "max_context_window_tokens": 264000, "max_output_tokens": 64000}}},
+            {"id": "gpt-5.3-codex", "capabilities": {"limits": {
+                "max_context_window_tokens": 400000, "max_output_tokens": 128000}}},
+        ]});
+        assert_eq!(
+            prompt_limits(&catalog, "claude-sonnet-5"),
+            Some((200_000, Some(64_000)))
+        );
+        // No prompt limit: the window minus the output.
+        assert_eq!(
+            prompt_limits(&catalog, "gpt-5.3-codex"),
+            Some((272_000, Some(128_000)))
+        );
+        assert_eq!(prompt_limits(&catalog, "claude-opus-5-5"), None);
     }
 
     #[test]

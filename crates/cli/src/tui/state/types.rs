@@ -536,6 +536,8 @@ pub struct TuiSessionState {
     /// Sub-agent details modal popup (`Ctrl+G`).
     pub subagent_modal_open: bool,
     pub subagent_modal_index: usize,
+    /// The session's background sub-agents, so `x` in the list stops one.
+    pub agents_registry: Option<dcode_ai_core::tools::spawn_subagent::BackgroundAgents>,
     /// Transcript search popup (`Ctrl+F`).
     pub transcript_search_open: bool,
     pub transcript_search_query: String,

@@ -1583,6 +1583,13 @@ pub struct HarnessConfig {
     /// the agent starts oriented. Off by default — it adds tokens every session.
     #[serde(default)]
     pub include_repo_map: bool,
+    /// Most tokens one sub-agent may process before it's stopped (and
+    /// returns what it has). 0 = no limit.
+    #[serde(default = "default_subagent_max_tokens")]
+    pub subagent_max_tokens: u64,
+    /// Most minutes one sub-agent may run. 0 = no limit.
+    #[serde(default = "default_subagent_max_minutes")]
+    pub subagent_max_minutes: u64,
     /// Extra system-prompt text for this run (`--append-system-prompt`).
     /// Never saved.
     #[serde(skip)]
@@ -1706,6 +1713,109 @@ pub struct ContextConfig {
     /// lifetime (5 minutes on Anthropic by default).
     #[serde(default = "default_idle_compaction_after_secs")]
     pub idle_compaction_after_secs: u64,
+    /// The most context to use: `"full"` (the model's whole window, e.g. 1M
+    /// for Claude 5.x — the default), `"200k"`, or a number of tokens.
+    #[serde(default)]
+    pub max_window: WindowSetting,
+    /// Compact once the conversation reaches this many tokens, even when the
+    /// window is bigger — keeps each turn (which re-sends the context)
+    /// cheap. 0 = only the window's own compaction point.
+    #[serde(default = "default_compact_at_tokens")]
+    pub compact_at_tokens: usize,
+    /// Within one turn (a tool loop) the context may grow past
+    /// `compact_at_tokens` up to this before compacting mid-work; it's then
+    /// compacted at the next turn or while idle. 0 = no extra room.
+    #[serde(default = "default_turn_headroom_tokens")]
+    pub turn_headroom_tokens: usize,
+    /// Per-model windows: a part of the model id → a window
+    /// (`"claude-haiku" = "200k"`). The longest match wins.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub model_windows: std::collections::BTreeMap<String, WindowSetting>,
+}
+
+/// How much of a model's context window to use.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WindowSetting {
+    Tokens(usize),
+    /// `"full"` (the model's whole window), `"200k"`, `"1m"`, `"400000"`.
+    Named(String),
+}
+
+impl Default for WindowSetting {
+    fn default() -> Self {
+        WindowSetting::Named("full".into())
+    }
+}
+
+impl WindowSetting {
+    /// The cap in tokens, `None` for the model's whole window.
+    pub fn cap(&self) -> Option<usize> {
+        match self {
+            WindowSetting::Tokens(n) => (*n > 0).then_some(*n),
+            WindowSetting::Named(s) => parse_tokens(s),
+        }
+    }
+
+    /// `full`/`auto`, `200k`, `1m`, `400000` — `None` for anything else.
+    pub fn parse(s: &str) -> Option<Self> {
+        let t = s.trim().to_ascii_lowercase();
+        if matches!(t.as_str(), "full" | "auto" | "max") {
+            return Some(WindowSetting::default());
+        }
+        parse_tokens(&t).map(WindowSetting::Tokens)
+    }
+}
+
+/// `200k` → 200_000, `1m` → 1_000_000, `400000` → 400_000; `full`/`auto` →
+/// `None`.
+fn parse_tokens(s: &str) -> Option<usize> {
+    let t = s.trim().to_ascii_lowercase().replace(['_', ','], "");
+    let (num, mul) = if let Some(n) = t.strip_suffix('k') {
+        (n, 1_000.0)
+    } else if let Some(n) = t.strip_suffix('m') {
+        (n, 1_000_000.0)
+    } else {
+        (t.as_str(), 1.0)
+    };
+    let v: f64 = num.trim().parse().ok()?;
+    (v > 0.0).then_some((v * mul) as usize)
+}
+
+impl ContextConfig {
+    /// The cap for `model`: a per-model entry (longest match), else
+    /// `max_window`, else the legacy `context_window_target`. `None` = the
+    /// model's whole window.
+    pub fn window_cap(&self, model: &str) -> Option<usize> {
+        let m = model.to_ascii_lowercase();
+        if let Some((_, w)) = self
+            .model_windows
+            .iter()
+            .filter(|(k, _)| m.contains(&k.to_ascii_lowercase()))
+            .max_by_key(|(k, _)| k.len())
+        {
+            return w.cap();
+        }
+        self.max_window
+            .cap()
+            .or((self.context_window_target > 0).then_some(self.context_window_target))
+    }
+}
+
+fn default_subagent_max_tokens() -> u64 {
+    2_000_000
+}
+
+fn default_subagent_max_minutes() -> u64 {
+    20
+}
+
+fn default_compact_at_tokens() -> usize {
+    160_000
+}
+
+fn default_turn_headroom_tokens() -> usize {
+    400_000
 }
 
 fn default_idle_compaction_min_tokens() -> usize {
@@ -1730,6 +1840,10 @@ impl Default for ContextConfig {
             idle_compaction: true,
             idle_compaction_min_tokens: default_idle_compaction_min_tokens(),
             idle_compaction_after_secs: default_idle_compaction_after_secs(),
+            max_window: WindowSetting::default(),
+            compact_at_tokens: default_compact_at_tokens(),
+            turn_headroom_tokens: default_turn_headroom_tokens(),
+            model_windows: Default::default(),
         }
     }
 }
@@ -1841,6 +1955,8 @@ impl Default for HarnessConfig {
             local_instructions_path: PathBuf::from(".dcode-ai/instructions.md"),
             skill_directories: default_skill_directories(),
             include_repo_map: false,
+            subagent_max_tokens: default_subagent_max_tokens(),
+            subagent_max_minutes: default_subagent_max_minutes(),
             append_system_prompt: None,
         }
     }
@@ -1859,6 +1975,12 @@ impl HarnessConfig {
         }
         if let Some(skill_directories) = partial.skill_directories {
             self.skill_directories = skill_directories;
+        }
+        if let Some(v) = partial.subagent_max_tokens {
+            self.subagent_max_tokens = v;
+        }
+        if let Some(v) = partial.subagent_max_minutes {
+            self.subagent_max_minutes = v;
         }
         if let Some(include_repo_map) = partial.include_repo_map {
             self.include_repo_map = include_repo_map;
@@ -1943,6 +2065,18 @@ impl ContextConfig {
         }
         if let Some(v) = partial.idle_compaction_after_secs {
             self.idle_compaction_after_secs = v.max(30);
+        }
+        if let Some(v) = partial.max_window {
+            self.max_window = v;
+        }
+        if let Some(v) = partial.compact_at_tokens {
+            self.compact_at_tokens = v;
+        }
+        if let Some(v) = partial.turn_headroom_tokens {
+            self.turn_headroom_tokens = v;
+        }
+        if let Some(v) = partial.model_windows {
+            self.model_windows.extend(v);
         }
         if let Some(query_provider_models_api) = partial.query_provider_models_api {
             self.query_provider_models_api = query_provider_models_api;
@@ -2157,6 +2291,8 @@ struct PartialHarnessConfig {
     local_instructions_path: Option<PathBuf>,
     skill_directories: Option<Vec<PathBuf>>,
     include_repo_map: Option<bool>,
+    subagent_max_tokens: Option<u64>,
+    subagent_max_minutes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2189,6 +2325,10 @@ struct PartialContextConfig {
     idle_compaction: Option<bool>,
     idle_compaction_min_tokens: Option<usize>,
     idle_compaction_after_secs: Option<u64>,
+    max_window: Option<WindowSetting>,
+    compact_at_tokens: Option<usize>,
+    turn_headroom_tokens: Option<usize>,
+    model_windows: Option<std::collections::BTreeMap<String, WindowSetting>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2401,6 +2541,55 @@ mouse_capture = true
         let partial: PartialDcodeAiConfig = toml::from_str(toml_str).unwrap();
         config.merge(partial);
         assert!(config.ui.mouse_capture);
+    }
+
+    #[test]
+    fn the_whole_window_with_a_soft_compaction_point_by_default() {
+        let c = DcodeAiConfig::default().memory.context;
+        assert_eq!(c.window_cap("claude-opus-5-5"), None);
+        assert_eq!(c.compact_at_tokens, 160_000);
+        assert_eq!(c.turn_headroom_tokens, 400_000);
+    }
+
+    #[test]
+    fn windows_merge_from_partial() {
+        let mut config = DcodeAiConfig::default();
+        let partial: PartialDcodeAiConfig = toml::from_str(
+            r#"
+[memory.context]
+max_window = "200k"
+compact_at_tokens = 0
+[memory.context.model_windows]
+"claude-opus" = "1m"
+"gpt-5" = 300000
+"#,
+        )
+        .unwrap();
+        config.merge(partial);
+        let c = &config.memory.context;
+        assert_eq!(c.window_cap("claude-sonnet-5-5"), Some(200_000));
+        assert_eq!(c.window_cap("claude-opus-5-5"), Some(1_000_000));
+        assert_eq!(c.window_cap("gpt-5.3-codex"), Some(300_000));
+        assert_eq!(c.compact_at_tokens, 0);
+        // The old setting still caps when `max_window` is full.
+        let mut old = DcodeAiConfig::default();
+        old.memory.context.context_window_target = 150_000;
+        assert_eq!(old.memory.context.window_cap("x"), Some(150_000));
+        // Round-trips through TOML.
+        let text = toml::to_string(&config).unwrap();
+        assert!(text.contains("max_window = \"200k\""), "{text}");
+    }
+
+    #[test]
+    fn window_settings_read_like_people_write_them() {
+        assert_eq!(WindowSetting::parse("full").unwrap().cap(), None);
+        assert_eq!(WindowSetting::parse("200k").unwrap().cap(), Some(200_000));
+        assert_eq!(WindowSetting::parse("1M").unwrap().cap(), Some(1_000_000));
+        assert_eq!(
+            WindowSetting::parse("400_000").unwrap().cap(),
+            Some(400_000)
+        );
+        assert!(WindowSetting::parse("lots").is_none());
     }
 
     #[test]

@@ -48,7 +48,7 @@ Detached sessions, sub-agents in isolated git worktrees, background agents, `/go
 <td width="50%" valign="top">
 
 ### ⚡ Small, fast, careful with credit
-One Rust binary that starts instantly. Lean prompts, tools loaded on demand, prompt caching, automatic compaction, and `/usage` shows where every token goes.
+One Rust binary that starts instantly. The model's whole context window (1M on Claude 5.x) with early compaction so turns stay cheap, a tool list that never breaks the prompt cache, idle compaction before the cache expires, sub-agent budgets, and `/cost today|week` shows where every token went.
 
 </td>
 </tr>
@@ -172,7 +172,7 @@ A command fails in any terminal: press `Alt+F` and dcode-ai opens on it, finds o
 <td valign="top">
 
 #### ⏪ Rewind anything
-`Esc` `Esc` takes code, conversation or both back to any earlier message. Sessions save after every step and resume in full.
+`Esc` `Esc` takes code, conversation or both back to any earlier message — even after a compaction or a restart. Sessions save after every step and resume in full.
 
 </td>
 </tr>
@@ -215,7 +215,7 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 | **Find** | `Ctrl+F` searches the whole conversation, with highlighted matches |
 | **Context** | `@` fuzzy file search, `[Image #N]` paste (`Ctrl+V`, or `Alt+V` on Windows/WSL), `!` shell mode, `# note` memory |
 | **Diffs** | Approvals show a line-numbered diff; `/diff` opens a full-screen viewer with hunk revert |
-| **Insight** | `/context` grid, `/usage` token breakdown with cache hit rate, `/cost`, `/effort`, `Ctrl+T` thinking |
+| **Insight** | `/context` grid with the window and compaction points, `/usage` token breakdown with cache hit rate, `/cost today\|week\|month` history by day, model and sub-agent, a note when the prompt cache misses and why, `/effort`, `Ctrl+T` thinking |
 | **Looks** | Claude's dark, light, colorblind-friendly and ANSI themes with a live `/theme` preview, plus `tokyonight`, `catppuccin`, `gruvbox`, `dracula`, `nord` … |
 | **Comfort** | Desktop notifications, `/sounds` and `/speak`, `/terminal-setup` for Shift+Enter, `/vim` keys, `--plain` for screen readers |
 
@@ -241,7 +241,7 @@ A Jira-style kanban for the project: **Backlog · To do · In progress · Review
 | --- | --- |
 | **Plan** | `/board plan <goal>`: the agent splits the goal into milestones and cards, with what blocks what and gates where you should check |
 | **Run** | `/board run [n]`: the head agent takes the ready cards (nothing blocking them), starts up to `n` sub-agents in their own worktrees in parallel, moves each card along and picks up what became unblocked. Gated cards wait in Review for you |
-| **Jira** | `/board jira SHOP` links the Jira space through Atlassian's MCP server: tickets come in, new Jira cards become tickets (required fields filled in), moving or renaming a card updates its ticket; in a card, `t` picks the workflow transition, `c`/`R` comment or reply, `w` logs time, `a` gets attachments, and `●` flags what others did. `/board jira SHOP me [sprint]` keeps only your tickets; `/board jira view add` saves other filters (`v` switches). `/board work SHOP-12` branches, starts the ticket and has the agent work it to a PR linked on the ticket. Personal cards never leave your computer |
+| **Jira** | `/board jira SHOP` links the Jira space through Atlassian's MCP server: tickets come in, new Jira cards become tickets (required fields filled in), moving or renaming a card updates its ticket; in a card, `t` picks the workflow transition, `c`/`R` comment or reply, `w` logs time, `a` gets attachments, and `●` flags what others did. `/board jira SHOP me [sprint]` keeps only your tickets; `/board jira view add` saves other filters (`v` switches). `/board work SHOP-12` branches, starts the ticket and has the agent work it to a PR linked on the ticket. `/board jira today` is your Jira day at a glance (shown once a day, no model call) and `/board jira doctor` checks the live link. Personal cards never leave your computer |
 | **Work it yourself** | Drag cards between columns with the mouse, or: `t` Personal/Jira, `←/→/↑/↓` move, `Shift+←/→` (or `<` `>`) move a card, `n` new, `e` rename, `p` priority, `b` blockers, `g` gate, `Enter` details, `o` open in Jira, `s` sync, `r` run |
 
 ### 👥 Work together
@@ -281,14 +281,16 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 
 - **Crash-safe:** saved after every step of a turn, so a crash or a closed terminal loses nothing.
 - **Full resume:** `/resume` brings back the whole conversation in order, quickly, even for sessions with thousands of steps.
-- **The `/resume` picker:** a tree of sessions with their forks and sub-agents, search over titles *and* content, and auto-generated titles.
-- **Automatic compaction**, like Claude Code: older history is summarized when the context fills, even mid-turn.
+- **The `/resume` picker:** a tree of sessions with their forks and sub-agents, search over titles, content *and the files they changed*, and auto-generated titles.
+- **Checkpoints that last:** `/undo`, `/redo` and `/rewind` keep their snapshots on disk, so they work after a restart or `/resume`, and across compactions.
+- **The whole window, at a sensible cost:** the model's full context window (1M for Claude 5.x; Copilot's own limit per model) with compaction at `compact_at_tokens` (160k) so each turn stays cheap; a tool loop may grow to 400k before compacting mid-work. `/context window full|200k|<n>` changes it for a session.
+- **Idle compaction:** a long conversation left idle is compacted once, just before the provider's prompt cache expires, so your next turn starts small.
 - **Small logs:** only what resume needs is stored. `dcode-ai sessions --tidy` shrinks old logs.
 - **`/export` and `/share`** as Markdown with secrets masked, to a file, the clipboard or a secret gist.
 
 ### 🤖 Agents and automation
 
-- **Sub-agents** in isolated git worktrees, with parent/child lineage. Merge, keep or discard their changes. They can run in the background while you keep chatting.
+- **Sub-agents** in isolated git worktrees, with parent/child lineage. Merge, keep or discard their changes. They can run in the background while you keep chatting, within a token and time budget (`[harness] subagent_max_tokens`, `subagent_max_minutes`); `x` in the sub-agents list stops one.
 - **`/goal <objective>`** keeps working across turns until it's done, within a budget you set.
 - **Fallback models** take over when the main one is overloaded. **`/btw`** answers a side question without derailing the turn.
 - **Browser control:** a real Chrome or Edge window. The agent waits for text to appear, takes screenshots it can see, and records steps you replay with `/browser save`.
@@ -337,9 +339,19 @@ model = "claude-sonnet-5-5"
 mode = "default"               # plan | default | accept-edits | auto | dont-ask | bypass-permissions
 sandbox_bash = true
 
+[memory.context]
+max_window = "full"            # the model's whole window; or "200k", or tokens
+compact_at_tokens = 160000     # compact early so each turn stays cheap (0 = only at the window's own point)
+idle_compaction = true         # compact once before the prompt cache expires
+
+[harness]
+subagent_max_tokens = 2000000  # per sub-agent; 0 = no limit
+subagent_max_minutes = 20
+
 [ui]
 theme = "claude"
 working_style = "bar"          # bar | dots | plain
+mouse_capture = false          # the inline view leaves scrolling and selection to the terminal
 ```
 
 Every option is documented in [docs/configuration.md](docs/configuration.md).

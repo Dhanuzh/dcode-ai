@@ -184,7 +184,43 @@ impl Repl {
                             Err(e) => out.eprintln(&format!("[board] {e}")),
                         }
                     }
-                    "jira" if matches!(arg.split_whitespace().next(), Some("sprint" | "move" | "comment" | "note" | "log" | "get" | "view" | "views")) => {
+                    "jira" if matches!(arg.split_whitespace().next(), Some("today")) => {
+                        // `/board jira today [on|off]`: the day from the board
+                        // as last synced — no model, no credits.
+                        let rest = arg.trim_start_matches("today").trim();
+                        if matches!(rest, "on" | "off") {
+                            let on = rest == "on";
+                            let _ = Board::update(&ws, |b| {
+                                if let Some(l) = b.jira.as_mut() {
+                                    l.daily_summary = on;
+                                }
+                            });
+                            out.println(&format!(
+                                "[board] daily summary at session start: {}",
+                                if on { "on" } else { "off" }
+                            ));
+                            return Ok(true);
+                        }
+                        let b = Board::load(&ws);
+                        if b.jira.is_none() {
+                            out.eprintln("[board] link Jira first: /board jira <PROJECT-KEY>");
+                            return Ok(true);
+                        }
+                        let lines = dcode_ai_cli::jira_sync::today_lines(&b, chrono::Local::now().date_naive());
+                        match &out {
+                            ReplOutput::Tui(st) => {
+                                if let Ok(mut g) = st.lock() {
+                                    g.open_info_modal("Jira today", lines);
+                                }
+                            }
+                            _ => {
+                                for l in lines {
+                                    out.println(&l);
+                                }
+                            }
+                        }
+                    }
+                    "jira" if matches!(arg.split_whitespace().next(), Some("sprint" | "move" | "comment" | "note" | "log" | "get" | "view" | "views" | "doctor")) => {
                         let (word, rest) = arg
                             .split_once(char::is_whitespace)
                             .map(|(w, r)| (w, r.trim()))
@@ -204,6 +240,19 @@ impl Repl {
                             .unwrap_or((rest, ""));
                         let key = key.to_ascii_uppercase();
                         let queued: Result<String, String> = match word {
+                            "doctor" => {
+                                out.println(&format!("[board] checking Jira {} live (read-only)…", link.project));
+                                let checks = dcode_ai_cli::jira_sync::doctor(&mcp, &link).await;
+                                let bad = checks.iter().filter(|c| c.mark == '✗').count();
+                                for c in &checks {
+                                    out.println(&format!("[board] {}", c.line()));
+                                }
+                                out.println(&format!(
+                                    "[board] {}",
+                                    if bad == 0 { "all good".to_string() } else { format!("{bad} problem(s) above") }
+                                ));
+                                return Ok(true);
+                            }
                             "sprint" => {
                                 let on = !matches!(rest, "off" | "no" | "false" | "all");
                                 Board::update(&ws, |b| {

@@ -988,6 +988,29 @@ pub(super) fn handle_key_event(
                     let _ = cmd_tx.send(TuiCmd::ResumeSession(id));
                 }
             }
+            // Stop the selected background sub-agent.
+            (KeyCode::Char('x'), _) => {
+                if let Some(row) = g.subagents.get(g.subagent_modal_index).cloned() {
+                    let msg = match (&g.agents_registry, row.running) {
+                        (_, false) => format!("{} isn't running", row.id),
+                        (Some(reg), true) => {
+                            let (found, text) = dcode_ai_core::tools::spawn_subagent::stop_agent(
+                                reg,
+                                &row.id,
+                                "Stopped by the user.",
+                            );
+                            if found {
+                                text
+                            } else {
+                                "only background agents can be stopped here — Esc stops the turn"
+                                    .into()
+                            }
+                        }
+                        (None, true) => "Esc stops the turn (and its sub-agent)".into(),
+                    };
+                    g.show_toast(msg, crate::tui::state::ToastKind::Info);
+                }
+            }
             _ => {}
         }
         return KeyFlow::Continue;

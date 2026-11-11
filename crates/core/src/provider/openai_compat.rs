@@ -198,7 +198,7 @@ pub fn openai_request_body(
     };
 
     let mut body = json!({
-        "model": model,
+        "model": crate::provider::api_model_id(model),
         "messages": to_openai_messages(messages, workspace_root, model_supports_vision(model))?,
         "stream": true,
         "stream_options": {
@@ -237,7 +237,7 @@ pub fn openai_responses_request_body(
     }
 
     let mut body = json!({
-        "model": model,
+        "model": crate::provider::api_model_id(model),
         "input": input_items,
         "stream": true,
         "store": false,

@@ -116,7 +116,29 @@ pub async fn resolve_model_limits(config: &DcodeAiConfig, model: &str) -> ModelL
                 }
             }
         }
-        // Copilot's catalog has no reliable per-plan limits; use the table.
+        // Copilot's catalog says what this account's plan accepts — often
+        // less than the model's maker allows (200k for a 1M Claude).
+        ProviderKind::Copilot => {
+            let id = crate::model_limits::api_model_id(model);
+            match dcode_ai_core::provider::copilot::copilot_model_limits(
+                &config.provider.copilot,
+                id,
+            )
+            .await
+            {
+                Ok(Some((prompt, out))) => ModelLimits {
+                    context_window: prompt as usize,
+                    max_output_tokens: out
+                        .map(|o| o as usize)
+                        .unwrap_or(static_limits.max_output_tokens),
+                },
+                Ok(None) => static_limits,
+                Err(err) => {
+                    tracing::debug!("Copilot model limits: {err}");
+                    static_limits
+                }
+            }
+        }
         _ => static_limits,
     }
 }

@@ -40,6 +40,11 @@ pub struct ToolRegistry {
     /// Tools left out of `definitions()` until `tool_search` activates them.
     deferred: std::collections::HashSet<String>,
     activated: tool_search::Activated,
+    /// The tool list has been sent to a model: from now on it only grows at
+    /// its end, so the provider's prompt cache stays valid.
+    sent: std::sync::atomic::AtomicBool,
+    /// The names `tool_search`'s description lists (frozen once sent).
+    search_listed: Vec<String>,
 }
 
 impl ToolRegistry {
@@ -48,6 +53,8 @@ impl ToolRegistry {
             tools: Vec::new(),
             deferred: Default::default(),
             activated: Default::default(),
+            sent: Default::default(),
+            search_listed: Vec::new(),
         }
     }
 
@@ -80,12 +87,51 @@ impl ToolRegistry {
             .map(|t| t.definition())
             .filter(|d| self.deferred.contains(&d.name))
             .collect();
-        self.tools.retain(|t| t.definition().name != "tool_search");
-        self.register(Box::new(tool_search::ToolSearchTool::new(
+        // Once the list has been sent, `tool_search` keeps its description
+        // and its place: tools deferred later are searchable, not listed.
+        let sent = self.sent.load(std::sync::atomic::Ordering::Relaxed);
+        let listed: Vec<String> = if sent && !self.search_listed.is_empty() {
+            self.search_listed.clone()
+        } else {
+            all.iter().map(|d| d.name.clone()).collect()
+        };
+        self.search_listed = listed.clone();
+        let search = Box::new(tool_search::ToolSearchTool::with_listed(
             all,
             self.activated.clone(),
-        )));
+            listed,
+        ));
+        match self
+            .tools
+            .iter()
+            .position(|t| t.definition().name == "tool_search")
+        {
+            Some(i) => self.tools[i] = search,
+            None => self.register(search),
+        }
         n
+    }
+
+    /// Tools that arrive after the list was sent (MCP servers that connected
+    /// late) go behind `tool_search` whatever their number, so the list the
+    /// provider caches doesn't change. Returns their names, to announce.
+    pub fn defer_late(&mut self, pred: impl Fn(&str) -> bool) -> Vec<String> {
+        let new: Vec<String> = self
+            .tools
+            .iter()
+            .map(|t| t.definition().name)
+            .filter(|n| pred(n) && !self.deferred.contains(n))
+            .collect();
+        if !new.is_empty() {
+            let set: std::collections::HashSet<String> = new.iter().cloned().collect();
+            self.defer_behind_search(|n| set.contains(n));
+        }
+        new
+    }
+
+    /// Whether the list has been sent to a model yet.
+    pub fn list_sent(&self) -> bool {
+        self.sent.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Built-in tools used rarely enough to load only on demand: their
@@ -217,13 +263,26 @@ impl ToolRegistry {
         self.tools.retain(|t| keep(&t.definition().name));
     }
 
+    /// The tools to send: the regular ones in registration order, then the
+    /// ones `tool_search` loaded, in the order it loaded them — so the list
+    /// only ever grows at its end and the prompt cache keeps its prefix.
     pub fn definitions(&self) -> Vec<ToolDefinition> {
-        let active = self.activated.names();
-        self.tools
+        self.sent.store(true, std::sync::atomic::Ordering::Relaxed);
+        let all: Vec<ToolDefinition> = self.tools.iter().map(|t| t.definition()).collect();
+        let mut out: Vec<ToolDefinition> = all
             .iter()
-            .map(|t| t.definition())
-            .filter(|d| !self.deferred.contains(&d.name) || active.contains(&d.name))
-            .collect()
+            .filter(|d| !self.deferred.contains(&d.name))
+            .cloned()
+            .collect();
+        for name in self.activated.names() {
+            if let Some(d) = all
+                .iter()
+                .find(|d| d.name == name && self.deferred.contains(&d.name))
+            {
+                out.push(d.clone());
+            }
+        }
+        out
     }
 
     pub async fn execute(&self, call: &ToolCall) -> ToolResult {

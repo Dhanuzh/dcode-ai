@@ -150,6 +150,18 @@ impl ProviderError {
     }
 }
 
+/// `claude-opus-5-5[1m]` → `claude-opus-5-5`: `[1m]` is dcode-ai's (and
+/// Claude Code's) way to ask for a model's whole window; APIs want the plain
+/// id. (The `claude` binary understands the marker and gets it as is.)
+pub fn api_model_id(model: &str) -> &str {
+    let t = model.trim();
+    if t.to_ascii_lowercase().ends_with("[1m]") {
+        t[..t.len() - 4].trim_end()
+    } else {
+        t
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -283,7 +283,7 @@ pub fn context_gauge_spans(used_tokens: u64, model: &str) -> Vec<Span<'static>> 
     );
     vec![
         Span::styled(
-            format!(" {bar} {pct}%"),
+            format!(" {bar} {pct}% of {}", format_tokens(window)),
             Style::default().fg(color).bg(theme::surface()),
         ),
         dot_sep,

@@ -283,6 +283,14 @@ pub struct RemoteAttachment {
     pub size: u64,
 }
 
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(b: &bool) -> bool {
+    *b
+}
+
 fn is_zero_u64(n: &u64) -> bool {
     *n == 0
 }
@@ -398,6 +406,9 @@ pub struct JiraLink {
     /// The view the board shows; `None` is the default pull.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub view: Option<String>,
+    /// Show `/board jira today` once a day when a session starts.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub daily_summary: bool,
     /// See [`Board::extra`].
     #[serde(flatten)]
     pub extra: Extra,

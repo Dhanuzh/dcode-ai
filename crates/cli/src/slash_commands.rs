@@ -251,7 +251,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/copy" => "copy the last response as markdown (/copy link: the newest link)",
         "/transcript" => "full-screen transcript (scroll/expand)",
         "/dashboard" => "toggle the full-screen dashboard (Ctrl+\\)",
-        "/cost" => "token cost for this session",
+        "/cost" => {
+            "token cost for this session · /cost today|week|month: history with cache hits and sub-agents"
+        }
         "/stats" => "session statistics",
         "/auto-answer" => "auto-accept the suggested answer",
         "/retry" => "retry the last request",
