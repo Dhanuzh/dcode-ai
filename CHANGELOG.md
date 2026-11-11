@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.0.57 — 2026-11-11
+
+### Fixed
+- **Scrolling and copying in the normal (inline) view**: after opening the
+  board, a diff or the transcript — or leaving the dashboard — dcode-ai kept
+  the mouse, so the wheel didn't scroll and text couldn't be selected. The
+  inline view now leaves the mouse to the terminal (native scrollback and
+  selection); the dashboard and overlays still take it. `[ui] mouse_capture
+  = true` opts back into in-app wheel scroll and drag-to-copy.
+
+### New
+- **Idle compaction**: a long conversation left idle is compacted once,
+  just before the provider's prompt cache expires (after 4 minutes), so the
+  compaction reads the context at cache price and your next turn starts
+  small. Only above 40k tokens, never while you're typing or something
+  runs. `[memory.context] idle_compaction`, `idle_compaction_min_tokens`,
+  `idle_compaction_after_secs`.
+- **Checkpoints that last**: `/undo`, `/redo` and `/rewind` (Esc Esc) keep
+  their turn snapshots on disk (`<sessions>/<id>.checkpoints/`, file
+  contents stored once each; newest 100 turns, 256 MB), so they work after
+  a restart or `/resume`. A compaction no longer cuts rewind off: the
+  history it replaces is archived, and rewinding to a message from before
+  it restores that conversation and the files.
+- **`/board work <KEY> [worktree]`**: makes the card's branch
+  (`bsi-513-<title>`; refuses with a hint on uncommitted changes), moves it
+  to In progress (its ticket follows) and has the agent work it — the card
+  in full, tests, a commit, a PR titled `BSI-513: …` — then posts the PR's
+  link on the ticket. `worktree` hands it to a sub-agent in its own
+  worktree. The agent's `board_update` gets a `comment` field for that.
+- **Ticket activity**: when someone else comments on or moves one of your
+  tickets, the card shows `● Supriya commented` / `● moved to Resolved`,
+  a toast says so, and a desktop notification when the terminal isn't
+  focused. Opening the card clears it.
+- **Log time and get attachments**: in a card's view `w` logs time
+  (`2h 30m reviewed the PR`) and `a` downloads its attachments to
+  `.dcode-ai/attachments/<KEY>/` (git-ignored) and opens them. Or
+  `/board jira log <KEY> <time> [note]`, `/board jira get <KEY> [n|all]`.
+  The card lists attachments and time spent.
+- **Saved views**: `/board jira view add <name> <JQL>` (e.g. several
+  projects: `project in (BSI, OPS) AND assignee = currentUser()`),
+  `/board jira view <name>|default`, `view rm <name>`; `v` on the board
+  cycles them, and the Jira tab shows which.
+- **Resume picker**: search finds sessions by the files they changed.
+
 ## 1.0.56 — 2026-11-11
 
 ### Fixed

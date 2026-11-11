@@ -1361,9 +1361,10 @@ impl Repl {
         }
         // sudo in agent / `!` commands asks through the TUI's password popup.
         crate::askpass::start(tui_state.clone());
-        // Koda-style fullscreen behavior: mouse capture is always on for
-        // wheel scroll + in-app drag-select copy.
-        let effective_mouse_capture = true;
+        // The inline view leaves the mouse to the terminal (native scrollback
+        // and selection); `[ui] mouse_capture = true` opts into in-app wheel
+        // scroll and drag-to-copy. The dashboard and overlays always take it.
+        let effective_mouse_capture = self.runtime.config().ui.mouse_capture;
         if let Ok(mut g) = tui_state.lock() {
             g.mouse_capture_on = effective_mouse_capture;
             g.notifications_enabled = self.runtime.config().ui.notifications;
@@ -1625,6 +1626,7 @@ impl Repl {
             g.steer_inbox = Some(steer_inbox.clone());
         }
         let mut pending_cmds: VecDeque<TuiCmd> = VecDeque::new();
+        let mut idle_compacted = false;
         if let Some(p) = self.startup_prompt.take() {
             pending_cmds.push_back(TuiCmd::Submit(p));
         }
@@ -1709,6 +1711,33 @@ impl Repl {
                 }
             }
 
+            // Idle compaction: a long conversation sitting idle is compacted
+            // once, just before the provider's prompt cache expires, so the
+            // next turn starts small instead of re-sending it all uncached.
+            if pending_cmds.is_empty() && !idle_compacted {
+                let ui_idle = tui_state.lock().is_ok_and(|g| {
+                    !g.busy
+                        && g.active_approval.is_none()
+                        && g.active_question.is_none()
+                        && g.followup_queue.is_empty()
+                        && g.input_buffer.trim().is_empty()
+                        && !g.subagents.iter().any(|s| s.running)
+                });
+                if ui_idle && self.runtime.idle_compaction_due() {
+                    idle_compacted = true;
+                    if let Some((before, after)) = self.runtime.idle_compact().await
+                        && let Ok(mut g) = tui_state.lock()
+                    {
+                        g.push_block(DisplayBlock::System(format!(
+                            "Compacted while idle (~{}k → ~{}k tokens), before the prompt cache expired · [memory.context] idle_compaction = false turns it off",
+                            before / 1000,
+                            after / 1000
+                        )));
+                        g.touch_transcript();
+                    }
+                }
+            }
+
             while let Ok(cmd) = cmd_rx.try_recv() {
                 pending_cmds.push_back(cmd);
             }
@@ -1716,6 +1745,8 @@ impl Repl {
             let Some(cmd) = pending_cmds.pop_front() else {
                 continue;
             };
+            // A new idle period starts after this command.
+            idle_compacted = false;
 
             match cmd {
                 TuiCmd::Backtrack {

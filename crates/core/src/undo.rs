@@ -15,8 +15,12 @@ enum NodeSnapshot {
 
 #[derive(Debug, Clone)]
 struct UndoEntry {
-    /// History index of the user message that started this turn, or `None`
-    /// once history was rewritten (compaction) and the index is meaningless.
+    /// The history epoch the turn ran in: each compaction that shortens the
+    /// history starts a new one (the old messages are archived), so
+    /// `msg_pos` stays meaningful across compactions.
+    epoch: u32,
+    /// History index (within its epoch) of the user message that started
+    /// this turn, or `None` once history was replaced wholesale.
     msg_pos: Option<usize>,
     changed_paths: Vec<PathBuf>,
     before: HashMap<PathBuf, NodeSnapshot>,
@@ -25,6 +29,7 @@ struct UndoEntry {
 
 #[derive(Debug, Default)]
 struct PendingTurn {
+    epoch: u32,
     msg_pos: Option<usize>,
     touched: Vec<PathBuf>,
     before: HashMap<PathBuf, NodeSnapshot>,
@@ -49,6 +54,22 @@ pub struct UndoManager {
     undo_stack: Vec<UndoEntry>,
     redo_stack: Vec<UndoEntry>,
     pending: Option<PendingTurn>,
+    /// The current history epoch.
+    epoch: u32,
+    /// Where the checkpoints live on disk (`<sessions>/<id>.checkpoints/`),
+    /// once attached: they then survive restarts and resumes.
+    dir: Option<PathBuf>,
+}
+
+/// Turns kept for undo/rewind; the oldest go first.
+const MAX_TURNS: usize = 100;
+/// Most bytes of file contents the checkpoints keep on disk.
+const MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
+
+/// Whether `e` started at or after message `pos` of `epoch`.
+fn at_or_after(e: &UndoEntry, epoch: u32, pos: usize) -> bool {
+    e.msg_pos
+        .is_some_and(|p| e.epoch > epoch || (e.epoch == epoch && p >= pos))
 }
 
 impl UndoManager {
@@ -56,9 +77,92 @@ impl UndoManager {
     /// `msg_pos`.
     pub fn begin_turn(&mut self, msg_pos: usize) {
         self.pending = Some(PendingTurn {
+            epoch: self.epoch,
             msg_pos: Some(msg_pos),
             ..Default::default()
         });
+    }
+
+    /// The current history epoch.
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
+
+    /// The history was shortened (compaction): `messages` — the history as
+    /// it was — is archived as this epoch, `kept` of its last messages
+    /// carry on into the next one, and a new epoch starts. Recorded turns
+    /// keep their positions in their own epoch.
+    pub fn next_epoch(&mut self, messages: &[dcode_ai_common::message::Message], kept: usize) {
+        if let Some(dir) = &self.dir {
+            let archive = serde_json::json!({ "messages": messages, "kept": kept });
+            let path = dir.join(format!("epoch-{}.json", self.epoch));
+            if let Err(e) = fs::create_dir_all(dir)
+                .and_then(|_| fs::write(&path, serde_json::to_vec(&archive).unwrap_or_default()))
+            {
+                tracing::warn!("couldn't archive history epoch: {e}");
+            }
+        }
+        self.epoch += 1;
+        if let Some(p) = self.pending.as_mut() {
+            p.epoch = self.epoch;
+            p.msg_pos = None;
+        }
+        self.persist();
+    }
+
+    /// The history as it was in `epoch`, and how many of its last messages
+    /// carried over into the next one. `None` when it wasn't archived.
+    pub fn archived(&self, epoch: u32) -> Option<(Vec<dcode_ai_common::message::Message>, usize)> {
+        let dir = self.dir.as_ref()?;
+        let raw = fs::read(dir.join(format!("epoch-{epoch}.json"))).ok()?;
+        let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+        let messages = serde_json::from_value(v.get("messages")?.clone()).ok()?;
+        let kept = v.get("kept")?.as_u64()? as usize;
+        Some((messages, kept))
+    }
+
+    /// The conversation was restored to an archived epoch: that epoch is
+    /// live again. Turns from later epochs can still be undone but no
+    /// longer rewound to.
+    pub fn resume_epoch(&mut self, epoch: u32) {
+        for e in self.undo_stack.iter_mut().chain(self.redo_stack.iter_mut()) {
+            if e.epoch > epoch {
+                e.msg_pos = None;
+            }
+        }
+        self.epoch = epoch;
+        self.persist();
+    }
+
+    /// Keep the checkpoints in `dir` from now on; the ones already there
+    /// (from before a restart or resume) are loaded first.
+    pub fn attach(&mut self, dir: PathBuf) {
+        match load_index(&dir) {
+            Ok(Some((epoch, undo, redo)))
+                if self.undo_stack.is_empty() && self.redo_stack.is_empty() =>
+            {
+                self.epoch = epoch;
+                self.undo_stack = undo;
+                self.redo_stack = redo;
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!("couldn't read checkpoints in {}: {e}", dir.display()),
+        }
+        self.dir = Some(dir);
+        self.persist();
+    }
+
+    /// Write the checkpoints to disk (when attached).
+    fn persist(&mut self) {
+        while self.undo_stack.len() > MAX_TURNS {
+            self.undo_stack.remove(0);
+        }
+        let Some(dir) = self.dir.clone() else {
+            return;
+        };
+        if let Err(e) = save_index(&dir, self) {
+            tracing::warn!("couldn't save checkpoints: {e}");
+        }
     }
 
     /// A turn ended early (error / cancel). Edits it already made stay on
@@ -78,13 +182,21 @@ impl UndoManager {
         if let Some(p) = self.pending.as_mut() {
             p.msg_pos = None;
         }
+        self.persist();
     }
 
-    /// Paths changed by turns that started at or after history index `pos`.
+    /// Paths changed by turns that started at or after history index `pos`
+    /// of the current epoch.
     pub fn paths_changed_since(&self, pos: usize) -> Vec<PathBuf> {
+        self.paths_changed_since_at(self.epoch, pos)
+    }
+
+    /// Paths changed by turns that started at or after message `pos` of
+    /// `epoch`.
+    pub fn paths_changed_since_at(&self, epoch: u32, pos: usize) -> Vec<PathBuf> {
         let mut out = Vec::new();
         for entry in &self.undo_stack {
-            if entry.msg_pos.is_some_and(|p| p >= pos) {
+            if at_or_after(entry, epoch, pos) {
                 for path in &entry.changed_paths {
                     insert_dedup_path(&mut out, path.clone());
                 }
@@ -97,11 +209,17 @@ impl UndoManager {
     /// `pos`: undo, newest first, every recorded turn from there on.
     /// Returns the number of distinct paths restored.
     pub fn rewind_to(&mut self, pos: usize) -> Result<usize, String> {
+        self.rewind_to_at(self.epoch, pos)
+    }
+
+    /// [`Self::rewind_to`] for message `pos` of `epoch` (possibly from
+    /// before a compaction).
+    pub fn rewind_to_at(&mut self, epoch: u32, pos: usize) -> Result<usize, String> {
         let mut restored: Vec<PathBuf> = Vec::new();
         while self
             .undo_stack
             .last()
-            .is_some_and(|e| e.msg_pos.is_some_and(|p| p >= pos))
+            .is_some_and(|e| at_or_after(e, epoch, pos))
         {
             let entry = self.undo_stack.pop().expect("checked non-empty");
             apply_state_map(&entry.before)?;
@@ -111,6 +229,7 @@ impl UndoManager {
         }
         // Rewound turns are gone from history; redoing them makes no sense.
         self.redo_stack.clear();
+        self.persist();
         Ok(restored.len())
     }
 
@@ -193,11 +312,13 @@ impl UndoManager {
 
         self.redo_stack.clear();
         self.undo_stack.push(UndoEntry {
+            epoch: pending.epoch,
             msg_pos: pending.msg_pos,
             changed_paths,
             before: pending.before,
             after,
         });
+        self.persist();
         Ok(())
     }
 
@@ -208,6 +329,7 @@ impl UndoManager {
         apply_state_map(&entry.before)?;
         let n = entry.changed_paths.len();
         self.redo_stack.push(entry);
+        self.persist();
         Ok(Some(format!("Undid last turn ({n} path(s) restored)")))
     }
 
@@ -218,6 +340,7 @@ impl UndoManager {
         apply_state_map(&entry.after)?;
         let n = entry.changed_paths.len();
         self.undo_stack.push(entry);
+        self.persist();
         Ok(Some(format!("Redid last turn ({n} path(s) restored)")))
     }
 }
@@ -480,6 +603,183 @@ fn apply_state_map(states: &HashMap<PathBuf, NodeSnapshot>) -> Result<(), String
     Ok(())
 }
 
+// ── On disk ─────────────────────────────────────────────────────────────
+// `<dir>/index.json` lists the turns; file contents live once each in
+// `<dir>/blobs/<sha256>`, shared by every turn that saw them.
+
+#[derive(serde::Serialize, serde::Deserialize)]
+enum NodeRec {
+    Absent,
+    File(String),
+    Dir {
+        dirs: Vec<PathBuf>,
+        files: Vec<(PathBuf, String)>,
+    },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EntryRec {
+    epoch: u32,
+    msg_pos: Option<usize>,
+    changed: Vec<PathBuf>,
+    before: Vec<(PathBuf, NodeRec)>,
+    after: Vec<(PathBuf, NodeRec)>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct IndexRec {
+    version: u32,
+    epoch: u32,
+    undo: Vec<EntryRec>,
+    redo: Vec<EntryRec>,
+}
+
+fn blob_hash(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(bytes);
+    d.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Turns as records; every file's bytes go into `blobs` (hash → bytes).
+fn entry_rec<'a>(e: &'a UndoEntry, blobs: &mut HashMap<String, &'a [u8]>) -> EntryRec {
+    let mut node = |n: &'a NodeSnapshot| match n {
+        NodeSnapshot::Absent => NodeRec::Absent,
+        NodeSnapshot::File(b) => {
+            let h = blob_hash(b);
+            blobs.insert(h.clone(), b);
+            NodeRec::File(h)
+        }
+        NodeSnapshot::Dir { dirs, files } => NodeRec::Dir {
+            dirs: dirs.clone(),
+            files: files
+                .iter()
+                .map(|(p, b)| {
+                    let h = blob_hash(b);
+                    blobs.insert(h.clone(), b);
+                    (p.clone(), h)
+                })
+                .collect(),
+        },
+    };
+    let mut map = |m: &'a HashMap<PathBuf, NodeSnapshot>| {
+        let mut v: Vec<(PathBuf, NodeRec)> = m.iter().map(|(p, n)| (p.clone(), node(n))).collect();
+        v.sort_by(|a, b| a.0.cmp(&b.0));
+        v
+    };
+    let before = map(&e.before);
+    let after = map(&e.after);
+    EntryRec {
+        epoch: e.epoch,
+        msg_pos: e.msg_pos,
+        changed: e.changed_paths.clone(),
+        before,
+        after,
+    }
+}
+
+fn save_index(dir: &Path, m: &mut UndoManager) -> Result<(), String> {
+    let blob_dir = dir.join("blobs");
+    fs::create_dir_all(&blob_dir).map_err(|e| e.to_string())?;
+    loop {
+        {
+            let mut blobs: HashMap<String, &[u8]> = HashMap::new();
+            let index = IndexRec {
+                version: 1,
+                epoch: m.epoch,
+                undo: m
+                    .undo_stack
+                    .iter()
+                    .map(|e| entry_rec(e, &mut blobs))
+                    .collect(),
+                redo: m
+                    .redo_stack
+                    .iter()
+                    .map(|e| entry_rec(e, &mut blobs))
+                    .collect(),
+            };
+            let total: u64 = blobs.values().map(|b| b.len() as u64).sum();
+            if total <= MAX_BLOB_BYTES || m.undo_stack.is_empty() {
+                for (h, bytes) in &blobs {
+                    let p = blob_dir.join(h);
+                    if !p.exists() {
+                        fs::write(&p, bytes).map_err(|e| e.to_string())?;
+                    }
+                }
+                let tmp = dir.join("index.json.tmp");
+                fs::write(&tmp, serde_json::to_vec(&index).map_err(|e| e.to_string())?)
+                    .map_err(|e| e.to_string())?;
+                fs::rename(&tmp, dir.join("index.json")).map_err(|e| e.to_string())?;
+                // Contents no turn refers to any more.
+                if let Ok(rd) = fs::read_dir(&blob_dir) {
+                    for f in rd.flatten() {
+                        let name = f.file_name().to_string_lossy().to_string();
+                        if !blobs.contains_key(&name) {
+                            let _ = fs::remove_file(f.path());
+                        }
+                    }
+                }
+                return Ok(());
+            }
+        }
+        // Too big on disk: the oldest turn goes.
+        m.undo_stack.remove(0);
+    }
+}
+
+type Loaded = (u32, Vec<UndoEntry>, Vec<UndoEntry>);
+
+fn load_index(dir: &Path) -> Result<Option<Loaded>, String> {
+    let raw = match fs::read(dir.join("index.json")) {
+        Ok(r) => r,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e.to_string()),
+    };
+    let index: IndexRec = serde_json::from_slice(&raw).map_err(|e| e.to_string())?;
+    let blob_dir = dir.join("blobs");
+    let blob = |h: &str| fs::read(blob_dir.join(h)).map_err(|e| format!("blob {h}: {e}"));
+    let node = |n: NodeRec| -> Result<NodeSnapshot, String> {
+        Ok(match n {
+            NodeRec::Absent => NodeSnapshot::Absent,
+            NodeRec::File(h) => NodeSnapshot::File(blob(&h)?),
+            NodeRec::Dir { dirs, files } => NodeSnapshot::Dir {
+                dirs,
+                files: files
+                    .into_iter()
+                    .map(|(p, h)| Ok((p, blob(&h)?)))
+                    .collect::<Result<_, String>>()?,
+            },
+        })
+    };
+    let entry = |r: EntryRec| -> Result<UndoEntry, String> {
+        Ok(UndoEntry {
+            epoch: r.epoch,
+            msg_pos: r.msg_pos,
+            changed_paths: r.changed,
+            before: r
+                .before
+                .into_iter()
+                .map(|(p, n)| Ok((p, node(n)?)))
+                .collect::<Result<_, String>>()?,
+            after: r
+                .after
+                .into_iter()
+                .map(|(p, n)| Ok((p, node(n)?)))
+                .collect::<Result<_, String>>()?,
+        })
+    };
+    let undo = index
+        .undo
+        .into_iter()
+        .map(entry)
+        .collect::<Result<_, _>>()?;
+    let redo = index
+        .redo
+        .into_iter()
+        .map(entry)
+        .collect::<Result<_, _>>()?;
+    Ok(Some((index.epoch, undo, redo)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -653,5 +953,72 @@ mod tests {
         mgr.invalidate_positions();
         assert_eq!(mgr.rewind_to(0).expect("rewind"), 0);
         assert_eq!(fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "v1");
+    }
+
+    #[test]
+    fn checkpoints_survive_a_restart() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let dir = tmp.path().join("s1.checkpoints");
+        let path = ws.join("a.txt");
+        fs::write(&path, "v0").unwrap();
+        {
+            let mut mgr = UndoManager::default();
+            mgr.attach(dir.clone());
+            write_turn(&mut mgr, &ws, 1, "c1", "v1");
+            mgr.finalize_turn().unwrap();
+            write_turn(&mut mgr, &ws, 5, "c2", "v2");
+            mgr.finalize_turn().unwrap();
+        }
+        assert!(dir.join("index.json").exists());
+        // Same contents are stored once.
+        let blobs = fs::read_dir(dir.join("blobs")).unwrap().count();
+        assert_eq!(blobs, 3, "v0, v1, v2");
+
+        // A new process: the turns are back.
+        let mut mgr = UndoManager::default();
+        mgr.attach(dir.clone());
+        assert_eq!(mgr.rewind_to(5).unwrap(), 1);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v1");
+        mgr.undo_last().unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v0");
+        // Unreferenced contents are cleaned up (v2 went with the rewind;
+        // the undone turn waits on the redo stack with v0 and v1).
+        let blobs = fs::read_dir(dir.join("blobs")).unwrap().count();
+        assert_eq!(blobs, 2);
+    }
+
+    #[test]
+    fn turns_from_before_a_compaction_can_still_be_rewound() {
+        use dcode_ai_common::message::Message;
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let ws = tmp.path().join("ws");
+        fs::create_dir_all(&ws).unwrap();
+        let path = ws.join("a.txt");
+        fs::write(&path, "v0").unwrap();
+        let mut mgr = UndoManager::default();
+        mgr.attach(tmp.path().join("s.checkpoints"));
+        write_turn(&mut mgr, &ws, 1, "c1", "v1");
+        mgr.finalize_turn().unwrap();
+        // Compaction: 4 messages → summary + the last 2.
+        let old = vec![
+            Message::system("sys"),
+            Message::user("first"),
+            Message::assistant("done 1"),
+            Message::user("second"),
+        ];
+        mgr.next_epoch(&old, 2);
+        assert_eq!(mgr.epoch(), 1);
+        write_turn(&mut mgr, &ws, 3, "c2", "v2");
+        mgr.finalize_turn().unwrap();
+        let (archived, kept) = mgr.archived(0).unwrap();
+        assert_eq!((archived.len(), kept), (4, 2));
+        // Rewinding to message 1 of epoch 0 undoes both turns.
+        assert_eq!(mgr.rewind_to_at(0, 1).unwrap(), 1);
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v0");
+        // The rewound-to epoch is live again.
+        mgr.resume_epoch(0);
+        assert_eq!(mgr.epoch(), 0);
     }
 }

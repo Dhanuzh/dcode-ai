@@ -242,6 +242,58 @@ pub struct Remote {
     /// Comments written here, not sent yet.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outbox: Vec<OutComment>,
+    /// Files attached to the ticket.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<RemoteAttachment>,
+    /// Attachments asked for (their ids), not downloaded yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub downloads: Vec<String>,
+    /// Time logged here, not sent yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub worklogs: Vec<OutWorklog>,
+    /// What someone else did to the ticket since you last opened the card
+    /// ("Mamatha commented", "moved to Resolved").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub activity: String,
+}
+
+/// A saved Jira view.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct JiraView {
+    pub name: String,
+    pub jql: String,
+}
+
+impl JiraLink {
+    /// The active view's JQL, when one is chosen and still saved.
+    pub fn active_view(&self) -> Option<&JiraView> {
+        let name = self.view.as_deref()?;
+        self.views
+            .iter()
+            .find(|v| v.name.eq_ignore_ascii_case(name))
+    }
+}
+
+/// A file attached to a ticket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RemoteAttachment {
+    pub id: String,
+    pub filename: String,
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub size: u64,
+}
+
+fn is_zero_u64(n: &u64) -> bool {
+    *n == 0
+}
+
+/// Time to log on a ticket, not sent yet.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct OutWorklog {
+    /// Jira's duration: `2h 30m`, `1d`.
+    pub time: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub comment: String,
 }
 
 /// One workflow move a ticket can make.
@@ -292,6 +344,9 @@ fn is_zero(n: &u32) -> bool {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct RemoteComment {
     pub author: String,
+    /// The author's account id, when the tracker sends it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub author_id: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub at: String,
     pub body: String,
@@ -336,6 +391,13 @@ pub struct JiraLink {
     /// Only tickets in the project's open sprints.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub sprint: bool,
+    /// Saved views: a name and the JQL it pulls (several projects, a
+    /// team's filter, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub views: Vec<JiraView>,
+    /// The view the board shows; `None` is the default pull.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view: Option<String>,
     /// See [`Board::extra`].
     #[serde(flatten)]
     pub extra: Extra,
@@ -800,6 +862,9 @@ impl Board {
             out.push_str("\nreview gate: a person moves it to done");
         }
         if let Some(rm) = &c.remote {
+            if !rm.activity.is_empty() {
+                out.push_str(&format!("\n● {}", rm.activity));
+            }
             if !rm.reporter.is_empty() {
                 out.push_str(&format!("\nreporter: {}", rm.reporter));
             }
@@ -868,6 +933,33 @@ impl Board {
             if !rm.want_transition.is_empty() {
                 out.push_str(&format!("\n⟳ moving: {}", rm.want_transition));
             }
+            for w in &rm.worklogs {
+                out.push_str(format!("\n⟳ logging {} {}", w.time, w.comment).trim_end());
+            }
+            if !rm.attachments.is_empty() {
+                let list: Vec<String> = rm
+                    .attachments
+                    .iter()
+                    .enumerate()
+                    .map(|(i, a)| {
+                        let size = match a.size {
+                            0 => String::new(),
+                            n if n >= 1 << 20 => {
+                                format!(" ({:.1} MB)", n as f64 / (1u64 << 20) as f64)
+                            }
+                            n => format!(" ({} KB)", n.div_ceil(1024)),
+                        };
+                        format!("{} {}{size}", i + 1, a.filename)
+                    })
+                    .collect();
+                out.push_str(&format!("\nattachments: {}", list.join(" · ")));
+            }
+            if !rm.downloads.is_empty() {
+                out.push_str(&format!(
+                    "\n⟳ downloading {} attachment(s)",
+                    rm.downloads.len()
+                ));
+            }
             if !rm.transitions.is_empty() {
                 let can: Vec<String> = rm
                     .transitions
@@ -905,10 +997,12 @@ impl Card {
     pub fn unsent_nothing(&self) -> bool {
         self.push.is_none()
             && !self.push_fields
-            && self
-                .remote
-                .as_ref()
-                .is_none_or(|r| r.want_transition.is_empty() && r.outbox.is_empty())
+            && self.remote.as_ref().is_none_or(|r| {
+                r.want_transition.is_empty()
+                    && r.outbox.is_empty()
+                    && r.worklogs.is_empty()
+                    && r.downloads.is_empty()
+            })
     }
 
     /// Its title or description changed: the ticket gets them next sync

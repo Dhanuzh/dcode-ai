@@ -954,7 +954,13 @@ fn spawn_session_text_loader(
                         std::fs::read_to_string(sessions_dir.join(format!("{id}.json"))).ok()?;
                     let state: dcode_ai_common::session::SessionState =
                         serde_json::from_str(&raw).ok()?;
-                    Some((id, session_search_text(&state.messages)))
+                    let mut text = session_search_text(&state.messages);
+                    let files = session_files_touched(&state.messages);
+                    if !files.is_empty() {
+                        // Search finds "the session that changed auth.rs".
+                        text.push_str(&format!("\nfiles: {}\n", files.join(" ")));
+                    }
+                    Some((id, text))
                 })
                 .collect::<Vec<_>>()
         })
@@ -994,6 +1000,63 @@ fn session_search_text(messages: &[dcode_ai_common::message::Message]) -> String
     out
 }
 
+/// The files a session's tools wrote, edited, moved or deleted — from the
+/// tool calls in its saved messages — in first-touched order.
+fn session_files_touched(messages: &[dcode_ai_common::message::Message]) -> Vec<String> {
+    const WRITERS: [&str; 10] = [
+        "write_file",
+        "edit_file",
+        "apply_patch",
+        "replace_match",
+        "notebook_edit",
+        "create_directory",
+        "delete_path",
+        "move_path",
+        "rename_path",
+        "copy_path",
+    ];
+    let mut out: Vec<String> = Vec::new();
+    let mut add = |p: &str| {
+        let p = p.trim().trim_start_matches("./");
+        if !p.is_empty() && !out.iter().any(|x| x == p) && out.len() < 200 {
+            out.push(p.to_string());
+        }
+    };
+    for m in messages {
+        for call in m.tool_calls.iter().flatten() {
+            if !WRITERS.contains(&call.name.as_str()) {
+                continue;
+            }
+            let args = &call.arguments;
+            for k in ["path", "to", "destination", "new_path"] {
+                if let Some(p) = args.get(k).and_then(|v| v.as_str()) {
+                    add(p);
+                }
+            }
+            // A patch names its files in its headers.
+            if let Some(patch) = args
+                .get("patch")
+                .or_else(|| args.get("input"))
+                .and_then(|v| v.as_str())
+            {
+                for line in patch.lines() {
+                    for head in [
+                        "*** Add File: ",
+                        "*** Update File: ",
+                        "*** Delete File: ",
+                        "+++ b/",
+                    ] {
+                        if let Some(p) = line.strip_prefix(head) {
+                            add(p);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 /// A picker row with the time its session was last updated.
 type DatedEntry = (Option<chrono::DateTime<chrono::Utc>>, SessionPickerEntry);
 
@@ -1021,4 +1084,41 @@ fn is_app_generated_prompt(text: &str) -> bool {
     ];
     let t = text.trim_start();
     PREFIXES.iter().any(|p| t.starts_with(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use dcode_ai_common::message::{Message, MessageToolCall};
+
+    #[test]
+    fn the_files_a_session_changed_are_searchable() {
+        let mut m = Message::assistant("done");
+        m.tool_calls = Some(vec![
+            MessageToolCall {
+                id: "1".into(),
+                name: "edit_file".into(),
+                arguments: serde_json::json!({"path": "./crates/cli/src/auth.rs"}),
+            },
+            MessageToolCall {
+                id: "2".into(),
+                name: "read_file".into(),
+                arguments: serde_json::json!({"path": "README.md"}),
+            },
+            MessageToolCall {
+                id: "3".into(),
+                name: "apply_patch".into(),
+                arguments: serde_json::json!({"patch": "*** Begin Patch\n*** Update File: src/a.rs\n@@\n*** Add File: src/b.rs\n"}),
+            },
+            MessageToolCall {
+                id: "4".into(),
+                name: "edit_file".into(),
+                arguments: serde_json::json!({"path": "crates/cli/src/auth.rs"}),
+            },
+        ]);
+        assert_eq!(
+            session_files_touched(&[m]),
+            vec!["crates/cli/src/auth.rs", "src/a.rs", "src/b.rs"]
+        );
+    }
 }

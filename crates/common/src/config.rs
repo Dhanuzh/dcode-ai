@@ -354,8 +354,10 @@ pub struct UiConfig {
     /// Lines per scroll event (default 3).
     #[serde(default = "default_scroll_speed")]
     pub scroll_speed: u16,
-    /// Full mouse capture: enables TUI button clicks but disables native text selection.
-    /// Default false: alternate scroll mode is used instead (wheel=arrow keys, selection works).
+    /// Mouse capture in the inline view: in-app wheel scroll, drag-to-copy
+    /// and clicks, at the cost of the terminal's own scrollback and text
+    /// selection. Default false: the terminal scrolls and selects natively.
+    /// (The dashboard and overlays always capture the mouse.)
     #[serde(default = "default_mouse_capture", skip_serializing_if = "is_false")]
     pub mouse_capture: bool,
     /// Show line numbers for fenced code blocks in assistant markdown output.
@@ -1692,6 +1694,26 @@ pub struct ContextConfig {
     /// Before summarizing, clear old tool outputs (no model call).
     #[serde(default = "default_true")]
     pub prune_tool_outputs: bool,
+    /// Compact a long conversation while the session sits idle, before the
+    /// provider's prompt cache expires: the compaction reads the context at
+    /// cache price, and the next turn starts small.
+    #[serde(default = "default_true")]
+    pub idle_compaction: bool,
+    /// Idle compaction only for a context at least this big (tokens).
+    #[serde(default = "default_idle_compaction_min_tokens")]
+    pub idle_compaction_min_tokens: usize,
+    /// Seconds idle before compacting — a little under the provider's cache
+    /// lifetime (5 minutes on Anthropic by default).
+    #[serde(default = "default_idle_compaction_after_secs")]
+    pub idle_compaction_after_secs: u64,
+}
+
+fn default_idle_compaction_min_tokens() -> usize {
+    40_000
+}
+
+fn default_idle_compaction_after_secs() -> u64 {
+    240
 }
 
 impl Default for ContextConfig {
@@ -1705,6 +1727,9 @@ impl Default for ContextConfig {
             enable_auto_summarize: default_true(),
             auto_compact_at: 0,
             prune_tool_outputs: true,
+            idle_compaction: true,
+            idle_compaction_min_tokens: default_idle_compaction_min_tokens(),
+            idle_compaction_after_secs: default_idle_compaction_after_secs(),
         }
     }
 }
@@ -1909,6 +1934,15 @@ impl ContextConfig {
         }
         if let Some(v) = partial.prune_tool_outputs {
             self.prune_tool_outputs = v;
+        }
+        if let Some(v) = partial.idle_compaction {
+            self.idle_compaction = v;
+        }
+        if let Some(v) = partial.idle_compaction_min_tokens {
+            self.idle_compaction_min_tokens = v;
+        }
+        if let Some(v) = partial.idle_compaction_after_secs {
+            self.idle_compaction_after_secs = v.max(30);
         }
         if let Some(query_provider_models_api) = partial.query_provider_models_api {
             self.query_provider_models_api = query_provider_models_api;
@@ -2152,6 +2186,9 @@ struct PartialContextConfig {
     enable_auto_summarize: Option<bool>,
     auto_compact_at: Option<u8>,
     prune_tool_outputs: Option<bool>,
+    idle_compaction: Option<bool>,
+    idle_compaction_min_tokens: Option<usize>,
+    idle_compaction_after_secs: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

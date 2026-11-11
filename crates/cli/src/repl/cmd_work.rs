@@ -184,7 +184,7 @@ impl Repl {
                             Err(e) => out.eprintln(&format!("[board] {e}")),
                         }
                     }
-                    "jira" if matches!(arg.split_whitespace().next(), Some("sprint" | "move" | "comment" | "note")) => {
+                    "jira" if matches!(arg.split_whitespace().next(), Some("sprint" | "move" | "comment" | "note" | "log" | "get" | "view" | "views")) => {
                         let (word, rest) = arg
                             .split_once(char::is_whitespace)
                             .map(|(w, r)| (w, r.trim()))
@@ -221,10 +221,133 @@ impl Repl {
                                 })
                                 .map_err(|e| format!("could not save: {e}"))
                             }
+                            "view" | "views" => {
+                                // `view` lists · `view add <name> <JQL>` · `view rm <name>`
+                                // · `view <name>|default` switches.
+                                let (sub, more) = rest
+                                    .split_once(char::is_whitespace)
+                                    .map(|(a, b)| (a, b.trim()))
+                                    .unwrap_or((rest, ""));
+                                match sub {
+                                    "" => {
+                                        if link.views.is_empty() {
+                                            out.println("[board] no saved views — /board jira view add <name> <JQL> (e.g. mine project in (BSI, OPS) AND assignee = currentUser())");
+                                        }
+                                        for v in &link.views {
+                                            let on = link.view.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(&v.name));
+                                            out.println(&format!("[board] {} {}: {}", if on { "●" } else { " " }, v.name, v.jql));
+                                        }
+                                        return Ok(true);
+                                    }
+                                    "add" | "save" => match more.split_once(char::is_whitespace) {
+                                        Some((name, jql)) if !jql.trim().is_empty() => {
+                                            let (name, jql) = (name.to_string(), jql.trim().to_string());
+                                            Board::update(&ws, |b| {
+                                                if let Some(l) = b.jira.as_mut() {
+                                                    l.views.retain(|v| !v.name.eq_ignore_ascii_case(&name));
+                                                    l.views.push(dcode_ai_common::board::JiraView { name: name.clone(), jql: jql.clone() });
+                                                    l.view = Some(name.clone());
+                                                }
+                                                b.drop_synced();
+                                            })
+                                            .map(|_| format!("view {name} saved and shown (re-syncing…) · v on the board switches views"))
+                                            .map_err(|e| format!("could not save: {e}"))
+                                        }
+                                        _ => Err("/board jira view add <name> <JQL>".into()),
+                                    },
+                                    "rm" | "remove" | "delete" => Board::update(&ws, |b| {
+                                        let l = b.jira.as_mut()?;
+                                        let before = l.views.len();
+                                        l.views.retain(|v| !v.name.eq_ignore_ascii_case(more));
+                                        if l.view.as_deref().is_some_and(|n| n.eq_ignore_ascii_case(more)) {
+                                            l.view = None;
+                                            b.drop_synced();
+                                        }
+                                        Some(before)
+                                    })
+                                    .map_err(|e| format!("could not save: {e}"))
+                                    .and_then(|n| match n {
+                                        Some(n) if n > Board::load(&ws).jira.map_or(0, |l| l.views.len()) => Ok(format!("view {more} removed")),
+                                        _ => Err(format!("no view {more}")),
+                                    }),
+                                    name => {
+                                        let default = matches!(name, "default" | "none" | "off");
+                                        if !default && !link.views.iter().any(|v| v.name.eq_ignore_ascii_case(name)) {
+                                            Err(format!("no view {name} — /board jira view lists them"))
+                                        } else {
+                                            Board::update(&ws, |b| {
+                                                if let Some(l) = b.jira.as_mut() {
+                                                    l.view = (!default).then(|| name.to_string());
+                                                }
+                                                b.drop_synced();
+                                            })
+                                            .map(|_| format!("view: {} (re-syncing…)", if default { "default" } else { name }))
+                                            .map_err(|e| format!("could not save: {e}"))
+                                        }
+                                    }
+                                }
+                            }
                             _ if key.is_empty() => Err(format!(
                                 "/board jira {word} <KEY> {}",
-                                if word == "move" { "[transition or status name]" } else { "[internal] <text>" }
+                                match word {
+                                    "move" => "[transition or status name]",
+                                    "log" => "<time like 2h 30m> [what you did]",
+                                    "get" => "[number|all]",
+                                    _ => "[internal] <text>",
+                                }
                             )),
+                            "log" => match dcode_ai_cli::jira_sync::parse_worklog(text) {
+                                None => Err(format!("/board jira log {key} <time like 2h 30m> [what you did]")),
+                                Some(w) => {
+                                    let shown = format!("{} {}", w.time, w.comment).trim().to_string();
+                                    Board::update(&ws, |b| {
+                                        let r = b.card_mut(&key).and_then(|c| c.remote.as_mut())?;
+                                        r.worklogs.push(w);
+                                        Some(())
+                                    })
+                                    .map_err(|e| format!("could not save: {e}"))
+                                    .and_then(|r| r.ok_or(format!("{key} isn't a Jira ticket on the board")))
+                                    .map(|_| format!("{key}: logging {shown}…"))
+                                }
+                            },
+                            "get" => {
+                                let b = Board::load(&ws);
+                                match b.card(&key).and_then(|c| c.remote.as_ref()) {
+                                    None => Err(format!("{key} isn't a Jira ticket on the board")),
+                                    Some(r) if r.attachments.is_empty() => Err(format!("{key} has no attachments (that the board has read — /board sync)")),
+                                    Some(r) if text.is_empty() && r.attachments.len() > 1 => {
+                                        for (i, a) in r.attachments.iter().enumerate() {
+                                            out.println(&format!("[board] {key} {}: {}", i + 1, a.filename));
+                                        }
+                                        out.println(&format!("[board] /board jira get {key} <number|all>"));
+                                        return Ok(true);
+                                    }
+                                    Some(_) => Board::update(&ws, |b| {
+                                        let r = b.card_mut(&key).and_then(|c| c.remote.as_mut())?;
+                                        let ids: Vec<String> = if text.is_empty() || text.eq_ignore_ascii_case("all") {
+                                            r.attachments.iter().map(|a| a.id.clone()).collect()
+                                        } else {
+                                            text.split([',', ' '])
+                                                .filter_map(|n| n.trim().parse::<usize>().ok())
+                                                .filter_map(|n| r.attachments.get(n.wrapping_sub(1)))
+                                                .map(|a| a.id.clone())
+                                                .collect()
+                                        };
+                                        let n = ids.len();
+                                        for id in ids {
+                                            if !r.downloads.contains(&id) {
+                                                r.downloads.push(id);
+                                            }
+                                        }
+                                        Some(n)
+                                    })
+                                    .map_err(|e| format!("could not save: {e}"))
+                                    .and_then(|n| match n {
+                                        Some(0) | None => Err("no such attachment".to_string()),
+                                        Some(n) => Ok(format!("{key}: downloading {n} attachment(s) to .dcode-ai/attachments/{key}/…")),
+                                    }),
+                                }
+                            }
                             "move" if text.is_empty() => {
                                 // List where it can go.
                                 let b = Board::load(&ws);
@@ -282,7 +405,12 @@ impl Repl {
                             Ok(m) => {
                                 out.println(&format!("[board] {m}"));
                                 match dcode_ai_cli::jira_sync::sync(&mcp, &ws).await {
-                                    Ok(r) => out.println(&format!("[board] {}", r.summary())),
+                                    Ok(r) => {
+                                        out.println(&format!("[board] {}", r.summary()));
+                                        for p in &r.downloaded {
+                                            out.println(&format!("[board] saved {}", p.display()));
+                                        }
+                                    }
                                     Err(e) => out.eprintln(&format!("[board] {e}")),
                                 }
                             }
@@ -418,6 +546,48 @@ Goal:
                         )
                         .await?
                     }
+                    "work" if !arg.is_empty() => {
+                        use dcode_ai_common::board::Status;
+                        let mut words = arg.split_whitespace();
+                        let want = words.next().unwrap_or_default();
+                        let worktree = words.any(|w| matches!(w, "worktree" | "isolated" | "wt"));
+                        let b = Board::load(&ws);
+                        let Some(card) = b.resolve_key(want).and_then(|k| b.card(&k).cloned()) else {
+                            out.eprintln(&format!("[board] no card {want} on the board"));
+                            return Ok(true);
+                        };
+                        let key = card.shown_key().to_string();
+                        let branch = dcode_ai_cli::board_work::branch_name(&card);
+                        if !worktree {
+                            match dcode_ai_cli::board_work::switch_branch(&ws, &branch) {
+                                Ok(m) => out.println(&format!("[board] {m}")),
+                                Err(e) => {
+                                    out.eprintln(&format!("[board] {e}"));
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                        // In progress (its ticket follows), on its branch.
+                        let _ = Board::update(&ws, |b| {
+                            if let Some(c) = b.card_mut(&card.key) {
+                                if c.status != Status::InProgress {
+                                    c.set_status(Status::InProgress, "you");
+                                }
+                                c.branch = Some(branch.clone());
+                            }
+                        });
+                        self.kick_board_sync(&out);
+                        let b = Board::load(&ws);
+                        let full = b.card(&card.key).map(|c| b.render_card(c)).unwrap_or_default();
+                        let prompt = dcode_ai_cli::board_work::work_prompt(
+                            &key,
+                            &branch,
+                            worktree,
+                            card.remote.is_some(),
+                        );
+                        out.println(&format!("[board] working {key} on {branch}…"));
+                        self.run_preset(&prompt, &full, out).await?
+                    }
                     "run" => {
                         let n: usize = arg.parse().unwrap_or(3).clamp(1, 8);
                         let prompt = format!(
@@ -439,7 +609,7 @@ Extra instructions from the user:
                         self.run_preset(&prompt, extra, out).await?
                     }
                     _ => out.println(
-                        "[board] /board opens the board · /board add [jira] <title> · /board list · /board plan <goal> (the agent lays out cards) · /board run [n] (the head agent works the ready cards, n at a time) · /board jira <PROJECT> links Jira · /board jira assignee <name>|all · /board sync",
+                        "[board] /board opens the board · /board add [jira] <title> · /board list · /board work <KEY> [worktree] (branch, ticket in progress, the agent works it to a PR) · /board plan <goal> (the agent lays out cards) · /board run [n] (the head agent works the ready cards, n at a time) · /board jira <PROJECT> links Jira · /board jira assignee <name>|all · /board sync",
                     ),
                 }
             }

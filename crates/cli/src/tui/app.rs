@@ -762,6 +762,17 @@ impl TranscriptRenderCache {
 /// the async loop is stuck in `run_turn` (that task does not poll `cmd_rx` until the turn ends).
 /// `mouse_capture`: retained for API compatibility; fullscreen TUI always enables mouse capture.
 /// `scroll_speed`: lines per scroll event.
+/// Mouse capture for the inline view: off (the terminal's own scrollback
+/// and selection work) unless `[ui] mouse_capture` asks for in-app wheel
+/// scroll and drag-to-copy.
+fn inline_mouse(capture: bool) {
+    if capture {
+        let _ = execute!(stdout(), crossterm::event::EnableMouseCapture);
+    } else {
+        let _ = execute!(stdout(), crossterm::event::DisableMouseCapture);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn run_blocking(
     state: Arc<Mutex<TuiSessionState>>,
@@ -770,12 +781,15 @@ pub fn run_blocking(
     approval_answer_tx: Option<UnboundedSender<ApprovalAnswer>>,
     show_run_banner: bool,
     cancel_flag: Option<Arc<std::sync::atomic::AtomicBool>>,
-    _mouse_capture: bool,
+    mouse_capture: bool,
     scroll_speed: u16,
 ) -> anyhow::Result<()> {
-    let mouse_capture = true;
     crate::tui::markdown::warm_up_highlighting();
     let mut terminal = setup_terminal(mouse_capture)?;
+    // The inline view leaves the mouse to the terminal (its scrollback holds
+    // the conversation: native wheel scroll and selection) unless the user
+    // opted into in-app mouse handling.
+    inline_mouse(mouse_capture);
 
     // Set terminal window title for tab identification.
     {
@@ -990,8 +1004,9 @@ pub fn run_blocking(
                 crate::tui::terminal::push_key_flags();
                 let _ = dt.clear();
             } else {
-                // The overlay turned mouse capture off; the TUI always uses it.
-                let _ = execute!(stdout(), crossterm::event::EnableMouseCapture);
+                // Back to the inline view: the mouse goes back to the
+                // terminal (scroll and copy), unless opted in.
+                inline_mouse(mouse_capture);
                 let _ = terminal.clear();
             }
             continue;
@@ -1031,13 +1046,10 @@ pub fn run_blocking(
                 transcript_cache.invalidate();
             } else if !want_dashboard && dash_terminal.take().is_some() {
                 crate::tui::terminal::pop_key_flags();
-                // Leave the dashboard's screen; the inline view keeps the
-                // mouse (wheel scroll, drag to copy).
-                let _ = execute!(
-                    stdout(),
-                    crossterm::terminal::LeaveAlternateScreen,
-                    crossterm::event::EnableMouseCapture
-                );
+                // Leave the dashboard's screen; the inline view gives the
+                // mouse back to the terminal (unless opted in).
+                let _ = execute!(stdout(), crossterm::terminal::LeaveAlternateScreen);
+                inline_mouse(mouse_capture);
                 // Repaint the inline pane; blocks produced meanwhile flush
                 // into scrollback below.
                 let _ = terminal.clear();
@@ -1064,6 +1076,35 @@ pub fn run_blocking(
             {
                 let ws = g.workspace_root.clone();
                 g.diff_review.refresh(&ws);
+            }
+
+            // Jira: someone commented on or moved one of your tickets, or an
+            // attachment you asked for was saved.
+            if let Some(syncer) = g.board_syncer.clone() {
+                let (activity, saved) = syncer.take_news();
+                for a in &activity {
+                    g.show_toast(format!("Jira · {a}"), crate::tui::state::ToastKind::Info);
+                }
+                if !activity.is_empty() && g.notifications_enabled && !terminal_focused {
+                    crate::tui::notify::desktop_notify("Jira", &activity.join(" · "));
+                }
+                for path in saved {
+                    let shown = path
+                        .strip_prefix(&g.workspace_root)
+                        .unwrap_or(&path)
+                        .display()
+                        .to_string();
+                    match open_link_in_system(&path.to_string_lossy()) {
+                        Ok(()) => g.show_toast(
+                            format!("saved and opened {shown}"),
+                            crate::tui::state::ToastKind::Success,
+                        ),
+                        Err(_) => g.show_toast(
+                            format!("saved {shown}"),
+                            crate::tui::state::ToastKind::Success,
+                        ),
+                    }
+                }
             }
 
             // Turn-completion desktop notification: fire once on the busy→idle

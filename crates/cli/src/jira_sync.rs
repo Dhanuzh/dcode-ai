@@ -35,6 +35,8 @@ const USERINFO: &str = "atlassianUserInfo";
 const GET_ISSUE: &str = "getJiraIssue";
 const COMMENTS: &str = "listJiraIssueComments";
 const COMMENT: &str = "addOrEditJiraIssueComment";
+const WORKLOG: &str = "addOrEditJiraIssueWorklog";
+const DOWNLOAD: &str = "downloadJiraIssueAttachment";
 
 /// Calls an MCP server's tools (the real server, or a fake in tests).
 #[async_trait::async_trait]
@@ -432,6 +434,9 @@ fn find_str(v: &Value, key: &str) -> Option<String> {
 /// one person's when filtered — open or touched in the last two weeks,
 /// or those in the open sprints.
 pub fn pull_jql(link: &JiraLink) -> String {
+    if let Some(v) = link.active_view() {
+        return v.jql.clone();
+    }
     if let Some(j) = link.jql.as_deref().filter(|j| !j.trim().is_empty()) {
         return j.to_string();
     }
@@ -654,6 +659,8 @@ pub async fn connect(
         last_error: None,
         fields: Default::default(),
         sprint: false,
+        views: Vec::new(),
+        view: None,
         extra: Default::default(),
     })
 }
@@ -665,6 +672,11 @@ pub struct Report {
     pub moved: usize,
     pub edited: usize,
     pub commented: usize,
+    pub logged: usize,
+    /// Attachments saved: where each went.
+    pub downloaded: Vec<PathBuf>,
+    /// What others did to the tickets ("BSI-513: Mamatha commented").
+    pub activity: Vec<String>,
     pub pulled: usize,
     /// More tickets matched than one sync reads.
     pub truncated: bool,
@@ -685,6 +697,12 @@ impl Report {
         }
         if self.commented > 0 {
             parts.push(format!("commented {}", self.commented));
+        }
+        if self.logged > 0 {
+            parts.push(format!("logged time on {}", self.logged));
+        }
+        if !self.downloaded.is_empty() {
+            parts.push(format!("saved {} attachment(s)", self.downloaded.len()));
         }
         parts.push(format!(
             "{}{} tickets",
@@ -1430,6 +1448,134 @@ async fn transition_named(
     apply_transition(mcp, tools, link, key, t).await
 }
 
+/// `2h 30m reviewed the PR` → time `2h 30m`, comment `reviewed the PR`.
+/// `None` when it doesn't start with a duration (`1w 2d 3h 4m`, `1.5h`).
+pub fn parse_worklog(text: &str) -> Option<dcode_ai_common::board::OutWorklog> {
+    let is_part = |w: &str| {
+        let Some(unit) = w.chars().last() else {
+            return false;
+        };
+        let n = &w[..w.len() - unit.len_utf8()];
+        matches!(unit, 'w' | 'd' | 'h' | 'm')
+            && !n.is_empty()
+            && n.parse::<f64>().is_ok_and(|x| x > 0.0)
+    };
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let n = words
+        .iter()
+        .take_while(|w| is_part(&w.to_ascii_lowercase()))
+        .count();
+    if n == 0 {
+        return None;
+    }
+    Some(dcode_ai_common::board::OutWorklog {
+        time: words[..n].join(" ").to_ascii_lowercase(),
+        comment: words[n..].join(" "),
+    })
+}
+
+/// Logs time on the ticket.
+async fn log_work(
+    mcp: &dyn Mcp,
+    tools: &[String],
+    link: &JiraLink,
+    key: &str,
+    w: &dcode_ai_common::board::OutWorklog,
+) -> Result<(), String> {
+    let mut inputs = serde_json::Map::from_iter([
+        ("issueIdOrKey".to_string(), json!(key)),
+        ("timeSpent".to_string(), json!(w.time)),
+    ]);
+    if !w.comment.trim().is_empty() {
+        inputs.insert("comment".into(), json!(w.comment));
+    }
+    let text = call_or_generic(
+        mcp,
+        tools,
+        &link.cloud_id,
+        WORKLOG,
+        WORKLOG,
+        "executeWrite",
+        inputs,
+    )
+    .await?;
+    if reads_as_error(&text) {
+        return Err(first_line(&text));
+    }
+    Ok(())
+}
+
+/// A file name safe to write: no directories, no `..`.
+fn safe_file_name(name: &str) -> String {
+    let n: String = name
+        .chars()
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':' | '\0') {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    let n = n.trim().trim_start_matches('.').to_string();
+    if n.is_empty() { "attachment".into() } else { n }
+}
+
+/// Saves a ticket's attachment under `.dcode-ai/attachments/<KEY>/`.
+async fn download(
+    mcp: &dyn Mcp,
+    tools: &[String],
+    link: &JiraLink,
+    ws: &Path,
+    key: &str,
+    id: &str,
+    name: &str,
+) -> Result<PathBuf, String> {
+    let text = call_or_generic(
+        mcp,
+        tools,
+        &link.cloud_id,
+        DOWNLOAD,
+        DOWNLOAD,
+        "executeRead",
+        serde_json::Map::from_iter([("attachmentId".to_string(), json!(id))]),
+    )
+    .await?;
+    let url = json_of(&text)
+        .and_then(|v| find_str(&v, "downloadUrl"))
+        .ok_or_else(|| format!("no download link in the answer: {}", first_line(&text)))?;
+    let dir = ws
+        .join(".dcode-ai")
+        .join("attachments")
+        .join(safe_file_name(key));
+    let path = dir.join(safe_file_name(name));
+    if url.starts_with("file:") || !url.starts_with("http") {
+        return Err(format!("unexpected download link: {url}"));
+    }
+    let bytes = reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(300))
+        .send()
+        .await
+        .and_then(reqwest::Response::error_for_status)
+        .map_err(|e| e.to_string())?
+        .bytes()
+        .await
+        .map_err(|e| e.to_string())?;
+    tokio::fs::create_dir_all(&dir)
+        .await
+        .map_err(|e| e.to_string())?;
+    // Downloads never end up in a commit.
+    let ignore = ws.join(".dcode-ai").join("attachments").join(".gitignore");
+    if !ignore.exists() {
+        let _ = tokio::fs::write(&ignore, "*\n").await;
+    }
+    tokio::fs::write(&path, &bytes)
+        .await
+        .map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
 /// Adds a comment to the ticket.
 async fn add_comment(
     mcp: &dyn Mcp,
@@ -1691,6 +1837,95 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
         });
     }
 
+    // 2d. Time logged here goes to the tickets' worklogs.
+    let board = Board::load(ws);
+    let logs: Vec<(String, Vec<dcode_ai_common::board::OutWorklog>)> = board
+        .cards
+        .iter()
+        .filter(|c| c.space == Space::Jira)
+        .filter_map(|c| {
+            let r = c.remote.as_ref()?;
+            (!r.worklogs.is_empty()).then(|| (r.key.clone(), r.worklogs.clone()))
+        })
+        .collect();
+    for (key, list) in logs {
+        let mut done = Vec::new();
+        for w in list {
+            let res = log_work(mcp, &tools, &link, &key, &w).await;
+            match &res {
+                Ok(()) => report.logged += 1,
+                Err(e) => report
+                    .errors
+                    .push(format!("couldn't log time on {key}: {}", first_line(e))),
+            }
+            done.push((w, res));
+        }
+        let _ = Board::update(ws, |b| {
+            let Some(c) = b.card_mut(&key) else { return };
+            for (w, res) in &done {
+                if let Some(r) = c.remote.as_mut()
+                    && let Some(i) = r.worklogs.iter().position(|x| x == w)
+                {
+                    r.worklogs.remove(i);
+                    // The time spent shows on the next read.
+                    r.detail_of.clear();
+                }
+                let what = format!("{} {}", w.time, w.comment).trim().to_string();
+                match res {
+                    Ok(()) => c.note("jira", &format!("logged {what}")),
+                    Err(e) => c.note("jira", &format!("couldn't log {what}: {}", first_line(e))),
+                }
+            }
+        });
+    }
+
+    // 2e. Attachments asked for are saved under .dcode-ai/attachments/<KEY>/.
+    let board = Board::load(ws);
+    let wanted: Vec<(
+        String,
+        Vec<dcode_ai_common::board::RemoteAttachment>,
+        Vec<String>,
+    )> = board
+        .cards
+        .iter()
+        .filter_map(|c| {
+            let r = c.remote.as_ref()?;
+            (!r.downloads.is_empty())
+                .then(|| (r.key.clone(), r.attachments.clone(), r.downloads.clone()))
+        })
+        .collect();
+    for (key, attachments, ids) in wanted {
+        let mut notes = Vec::new();
+        for id in &ids {
+            let name = attachments
+                .iter()
+                .find(|a| &a.id == id)
+                .map(|a| a.filename.clone())
+                .unwrap_or_else(|| format!("attachment-{id}"));
+            match download(mcp, &tools, &link, ws, &key, id, &name).await {
+                Ok(path) => {
+                    notes.push(format!("saved {}", path.display()));
+                    report.downloaded.push(path);
+                }
+                Err(e) => {
+                    report
+                        .errors
+                        .push(format!("couldn't download {name}: {}", first_line(&e)));
+                    notes.push(format!("couldn't download {name}: {}", first_line(&e)));
+                }
+            }
+        }
+        let _ = Board::update(ws, |b| {
+            let Some(c) = b.card_mut(&key) else { return };
+            if let Some(r) = c.remote.as_mut() {
+                r.downloads.retain(|d| !ids.contains(d));
+            }
+            for n in &notes {
+                c.note("jira", n);
+            }
+        });
+    }
+
     // 2b. Cards renamed or redescribed here update their tickets.
     let board = Board::load(ws);
     let to_edit: Vec<(String, String, String)> = board
@@ -1808,6 +2043,7 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
     let fetched_keys: std::collections::HashSet<&str> =
         issues.iter().map(|i| i.key.as_str()).collect();
     let mut superseded = false;
+    let mut activity: Vec<(String, String)> = Vec::new();
     Board::update(ws, |b| {
         // The link changed while this round was out (`/board jira … me`
         // a moment ago): what came back answers the old filter — drop it,
@@ -1816,7 +2052,7 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
             l.project == link.project
                 && l.cloud_id == link.cloud_id
                 && l.assignee == link.assignee
-                && l.jql == link.jql
+                && pull_jql(l) == jql
         });
         if !same {
             superseded = true;
@@ -1837,6 +2073,19 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
                 .card(&i.key)
                 .and_then(|c| c.remote.clone())
                 .unwrap_or_default();
+            // Moved in Jira by someone else (the board's own moves update
+            // the status they land on right away).
+            let moved_elsewhere = !old.status.is_empty()
+                && old.status != i.status
+                && b.card(&i.key).is_some_and(|c| {
+                    c.push.is_none()
+                        && c.remote
+                            .as_ref()
+                            .is_some_and(|r| r.want_transition.is_empty())
+                });
+            if moved_elsewhere {
+                activity.push((i.key.clone(), format!("moved to {}", i.status)));
+            }
             let remote = Remote {
                 key: i.key.clone(),
                 url: browse(&link.site, &i.key),
@@ -1857,6 +2106,14 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
                 transitions: old.transitions,
                 want_transition: old.want_transition,
                 outbox: old.outbox,
+                attachments: old.attachments,
+                downloads: old.downloads,
+                worklogs: old.worklogs,
+                activity: if moved_elsewhere {
+                    format!("moved to {}", i.status)
+                } else {
+                    old.activity
+                },
             };
             let jira_unchanged = !old.status.is_empty() && old.status == i.status;
             match b.card_mut(&i.key) {
@@ -1933,10 +2190,29 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
                 .await,
             );
         }
+        // New comments on tickets read before: whose? (Yours don't count.)
+        let before = Board::load(ws);
+        let new_comments = stale.iter().zip(&read).any(|((key, _), d)| {
+            d.as_ref().is_some_and(|d| {
+                before
+                    .card(key)
+                    .and_then(|c| c.remote.as_ref())
+                    .is_some_and(|r| !r.detail_of.is_empty() && d.comment_count > r.comment_count)
+            })
+        });
+        let me = if new_comments {
+            my_account_id(mcp, &tools).await
+        } else {
+            None
+        };
         let _ = Board::update(ws, |b| {
             for ((key, updated), d) in stale.iter().zip(read) {
                 let Some(d) = d else { continue };
                 if let Some(r) = b.card_mut(key).and_then(|c| c.remote.as_mut()) {
+                    if let Some(note) = comment_activity(r, &d, me.as_deref()) {
+                        r.activity = note.clone();
+                        activity.push((key.clone(), note));
+                    }
                     r.parent = d.parent;
                     r.fields = d.fields;
                     r.links = d.links;
@@ -1946,6 +2222,9 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
                     if let Some(t) = d.transitions {
                         r.transitions = t;
                     }
+                    if let Some(a) = d.attachments {
+                        r.attachments = a;
+                    }
                     if r.reporter.is_empty() {
                         r.reporter = d.reporter;
                     }
@@ -1953,7 +2232,31 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
             }
         });
     }
+    report.activity = activity
+        .into_iter()
+        .map(|(k, a)| format!("{k}: {a}"))
+        .collect();
     Ok(report)
+}
+
+/// "Mamatha commented" when the ticket (read before) has a comment that
+/// wasn't there, and the newest isn't yours.
+fn comment_activity(old: &Remote, new: &Details, me: Option<&str>) -> Option<String> {
+    if old.detail_of.is_empty() || new.comment_count <= old.comment_count {
+        return None;
+    }
+    let newest = new.comments.first()?;
+    let mine = me.is_some_and(|m| !newest.author_id.is_empty() && newest.author_id == m);
+    if mine {
+        return None;
+    }
+    let who = newest.author.split_whitespace().next().unwrap_or("someone");
+    let added = new.comment_count - old.comment_count;
+    Some(if added == 1 {
+        format!("{who} commented")
+    } else {
+        format!("{added} new comments ({who} last)")
+    })
 }
 
 /// When a ticket last changed — or, from a server that doesn't say, a
@@ -1964,6 +2267,24 @@ fn stamp(i: &Issue) -> String {
     } else {
         i.updated.clone()
     }
+}
+
+/// `estimate 1d · left 4h · spent 4h` from Jira's time tracking.
+fn time_text(t: Option<&Value>) -> Option<String> {
+    let t = t?;
+    let parts: Vec<String> = [
+        ("originalEstimate", "estimate"),
+        ("remainingEstimate", "left"),
+        ("timeSpent", "spent"),
+    ]
+    .iter()
+    .filter_map(|(k, l)| {
+        t.get(*k)
+            .and_then(Value::as_str)
+            .map(|v| format!("{l} {v}"))
+    })
+    .collect();
+    (!parts.is_empty()).then(|| parts.join(" · "))
 }
 
 /// At most this many tickets get their details read in one round (the
@@ -1980,6 +2301,7 @@ struct Details {
     comments: Vec<dcode_ai_common::board::RemoteComment>,
     comment_count: u32,
     transitions: Option<Vec<RemoteTransition>>,
+    attachments: Option<Vec<dcode_ai_common::board::RemoteAttachment>>,
 }
 
 /// Custom fields not worth a line: board plumbing and service-desk timers.
@@ -2072,21 +2394,9 @@ async fn details(mcp: &dyn Mcp, tools: &[String], link: &JiraLink, key: &str) ->
             d.fields.push((label.to_string(), t));
         }
     }
-    if let Some(t) = f.get("timetracking") {
-        let parts: Vec<String> = [
-            ("originalEstimate", "estimate"),
-            ("remainingEstimate", "left"),
-            ("timeSpent", "spent"),
-        ]
-        .iter()
-        .filter_map(|(k, l)| {
-            t.get(*k)
-                .and_then(Value::as_str)
-                .map(|v| format!("{l} {v}"))
-        })
-        .collect();
-        if !parts.is_empty() {
-            d.fields.push(("time".into(), parts.join(" · ")));
+    if let Some(t) = time_text(f.get("timetracking")) {
+        {
+            d.fields.push(("time".into(), t));
         }
     }
     if let Some(custom) = f.get("customFields").and_then(Value::as_object) {
@@ -2151,6 +2461,10 @@ async fn details(mcp: &dyn Mcp, tools: &[String], link: &JiraLink, key: &str) ->
             .get("author")
             .map(|a| name(a, "displayName"))
             .unwrap_or_default(),
+        author_id: c
+            .get("author")
+            .map(|a| name(a, "accountId"))
+            .unwrap_or_default(),
         at: name(c, "created"),
         body: c
             .get("body")
@@ -2187,6 +2501,38 @@ async fn details(mcp: &dyn Mcp, tools: &[String], link: &JiraLink, key: &str) ->
         .await
         .ok()
         .map(|ts| ts.iter().filter_map(remote_transition).collect());
+    // Attachments and time tracking aren't in the evidence view.
+    if let Some(v) = mcp
+        .call(
+            &tool(tools, GET_ISSUE)?,
+            json!({"cloudId": link.cloud_id, "issueIdOrKey": key, "fields": ["attachment", "timetracking"], "fieldsByKeys": true}),
+        )
+        .await
+        .ok()
+        .and_then(|t| json_of(&t))
+    {
+        let issue = v.get("data").unwrap_or(&v);
+        let f = issue.get("fields").unwrap_or(&Value::Null);
+        d.attachments = Some(
+            f.get("attachment")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|a| {
+                    Some(dcode_ai_common::board::RemoteAttachment {
+                        id: id_str(a.get("id")?)?,
+                        filename: a.get("filename")?.as_str()?.to_string(),
+                        size: a.get("size").and_then(Value::as_u64).unwrap_or(0),
+                    })
+                })
+                .collect(),
+        );
+        if let Some(t) = time_text(f.get("timetracking"))
+            && !d.fields.iter().any(|(k, _)| k == "time")
+        {
+            d.fields.push(("time".into(), t));
+        }
+    }
     Some(d)
 }
 
@@ -2199,6 +2545,9 @@ fn first_line(s: &str) -> String {
 pub struct Syncer {
     kick: Arc<tokio::sync::Notify>,
     status: Arc<Mutex<String>>,
+    /// What others did to your tickets, and attachments saved, since the
+    /// TUI last looked.
+    news: Arc<Mutex<(Vec<String>, Vec<PathBuf>)>>,
     busy: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -2207,6 +2556,7 @@ impl Syncer {
         let me = Arc::new(Self {
             kick: Arc::new(tokio::sync::Notify::new()),
             status: Arc::new(Mutex::new("connecting to Jira…".into())),
+            news: Default::default(),
             busy: Default::default(),
         });
         let s = me.clone();
@@ -2239,6 +2589,12 @@ impl Syncer {
                 let text = match sync(mcp.as_ref(), &ws).await {
                     Ok(r) => {
                         last_ok = r.errors.is_empty();
+                        if (!r.activity.is_empty() || !r.downloaded.is_empty())
+                            && let Ok(mut n) = s.news.lock()
+                        {
+                            n.0.extend(r.activity.iter().cloned());
+                            n.1.extend(r.downloaded.iter().cloned());
+                        }
                         r.summary()
                     }
                     Err(e) => {
@@ -2257,6 +2613,14 @@ impl Syncer {
             }
         });
         me
+    }
+
+    /// Activity on your tickets and attachments saved since the last call.
+    pub fn take_news(&self) -> (Vec<String>, Vec<PathBuf>) {
+        self.news
+            .lock()
+            .map(|mut n| std::mem::take(&mut *n))
+            .unwrap_or_default()
     }
 
     /// Sync now.
@@ -3066,6 +3430,10 @@ mod tests {
         issues: Mutex<Vec<(String, String, String, String)>>,
         /// Changes the board's filter while a search is out.
         relink_during_search: Option<PathBuf>,
+        /// Someone else has commented on the tickets since.
+        new_comment: Mutex<bool>,
+        /// Where attachment downloads point.
+        download_url: Mutex<String>,
     }
 
     impl Workflow {
@@ -3093,7 +3461,16 @@ mod tests {
                     ),
                 ]),
                 relink_during_search: None,
+                new_comment: Mutex::new(false),
+                download_url: Mutex::new(String::new()),
             }
+        }
+        /// `getJiraIssue` reads of a ticket's details (not its attachments).
+        fn evidence_reads(&self) -> usize {
+            self.called(GET_ISSUE)
+                .iter()
+                .filter(|a| a["view"] == "evidence")
+                .count()
         }
         fn called(&self, tool: &str) -> Vec<Value> {
             self.calls
@@ -3165,15 +3542,25 @@ mod tests {
                         .map(|(k, a, st, cat)| json!({"key": k, "fields": {
                             "summary": format!("{k} work"), "status": {"name": st, "statusCategory": {"name": cat}},
                             "assignee": {"displayName": a}, "priority": {"name": "P2"},
-                            "updated": "2026-11-04T10:01:49.471-0500"
+                            "updated": if *self.new_comment.lock().unwrap() { "2026-11-05T10:00:00.000-0500" } else { "2026-11-04T10:01:49.471-0500" }
                         }}))
                         .collect();
                     data(json!({"isLast": true, "issues": issues}))
                 }
+                GET_ISSUE
+                    if args["fields"]
+                        .as_array()
+                        .is_some_and(|f| f.contains(&json!("attachment"))) =>
+                {
+                    data(json!({"key": args["issueIdOrKey"], "fields": {
+                        "attachment": [{"id": "1058600", "filename": "spec.xlsx", "size": 2048}],
+                        "timetracking": {"timeSpent": "4h"}
+                    }}))
+                }
                 GET_ISSUE => data(json!({"key": args["issueIdOrKey"], "fields": {
                     "reporter": {"displayName": "Sreelekshmi Latha"},
                     "parent": {"key": "BSI-476", "fields": {"summary": "Release Management"}},
-                    "comment": {"total": 2},
+                    "comment": {"total": if *self.new_comment.lock().unwrap() { 3 } else { 2 }},
                     "issuelinks": [{"type": {"outward": "blocks", "inward": "is blocked by"},
                                     "outwardIssue": {"key": "BSI-9", "fields": {"summary": "Go live", "status": {"name": "Open"}}}}],
                     "customFields": {
@@ -3183,10 +3570,24 @@ mod tests {
                         "Time to resolution": {"id": "customfield_10045", "value": {"errorMessage": "nope"}}
                     }
                 }})),
-                COMMENTS => data(json!({"total": 2, "comments": [
-                    {"author": {"displayName": "Mamatha Suresh"}, "created": "2026-11-04T09:00:00.000-0500", "body": "Any update?"},
-                    {"author": {"displayName": "Dhanush Durai"}, "created": "2026-11-03T09:00:00.000-0500", "body": "On it"}
-                ]})),
+                COMMENTS => {
+                    let mut list = vec![
+                        json!({"author": {"displayName": "Mamatha Suresh"}, "created": "2026-11-04T09:00:00.000-0500", "body": "Any update?"}),
+                        json!({"author": {"displayName": "Dhanush Durai", "accountId": "712020:me"}, "created": "2026-11-03T09:00:00.000-0500", "body": "On it"}),
+                    ];
+                    if *self.new_comment.lock().unwrap() {
+                        list.insert(0, json!({"author": {"displayName": "Supriya Prabhu", "accountId": "712020:other"}, "created": "2026-11-05T09:00:00.000-0500", "body": "Please share the ETA"}));
+                    }
+                    data(json!({"total": list.len(), "comments": list}))
+                }
+                "executeWrite" => {
+                    assert_eq!(args["name"], WORKLOG);
+                    data(json!({"worklogId": "9001", "timeSpent": args["inputs"]["timeSpent"]}))
+                }
+                "executeRead" if args["name"] == DOWNLOAD => data(json!({
+                    "attachmentId": args["inputs"]["attachmentId"],
+                    "downloadUrl": *self.download_url.lock().unwrap(),
+                })),
                 "executeRead" => {
                     assert_eq!(args["name"], "listJiraIssueTransitions");
                     let fields = args["inputs"]["expand"] == "transitions.fields";
@@ -3241,6 +3642,8 @@ mod tests {
                 last_error: None,
                 fields: Default::default(),
                 sprint: false,
+                views: Vec::new(),
+                view: None,
                 extra: Default::default(),
             })
         })
@@ -3298,7 +3701,7 @@ mod tests {
         );
         // Nothing changed in Jira: the details aren't read again.
         sync(&jira, &ws).await.unwrap();
-        assert_eq!(jira.called(GET_ISSUE).len(), 1);
+        assert_eq!(jira.evidence_reads(), 1);
     }
 
     #[tokio::test]
@@ -3494,7 +3897,7 @@ mod tests {
         );
         assert!(r.summary().contains("commented 2"), "{}", r.summary());
         // Sent comments make the ticket's details read again.
-        assert_eq!(jira.called(GET_ISSUE).len(), 2);
+        assert_eq!(jira.evidence_reads(), 2);
     }
 
     /// 250 tickets, 100 a page; or endless pages.
@@ -3588,6 +3991,8 @@ mod tests {
             last_error: None,
             fields: Default::default(),
             sprint: true,
+            views: Vec::new(),
+            view: None,
             extra: Default::default(),
         };
         assert_eq!(
@@ -3599,5 +4004,191 @@ mod tests {
         assert_eq!(pull_jql(&l), project_jql("BSI"));
         l.jql = Some("key = BSI-1".into());
         assert_eq!(pull_jql(&l), "key = BSI-1");
+    }
+
+    #[tokio::test]
+    async fn what_others_do_to_your_tickets_is_flagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let jira = Workflow::new();
+        linked(&ws, Some("me"));
+        // The first look is never news.
+        let r = sync(&jira, &ws).await.unwrap();
+        assert!(r.activity.is_empty(), "{r:?}");
+        assert!(
+            Board::load(&ws)
+                .card("BSI-1")
+                .unwrap()
+                .remote
+                .as_ref()
+                .unwrap()
+                .activity
+                .is_empty()
+        );
+
+        // Someone resolves it in Jira and comments.
+        for i in jira.issues.lock().unwrap().iter_mut() {
+            if i.0 == "BSI-1" {
+                i.2 = "Resolved".into();
+                i.3 = "Done".into();
+            }
+        }
+        *jira.new_comment.lock().unwrap() = true;
+        let r = sync(&jira, &ws).await.unwrap();
+        assert_eq!(
+            r.activity,
+            vec![
+                "BSI-1: moved to Resolved".to_string(),
+                "BSI-1: Supriya commented".to_string()
+            ]
+        );
+        let c = Board::load(&ws).card("BSI-1").unwrap().clone();
+        assert_eq!(c.remote.as_ref().unwrap().activity, "Supriya commented");
+        assert_eq!(c.status, Status::Done);
+        assert!(
+            Board::load(&ws)
+                .render_card(&c)
+                .contains("● Supriya commented")
+        );
+
+        // Nothing new: no news.
+        let r = sync(&jira, &ws).await.unwrap();
+        assert!(r.activity.is_empty(), "{r:?}");
+    }
+
+    #[test]
+    fn your_own_comment_is_not_news() {
+        let old = Remote {
+            detail_of: "t1".into(),
+            comment_count: 1,
+            ..Default::default()
+        };
+        let mut d = Details {
+            comment_count: 2,
+            ..Default::default()
+        };
+        d.comments.push(dcode_ai_common::board::RemoteComment {
+            author: "Dhanush Durai".into(),
+            author_id: "712020:me".into(),
+            ..Default::default()
+        });
+        assert_eq!(comment_activity(&old, &d, Some("712020:me")), None);
+        assert_eq!(
+            comment_activity(&old, &d, Some("712020:other")).as_deref(),
+            Some("Dhanush commented")
+        );
+        // Never on the first read.
+        let first = Remote::default();
+        assert_eq!(comment_activity(&first, &d, None), None);
+    }
+
+    #[tokio::test]
+    async fn time_is_logged_and_attachments_are_saved() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let jira = Workflow::new();
+        // A one-shot file server for the short-lived download link.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        *jira.download_url.lock().unwrap() = format!(
+            "http://{}/file/1/binary?token=x",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 2048];
+            let _ = sock.read(&mut buf).await.unwrap();
+            sock.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello",
+            )
+            .await
+            .unwrap();
+        });
+        linked(&ws, Some("me"));
+        sync(&jira, &ws).await.unwrap();
+        let r = Board::load(&ws)
+            .card("BSI-1")
+            .unwrap()
+            .remote
+            .clone()
+            .unwrap();
+        assert_eq!(r.attachments.len(), 1);
+        assert_eq!(r.attachments[0].filename, "spec.xlsx");
+        assert!(
+            r.fields.contains(&("time".into(), "spent 4h".into())),
+            "{:?}",
+            r.fields
+        );
+
+        Board::update(&ws, |b| {
+            let r = b.card_mut("BSI-1").unwrap().remote.as_mut().unwrap();
+            r.worklogs
+                .push(parse_worklog("2h 30m reviewed the PR").unwrap());
+            r.downloads.push("1058600".into());
+        })
+        .unwrap();
+        assert_eq!(Board::load(&ws).pending(), 1);
+        let r = sync(&jira, &ws).await.unwrap();
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert_eq!(r.logged, 1);
+        let w = &jira.called("executeWrite")[0];
+        assert_eq!(w["inputs"]["timeSpent"], "2h 30m");
+        assert_eq!(w["inputs"]["comment"], "reviewed the PR");
+        let saved = ws.join(".dcode-ai/attachments/BSI-1/spec.xlsx");
+        assert_eq!(r.downloaded, vec![saved.clone()]);
+        assert_eq!(std::fs::read(&saved).unwrap(), b"hello");
+        assert!(ws.join(".dcode-ai/attachments/.gitignore").exists());
+        server.await.unwrap();
+        let c = Board::load(&ws).card("BSI-1").unwrap().clone();
+        let rm = c.remote.as_ref().unwrap();
+        assert!(rm.worklogs.is_empty() && rm.downloads.is_empty());
+        assert!(
+            c.notes
+                .iter()
+                .any(|n| n.text == "logged 2h 30m reviewed the PR")
+        );
+    }
+
+    #[test]
+    fn worklog_times_read_like_jira() {
+        let w = parse_worklog("1d 2h fixed the export").unwrap();
+        assert_eq!(
+            (w.time.as_str(), w.comment.as_str()),
+            ("1d 2h", "fixed the export")
+        );
+        assert_eq!(parse_worklog("1.5H").unwrap().time, "1.5h");
+        assert!(parse_worklog("fixed it in 2h").is_none());
+        assert!(parse_worklog("0h").is_none());
+        assert_eq!(safe_file_name("../../etc/passwd"), "_.._etc_passwd");
+        assert_eq!(safe_file_name("a/b\\c.txt"), "a_b_c.txt");
+    }
+
+    #[test]
+    fn a_saved_view_replaces_the_pull() {
+        let mut l = JiraLink {
+            server: "a".into(),
+            cloud_id: "c".into(),
+            site: String::new(),
+            project: "BSI".into(),
+            jql: None,
+            assignee: Some("me".into()),
+            last_sync: None,
+            last_error: None,
+            fields: Default::default(),
+            sprint: false,
+            views: vec![dcode_ai_common::board::JiraView {
+                name: "ops".into(),
+                jql: "project in (BSI, OPS) AND assignee = currentUser()".into(),
+            }],
+            view: Some("OPS".into()),
+            extra: Default::default(),
+        };
+        assert_eq!(
+            pull_jql(&l),
+            "project in (BSI, OPS) AND assignee = currentUser()"
+        );
+        // A view that was removed falls back to the default pull.
+        l.view = Some("gone".into());
+        assert!(pull_jql(&l).starts_with("project = \"BSI\" AND assignee = currentUser()"));
     }
 }

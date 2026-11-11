@@ -53,6 +53,10 @@ enum Typing {
     },
     /// A comment answering the ticket's newest one.
     Reply(String),
+    /// Time to log on the ticket: `2h 30m [what you did]`.
+    Worklog(String),
+    /// Which attachment to download: a number, or `all`.
+    Download(String),
 }
 
 /// The board view's state while it's open.
@@ -381,6 +385,22 @@ fn card_lines(board: &Board, c: &Card, w: usize) -> Vec<Line<'static>> {
         ),
         None => {}
     }
+    if let Some(act) = c
+        .remote
+        .as_ref()
+        .map(|r| r.activity.as_str())
+        .filter(|a| !a.is_empty())
+    {
+        add(
+            Span::styled(
+                format!("● {}", truncate(act, 18)),
+                Style::default()
+                    .fg(theme::accent())
+                    .add_modifier(Modifier::BOLD),
+            ),
+            &mut meta,
+        );
+    }
     if let Some(a) = &c.assignee {
         add(
             Span::styled(
@@ -527,6 +547,18 @@ pub(crate) fn run_board_overlay(
             ui.col = ui.col.min(Status::ALL.len() - 1);
             ui.row = ui.row.min(columns[ui.col].len().saturating_sub(1));
             let selected: Option<Card> = columns[ui.col].get(ui.row).cloned();
+            // Opening a card is reading what happened to it.
+            if ui.detail
+                && let Some(c) = &selected
+                && c.remote.as_ref().is_some_and(|r| !r.activity.is_empty())
+            {
+                let key = c.key.clone();
+                let _ = Board::update(&ws, |b| {
+                    if let Some(r) = b.card_mut(&key).and_then(|c| c.remote.as_mut()) {
+                        r.activity.clear();
+                    }
+                });
+            }
 
             let size = term.size()?;
             let area = Rect::new(0, 0, size.width, size.height);
@@ -575,7 +607,10 @@ pub(crate) fn run_board_overlay(
             let jira_label = match &board.jira {
                 Some(l) => {
                     let mut t = format!("Jira {}", l.project);
-                    if let Some(a) = &l.assignee {
+                    if let Some(v) = l.active_view() {
+                        t = format!("Jira {}", v.name);
+                    }
+                    if let Some(a) = l.assignee.as_ref().filter(|_| l.active_view().is_none()) {
                         t.push_str(&format!(" · {a}"));
                     }
                     if l.sprint {
@@ -670,6 +705,25 @@ pub(crate) fn run_board_overlay(
                     if *internal { "Internal note" } else { "Comment" },
                     tail(buf, 120)
                 ),
+                (Some((Typing::Worklog(k), buf)), _, _) => format!(
+                    " Log time on {k} (e.g. 2h 30m reviewed the PR): {}▏   Enter logs · Esc cancels",
+                    tail(buf, 120)
+                ),
+                (Some((Typing::Download(k), buf)), _, _) => {
+                    let list = board
+                        .card(k)
+                        .and_then(|c| c.remote.as_ref())
+                        .map(|r| {
+                            r.attachments
+                                .iter()
+                                .enumerate()
+                                .map(|(i, a)| format!("{} {}", i + 1, a.filename))
+                                .collect::<Vec<_>>()
+                                .join(" · ")
+                        })
+                        .unwrap_or_default();
+                    format!(" Download from {k}: {list} — number or `all`: {buf}▏")
+                }
                 (Some((Typing::Reply(k), buf)), _, _) => {
                     let to = board
                         .card(k)
@@ -683,7 +737,7 @@ pub(crate) fn run_board_overlay(
                     format!(" Delete {k}? x again deletes, any other key keeps it")
                 }
                 (None, Some(m), None) => format!(" {m}"),
-                _ => " t Personal/Jira · ←→↑↓ · ⇧←/→ move card · n new · e edit · p priority · b blockers · g gate · ⏎ details · o open in Jira · s sync · r run · q close".into(),
+                _ => " t Personal/Jira · ←→↑↓ · ⇧←/→ move card · n new · e edit · p priority · b blockers · g gate · ⏎ details · o open in Jira · s sync · v view · r run · q close".into(),
             };
 
             term.draw(|frame| {
@@ -830,7 +884,7 @@ pub(crate) fn run_board_overlay(
                         }
                     }
                     text.push_str(
-                        "\n\n ←→ status · t transition · c comment · C internal note · R reply · ↑↓ scroll · p priority · e description · u assignee · o open in Jira · q close",
+                        "\n\n ←→ status · t transition · c comment · C internal note · R reply · w log time · a attachments · ↑↓ scroll · p priority · e description · u assignee · o open in Jira · q close",
                     );
                     hits.detail = Some(r);
                     frame.render_widget(Clear, r);
@@ -1014,6 +1068,61 @@ pub(crate) fn run_board_overlay(
                                             }
                                         })
                                     }
+                                    Typing::Worklog(k) if !text.is_empty() => {
+                                        match crate::jira_sync::parse_worklog(&text) {
+                                            None => Ok(format!(
+                                                "say how long first, e.g. 2h 30m {text}"
+                                            )),
+                                            Some(w) => {
+                                                let shown = format!("{} {}", w.time, w.comment)
+                                                    .trim()
+                                                    .to_string();
+                                                let r = Board::update(&ws, |b| {
+                                                    let r = b.card_mut(k)?.remote.as_mut()?;
+                                                    r.worklogs.push(w);
+                                                    Some(())
+                                                });
+                                                kick(state);
+                                                r.map(|o| match o {
+                                                    Some(()) => format!("{k}: logging {shown}…"),
+                                                    None => format!("{k} isn't a Jira ticket"),
+                                                })
+                                            }
+                                        }
+                                    }
+                                    Typing::Download(k) if !text.is_empty() => {
+                                        let r = Board::update(&ws, |b| {
+                                            let r = b.card_mut(k)?.remote.as_mut()?;
+                                            let ids: Vec<String> = if text
+                                                .eq_ignore_ascii_case("all")
+                                            {
+                                                r.attachments.iter().map(|a| a.id.clone()).collect()
+                                            } else {
+                                                text.split([',', ' '])
+                                                    .filter_map(|n| n.trim().parse::<usize>().ok())
+                                                    .filter_map(|n| {
+                                                        r.attachments.get(n.wrapping_sub(1))
+                                                    })
+                                                    .map(|a| a.id.clone())
+                                                    .collect()
+                                            };
+                                            let n = ids.len();
+                                            for id in ids {
+                                                if !r.downloads.contains(&id) {
+                                                    r.downloads.push(id);
+                                                }
+                                            }
+                                            Some(n)
+                                        });
+                                        kick(state);
+                                        r.map(|n| match n {
+                                            Some(0) => "no such attachment".to_string(),
+                                            Some(n) => {
+                                                format!("{k}: downloading {n} attachment(s)…")
+                                            }
+                                            None => format!("{k} isn't a Jira ticket"),
+                                        })
+                                    }
                                     Typing::Reply(k) if !text.is_empty() => {
                                         let quote = board
                                             .card(k)
@@ -1070,7 +1179,9 @@ pub(crate) fn run_board_overlay(
                             }
                             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
                                 let max = match what {
-                                    Typing::Comment { .. } | Typing::Reply(_) => 4000,
+                                    Typing::Comment { .. }
+                                    | Typing::Reply(_)
+                                    | Typing::Worklog(_) => 4000,
                                     _ => 200,
                                 };
                                 if buf.chars().count() < max {
@@ -1108,6 +1219,25 @@ pub(crate) fn run_board_overlay(
                             }
                             KeyCode::PageUp => {
                                 ui.detail_scroll = ui.detail_scroll.saturating_sub(10)
+                            }
+                            KeyCode::Char('w') | KeyCode::Char('a')
+                                if selected.as_ref().is_some_and(|c| c.remote.is_some()) =>
+                            {
+                                let c = selected.as_ref().expect("checked");
+                                let k = c.key.clone();
+                                let attachments =
+                                    c.remote.as_ref().map_or(0, |r| r.attachments.len());
+                                if key.code == KeyCode::Char('w') {
+                                    ui.typing = Some((Typing::Worklog(k), String::new()));
+                                } else if attachments == 0 {
+                                    ui.message = Some(format!(
+                                        "{k} has no attachments (s syncs to read them)"
+                                    ));
+                                } else if attachments == 1 {
+                                    ui.typing = Some((Typing::Download(k), "1".into()));
+                                } else {
+                                    ui.typing = Some((Typing::Download(k), String::new()));
+                                }
                             }
                             KeyCode::Char('t')
                             | KeyCode::Char('c')
@@ -1323,6 +1453,38 @@ pub(crate) fn run_board_overlay(
                             }
                         }
                         KeyCode::Enter => ui.detail = selected.is_some(),
+                        KeyCode::Char('v') => {
+                            let r = Board::update(&ws, |b| {
+                                let l = b.jira.as_mut()?;
+                                if l.views.is_empty() {
+                                    return Some(None);
+                                }
+                                // default → each view → default
+                                let next = match l.active_view().map(|v| v.name.clone()) {
+                                    None => Some(l.views[0].name.clone()),
+                                    Some(cur) => {
+                                        let i =
+                                            l.views.iter().position(|v| v.name == cur).unwrap_or(0);
+                                        l.views.get(i + 1).map(|v| v.name.clone())
+                                    }
+                                };
+                                l.view = next.clone();
+                                b.drop_synced();
+                                Some(Some(next.unwrap_or_else(|| "default".into())))
+                            });
+                            board = Board::load(&ws);
+                            ui.message = Some(match r {
+                                Ok(Some(Some(name))) => {
+                                    kick(state);
+                                    format!("view: {name} — syncing…")
+                                }
+                                Ok(Some(None)) => {
+                                    "no saved views — /board jira view add <name> <JQL>".into()
+                                }
+                                Ok(None) => "Jira isn't linked".into(),
+                                Err(e) => format!("could not save the board: {e}"),
+                            });
+                        }
                         KeyCode::Char('r') => {
                             let _ = cmd_tx.send(TuiCmd::Submit("/board run".into()));
                             if let Ok(mut g) = state.lock() {

@@ -251,75 +251,94 @@ impl SessionRuntime {
         b
     }
 
-    /// History index of the `user_index_from_end`-th user message (0 = most
-    /// recent). The message text is verified first so a transcript/history
-    /// divergence (e.g. after compaction) fails loudly instead of rewinding
-    /// the wrong spot.
-    fn user_message_position(
+    /// Where the `user_index_from_end`-th user message (0 = most recent) of
+    /// the whole conversation is — in the current history, or, from before
+    /// a compaction, in an archived epoch. The message text is verified so a
+    /// transcript/history divergence fails loudly instead of rewinding the
+    /// wrong spot.
+    fn locate_user_message(
         &self,
         user_index_from_end: usize,
         expected_text: &str,
-    ) -> Result<usize, String> {
-        use dcode_ai_common::message::{ContentPart, MessageContent, Role};
-
-        let messages = &self.supervisor.agent().messages;
-        let user_positions: Vec<usize> = messages
-            .iter()
-            .enumerate()
-            .filter(|(_, m)| matches!(m.role, Role::User))
-            .map(|(i, _)| i)
-            .collect();
-        if user_index_from_end >= user_positions.len() {
-            return Err(
-                "that message is no longer in the model context (history was compacted)".into(),
-            );
-        }
-        let pos = user_positions[user_positions.len() - 1 - user_index_from_end];
-        let actual = match &messages[pos].content {
-            MessageContent::Text(t) => t.clone(),
-            MessageContent::Parts(parts) => parts
+    ) -> Result<RewindPoint, String> {
+        use dcode_ai_common::message::{Message, Role};
+        let agent = self.supervisor.agent();
+        let users = |messages: &[Message], upto: usize| -> Vec<usize> {
+            messages[..upto.min(messages.len())]
                 .iter()
-                .filter_map(|p| match p {
-                    ContentPart::Text { text } => Some(text.as_str()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n"),
+                .enumerate()
+                .filter(|(_, m)| matches!(m.role, Role::User))
+                .map(|(i, _)| i)
+                .collect()
         };
-        // The stored message may be an expanded form of what the transcript
-        // shows (@file mentions inlined), so accept either direction of
-        // containment, not only exact equality.
-        let a = actual.trim();
-        let e = expected_text.trim();
-        // A `/command` line is shown as typed but sent expanded; its
-        // position alone identifies it.
-        if !e.starts_with('/') && a != e && !a.contains(e) && !e.contains(a) {
-            return Err("transcript and model history diverged — not rewinding".into());
+        let current = users(&agent.messages, agent.messages.len());
+        if user_index_from_end < current.len() {
+            let pos = current[current.len() - 1 - user_index_from_end];
+            check_rewind_text(&agent.messages[pos], expected_text)?;
+            return Ok(RewindPoint {
+                epoch: agent.history_epoch(),
+                pos,
+                archived: None,
+            });
         }
-        Ok(pos)
+        // Older: walk the archived epochs, newest first. Each one's last
+        // `kept` messages live on in the next, so only those before count.
+        let mut left = user_index_from_end - current.len();
+        let mut epoch = agent.history_epoch();
+        while epoch > 0 {
+            epoch -= 1;
+            let Some((messages, kept)) = agent.archived_history(epoch) else {
+                break;
+            };
+            let own = users(&messages, messages.len().saturating_sub(kept));
+            if left < own.len() {
+                let pos = own[own.len() - 1 - left];
+                check_rewind_text(&messages[pos], expected_text)?;
+                return Ok(RewindPoint {
+                    epoch,
+                    pos,
+                    archived: Some(messages),
+                });
+            }
+            left -= own.len();
+        }
+        Err("that message is no longer in the model context (history was compacted)".into())
     }
 
     /// Rewind to just before the `user_index_from_end`-th user message:
     /// the conversation (drop that message and everything after), the files
-    /// edited since (restored from turn snapshots), or both. Returns the
-    /// number of files restored.
+    /// edited since (restored from turn snapshots), or both. Works across
+    /// compactions: the history from before one is kept on disk. Returns
+    /// the number of files restored.
     pub fn rewind_to_user_message(
         &mut self,
         user_index_from_end: usize,
         expected_text: &str,
         scope: crate::tui::state::RewindScope,
     ) -> Result<(usize, Option<String>), String> {
-        let pos = self.user_message_position(user_index_from_end, expected_text)?;
+        let point = self.locate_user_message(user_index_from_end, expected_text)?;
         let mut restored = 0;
         let mut page = None;
         if scope.code() {
-            restored = self.supervisor.agent_mut().rewind_files_to(pos)?;
-            // Back to the page that was open then (a form already submitted
-            // to a site can't be taken back).
-            page = self.supervisor.agent().page_at_message(pos);
+            restored = self
+                .supervisor
+                .agent_mut()
+                .rewind_files_to_at(point.epoch, point.pos)?;
+            if point.archived.is_none() {
+                // Back to the page that was open then (a form already
+                // submitted to a site can't be taken back).
+                page = self.supervisor.agent().page_at_message(point.pos);
+            }
         }
         if scope.conversation() {
-            self.supervisor.agent_mut().messages.truncate(pos);
+            let agent = self.supervisor.agent_mut();
+            match point.archived {
+                None => agent.messages.truncate(point.pos),
+                Some(mut messages) => {
+                    messages.truncate(point.pos);
+                    agent.restore_archived_history(point.epoch, messages);
+                }
+            }
             if let Some(tx) = self.supervisor.agent().event_sender() {
                 let _ = tx.try_send(dcode_ai_common::event::AgentEvent::ConversationRewound {
                     user_messages_dropped: user_index_from_end + 1,
@@ -541,6 +560,16 @@ impl SessionRuntime {
         focus: Option<&str>,
     ) -> Result<(usize, usize, String), String> {
         self.supervisor.compact_now(focus).await
+    }
+
+    /// Whether an idle compaction is due now.
+    pub fn idle_compaction_due(&self) -> bool {
+        self.supervisor.idle_compaction_due()
+    }
+
+    /// Compact while idle; context size before and after.
+    pub async fn idle_compact(&mut self) -> Option<(usize, usize)> {
+        self.supervisor.idle_compact().await
     }
 
     pub fn compact_summary(&self) -> String {
@@ -783,4 +812,40 @@ pub async fn build_resumed_session_runtime(
         background_subagents: false,
         btw: None,
     })
+}
+
+/// A user message to rewind to: its position in a history epoch, and that
+/// epoch's archived messages when it's from before a compaction.
+struct RewindPoint {
+    epoch: u32,
+    pos: usize,
+    archived: Option<Vec<dcode_ai_common::message::Message>>,
+}
+
+/// The stored message may be an expanded form of what the transcript shows
+/// (@file mentions inlined), so either direction of containment counts; a
+/// `/command` line (shown as typed, sent expanded) is identified by its
+/// position alone.
+fn check_rewind_text(
+    m: &dcode_ai_common::message::Message,
+    expected_text: &str,
+) -> Result<(), String> {
+    use dcode_ai_common::message::{ContentPart, MessageContent};
+    let actual = match &m.content {
+        MessageContent::Text(t) => t.clone(),
+        MessageContent::Parts(parts) => parts
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+    };
+    let a = actual.trim();
+    let e = expected_text.trim();
+    if !e.starts_with('/') && a != e && !a.contains(e) && !e.contains(a) {
+        return Err("transcript and model history diverged — not rewinding".into());
+    }
+    Ok(())
 }

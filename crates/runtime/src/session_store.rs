@@ -207,6 +207,11 @@ impl SessionStore {
         if events_path.exists() {
             let _ = tokio::fs::remove_file(&events_path).await;
         }
+        // …and its turn checkpoints and archived history.
+        let checkpoints = self.sessions_dir.join(format!("{session_id}.checkpoints"));
+        if checkpoints.is_dir() {
+            let _ = tokio::fs::remove_dir_all(&checkpoints).await;
+        }
 
         if !deleted_any {
             return Err(SessionStoreError::NotFound(session_id.to_string()));

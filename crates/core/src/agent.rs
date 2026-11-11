@@ -77,6 +77,15 @@ pub const MAX_COMPACTION_FAILURES: u32 = 3;
 
 /// Whether a compaction from `before` to `after` tokens freed enough to
 /// keep (at least 30% smaller), as Gemini CLI rejects one that doesn't.
+/// The same message on both sides of a compaction (provider blocks are
+/// stripped from the kept tail, so they don't count).
+fn same_message(a: &Message, b: &Message) -> bool {
+    a.role == b.role
+        && a.content == b.content
+        && a.tool_call_id == b.tool_call_id
+        && a.tool_calls == b.tool_calls
+}
+
 pub fn compaction_worked(before: usize, after: usize) -> bool {
     after * 10 <= before * 7
 }
@@ -287,8 +296,19 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
     /// Returns the new message count.
     pub fn compact_messages(&mut self, new_messages: Vec<Message>) -> usize {
         let old_count = self.messages.len();
-        self.messages = new_messages;
-        self.undo.invalidate_positions();
+        let old = std::mem::replace(&mut self.messages, new_messages);
+        if self.messages.len() < old.len() {
+            // A shorter history: archive it as an epoch so turns from before
+            // can still be rewound to; its tail lives on in the new one.
+            let kept = old
+                .iter()
+                .rev()
+                .zip(self.messages.iter().rev())
+                .take_while(|(a, b)| same_message(a, b))
+                .count();
+            self.undo.next_epoch(&old, kept);
+        }
+        // Same length (old tool output cleared): positions still line up.
         self.page_at_message.clear();
         // Compaction rewrites history, so every replayed provider block now
         // sits on a changed prefix and would be rejected or ignored.
@@ -1435,6 +1455,39 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
     /// Restore files to before the turn whose user message is at `pos`.
     pub fn rewind_files_to(&mut self, pos: usize) -> Result<usize, String> {
         self.undo.rewind_to(pos)
+    }
+
+    /// Restore files to before the turn at message `pos` of history
+    /// `epoch` (from before a compaction).
+    pub fn rewind_files_to_at(&mut self, epoch: u32, pos: usize) -> Result<usize, String> {
+        self.undo.rewind_to_at(epoch, pos)
+    }
+
+    /// Keep turn checkpoints (and archived history) in `dir`, loading any
+    /// already there: undo and rewind survive restarts and resumes.
+    pub fn attach_checkpoints(&mut self, dir: std::path::PathBuf) {
+        self.undo.attach(dir);
+    }
+
+    /// The current history epoch (one per compaction that shortened it).
+    pub fn history_epoch(&self) -> u32 {
+        self.undo.epoch()
+    }
+
+    /// The history as it was in an earlier `epoch`, and how many of its last
+    /// messages carried on into the next.
+    pub fn archived_history(&self, epoch: u32) -> Option<(Vec<Message>, usize)> {
+        self.undo.archived(epoch)
+    }
+
+    /// Make an archived epoch's history (up to a point) the conversation.
+    pub fn restore_archived_history(&mut self, epoch: u32, messages: Vec<Message>) {
+        self.messages = messages;
+        self.page_at_message.clear();
+        strip_provider_blocks_from(&mut self.messages, 0);
+        self.last_prompt_tokens = 0;
+        self.last_prompt_len = 0;
+        self.undo.resume_epoch(epoch);
     }
 
     /// The browser page that was open when the user message at `pos` was

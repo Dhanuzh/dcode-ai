@@ -180,6 +180,14 @@ impl SupervisorHandle {
     }
 }
 
+/// Idle long enough to compact (`after_secs`), but not so long that the
+/// prompt cache has surely expired (two more minutes): compacting a cold
+/// context costs as much as the next turn would.
+pub fn idle_window_open(idle: std::time::Duration, after_secs: u64) -> bool {
+    let after = std::time::Duration::from_secs(after_secs);
+    idle >= after && idle < after + std::time::Duration::from_secs(120)
+}
+
 impl Supervisor {
     /// Create a new supervised session. This sets up the agent loop, IPC server,
     /// and event channels.
@@ -458,7 +466,7 @@ impl Supervisor {
             });
         }
 
-        let sup = Self {
+        let mut sup = Self {
             session_id,
             session_name: None,
             workspace_root,
@@ -497,9 +505,20 @@ impl Supervisor {
             goal,
             background_default,
         };
+        sup.attach_checkpoints();
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
             .await;
         Ok(sup)
+    }
+
+    /// `<sessions>/<id>.checkpoints/`: this session's turn checkpoints and
+    /// archived history, so undo and rewind survive restarts and resumes.
+    fn attach_checkpoints(&mut self) {
+        let dir = self
+            .session_store
+            .sessions_dir()
+            .join(format!("{}.checkpoints", self.session_id));
+        self.agent.attach_checkpoints(dir);
     }
 
     /// Resume an existing session by loading its state and creating a fresh
@@ -630,6 +649,8 @@ impl Supervisor {
         sup.agent
             .set_context_token_limit(sup.context_manager.budget().hard_limit());
 
+        // Undo and rewind pick up where the session left off.
+        sup.attach_checkpoints();
         // Keep last-session pointer consistent with the resumed session.
         let _ = sup.update_last_session().await;
         Ok(sup)
@@ -1064,6 +1085,56 @@ impl Supervisor {
         if let Err(e) = self.perform_auto_summarize().await {
             tracing::warn!("compaction failed: {e}");
         }
+    }
+
+    /// An idle compaction is worth running now: it's on, the session has
+    /// sat idle long enough but the provider's prompt cache is still warm
+    /// (past that, compacting saves nothing), the context is big, and there
+    /// is older history to summarize.
+    pub fn idle_compaction_due(&self) -> bool {
+        let c = &self.config.memory.context;
+        if !c.idle_compaction || !self.auto_compact_enabled() {
+            return false;
+        }
+        let Some(idle) = self.agent.idle_for() else {
+            return false;
+        };
+        idle_window_open(idle, c.idle_compaction_after_secs)
+            && (self.agent.context_used() as usize) >= c.idle_compaction_min_tokens
+            && !self
+                .context_manager
+                .get_messages_to_summarize(&self.agent.messages)
+                .is_empty()
+    }
+
+    /// Compact while idle (see [`Self::idle_compaction_due`]): summarize the
+    /// older history, keep the recent messages. Returns the context size
+    /// before and after, or `None` when it wasn't due or didn't work.
+    pub async fn idle_compact(&mut self) -> Option<(usize, usize)> {
+        if !self.idle_compaction_due() {
+            return None;
+        }
+        let before = self.agent.context_used() as usize;
+        if let Some(tx) = self.agent.event_sender() {
+            let budget = self.context_manager.budget();
+            let _ = tx
+                .send(AgentEvent::ContextCompaction {
+                    phase: "starting".to_string(),
+                    message: format!(
+                        "Compacting while idle, before the prompt cache expires… ({}% of the context window)",
+                        budget.percent(before)
+                    ),
+                    context_tokens: before as u64,
+                })
+                .await;
+        }
+        if let Err(e) = self.perform_auto_summarize().await {
+            tracing::warn!("idle compaction failed: {e}");
+            return None;
+        }
+        let after = self.agent.context_used() as usize;
+        let _ = self.save().await;
+        Some((before, after))
     }
 
     /// Automatic compaction is on and hasn't failed three times in a row.
@@ -1584,6 +1655,7 @@ impl Supervisor {
         self.parent_session_id = Some(parent);
         self.session_name = self.session_name.take().map(|n| format!("{n} (fork)"));
         self.child_session_ids.clear();
+        self.attach_checkpoints();
         self.session_id.clone()
     }
 
@@ -1638,6 +1710,7 @@ impl Supervisor {
             .store(0, std::sync::atomic::Ordering::Relaxed);
         self.session_store =
             SessionStore::new(self.workspace_root.join(&self.config.session.history_dir));
+        self.attach_checkpoints();
     }
 
     pub fn session_id(&self) -> &str {
@@ -2527,6 +2600,16 @@ pub(crate) fn utility_model(config: &DcodeAiConfig) -> Option<String> {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn idle_compaction_runs_only_while_the_cache_is_warm() {
+        let s = std::time::Duration::from_secs;
+        assert!(!idle_window_open(s(60), 240));
+        assert!(idle_window_open(s(240), 240));
+        assert!(idle_window_open(s(359), 240));
+        // Past it, the cache has expired: compacting saves nothing.
+        assert!(!idle_window_open(s(360), 240));
+    }
 
     #[test]
     fn person_names_are_cleaned() {

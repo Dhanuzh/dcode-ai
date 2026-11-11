@@ -227,8 +227,9 @@ impl ToolExecutor for BoardUpdateTool {
             description: "Change a card on the project's task board: its status (move it to \
 in_progress when work starts, review when it's ready to check, done when finished), assignee \
 (`agent`, a person, or a sub-agent's session id), priority, blockers, the branch working on it, \
-or add a note (what was done, results, links). A card with a review gate can't be moved to done \
-by you: leave it in review for a person."
+or add a note (what was done, results, links). `comment` posts a comment on the card's Jira \
+ticket (e.g. the pull request's link when the work is up for review). A card with a review gate \
+can't be moved to done by you: leave it in review for a person."
                 .into(),
             parameters: json!({
                 "type": "object",
@@ -241,7 +242,8 @@ by you: leave it in review for a person."
                     "branch": { "type": "string" },
                     "title": { "type": "string" },
                     "description": { "type": "string" },
-                    "note": { "type": "string" }
+                    "note": { "type": "string" },
+                    "comment": { "type": "string", "description": "A comment for the card's Jira ticket (Jira cards only)" }
                 },
                 "required": ["key"]
             }),
@@ -304,6 +306,16 @@ by you: leave it in review for a person."
             if let Some(n) = s(&input, "note") {
                 card.note("agent", n);
                 changed.push("note".into());
+            }
+            if let Some(c) = s(&input, "comment") {
+                let r = card.remote.as_mut().ok_or_else(|| {
+                    format!("{key} isn't a Jira ticket: use `note` for a personal card")
+                })?;
+                r.outbox.push(dcode_ai_common::board::OutComment {
+                    body: c.chars().take(8000).collect(),
+                    internal: false,
+                });
+                changed.push("comment for the ticket (goes at the next sync)".into());
             }
             card.updated = chrono::Utc::now();
             if s(&input, "title").is_some() || s(&input, "description").is_some() {
