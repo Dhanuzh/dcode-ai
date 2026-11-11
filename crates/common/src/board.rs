@@ -190,7 +190,7 @@ impl Space {
 }
 
 /// A card's ticket in the tracker.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct Remote {
     /// `PROJ-42`.
     pub key: String,
@@ -207,6 +207,94 @@ pub struct Remote {
     pub due_date: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// When the ticket was made / last changed, as the tracker says it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub created: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub updated: String,
+    /// The parent (epic or story) — `PROJ-7 Summary`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub parent: String,
+    /// The ticket's other fields worth reading (`Task Type` → `Build`,
+    /// `Planned End Date` → `2026-10-12`, sprint, components, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<(String, String)>,
+    /// Sub-tasks and linked tickets, one line each (`blocks PROJ-9 Title`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<String>,
+    /// The newest comments, newest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub comments: Vec<RemoteComment>,
+    /// How many comments the ticket has in all.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub comment_count: u32,
+    /// The `updated` stamp the details above were read at: a ticket whose
+    /// stamp moves gets them read again, the rest cost nothing.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail_of: String,
+    /// The workflow moves the ticket can make from where it is now.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub transitions: Vec<RemoteTransition>,
+    /// A transition picked by hand (its id, its name, or the status it
+    /// goes to), not sent yet.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub want_transition: String,
+    /// Comments written here, not sent yet.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outbox: Vec<OutComment>,
+}
+
+/// One workflow move a ticket can make.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RemoteTransition {
+    pub id: String,
+    /// The transition's own name ("Resolve Issue").
+    pub name: String,
+    /// The status it lands in ("Resolved").
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub to: String,
+}
+
+impl RemoteTransition {
+    /// `Resolve Issue → Resolved`.
+    pub fn label(&self) -> String {
+        if self.to.is_empty() || self.to.eq_ignore_ascii_case(&self.name) {
+            self.name.clone()
+        } else {
+            format!("{} → {}", self.name, self.to)
+        }
+    }
+
+    /// Whether `want` names it: its id, its name or the status it goes to.
+    pub fn matches(&self, want: &str) -> bool {
+        let w = want.trim();
+        !w.is_empty()
+            && (self.id == w
+                || self.name.eq_ignore_ascii_case(w)
+                || self.to.eq_ignore_ascii_case(w))
+    }
+}
+
+/// A comment waiting to go to the ticket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct OutComment {
+    pub body: String,
+    /// A service-desk internal note (not shown to the customer).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub internal: bool,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A comment on a ticket.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct RemoteComment {
+    pub author: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub at: String,
+    pub body: String,
 }
 
 /// What's waiting to go to the tracker.
@@ -245,6 +333,9 @@ pub struct JiraLink {
     /// taken from your latest ticket of the same type.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub fields: std::collections::BTreeMap<String, String>,
+    /// Only tickets in the project's open sprints.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub sprint: bool,
     /// See [`Board::extra`].
     #[serde(flatten)]
     pub extra: Extra,
@@ -431,7 +522,20 @@ impl Board {
     /// the agent don't overwrite each other.
     pub fn update<T>(workspace: &Path, change: impl FnOnce(&mut Board) -> T) -> std::io::Result<T> {
         let _lock = BoardLock::take(workspace);
-        let mut board = Board::load(workspace);
+        // A board on disk that doesn't read (written by a newer version,
+        // or damaged) is never replaced by an empty one.
+        let mut board = match std::fs::read_to_string(board_path(workspace)) {
+            Ok(s) => serde_json::from_str::<Board>(&s).map_err(|e| {
+                std::io::Error::other(format!(
+                    "{} doesn't read ({e}); not overwriting it",
+                    board_path(workspace).display()
+                ))
+            })?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                Board::new(&prefix_for(workspace))
+            }
+            Err(e) => return Err(e),
+        };
         let out = change(&mut board);
         board.save(workspace)?;
         Ok(out)
@@ -497,10 +601,7 @@ impl Board {
 
     /// Cards waiting to go to the tracker.
     pub fn pending(&self) -> usize {
-        self.cards
-            .iter()
-            .filter(|c| c.push.is_some() || c.push_fields)
-            .count()
+        self.cards.iter().filter(|c| !c.unsent_nothing()).count()
     }
 
     /// Forgets the Jira tickets a sync brought in that have nothing waiting
@@ -708,9 +809,74 @@ impl Board {
             if !rm.labels.is_empty() {
                 out.push_str(&format!("\nlabels: {}", rm.labels.join(", ")));
             }
+            if !rm.issue_type.is_empty() {
+                out.push_str(&format!("\ntype: {}", rm.issue_type));
+            }
+            if !rm.parent.is_empty() {
+                out.push_str(&format!("\nparent: {}", rm.parent));
+            }
+            let day = |s: &str| s.get(..10).unwrap_or(s).to_string();
+            if !rm.created.is_empty() || !rm.updated.is_empty() {
+                out.push_str(&format!(
+                    "\ncreated: {} · updated: {}",
+                    day(&rm.created),
+                    day(&rm.updated)
+                ));
+            }
+            for (k, v) in &rm.fields {
+                out.push_str(&format!("\n{k}: {v}"));
+            }
+            if !rm.links.is_empty() {
+                out.push_str("\nlinks:");
+                for l in &rm.links {
+                    out.push_str(&format!("\n  {l}"));
+                }
+            }
         }
         if !c.description.is_empty() {
             out.push_str(&format!("\n\n{}", c.description));
+        }
+        if let Some(rm) = &c.remote
+            && !rm.comments.is_empty()
+        {
+            out.push_str(&format!(
+                "\n\ncomments ({}, newest first):",
+                rm.comment_count.max(rm.comments.len() as u32)
+            ));
+            for cm in &rm.comments {
+                let body: String = cm.body.trim().chars().take(600).collect();
+                out.push_str(&format!(
+                    "\n- {} {}: {}",
+                    cm.at.get(..16).unwrap_or(&cm.at).replace('T', " "),
+                    cm.author,
+                    body.replace('\n', "\n  ")
+                ));
+            }
+        }
+        if let Some(rm) = &c.remote {
+            for o in &rm.outbox {
+                out.push_str(&format!(
+                    "\n⟳ {} waiting to go: {}",
+                    if o.internal {
+                        "internal note"
+                    } else {
+                        "comment"
+                    },
+                    o.body.chars().take(200).collect::<String>()
+                ));
+            }
+            if !rm.want_transition.is_empty() {
+                out.push_str(&format!("\n⟳ moving: {}", rm.want_transition));
+            }
+            if !rm.transitions.is_empty() {
+                let can: Vec<String> = rm
+                    .transitions
+                    .iter()
+                    .enumerate()
+                    .map(|(i, t)| format!("{} {}", i + 1, t.label()))
+                    .collect();
+                out.push_str(&format!("\ncan move: {}", can.join(" · ")));
+            }
         }
         for n in c.notes.iter().rev().take(10).rev() {
             out.push_str(&format!(
@@ -737,7 +903,12 @@ impl Card {
 
     /// Nothing here waits to go to the tracker.
     pub fn unsent_nothing(&self) -> bool {
-        self.push.is_none() && !self.push_fields
+        self.push.is_none()
+            && !self.push_fields
+            && self
+                .remote
+                .as_ref()
+                .is_none_or(|r| r.want_transition.is_empty() && r.outbox.is_empty())
     }
 
     /// Its title or description changed: the ticket gets them next sync
@@ -785,12 +956,8 @@ mod tests {
         let mut b = Board::new("DCO");
         let remote = |k: &str| Remote {
             key: k.into(),
-            url: String::new(),
             status: "To Do".into(),
-            issue_type: String::new(),
-            reporter: String::new(),
-            due_date: String::new(),
-            labels: Vec::new(),
+            ..Default::default()
         };
         b.insert_remote(
             remote("BSI-1"),

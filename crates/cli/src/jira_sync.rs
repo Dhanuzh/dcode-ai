@@ -15,7 +15,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use dcode_ai_common::board::{Board, JiraLink, Priority, Push, Remote, Space, Status};
+use dcode_ai_common::board::{
+    Board, JiraLink, OutComment, Priority, Push, Remote, RemoteTransition, Space, Status,
+};
 use dcode_ai_common::config::McpServerConfig;
 use dcode_ai_core::tools::mcp::{McpCallToolResult, McpConnectionManager};
 use serde_json::{Value, json};
@@ -30,6 +32,9 @@ const ISSUE_TYPES: &str = "getJiraProjectIssueTypesMetadata";
 const ISSUE_TYPE_FIELDS: &str = "getJiraIssueTypeMetaWithFields";
 const EDIT: &str = "editJiraIssue";
 const USERINFO: &str = "atlassianUserInfo";
+const GET_ISSUE: &str = "getJiraIssue";
+const COMMENTS: &str = "listJiraIssueComments";
+const COMMENT: &str = "addOrEditJiraIssueComment";
 
 /// Calls an MCP server's tools (the real server, or a fake in tests).
 #[async_trait::async_trait]
@@ -223,6 +228,8 @@ struct Issue {
     reporter: String,
     due_date: String,
     labels: Vec<String>,
+    created: String,
+    updated: String,
 }
 
 fn issue_of(v: &Value) -> Option<Issue> {
@@ -275,6 +282,8 @@ fn issue_of(v: &Value) -> Option<Issue> {
         issue_type: s(&["issuetype", "name"]),
         reporter: s(&["reporter", "displayName"]),
         due_date: s(&["duedate"]),
+        created: s(&["created"]),
+        updated: s(&["updated"]),
         labels,
         key,
     })
@@ -393,6 +402,65 @@ pub async fn find_server(
     })
 }
 
+/// Pages of 100 one sync reads at most.
+const MAX_PAGES: usize = 10;
+
+/// The first boolean called `key` anywhere in `v`.
+fn find_bool(v: &Value, key: &str) -> Option<bool> {
+    match v {
+        Value::Object(m) => m
+            .get(key)
+            .and_then(Value::as_bool)
+            .or_else(|| m.values().find_map(|x| find_bool(x, key))),
+        _ => None,
+    }
+}
+
+/// The first string called `key` anywhere in `v` (not inside arrays).
+fn find_str(v: &Value, key: &str) -> Option<String> {
+    match v {
+        Value::Object(m) => m
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| m.values().find_map(|x| find_str(x, key))),
+        _ => None,
+    }
+}
+
+/// What a sync pulls: the link's own JQL, or the project's tickets —
+/// one person's when filtered — open or touched in the last two weeks,
+/// or those in the open sprints.
+pub fn pull_jql(link: &JiraLink) -> String {
+    if let Some(j) = link.jql.as_deref().filter(|j| !j.trim().is_empty()) {
+        return j.to_string();
+    }
+    let project = link.project.replace('"', "");
+    let mut q = format!("project = \"{project}\"");
+    if let Some(a) = link.assignee.as_deref().filter(|a| !a.trim().is_empty()) {
+        q.push_str(&format!(" AND assignee = {}", assignee_value(a)));
+    }
+    if link.sprint {
+        q.push_str(" AND sprint in openSprints()");
+    } else {
+        q.push_str(" AND (statusCategory != Done OR updated >= -14d)");
+    }
+    q.push_str(" ORDER BY updated DESC");
+    q
+}
+
+/// `currentUser()` for `me`, else the name quoted for JQL.
+fn assignee_value(name: &str) -> String {
+    if is_me(name) {
+        "currentUser()".to_string()
+    } else {
+        format!(
+            "\"{}\"",
+            name.trim().replace('\\', "\\\\").replace('"', "\\\"")
+        )
+    }
+}
+
 /// What a sync pulls by default: the project's open and recent tickets.
 pub fn project_jql(project: &str) -> String {
     format!(
@@ -429,13 +497,31 @@ pub async fn whoami(mcp: &dyn Mcp) -> Result<String, String> {
     .ok_or_else(|| format!("can't tell who's signed in from: {who}"))
 }
 
-/// Only the project's tickets assigned to `name` (a Jira display name,
-/// email or account id), open or touched in the last two weeks.
+/// `me`: whoever is signed in to the MCP server — Jira's `currentUser()`,
+/// so no lookup of who that is can go wrong.
+pub fn is_me(filter: &str) -> bool {
+    let f = filter.trim();
+    f.eq_ignore_ascii_case("me") || f.eq_ignore_ascii_case("currentUser()")
+}
+
+/// Only the project's tickets assigned to `name` (`me`, a Jira display
+/// name, email or account id), open or touched in the last two weeks.
 pub fn assignee_jql(project: &str, name: &str) -> String {
-    let name = name.trim().replace('\\', "\\\\").replace('"', "\\\"");
+    let who = assignee_value(name);
     format!(
-        "project = \"{project}\" AND assignee = \"{name}\" AND (statusCategory != Done OR updated >= -14d) ORDER BY updated DESC"
+        "project = \"{project}\" AND assignee = {who} AND (statusCategory != Done OR updated >= -14d) ORDER BY updated DESC"
     )
+}
+
+/// The signed-in person's Atlassian account id.
+async fn my_account_id(mcp: &dyn Mcp, tools: &[String]) -> Option<String> {
+    let who = mcp.call(&tool(tools, USERINFO)?, json!({})).await.ok()?;
+    let v = json_of(&who)?;
+    let data = v.get("data").unwrap_or(&v);
+    ["accountId", "account_id"]
+        .into_iter()
+        .find_map(|k| v.get(k).or_else(|| data.get(k)).and_then(Value::as_str))
+        .map(str::to_string)
 }
 
 /// Whether an issue actually belongs to the configured assignee filter —
@@ -449,6 +535,11 @@ fn matches_assignee_filter(filter: Option<&str>, issue: &Issue) -> bool {
     let f = f.trim();
     if f.is_empty() {
         return true;
+    }
+    // `currentUser()` in the JQL already picked exactly this person's
+    // tickets; an unassigned one can't be theirs.
+    if is_me(f) {
+        return issue.assignee.is_some();
     }
     // An opaque Atlassian account id (e.g. `712020:xxxxxxxx-...` or a long
     // hex/base62 string) isn't something we can compare against the
@@ -562,6 +653,7 @@ pub async fn connect(
         last_sync: None,
         last_error: None,
         fields: Default::default(),
+        sprint: false,
         extra: Default::default(),
     })
 }
@@ -572,7 +664,10 @@ pub struct Report {
     pub created: Vec<String>,
     pub moved: usize,
     pub edited: usize,
+    pub commented: usize,
     pub pulled: usize,
+    /// More tickets matched than one sync reads.
+    pub truncated: bool,
     pub errors: Vec<String>,
 }
 
@@ -588,7 +683,14 @@ impl Report {
         if self.edited > 0 {
             parts.push(format!("updated {}", self.edited));
         }
-        parts.push(format!("{} tickets", self.pulled));
+        if self.commented > 0 {
+            parts.push(format!("commented {}", self.commented));
+        }
+        parts.push(format!(
+            "{}{} tickets",
+            self.pulled,
+            if self.truncated { "+" } else { "" }
+        ));
         let mut s = parts.join(" · ");
         if let Some(e) = self.errors.first() {
             s.push_str(&format!(" · ⚠ {e}"));
@@ -948,11 +1050,15 @@ async fn create(
     let name = need(tools, CREATE)?;
     // Filtered to one person: the new ticket is theirs, or the next pull
     // (which only takes their tickets) wouldn't bring it back.
-    let owner = link
+    let my_id = match link.assignee.as_deref() {
+        Some(a) if is_me(a) => my_account_id(mcp, tools).await,
+        _ => None,
+    };
+    let owner = my_id.as_deref().or(link
         .assignee
         .as_deref()
         .filter(|a| is_account_id(a))
-        .map(str::trim);
+        .map(str::trim));
     // A Task, or the project's first standard type when it has none.
     let types = issue_types(mcp, tools, link).await.unwrap_or_default();
     let (type_id, issue_type) = types
@@ -1037,14 +1143,15 @@ async fn edit_ticket(
     Ok(())
 }
 
-/// The transition id that takes a ticket to `to`'s column.
-fn pick_transition(transitions: &[Value], to: Status) -> Option<String> {
+/// The transition that takes a ticket to `to`'s column, or the nearest one
+/// (Review → an in-progress status, Backlog → a to-do one) when the
+/// workflow has nothing that lands there.
+fn pick(transitions: &[Value], to: Status) -> Option<&Value> {
     let scored = transitions.iter().filter_map(|t| {
-        let id = t
-            .get("id")?
-            .as_str()
-            .map(str::to_string)
-            .or_else(|| t.get("id")?.as_u64().map(|n| n.to_string()))?;
+        t.get("id")?;
+        if t.get("isAvailable").and_then(Value::as_bool) == Some(false) {
+            return None;
+        }
         let name = t
             .get("to")
             .and_then(|x| x.get("name"))
@@ -1063,28 +1170,115 @@ fn pick_transition(transitions: &[Value], to: Status) -> Option<String> {
         let lname = name.to_ascii_lowercase();
         let score = if lands == to {
             match to {
-                Status::Todo if lname == "to do" || lname == "todo" => 3,
-                Status::InProgress if lname.contains("progress") => 3,
-                Status::Done if lname == "done" => 3,
+                Status::Todo if matches!(lname.as_str(), "to do" | "todo" | "open") => 4,
+                Status::InProgress if lname.contains("progress") => 4,
+                Status::Done if lname == "done" => 4,
+                Status::Done if lname == "resolved" => 3,
                 _ => 2,
             }
-        } else if to == Status::Review && lands == Status::InProgress {
+        } else if (to == Status::Review && lands == Status::InProgress)
+            || (to == Status::Backlog && lands == Status::Todo)
+        {
             1
         } else {
             0
         };
-        (score > 0).then_some((score, id))
+        (score > 0).then_some((score, t))
     });
-    scored.max_by_key(|(s, _)| *s).map(|(_, id)| id)
+    // The first of the best: Jira lists the usual way first.
+    scored
+        .fold(None::<(i32, &Value)>, |best, (s, t)| match best {
+            Some((bs, _)) if bs >= s => best,
+            _ => Some((s, t)),
+        })
+        .map(|(_, t)| t)
 }
 
-async fn move_ticket(
+fn transition_id(t: &Value) -> Option<String> {
+    let id = t.get("id")?;
+    id.as_str()
+        .map(str::to_string)
+        .or_else(|| id.as_u64().map(|n| n.to_string()))
+}
+
+/// The transition id that takes a ticket to `to`'s column.
+#[cfg(test)]
+fn pick_transition(transitions: &[Value], to: Status) -> Option<String> {
+    pick(transitions, to).and_then(transition_id)
+}
+
+/// Values for what the transition's screen requires (from
+/// `expand=transitions.fields`): a resolution for a move to done — "Done",
+/// "Fixed" or the like — which Jira refuses the move without.
+fn transition_fields(t: &Value) -> serde_json::Map<String, Value> {
+    let mut out = serde_json::Map::new();
+    let Some(fields) = t.get("fields").and_then(Value::as_object) else {
+        return out;
+    };
+    for (id, meta) in fields {
+        let required = meta.get("required").and_then(Value::as_bool) == Some(true);
+        let has_default = meta.get("hasDefaultValue").and_then(Value::as_bool) == Some(true);
+        let is_resolution = id == "resolution"
+            || meta
+                .get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| n.eq_ignore_ascii_case("resolution"));
+        if !required || has_default || !is_resolution {
+            continue;
+        }
+        let allowed = meta
+            .get("allowedValues")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let name_of = |v: &Value| {
+            v.get("name")
+                .or_else(|| v.get("value"))
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
+        let chosen = ["done", "fixed", "resolved", "complete", "completed"]
+            .iter()
+            .find_map(|want| {
+                allowed
+                    .iter()
+                    .find(|v| name_of(v).eq_ignore_ascii_case(want))
+            })
+            .or_else(|| allowed.first());
+        match chosen {
+            Some(v) => match v.get("id").and_then(Value::as_str) {
+                Some(i) => out.insert(id.clone(), json!({"id": i})),
+                None => out.insert(id.clone(), json!({"name": name_of(v)})),
+            },
+            None => out.insert(id.clone(), json!({"name": "Done"})),
+        };
+    }
+    out
+}
+
+/// What became of a move.
+#[derive(Debug, PartialEq)]
+enum Moved {
+    /// The ticket went through a transition, to this status.
+    To(String),
+    /// Jira's workflow has no such column; the ticket stays where it is.
+    Kept(String),
+}
+
+/// The moves the ticket's workflow allows from where it is now (with what
+/// each one's screen requires, when `with_fields`).
+async fn list_transitions(
     mcp: &dyn Mcp,
     tools: &[String],
     link: &JiraLink,
     key: &str,
-    to: Status,
-) -> Result<(), String> {
+    with_fields: bool,
+) -> Result<Vec<Value>, String> {
+    let mut inputs = serde_json::Map::from_iter([("issueIdOrKey".to_string(), json!(key))]);
+    if with_fields {
+        inputs.insert("expand".into(), json!("transitions.fields"));
+    }
     let list = call_or_generic(
         mcp,
         tools,
@@ -1092,7 +1286,7 @@ async fn move_ticket(
         TRANSITIONS,
         "listJiraIssueTransitions",
         "executeRead",
-        serde_json::Map::from_iter([("issueIdOrKey".to_string(), json!(key))]),
+        inputs,
     )
     .await?;
     let transitions = json_of(&list)
@@ -1102,26 +1296,169 @@ async fn move_ticket(
                 .or_else(|| v.as_array().cloned())
         })
         .unwrap_or_default();
-    let Some(id) = pick_transition(&transitions, to) else {
-        return Err(format!(
-            "{key} has no way to {} in Jira's workflow",
-            to.label()
-        ));
-    };
-    call_or_generic(
+    if transitions.is_empty() && reads_as_error(&list) {
+        return Err(first_line(&list));
+    }
+    Ok(transitions)
+}
+
+/// A transition as the board keeps it.
+fn remote_transition(t: &Value) -> Option<RemoteTransition> {
+    Some(RemoteTransition {
+        id: transition_id(t)?,
+        name: t
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        to: t
+            .get("to")
+            .and_then(|x| x.get("name"))
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+    })
+}
+
+/// "Resolve Issue → Resolved, Close Issue → Closed".
+fn can_go(transitions: &[Value]) -> String {
+    transitions
+        .iter()
+        .filter_map(remote_transition)
+        .map(|t| t.label())
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// Runs transition `t` (filling what its screen requires); the status it
+/// lands in and that status's category.
+async fn apply_transition(
+    mcp: &dyn Mcp,
+    tools: &[String],
+    link: &JiraLink,
+    key: &str,
+    t: &Value,
+) -> Result<(String, String), String> {
+    let id = transition_id(t).ok_or("a transition without an id")?;
+    let to = t.get("to").unwrap_or(&Value::Null);
+    let lands = to
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let category = to
+        .get("statusCategory")
+        .and_then(|c| c.get("key"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string();
+    let mut inputs = serde_json::Map::from_iter([
+        ("issueIdOrKey".to_string(), json!(key)),
+        ("transitionId".to_string(), json!(id)),
+    ]);
+    let fields = transition_fields(t);
+    if !fields.is_empty() {
+        inputs.insert("fields".into(), Value::Object(fields));
+    }
+    let text = call_or_generic(
         mcp,
         tools,
         &link.cloud_id,
         TRANSITION,
         "transitionJiraIssue",
         "executeWrite",
-        serde_json::Map::from_iter([
-            ("issueIdOrKey".to_string(), json!(key)),
-            ("transitionId".to_string(), json!(id)),
-        ]),
+        inputs,
     )
-    .await
-    .map(|_| ())
+    .await?;
+    if reads_as_error(&text) {
+        return Err(first_line(&text));
+    }
+    Ok((lands, category))
+}
+
+async fn move_ticket(
+    mcp: &dyn Mcp,
+    tools: &[String],
+    link: &JiraLink,
+    key: &str,
+    to: Status,
+) -> Result<Moved, String> {
+    let transitions = list_transitions(mcp, tools, link, key, true).await?;
+    let Some(t) = pick(&transitions, to) else {
+        let can = can_go(&transitions);
+        let can = if can.is_empty() {
+            String::new()
+        } else {
+            format!(" (it can: {can})")
+        };
+        // Already as near as the workflow goes (a Review card on a
+        // workflow with no review status, its ticket in progress): fine.
+        if matches!(to, Status::Review | Status::Backlog) {
+            return Ok(Moved::Kept(format!(
+                "Jira's workflow has no {} status — the ticket stays where it is{can}",
+                to.label()
+            )));
+        }
+        return Err(format!(
+            "{key} has no way to {} in Jira's workflow{can}",
+            to.label()
+        ));
+    };
+    let (lands, _) = apply_transition(mcp, tools, link, key, t).await?;
+    Ok(Moved::To(lands))
+}
+
+/// Runs the transition picked by hand: `want` is its id, its name
+/// ("Resolve Issue") or the status it goes to ("Closed").
+async fn transition_named(
+    mcp: &dyn Mcp,
+    tools: &[String],
+    link: &JiraLink,
+    key: &str,
+    want: &str,
+) -> Result<(String, String), String> {
+    let transitions = list_transitions(mcp, tools, link, key, true).await?;
+    let t = transitions
+        .iter()
+        .find(|t| remote_transition(t).is_some_and(|r| r.matches(want)))
+        .ok_or_else(|| {
+            format!(
+                "{key} has no move “{want}” from where it is now (it can: {})",
+                can_go(&transitions)
+            )
+        })?;
+    apply_transition(mcp, tools, link, key, t).await
+}
+
+/// Adds a comment to the ticket.
+async fn add_comment(
+    mcp: &dyn Mcp,
+    tools: &[String],
+    link: &JiraLink,
+    key: &str,
+    c: &OutComment,
+) -> Result<(), String> {
+    let mut inputs = serde_json::Map::from_iter([
+        ("issueIdOrKey".to_string(), json!(key)),
+        ("commentBody".to_string(), json!(c.body)),
+    ]);
+    if c.internal {
+        inputs.insert("jsmCommentType".into(), json!("internalNote"));
+    }
+    let text = call_or_generic(
+        mcp,
+        tools,
+        &link.cloud_id,
+        COMMENT,
+        COMMENT,
+        "executeWrite",
+        inputs,
+    )
+    .await?;
+    if reads_as_error(&text) {
+        return Err(first_line(&text));
+    }
+    Ok(())
 }
 
 /// One round: send what changed here, then take what's in Jira.
@@ -1155,11 +1492,7 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
                         c.remote = Some(Remote {
                             key: jira_key.clone(),
                             url,
-                            status: String::new(),
-                            issue_type: String::new(),
-                            reporter: String::new(),
-                            due_date: String::new(),
-                            labels: Vec::new(),
+                            ..Default::default()
                         });
                         // Made in a column other than To do: move it there.
                         c.push = (status != Status::Todo).then_some(Push::Status);
@@ -1214,11 +1547,26 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
         .collect();
     for (key, status) in to_move {
         match move_ticket(mcp, &tools, &link, &key, status).await {
-            Ok(()) => {
-                report.moved += 1;
+            Ok(moved) => {
+                if matches!(moved, Moved::To(_)) {
+                    report.moved += 1;
+                }
                 Board::update(ws, |b| {
                     if let Some(c) = b.card_mut(&key) {
                         c.push = None;
+                        match &moved {
+                            Moved::To(s) if !s.is_empty() => {
+                                if let Some(r) = c.remote.as_mut() {
+                                    r.status = s.clone();
+                                    // Where it can go next has changed.
+                                    r.transitions.clear();
+                                    r.detail_of.clear();
+                                }
+                                c.note("jira", &format!("ticket moved to {s}"));
+                            }
+                            Moved::To(_) => {}
+                            Moved::Kept(why) => c.note("jira", why),
+                        }
                     }
                 })
                 .map_err(|e| e.to_string())?;
@@ -1237,6 +1585,110 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
                 });
             }
         }
+    }
+
+    // 2a. Transitions picked by hand.
+    let board = Board::load(ws);
+    let wanted: Vec<(String, String)> = board
+        .cards
+        .iter()
+        .filter(|c| c.space == Space::Jira)
+        .filter_map(|c| {
+            let r = c.remote.as_ref()?;
+            (!r.want_transition.is_empty()).then(|| (r.key.clone(), r.want_transition.clone()))
+        })
+        .collect();
+    for (key, want) in wanted {
+        let done = transition_named(mcp, &tools, &link, &key, &want).await;
+        match &done {
+            Ok(_) => report.moved += 1,
+            Err(e) => report.errors.push(first_line(e)),
+        }
+        let _ = Board::update(ws, |b| {
+            let Some(c) = b.card_mut(&key) else { return };
+            let mut column = None;
+            if let Some(r) = c.remote.as_mut() {
+                // Picked again meanwhile: that one goes next round.
+                if r.want_transition == want {
+                    r.want_transition.clear();
+                }
+                if let Ok((lands, cat)) = &done {
+                    r.status = lands.clone();
+                    r.transitions.clear();
+                    r.detail_of.clear();
+                    column = Some(column_for(lands, cat));
+                }
+            }
+            match &done {
+                Ok((lands, _)) => {
+                    if let Some(col) = column {
+                        c.status = col;
+                    }
+                    // The hand-picked move wins over a column move.
+                    c.push = None;
+                    c.note("jira", &format!("{want}: ticket now {lands}"));
+                }
+                Err(e) => c.note(
+                    "jira",
+                    &format!("couldn't move the ticket: {}", first_line(e)),
+                ),
+            }
+        });
+    }
+
+    // 2c. Comments written here go to their tickets.
+    let board = Board::load(ws);
+    let outgoing: Vec<(String, Vec<OutComment>)> = board
+        .cards
+        .iter()
+        .filter(|c| c.space == Space::Jira)
+        .filter_map(|c| {
+            let r = c.remote.as_ref()?;
+            (!r.outbox.is_empty()).then(|| (r.key.clone(), r.outbox.clone()))
+        })
+        .collect();
+    for (key, outbox) in outgoing {
+        let mut sent = Vec::new();
+        let mut failed = Vec::new();
+        for o in outbox {
+            match add_comment(mcp, &tools, &link, &key, &o).await {
+                Ok(()) => {
+                    report.commented += 1;
+                    sent.push(o);
+                }
+                Err(e) => {
+                    report
+                        .errors
+                        .push(format!("couldn't comment on {key}: {}", first_line(&e)));
+                    failed.push((o, e));
+                }
+            }
+        }
+        let _ = Board::update(ws, |b| {
+            let Some(c) = b.card_mut(&key) else { return };
+            if let Some(r) = c.remote.as_mut() {
+                // Only what went (or was refused): one written meanwhile
+                // waits for the next round.
+                for o in sent.iter().chain(failed.iter().map(|(o, _)| o)) {
+                    if let Some(i) = r.outbox.iter().position(|x| x == o) {
+                        r.outbox.remove(i);
+                    }
+                }
+                if !sent.is_empty() {
+                    r.detail_of.clear();
+                }
+            }
+            for (o, e) in &failed {
+                c.note(
+                    "jira",
+                    &format!(
+                        "couldn't send the comment ({}): {}",
+                        first_line(e),
+                        o.body.chars().take(500).collect::<String>()
+                    ),
+                );
+            }
+        });
     }
 
     // 2b. Cards renamed or redescribed here update their tickets.
@@ -1285,41 +1737,67 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
     }
 
     // 3. The project's tickets come in.
-    let jql = link.jql.clone().unwrap_or_else(|| match &link.assignee {
-        Some(name) => assignee_jql(&link.project, name),
-        None => project_jql(&link.project),
+    let jql = pull_jql(&link);
+    let mut query = json!({
+        "cloudId": link.cloud_id,
+        "jql": jql,
+        "maxResults": 100,
+        "fields": ["summary", "status", "priority", "assignee", "description", "issuetype", "created", "updated", "labels", "duedate", "reporter", "parent"],
     });
-    let found = mcp
-        .call(
-            &need(&tools, SEARCH)?,
-            json!({
-                "cloudId": link.cloud_id,
-                "jql": jql,
-                "maxResults": 100,
-                "fields": ["summary", "status", "priority", "assignee", "description", "issuetype", "updated", "labels", "duedate", "reporter"],
-            }),
-        )
-        .await;
-    let found_ok = found.is_ok();
-    let issues: Vec<Issue> = match found {
-        Ok(text) => json_of(&text)
-            .and_then(|v| find_array(&v, "issues").cloned())
-            .unwrap_or_default()
-            .iter()
-            .filter_map(issue_of)
-            // Belt and suspenders: whatever the server's JQL did, never show a
-            // ticket that isn't actually this person's when a filter is set —
-            // a quoting/account-id mismatch in the query must never widen to
-            // "everyone's tickets".
-            .filter(|i| matches_assignee_filter(link.assignee.as_deref(), i))
-            .collect(),
-        Err(e) => {
-            report
-                .errors
-                .push(format!("couldn't read Jira: {}", first_line(&e)));
-            Vec::new()
+    // Atlassian's v2 server: its default (compact) view drops the
+    // reporter, the description and account ids; "evidence" keeps them.
+    if tool(&tools, "executeRead").is_some() {
+        query["view"] = json!("evidence");
+    }
+    // Page through it all (up to a limit): a big filter isn't cut off at
+    // the first hundred.
+    let search = need(&tools, SEARCH)?;
+    let mut raw: Vec<Value> = Vec::new();
+    let mut token: Option<String> = None;
+    let mut found_ok = true;
+    let mut complete = false;
+    for _ in 0..MAX_PAGES {
+        let mut q = query.clone();
+        if let Some(t) = &token {
+            q["nextPageToken"] = json!(t);
         }
-    };
+        match mcp.call(&search, q).await {
+            Ok(text) => {
+                let v = json_of(&text).unwrap_or(Value::Null);
+                let page = find_array(&v, "issues").cloned().unwrap_or_default();
+                let last = find_bool(&v, "isLast");
+                let next = find_str(&v, "nextPageToken");
+                let empty = page.is_empty();
+                raw.extend(page);
+                if last == Some(true) || next.is_none() || empty || next == token {
+                    complete = true;
+                    break;
+                }
+                token = next;
+            }
+            Err(e) => {
+                report
+                    .errors
+                    .push(format!("couldn't read Jira: {}", first_line(&e)));
+                found_ok = false;
+                break;
+            }
+        }
+    }
+    report.truncated = found_ok && !complete;
+    let mut seen = std::collections::HashSet::new();
+    let issues: Vec<Issue> = raw
+        .iter()
+        .filter_map(issue_of)
+        .filter(|i| seen.insert(i.key.clone()))
+        // Belt and suspenders: whatever the server's JQL did, never show a
+        // ticket that isn't actually this person's when a filter is set —
+        // a quoting/account-id mismatch in the query must never widen to
+        // "everyone's tickets".
+        .filter(|i| matches_assignee_filter(link.assignee.as_deref(), i))
+        .collect();
+    // Only a pull that read everything may forget tickets it didn't see.
+    let found_ok = found_ok && complete;
     report.pulled = issues.len();
     let errors = report.errors.clone();
     // Forget Jira cards from an earlier, wider filter (or a project no
@@ -1329,7 +1807,21 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
     let fetch_ok = found_ok;
     let fetched_keys: std::collections::HashSet<&str> =
         issues.iter().map(|i| i.key.as_str()).collect();
+    let mut superseded = false;
     Board::update(ws, |b| {
+        // The link changed while this round was out (`/board jira … me`
+        // a moment ago): what came back answers the old filter — drop it,
+        // never let it fill the board with everyone's tickets.
+        let same = b.jira.as_ref().is_some_and(|l| {
+            l.project == link.project
+                && l.cloud_id == link.cloud_id
+                && l.assignee == link.assignee
+                && l.jql == link.jql
+        });
+        if !same {
+            superseded = true;
+            return;
+        }
         if fetch_ok {
             b.cards.retain(|c| {
                 !(c.space == Space::Jira
@@ -1341,6 +1833,10 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
         }
         for i in &issues {
             let status = column_for(&i.status, &i.category);
+            let old = b
+                .card(&i.key)
+                .and_then(|c| c.remote.clone())
+                .unwrap_or_default();
             let remote = Remote {
                 key: i.key.clone(),
                 url: browse(&link.site, &i.key),
@@ -1349,11 +1845,31 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
                 reporter: i.reporter.clone(),
                 due_date: i.due_date.clone(),
                 labels: i.labels.clone(),
+                created: i.created.clone(),
+                updated: i.updated.clone(),
+                // Read with the details below; kept until they're read again.
+                parent: old.parent,
+                fields: old.fields,
+                links: old.links,
+                comments: old.comments,
+                comment_count: old.comment_count,
+                detail_of: old.detail_of,
+                transitions: old.transitions,
+                want_transition: old.want_transition,
+                outbox: old.outbox,
             };
+            let jira_unchanged = !old.status.is_empty() && old.status == i.status;
             match b.card_mut(&i.key) {
                 Some(c) => {
-                    // A move here that hasn't gone yet wins over Jira.
-                    if c.push.is_none() {
+                    // A move here that hasn't gone yet wins over Jira; so
+                    // does a Review (Backlog) card whose workflow has no
+                    // such status, while Jira hasn't moved the ticket.
+                    let refined = jira_unchanged
+                        && matches!(
+                            (c.status, status),
+                            (Status::Review, Status::InProgress) | (Status::Backlog, Status::Todo)
+                        );
+                    if c.push.is_none() && !refined {
                         c.status = status;
                     }
                     // An edit here that hasn't gone yet wins too.
@@ -1384,7 +1900,294 @@ pub async fn sync(mcp: &dyn Mcp, ws: &Path) -> Result<Report, String> {
         }
     })
     .map_err(|e| e.to_string())?;
+    if superseded {
+        // Not an error: whoever changed the filter syncs with the new one.
+        report.pulled = 0;
+        return Ok(report);
+    }
+
+    // 4. Details (custom fields, links, comments) for the tickets that
+    // changed since they were last read — one call or two per changed
+    // ticket, nothing for the rest.
+    let stale: Vec<(String, String)> = {
+        let b = Board::load(ws);
+        issues
+            .iter()
+            .filter(|i| {
+                b.card(&i.key)
+                    .and_then(|c| c.remote.as_ref())
+                    .is_none_or(|r| r.detail_of != stamp(i))
+            })
+            .map(|i| (i.key.clone(), stamp(i)))
+            .take(DETAILS_PER_ROUND)
+            .collect()
+    };
+    if !stale.is_empty() && tool(&tools, GET_ISSUE).is_some() {
+        // A few at a time, in order: no burst of calls at the server.
+        let mut read: Vec<Option<Details>> = Vec::with_capacity(stale.len());
+        for chunk in stale.chunks(4) {
+            read.extend(
+                futures::future::join_all(
+                    chunk.iter().map(|(k, _)| details(mcp, &tools, &link, k)),
+                )
+                .await,
+            );
+        }
+        let _ = Board::update(ws, |b| {
+            for ((key, updated), d) in stale.iter().zip(read) {
+                let Some(d) = d else { continue };
+                if let Some(r) = b.card_mut(key).and_then(|c| c.remote.as_mut()) {
+                    r.parent = d.parent;
+                    r.fields = d.fields;
+                    r.links = d.links;
+                    r.comments = d.comments;
+                    r.comment_count = d.comment_count;
+                    r.detail_of = updated.clone();
+                    if let Some(t) = d.transitions {
+                        r.transitions = t;
+                    }
+                    if r.reporter.is_empty() {
+                        r.reporter = d.reporter;
+                    }
+                }
+            }
+        });
+    }
     Ok(report)
+}
+
+/// When a ticket last changed — or, from a server that doesn't say, a
+/// stamp that reads its details once.
+fn stamp(i: &Issue) -> String {
+    if i.updated.is_empty() {
+        "read".into()
+    } else {
+        i.updated.clone()
+    }
+}
+
+/// At most this many tickets get their details read in one round (the
+/// rest wait for the next).
+const DETAILS_PER_ROUND: usize = 15;
+
+/// A ticket's details beyond what a search returns.
+#[derive(Debug, Default)]
+struct Details {
+    parent: String,
+    reporter: String,
+    fields: Vec<(String, String)>,
+    links: Vec<String>,
+    comments: Vec<dcode_ai_common::board::RemoteComment>,
+    comment_count: u32,
+    transitions: Option<Vec<RemoteTransition>>,
+}
+
+/// Custom fields not worth a line: board plumbing and service-desk timers.
+fn noise_field(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "rank",
+        "issue color",
+        "epic color",
+        "epic status",
+        "last public comment",
+        "request type",
+        "request language",
+        "satisfaction",
+        "time to ",
+        "development",
+        "vulnerability",
+        "flagged",
+    ]
+    .iter()
+    .any(|x| n.contains(x))
+}
+
+/// A field's value in words, when it's simple enough to show.
+fn field_text(v: &Value) -> Option<String> {
+    let s = match v {
+        Value::String(s) => s.trim().to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::Bool(b) => if *b { "yes" } else { "no" }.to_string(),
+        Value::Object(m) => {
+            if m.contains_key("errorMessage") {
+                return None;
+            }
+            ["value", "name", "displayName", "key"]
+                .iter()
+                .find_map(|k| m.get(*k).and_then(Value::as_str))
+                .map(|s| {
+                    match m
+                        .get("child")
+                        .and_then(|c| c.get("value"))
+                        .and_then(Value::as_str)
+                    {
+                        Some(c) => format!("{s} / {c}"),
+                        None => s.to_string(),
+                    }
+                })?
+        }
+        Value::Array(a) => {
+            let parts: Vec<String> = a.iter().filter_map(field_text).collect();
+            parts.join(", ")
+        }
+        Value::Null => return None,
+    };
+    (!s.is_empty()).then(|| s.chars().take(200).collect())
+}
+
+/// Reads one ticket's details (`getJiraIssue`, evidence view) and its
+/// newest comments.
+async fn details(mcp: &dyn Mcp, tools: &[String], link: &JiraLink, key: &str) -> Option<Details> {
+    let text = mcp
+        .call(
+            &tool(tools, GET_ISSUE)?,
+            json!({"cloudId": link.cloud_id, "issueIdOrKey": key, "view": "evidence"}),
+        )
+        .await
+        .ok()?;
+    let v = json_of(&text)?;
+    let issue = v.get("data").unwrap_or(&v);
+    let f = issue.get("fields")?;
+    let name = |x: &Value, k: &str| x.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut d = Details {
+        reporter: f
+            .get("reporter")
+            .map(|r| name(r, "displayName"))
+            .unwrap_or_default(),
+        ..Default::default()
+    };
+    if let Some(p) = f.get("parent") {
+        let summary = p
+            .get("fields")
+            .map(|pf| name(pf, "summary"))
+            .unwrap_or_default();
+        d.parent = format!("{} {summary}", name(p, "key")).trim().to_string();
+    }
+    for (label, k) in [
+        ("components", "components"),
+        ("fix versions", "fixVersions"),
+    ] {
+        if let Some(t) = f.get(k).and_then(field_text) {
+            d.fields.push((label.to_string(), t));
+        }
+    }
+    if let Some(t) = f.get("timetracking") {
+        let parts: Vec<String> = [
+            ("originalEstimate", "estimate"),
+            ("remainingEstimate", "left"),
+            ("timeSpent", "spent"),
+        ]
+        .iter()
+        .filter_map(|(k, l)| {
+            t.get(*k)
+                .and_then(Value::as_str)
+                .map(|v| format!("{l} {v}"))
+        })
+        .collect();
+        if !parts.is_empty() {
+            d.fields.push(("time".into(), parts.join(" · ")));
+        }
+    }
+    if let Some(custom) = f.get("customFields").and_then(Value::as_object) {
+        for (n, c) in custom {
+            if noise_field(n) {
+                continue;
+            }
+            if let Some(t) = c.get("value").and_then(field_text) {
+                d.fields.push((n.clone(), t));
+            }
+        }
+    }
+    for st in f
+        .get("subtasks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let sf = st.get("fields").unwrap_or(&Value::Null);
+        d.links.push(format!(
+            "sub-task {} {} ({})",
+            name(st, "key"),
+            name(sf, "summary"),
+            sf.get("status")
+                .map(|x| name(x, "name"))
+                .unwrap_or_default()
+        ));
+    }
+    for l in f
+        .get("issuelinks")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let ty = l.get("type").unwrap_or(&Value::Null);
+        let (how, other) = match (l.get("outwardIssue"), l.get("inwardIssue")) {
+            (Some(o), _) => (name(ty, "outward"), o),
+            (_, Some(i)) => (name(ty, "inward"), i),
+            _ => continue,
+        };
+        let of = other.get("fields").unwrap_or(&Value::Null);
+        d.links.push(
+            format!(
+                "{how} {} {} ({})",
+                name(other, "key"),
+                name(of, "summary"),
+                of.get("status")
+                    .map(|x| name(x, "name"))
+                    .unwrap_or_default()
+            )
+            .replace(" ()", ""),
+        );
+    }
+    let total = f
+        .get("comment")
+        .and_then(|c| c.get("total"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as u32;
+    d.comment_count = total;
+    let comment_of = |c: &Value| dcode_ai_common::board::RemoteComment {
+        author: c
+            .get("author")
+            .map(|a| name(a, "displayName"))
+            .unwrap_or_default(),
+        at: name(c, "created"),
+        body: c
+            .get("body")
+            .map(adf_text)
+            .unwrap_or_default()
+            .trim()
+            .chars()
+            .take(2000)
+            .collect(),
+    };
+    if total > 0 {
+        // Newest first, the latest five.
+        let list = match tool(tools, COMMENTS) {
+            Some(t) => mcp
+                .call(
+                    &t,
+                    json!({"cloudId": link.cloud_id, "issueIdOrKey": key, "maxResults": 5, "orderBy": "-created"}),
+                )
+                .await
+                .ok()
+                .and_then(|t| json_of(&t))
+                .and_then(|v| find_array(&v, "comments").cloned()),
+            None => None,
+        }
+        .or_else(|| f.get("comment").and_then(|c| find_array(c, "comments")).map(|a| {
+            let mut a = a.clone();
+            a.reverse();
+            a
+        }))
+        .unwrap_or_default();
+        d.comments = list.iter().take(5).map(comment_of).collect();
+    }
+    d.transitions = list_transitions(mcp, tools, link, key, false)
+        .await
+        .ok()
+        .map(|ts| ts.iter().filter_map(remote_transition).collect());
+    Some(d)
 }
 
 fn first_line(s: &str) -> String {
@@ -1877,6 +2680,8 @@ mod tests {
             reporter: String::new(),
             due_date: String::new(),
             labels: Vec::new(),
+            created: String::new(),
+            updated: String::new(),
         };
         // No filter: everything's in.
         assert!(matches_assignee_filter(None, &issue("Anyone")));
@@ -2251,5 +3056,548 @@ mod tests {
         assert_eq!(Board::load(&ws).pending(), 0);
         sync(&jira, &ws).await.unwrap();
         assert_eq!(*jira.0.lock().unwrap(), 1, "created twice");
+    }
+
+    /// Atlassian's v2 server over a BSI-like workflow: Open → In Progress
+    /// → Resolved/Closed (both needing a resolution), no review status.
+    struct Workflow {
+        calls: Mutex<Vec<(String, Value)>>,
+        /// key, assignee, status, category
+        issues: Mutex<Vec<(String, String, String, String)>>,
+        /// Changes the board's filter while a search is out.
+        relink_during_search: Option<PathBuf>,
+    }
+
+    impl Workflow {
+        fn new() -> Self {
+            Self {
+                calls: Mutex::new(Vec::new()),
+                issues: Mutex::new(vec![
+                    (
+                        "BSI-1".into(),
+                        "Dhanush Durai".into(),
+                        "In Progress".into(),
+                        "In Progress".into(),
+                    ),
+                    (
+                        "BSI-2".into(),
+                        "Boopathi S".into(),
+                        "Open".into(),
+                        "To Do".into(),
+                    ),
+                    (
+                        "BSI-3".into(),
+                        "Dinoj D".into(),
+                        "In Progress".into(),
+                        "In Progress".into(),
+                    ),
+                ]),
+                relink_during_search: None,
+            }
+        }
+        fn called(&self, tool: &str) -> Vec<Value> {
+            self.calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(t, _)| t == tool)
+                .map(|(_, a)| a.clone())
+                .collect()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl Mcp for Workflow {
+        async fn tools(&self) -> Result<Vec<String>, String> {
+            Ok([
+                RESOURCES,
+                USERINFO,
+                SEARCH,
+                CREATE,
+                EDIT,
+                TRANSITION,
+                GET_ISSUE,
+                COMMENTS,
+                COMMENT,
+                "executeRead",
+                "executeWrite",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect())
+        }
+        async fn call(&self, tool: &str, args: Value) -> Result<String, String> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((tool.to_string(), args.clone()));
+            let data = |v: Value| Ok(json!({"data": v}).to_string());
+            match tool {
+                RESOURCES => Ok(r#"[{"id":"c","url":"https://acme.atlassian.net"}]"#.into()),
+                USERINFO => data(json!({"accountId": "712020:me"})),
+                COMMENT => {
+                    if args["commentBody"]
+                        .as_str()
+                        .unwrap_or("")
+                        .contains("refuse")
+                    {
+                        return Ok(
+                            r#"{"error":true,"message":"You do not have permission"}"#.into()
+                        );
+                    }
+                    data(json!({"commentId": "777"}))
+                }
+                SEARCH => {
+                    if let Some(ws) = &self.relink_during_search {
+                        Board::update(ws, |b| {
+                            b.jira.as_mut().unwrap().assignee = Some("me".into())
+                        })
+                        .unwrap();
+                    }
+                    let jql = args["jql"].as_str().unwrap();
+                    let mine = jql.contains("assignee = currentUser()");
+                    let issues: Vec<Value> = self
+                        .issues
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|(_, a, _, _)| !mine || a == "Dhanush Durai")
+                        .map(|(k, a, st, cat)| json!({"key": k, "fields": {
+                            "summary": format!("{k} work"), "status": {"name": st, "statusCategory": {"name": cat}},
+                            "assignee": {"displayName": a}, "priority": {"name": "P2"},
+                            "updated": "2026-11-04T10:01:49.471-0500"
+                        }}))
+                        .collect();
+                    data(json!({"isLast": true, "issues": issues}))
+                }
+                GET_ISSUE => data(json!({"key": args["issueIdOrKey"], "fields": {
+                    "reporter": {"displayName": "Sreelekshmi Latha"},
+                    "parent": {"key": "BSI-476", "fields": {"summary": "Release Management"}},
+                    "comment": {"total": 2},
+                    "issuelinks": [{"type": {"outward": "blocks", "inward": "is blocked by"},
+                                    "outwardIssue": {"key": "BSI-9", "fields": {"summary": "Go live", "status": {"name": "Open"}}}}],
+                    "customFields": {
+                        "Task Type": {"id": "customfield_10106", "value": {"value": "Build and Development", "id": "10140"}},
+                        "Planned End Date": {"id": "customfield_10123", "value": "2026-10-22"},
+                        "Rank": {"id": "customfield_10019", "value": "0|i4alp7:"},
+                        "Time to resolution": {"id": "customfield_10045", "value": {"errorMessage": "nope"}}
+                    }
+                }})),
+                COMMENTS => data(json!({"total": 2, "comments": [
+                    {"author": {"displayName": "Mamatha Suresh"}, "created": "2026-11-04T09:00:00.000-0500", "body": "Any update?"},
+                    {"author": {"displayName": "Dhanush Durai"}, "created": "2026-11-03T09:00:00.000-0500", "body": "On it"}
+                ]})),
+                "executeRead" => {
+                    assert_eq!(args["name"], "listJiraIssueTransitions");
+                    let fields = args["inputs"]["expand"] == "transitions.fields";
+                    let res = json!({"required": true, "allowedValues": [
+                        {"id": "10001", "name": "Won't Fix"}, {"id": "10000", "name": "Fixed"}
+                    ]});
+                    let screen = if fields {
+                        json!({"resolution": res})
+                    } else {
+                        json!({})
+                    };
+                    data(json!({"transitions": [
+                        {"id": "301", "name": "Stop Progress", "to": {"name": "Open", "statusCategory": {"key": "new"}}},
+                        {"id": "2", "name": "Close Issue", "to": {"name": "Closed", "statusCategory": {"key": "done"}}, "fields": screen},
+                        {"id": "5", "name": "Resolve Issue", "to": {"name": "Resolved", "statusCategory": {"key": "done"}}, "fields": screen}
+                    ]}))
+                }
+                TRANSITION => {
+                    let key = args["issueIdOrKey"].as_str().unwrap();
+                    let id = args["transitionId"].as_str().unwrap();
+                    if (id == "2" || id == "5") && args["fields"]["resolution"].is_null() {
+                        return Ok(r#"{"error":true,"message":"Resolution is required."}"#.into());
+                    }
+                    let to = match id {
+                        "301" => ("Open", "To Do"),
+                        "2" => ("Closed", "Done"),
+                        _ => ("Resolved", "Done"),
+                    };
+                    for i in self.issues.lock().unwrap().iter_mut() {
+                        if i.0 == key {
+                            i.2 = to.0.into();
+                            i.3 = to.1.into();
+                        }
+                    }
+                    data(json!({"status": to.0}))
+                }
+                other => Err(format!("unknown tool {other}")),
+            }
+        }
+    }
+
+    fn linked(ws: &Path, assignee: Option<&str>) {
+        Board::update(ws, |b| {
+            b.jira = Some(JiraLink {
+                server: "atlassian".into(),
+                cloud_id: "c".into(),
+                site: "https://acme.atlassian.net".into(),
+                project: "BSI".into(),
+                jql: None,
+                assignee: assignee.map(str::to_string),
+                last_sync: None,
+                last_error: None,
+                fields: Default::default(),
+                sprint: false,
+                extra: Default::default(),
+            })
+        })
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn me_pulls_only_my_tickets_with_their_details() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let jira = Workflow::new();
+        linked(&ws, Some("me"));
+        let r = sync(&jira, &ws).await.unwrap();
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert_eq!(r.pulled, 1);
+        let q = &jira.called(SEARCH)[0];
+        assert!(
+            q["jql"]
+                .as_str()
+                .unwrap()
+                .contains("assignee = currentUser()"),
+            "{q}"
+        );
+        assert_eq!(q["view"], "evidence");
+        let b = Board::load(&ws);
+        assert_eq!(b.in_space(Space::Jira).count(), 1);
+        let rm = b.card("BSI-1").unwrap().remote.clone().unwrap();
+        assert_eq!(rm.parent, "BSI-476 Release Management");
+        assert_eq!(rm.reporter, "Sreelekshmi Latha");
+        assert!(
+            rm.fields
+                .contains(&("Task Type".into(), "Build and Development".into())),
+            "{:?}",
+            rm.fields
+        );
+        assert!(
+            rm.fields
+                .contains(&("Planned End Date".into(), "2026-10-22".into()))
+        );
+        assert!(
+            !rm.fields
+                .iter()
+                .any(|(k, _)| k == "Rank" || k.starts_with("Time to")),
+            "{:?}",
+            rm.fields
+        );
+        assert_eq!(rm.links, vec!["blocks BSI-9 Go live (Open)".to_string()]);
+        assert_eq!(rm.comment_count, 2);
+        assert_eq!(rm.comments[0].author, "Mamatha Suresh");
+        assert_eq!(rm.comments[0].body, "Any update?");
+        let shown = b.render_card(b.card("BSI-1").unwrap());
+        assert!(
+            shown.contains("comments (2, newest first)") && shown.contains("Any update?"),
+            "{shown}"
+        );
+        // Nothing changed in Jira: the details aren't read again.
+        sync(&jira, &ws).await.unwrap();
+        assert_eq!(jira.called(GET_ISSUE).len(), 1);
+    }
+
+    #[tokio::test]
+    async fn a_round_started_under_the_old_filter_never_fills_the_board() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let mut jira = Workflow::new();
+        // The board shows everyone's; `/board jira BSI me` lands while
+        // the background round's search is out.
+        linked(&ws, None);
+        jira.relink_during_search = Some(ws.clone());
+        let r = sync(&jira, &ws).await.unwrap();
+        assert_eq!(r.pulled, 0);
+        assert_eq!(Board::load(&ws).in_space(Space::Jira).count(), 0);
+        // The next round answers the new filter.
+        jira.relink_during_search = None;
+        sync(&jira, &ws).await.unwrap();
+        let b = Board::load(&ws);
+        let keys: Vec<&str> = b.in_space(Space::Jira).map(|c| c.key.as_str()).collect();
+        assert_eq!(keys, vec!["BSI-1"]);
+    }
+
+    #[tokio::test]
+    async fn moves_fill_the_resolution_and_review_stays_without_a_review_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let jira = Workflow::new();
+        linked(&ws, Some("me"));
+        sync(&jira, &ws).await.unwrap();
+
+        // Review: the workflow has none — no call, the card stays in Review.
+        Board::update(&ws, |b| {
+            b.card_mut("BSI-1")
+                .unwrap()
+                .set_status(Status::Review, "you")
+        })
+        .unwrap();
+        let r = sync(&jira, &ws).await.unwrap();
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert!(jira.called(TRANSITION).is_empty());
+        let c = Board::load(&ws).card("BSI-1").unwrap().clone();
+        assert_eq!(c.status, Status::Review);
+        assert!(
+            c.notes.iter().any(|n| n.text.contains("no Review status")),
+            "{:?}",
+            c.notes
+        );
+
+        // Done: Resolve Issue, with a resolution (Fixed — there's no Done).
+        Board::update(&ws, |b| {
+            b.card_mut("BSI-1").unwrap().set_status(Status::Done, "you")
+        })
+        .unwrap();
+        let r = sync(&jira, &ws).await.unwrap();
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert_eq!(r.moved, 1);
+        let t = &jira.called(TRANSITION)[0];
+        assert_eq!(t["transitionId"], "5");
+        assert_eq!(t["fields"]["resolution"], json!({"id": "10000"}));
+        let c = Board::load(&ws).card("BSI-1").unwrap().clone();
+        assert_eq!(c.status, Status::Done);
+        assert_eq!(c.remote.unwrap().status, "Resolved");
+
+        // Back to To do: Stop Progress, no fields.
+        Board::update(&ws, |b| {
+            b.card_mut("BSI-1").unwrap().set_status(Status::Todo, "you")
+        })
+        .unwrap();
+        sync(&jira, &ws).await.unwrap();
+        let t = &jira.called(TRANSITION)[1];
+        assert_eq!(t["transitionId"], "301");
+        assert!(t["fields"].is_null());
+    }
+
+    #[test]
+    fn me_asks_jira_for_the_signed_in_person() {
+        assert!(assignee_jql("BSI", "me").contains("assignee = currentUser() AND"));
+        assert!(assignee_jql("BSI", "ME").contains("currentUser()"));
+        assert!(is_me("currentUser()"));
+        assert!(!is_me("Dhanush"));
+    }
+
+    #[tokio::test]
+    async fn a_transition_picked_by_hand_goes_with_its_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let jira = Workflow::new();
+        linked(&ws, Some("me"));
+        sync(&jira, &ws).await.unwrap();
+        // The details brought where it can go.
+        let b = Board::load(&ws);
+        let r = b.card("BSI-1").unwrap().remote.clone().unwrap();
+        let labels: Vec<String> = r.transitions.iter().map(|t| t.label()).collect();
+        assert_eq!(
+            labels,
+            vec![
+                "Stop Progress → Open",
+                "Close Issue → Closed",
+                "Resolve Issue → Resolved"
+            ]
+        );
+        assert!(
+            b.render_card(b.card("BSI-1").unwrap())
+                .contains("can move: 1 Stop Progress → Open")
+        );
+
+        // Close, not Resolve (which a move to Done would pick).
+        Board::update(&ws, |b| {
+            b.card_mut("BSI-1")
+                .unwrap()
+                .remote
+                .as_mut()
+                .unwrap()
+                .want_transition = "close issue".into()
+        })
+        .unwrap();
+        assert_eq!(Board::load(&ws).pending(), 1);
+        let r = sync(&jira, &ws).await.unwrap();
+        assert!(r.errors.is_empty(), "{r:?}");
+        assert_eq!(r.moved, 1);
+        let t = &jira.called(TRANSITION)[0];
+        assert_eq!(t["transitionId"], "2");
+        assert_eq!(t["fields"]["resolution"], json!({"id": "10000"}));
+        let c = Board::load(&ws).card("BSI-1").unwrap().clone();
+        assert_eq!(c.status, Status::Done);
+        let rm = c.remote.unwrap();
+        assert_eq!(rm.status, "Closed");
+        assert!(rm.want_transition.is_empty());
+
+        // A move the workflow doesn't have: said, and not tried again.
+        Board::update(&ws, |b| {
+            b.card_mut("BSI-1")
+                .unwrap()
+                .remote
+                .as_mut()
+                .unwrap()
+                .want_transition = "Fly away".into()
+        })
+        .unwrap();
+        let r = sync(&jira, &ws).await.unwrap();
+        assert!(r.errors[0].contains("no move “Fly away”"), "{r:?}");
+        let c = Board::load(&ws).card("BSI-1").unwrap().clone();
+        assert!(c.remote.unwrap().want_transition.is_empty());
+        assert!(
+            c.notes
+                .iter()
+                .any(|n| n.text.contains("it can: Stop Progress → Open")),
+            "{:?}",
+            c.notes
+        );
+    }
+
+    #[tokio::test]
+    async fn comments_written_here_go_to_the_ticket() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        let jira = Workflow::new();
+        linked(&ws, Some("me"));
+        sync(&jira, &ws).await.unwrap();
+        Board::update(&ws, |b| {
+            let r = b.card_mut("BSI-1").unwrap().remote.as_mut().unwrap();
+            r.outbox.push(OutComment {
+                body: "Deployed to UAT".into(),
+                internal: false,
+            });
+            r.outbox.push(OutComment {
+                body: "Needs CAB".into(),
+                internal: true,
+            });
+            r.outbox.push(OutComment {
+                body: "please refuse".into(),
+                internal: false,
+            });
+        })
+        .unwrap();
+        // Waiting comments keep the card through a filter change.
+        assert!(!Board::load(&ws).card("BSI-1").unwrap().unsent_nothing());
+        let r = sync(&jira, &ws).await.unwrap();
+        assert_eq!(r.commented, 2);
+        assert_eq!(r.errors.len(), 1, "{r:?}");
+        let sent = jira.called(COMMENT);
+        assert_eq!(sent.len(), 3);
+        assert_eq!(sent[0]["commentBody"], "Deployed to UAT");
+        assert!(sent[0]["jsmCommentType"].is_null());
+        assert_eq!(sent[1]["jsmCommentType"], "internalNote");
+        let c = Board::load(&ws).card("BSI-1").unwrap().clone();
+        assert!(c.remote.as_ref().unwrap().outbox.is_empty());
+        assert!(
+            c.notes
+                .iter()
+                .any(|n| n.text.contains("couldn't send the comment")
+                    && n.text.contains("please refuse"))
+        );
+        assert!(r.summary().contains("commented 2"), "{}", r.summary());
+        // Sent comments make the ticket's details read again.
+        assert_eq!(jira.called(GET_ISSUE).len(), 2);
+    }
+
+    /// 250 tickets, 100 a page; or endless pages.
+    struct Paged {
+        endless: bool,
+        calls: Mutex<Vec<Value>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Mcp for Paged {
+        async fn tools(&self) -> Result<Vec<String>, String> {
+            Ok(vec![SEARCH.to_string()])
+        }
+        async fn call(&self, _tool: &str, args: Value) -> Result<String, String> {
+            self.calls.lock().unwrap().push(args.clone());
+            let page: usize = args["nextPageToken"]
+                .as_str()
+                .map_or(0, |t| t.parse().unwrap());
+            let total = if self.endless { usize::MAX } else { 250 };
+            let issues: Vec<Value> = (page * 100..(page * 100 + 100).min(total))
+                .map(|n| json!({"key": format!("BSI-{n}"), "fields": {"summary": "x", "status": {"name": "Open"}, "assignee": {"displayName": "Me"}}}))
+                .collect();
+            let last = (page + 1) * 100 >= total;
+            let mut d = json!({"isLast": last, "issues": issues});
+            if !last {
+                d["nextPageToken"] = json!((page + 1).to_string());
+            }
+            Ok(json!({ "data": d }).to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn every_page_of_a_big_filter_comes_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        linked(&ws, None);
+        let jira = Paged {
+            endless: false,
+            calls: Mutex::new(Vec::new()),
+        };
+        let r = sync(&jira, &ws).await.unwrap();
+        assert_eq!(r.pulled, 250);
+        assert!(!r.truncated);
+        let calls = jira.calls.lock().unwrap().clone();
+        assert_eq!(calls.len(), 3);
+        assert_eq!(calls[2]["nextPageToken"], "2");
+        assert_eq!(Board::load(&ws).in_space(Space::Jira).count(), 250);
+    }
+
+    #[tokio::test]
+    async fn a_cut_off_pull_forgets_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let ws = dir.path().to_path_buf();
+        linked(&ws, None);
+        // A ticket from before, past where the endless filter is read to.
+        Board::update(&ws, |b| {
+            b.insert_remote(
+                Remote {
+                    key: "BSI-99999".into(),
+                    ..Default::default()
+                },
+                "old",
+                "",
+                Status::Todo,
+                Priority::Medium,
+                None,
+            )
+        })
+        .unwrap();
+        let jira = Paged {
+            endless: true,
+            calls: Mutex::new(Vec::new()),
+        };
+        let r = sync(&jira, &ws).await.unwrap();
+        assert_eq!(jira.calls.lock().unwrap().len(), MAX_PAGES);
+        assert!(r.truncated);
+        assert!(r.summary().contains("1000+ tickets"), "{}", r.summary());
+        assert!(Board::load(&ws).card("BSI-99999").is_some());
+    }
+
+    #[test]
+    fn the_sprint_filter_asks_for_open_sprints() {
+        let mut l = JiraLink {
+            server: "a".into(),
+            cloud_id: "c".into(),
+            site: String::new(),
+            project: "BSI".into(),
+            jql: None,
+            assignee: Some("me".into()),
+            last_sync: None,
+            last_error: None,
+            fields: Default::default(),
+            sprint: true,
+            extra: Default::default(),
+        };
+        assert_eq!(
+            pull_jql(&l),
+            "project = \"BSI\" AND assignee = currentUser() AND sprint in openSprints() ORDER BY updated DESC"
+        );
+        l.sprint = false;
+        l.assignee = None;
+        assert_eq!(pull_jql(&l), project_jql("BSI"));
+        l.jql = Some("key = BSI-1".into());
+        assert_eq!(pull_jql(&l), "key = BSI-1");
     }
 }

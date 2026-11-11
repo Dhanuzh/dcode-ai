@@ -44,6 +44,15 @@ enum Typing {
     Blockers(String),
     Describe(String),
     Assignee(String),
+    /// A workflow move picked by hand (its number, or its name).
+    Transition(String),
+    /// A comment for the ticket; `internal`: a service-desk internal note.
+    Comment {
+        key: String,
+        internal: bool,
+    },
+    /// A comment answering the ticket's newest one.
+    Reply(String),
 }
 
 /// The board view's state while it's open.
@@ -56,6 +65,8 @@ pub struct BoardUi {
     /// `x` pressed once on this card: `x` again deletes.
     confirm_delete: Option<String>,
     detail: bool,
+    /// Lines scrolled in the card's full view (↑↓ / the wheel).
+    detail_scroll: u16,
     message: Option<String>,
     /// The left button is down on this card.
     press: Option<Press>,
@@ -132,8 +143,11 @@ fn on_mouse(
         return MouseAct::Nothing;
     }
     if ui.detail {
-        if left_down && !hits.detail.is_some_and(|r| inside(&r, x, y)) {
-            ui.detail = false;
+        match m.kind {
+            MouseEventKind::ScrollDown => ui.detail_scroll = ui.detail_scroll.saturating_add(3),
+            MouseEventKind::ScrollUp => ui.detail_scroll = ui.detail_scroll.saturating_sub(3),
+            _ if left_down && !hits.detail.is_some_and(|r| inside(&r, x, y)) => ui.detail = false,
+            _ => {}
         }
         return MouseAct::Nothing;
     }
@@ -235,11 +249,43 @@ impl Default for BoardUi {
             typing: None,
             confirm_delete: None,
             detail: false,
+            detail_scroll: 0,
             message: None,
             press: None,
             drop_col: None,
         }
     }
+}
+
+/// The end of `s`, at most `n` characters (what's being typed is at the end).
+fn tail(s: &str, n: usize) -> String {
+    let count = s.chars().count();
+    if count <= n {
+        s.to_string()
+    } else {
+        format!("…{}", s.chars().skip(count - n).collect::<String>())
+    }
+}
+
+/// Puts a comment in the ticket's outbox; false when the card has no ticket.
+fn queue_comment(
+    ws: &std::path::Path,
+    key: &str,
+    body: String,
+    internal: bool,
+) -> std::io::Result<bool> {
+    Board::update(ws, |b| {
+        let Some(c) = b.card_mut(key) else {
+            return false;
+        };
+        let Some(r) = c.remote.as_mut() else {
+            return false;
+        };
+        r.outbox
+            .push(dcode_ai_common::board::OutComment { body, internal });
+        c.updated = chrono::Utc::now();
+        true
+    })
 }
 
 fn priority_chip(p: Priority) -> Span<'static> {
@@ -527,12 +573,16 @@ pub(crate) fn run_board_overlay(
                 }
             };
             let jira_label = match &board.jira {
-                Some(l) if l.assignee.is_some() => format!(
-                    "Jira {} · {} · {jira_n}",
-                    l.project,
-                    l.assignee.as_deref().unwrap_or_default()
-                ),
-                Some(l) => format!("Jira {} · {jira_n}", l.project),
+                Some(l) => {
+                    let mut t = format!("Jira {}", l.project);
+                    if let Some(a) = &l.assignee {
+                        t.push_str(&format!(" · {a}"));
+                    }
+                    if l.sprint {
+                        t.push_str(" · sprint");
+                    }
+                    format!("{t} · {jira_n}")
+                }
                 None => "Jira".into(),
             };
             let total: usize = columns.iter().map(Vec::len).sum();
@@ -595,6 +645,39 @@ pub(crate) fn run_board_overlay(
                 (Some((Typing::Describe(k), buf)), _, _) => format!(" {k} description: {buf}▏"),
                 (Some((Typing::Assignee(k), buf)), _, _) => {
                     format!(" {k} assignee (blank clears it): {buf}▏")
+                }
+                (Some((Typing::Transition(k), buf)), _, _) => {
+                    let can = board
+                        .card(k)
+                        .and_then(|c| c.remote.as_ref())
+                        .map(|r| {
+                            r.transitions
+                                .iter()
+                                .enumerate()
+                                .map(|(i, t)| format!("{} {}", i + 1, t.label()))
+                                .collect::<Vec<_>>()
+                                .join(" · ")
+                        })
+                        .unwrap_or_default();
+                    if can.is_empty() {
+                        format!(" Move {k} — transition or status name (s syncs to list them): {buf}▏")
+                    } else {
+                        format!(" Move {k}: {can} — number or name: {buf}▏")
+                    }
+                }
+                (Some((Typing::Comment { key, internal }, buf)), _, _) => format!(
+                    " {} on {key}: {}▏   Enter sends · Esc cancels",
+                    if *internal { "Internal note" } else { "Comment" },
+                    tail(buf, 120)
+                ),
+                (Some((Typing::Reply(k), buf)), _, _) => {
+                    let to = board
+                        .card(k)
+                        .and_then(|c| c.remote.as_ref())
+                        .and_then(|r| r.comments.first())
+                        .map(|c| c.author.clone())
+                        .unwrap_or_default();
+                    format!(" Reply to {to} on {k}: {}▏   Enter sends · Esc cancels", tail(buf, 120))
                 }
                 (None, _, Some(k)) => {
                     format!(" Delete {k}? x again deletes, any other key keeps it")
@@ -724,6 +807,9 @@ pub(crate) fn run_board_overlay(
                         y += h;
                     }
                 }
+                if !ui.detail {
+                    ui.detail_scroll = 0;
+                }
                 if ui.detail
                     && let Some(c) = &selected
                 {
@@ -744,13 +830,14 @@ pub(crate) fn run_board_overlay(
                         }
                     }
                     text.push_str(
-                        "\n\n ←→ status · p priority · e description · u assignee · o open in Jira · q close",
+                        "\n\n ←→ status · t transition · c comment · C internal note · R reply · ↑↓ scroll · p priority · e description · u assignee · o open in Jira · q close",
                     );
                     hits.detail = Some(r);
                     frame.render_widget(Clear, r);
                     frame.render_widget(
                         Paragraph::new(text)
                             .wrap(Wrap { trim: false })
+                            .scroll((ui.detail_scroll, 0))
                             .style(Style::default().fg(theme::text()).bg(theme::bg()))
                             .block(
                                 Block::default()
@@ -884,6 +971,77 @@ pub(crate) fn run_board_overlay(
                                         }
                                     })
                                     .map(|_| format!("{k}: description updated")),
+                                    Typing::Transition(k) if !text.is_empty() => {
+                                        let r = Board::update(&ws, |b| {
+                                            let r = b.card_mut(k)?.remote.as_mut()?;
+                                            let want = match text.parse::<usize>() {
+                                                Ok(n) if n >= 1 && n <= r.transitions.len() => {
+                                                    r.transitions[n - 1].id.clone()
+                                                }
+                                                _ => text.clone(),
+                                            };
+                                            let label = r
+                                                .transitions
+                                                .iter()
+                                                .find(|t| t.matches(&want))
+                                                .map(|t| t.label())
+                                                .unwrap_or_else(|| want.clone());
+                                            r.want_transition = want;
+                                            Some(label)
+                                        });
+                                        kick(state);
+                                        r.map(|l| match l {
+                                            Some(l) => format!("{k}: {l} — sending to Jira…"),
+                                            None => format!("{k} isn't a Jira ticket"),
+                                        })
+                                    }
+                                    Typing::Comment { key: k, internal } if !text.is_empty() => {
+                                        let internal = *internal;
+                                        let r = queue_comment(&ws, k, text.clone(), internal);
+                                        kick(state);
+                                        r.map(|ok| {
+                                            if ok {
+                                                format!(
+                                                    "{k}: {} sending…",
+                                                    if internal {
+                                                        "internal note"
+                                                    } else {
+                                                        "comment"
+                                                    }
+                                                )
+                                            } else {
+                                                format!("{k} isn't a Jira ticket")
+                                            }
+                                        })
+                                    }
+                                    Typing::Reply(k) if !text.is_empty() => {
+                                        let quote = board
+                                            .card(k)
+                                            .and_then(|c| c.remote.as_ref())
+                                            .and_then(|r| r.comments.first())
+                                            .map(|c| {
+                                                let first: String = c
+                                                    .body
+                                                    .lines()
+                                                    .next()
+                                                    .unwrap_or("")
+                                                    .chars()
+                                                    .take(160)
+                                                    .collect();
+                                                format!("> {}: {first}\n\n", c.author)
+                                            })
+                                            .unwrap_or_default();
+                                        let r =
+                                            queue_comment(&ws, k, format!("{quote}{text}"), false);
+                                        kick(state);
+                                        r.map(|ok| {
+                                            if ok {
+                                                format!("{k}: reply sending…")
+                                            } else {
+                                                format!("{k} isn't a Jira ticket")
+                                            }
+                                        })
+                                    }
                                     Typing::Assignee(k) => Board::update(&ws, |b| {
                                         if let Some(c) = b.card_mut(k) {
                                             c.assignee = (!text.is_empty()).then(|| text.clone());
@@ -911,7 +1069,11 @@ pub(crate) fn run_board_overlay(
                                 ui.typing = Some((what, buf));
                             }
                             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                                if buf.chars().count() < 200 {
+                                let max = match what {
+                                    Typing::Comment { .. } | Typing::Reply(_) => 4000,
+                                    _ => 200,
+                                };
+                                if buf.chars().count() < max {
                                     buf.push(c);
                                 }
                                 ui.typing = Some((what, buf));
@@ -935,6 +1097,49 @@ pub(crate) fn run_board_overlay(
                     if ui.detail {
                         match key.code {
                             KeyCode::Esc | KeyCode::Char('q') => ui.detail = false,
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                ui.detail_scroll = ui.detail_scroll.saturating_add(1)
+                            }
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                ui.detail_scroll = ui.detail_scroll.saturating_sub(1)
+                            }
+                            KeyCode::PageDown | KeyCode::Char(' ') => {
+                                ui.detail_scroll = ui.detail_scroll.saturating_add(10)
+                            }
+                            KeyCode::PageUp => {
+                                ui.detail_scroll = ui.detail_scroll.saturating_sub(10)
+                            }
+                            KeyCode::Char('t')
+                            | KeyCode::Char('c')
+                            | KeyCode::Char('C')
+                            | KeyCode::Char('R') => {
+                                match selected.as_ref().filter(|c| c.remote.is_some()) {
+                                    None => {
+                                        ui.message = Some(
+                                            "only a Jira ticket can be moved or commented on"
+                                                .into(),
+                                        )
+                                    }
+                                    Some(c) => {
+                                        let k = c.key.clone();
+                                        ui.typing = Some((
+                                            match key.code {
+                                                KeyCode::Char('t') => Typing::Transition(k),
+                                                KeyCode::Char('c') => Typing::Comment {
+                                                    key: k,
+                                                    internal: false,
+                                                },
+                                                KeyCode::Char('C') => Typing::Comment {
+                                                    key: k,
+                                                    internal: true,
+                                                },
+                                                _ => Typing::Reply(k),
+                                            },
+                                            String::new(),
+                                        ));
+                                    }
+                                }
+                            }
                             KeyCode::Char('o') => open_remote(&selected, &mut ui),
                             KeyCode::Char('e') => {
                                 if let Some(c) = &selected {

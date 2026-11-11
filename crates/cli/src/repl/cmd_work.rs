@@ -150,16 +150,12 @@ impl Repl {
                             return Ok(true);
                         };
                         let mcp = dcode_ai_cli::jira_sync::ServerMcp::new(manager, server);
+                        // `me` stays `me`: the pull asks Jira for
+                        // `assignee = currentUser()`, whoever is signed in.
                         let assignee = if word == "all" {
                             None
-                        } else if name.eq_ignore_ascii_case("me") {
-                            match dcode_ai_cli::jira_sync::whoami(&mcp).await {
-                                Ok(me) => Some(me),
-                                Err(e) => {
-                                    out.eprintln(&format!("[board] {e} — try /board jira assignee <your name or email>"));
-                                    return Ok(true);
-                                }
-                            }
+                        } else if dcode_ai_cli::jira_sync::is_me(name) {
+                            Some("me".to_string())
                         } else {
                             Some(name.to_string())
                         };
@@ -188,15 +184,124 @@ impl Repl {
                             Err(e) => out.eprintln(&format!("[board] {e}")),
                         }
                     }
+                    "jira" if matches!(arg.split_whitespace().next(), Some("sprint" | "move" | "comment" | "note")) => {
+                        let (word, rest) = arg
+                            .split_once(char::is_whitespace)
+                            .map(|(w, r)| (w, r.trim()))
+                            .unwrap_or((arg, ""));
+                        let Some(link) = Board::load(&ws).jira else {
+                            out.eprintln("[board] link Jira first: /board jira <PROJECT-KEY>");
+                            return Ok(true);
+                        };
+                        let Some(server) = self.runtime.config().mcp.servers.iter().find(|s| s.name == link.server).cloned() else {
+                            out.eprintln(&format!("[board] the MCP server `{}` isn't configured any more", link.server));
+                            return Ok(true);
+                        };
+                        let mcp = dcode_ai_cli::jira_sync::ServerMcp::new(self.runtime.mcp_manager().clone(), server);
+                        let (key, text) = rest
+                            .split_once(char::is_whitespace)
+                            .map(|(k, t)| (k.trim(), t.trim()))
+                            .unwrap_or((rest, ""));
+                        let key = key.to_ascii_uppercase();
+                        let queued: Result<String, String> = match word {
+                            "sprint" => {
+                                let on = !matches!(rest, "off" | "no" | "false" | "all");
+                                Board::update(&ws, |b| {
+                                    if let Some(l) = b.jira.as_mut() {
+                                        l.sprint = on;
+                                    }
+                                    b.drop_synced();
+                                })
+                                .map(|_| {
+                                    if on {
+                                        format!("Jira {}: open sprints only (re-syncing…)", link.project)
+                                    } else {
+                                        format!("Jira {}: open and recent tickets, any sprint (re-syncing…)", link.project)
+                                    }
+                                })
+                                .map_err(|e| format!("could not save: {e}"))
+                            }
+                            _ if key.is_empty() => Err(format!(
+                                "/board jira {word} <KEY> {}",
+                                if word == "move" { "[transition or status name]" } else { "[internal] <text>" }
+                            )),
+                            "move" if text.is_empty() => {
+                                // List where it can go.
+                                let b = Board::load(&ws);
+                                match b.card(&key).and_then(|c| c.remote.as_ref()) {
+                                    None => Err(format!("{key} isn't a Jira ticket on the board")),
+                                    Some(r) if r.transitions.is_empty() => Err(format!(
+                                        "{key}: its moves aren't read yet — /board sync, then try again"
+                                    )),
+                                    Some(r) => {
+                                        for (i, t) in r.transitions.iter().enumerate() {
+                                            out.println(&format!("[board] {key} {}: {}", i + 1, t.label()));
+                                        }
+                                        out.println(&format!("[board] /board jira move {key} <number or name>"));
+                                        return Ok(true);
+                                    }
+                                }
+                            }
+                            "move" => Board::update(&ws, |b| {
+                                let r = b.card_mut(&key).and_then(|c| c.remote.as_mut())?;
+                                let want = match text.parse::<usize>() {
+                                    Ok(n) if n >= 1 && n <= r.transitions.len() => r.transitions[n - 1].id.clone(),
+                                    _ => text.to_string(),
+                                };
+                                r.want_transition = want;
+                                Some(())
+                            })
+                            .map_err(|e| format!("could not save: {e}"))
+                            .and_then(|r| r.ok_or(format!("{key} isn't a Jira ticket on the board")))
+                            .map(|_| format!("{key}: {text} — sending to Jira…")),
+                            _ => {
+                                // comment / note
+                                let (internal, body) = match text.split_once(char::is_whitespace) {
+                                    Some(("internal", b)) => (true, b.trim()),
+                                    _ => (word == "note", text),
+                                };
+                                if body.is_empty() {
+                                    Err(format!("/board jira {word} {key} [internal] <text>"))
+                                } else {
+                                    Board::update(&ws, |b| {
+                                        let r = b.card_mut(&key).and_then(|c| c.remote.as_mut())?;
+                                        r.outbox.push(dcode_ai_common::board::OutComment {
+                                            body: body.to_string(),
+                                            internal,
+                                        });
+                                        Some(())
+                                    })
+                                    .map_err(|e| format!("could not save: {e}"))
+                                    .and_then(|r| r.ok_or(format!("{key} isn't a Jira ticket on the board")))
+                                    .map(|_| format!("{key}: {} sending…", if internal { "internal note" } else { "comment" }))
+                                }
+                            }
+                        };
+                        match queued {
+                            Err(e) => out.eprintln(&format!("[board] {e}")),
+                            Ok(m) => {
+                                out.println(&format!("[board] {m}"));
+                                match dcode_ai_cli::jira_sync::sync(&mcp, &ws).await {
+                                    Ok(r) => out.println(&format!("[board] {}", r.summary())),
+                                    Err(e) => out.eprintln(&format!("[board] {e}")),
+                                }
+                            }
+                        }
+                    }
                     "jira" if !arg.is_empty() => {
                         let mut words = arg.split_whitespace();
                         let project = words.next().unwrap_or_default().to_string();
                         let rest: Vec<&str> = words.collect();
                         let mut site = None;
-                        let mut assignee_spec: Option<String> = None;
+                                let mut assignee_spec: Option<String> = None;
+                        let mut sprint = false;
                         let mut i = 0;
                         while i < rest.len() {
                             match rest[i] {
+                                "sprint" => {
+                                    sprint = true;
+                                    i += 1;
+                                }
                                 "me" => {
                                     assignee_spec = Some("me".into());
                                     i += 1;
@@ -228,28 +333,36 @@ impl Repl {
                             Ok(mut link) => {
                                 let assignee = match assignee_spec.as_deref() {
                                     None => None,
-                                    Some("me") => match dcode_ai_cli::jira_sync::whoami(&mcp).await {
-                                        Ok(me) => Some(me),
-                                        Err(e) => {
-                                            out.eprintln(&format!("[board] {e} — linking without a filter; try /board jira assignee me later"));
-                                            None
-                                        }
-                                    },
                                     Some("") => {
-                                        out.eprintln("[board] whose tickets? /board jira <PROJECT> assignee <name>");
-                                        None
+                                        out.eprintln("[board] whose tickets? /board jira <PROJECT> assignee <name>|me");
+                                        return Ok(true);
                                     }
+                                    Some(n) if dcode_ai_cli::jira_sync::is_me(n) => Some("me".to_string()),
                                     Some(n) => Some(n.to_string()),
                                 };
                                 link.assignee = assignee.clone();
+                                link.sprint = sprint;
+                                // Keep the field values set before (a relink
+                                // to change the filter shouldn't lose them).
                                 let (p, s) = (link.project.clone(), link.site.clone());
-                                if let Err(e) = Board::update(&ws, |b| b.jira = Some(link)) {
+                                if let Err(e) = Board::update(&ws, |b| {
+                                    if let Some(old) = &b.jira
+                                        && old.project == link.project
+                                    {
+                                        link.fields = old.fields.clone();
+                                    }
+                                    // Tickets pulled under another filter go
+                                    // now; the sync below brings back yours.
+                                    b.drop_synced();
+                                    b.jira = Some(link);
+                                }) {
                                     out.eprintln(&format!("[board] could not save: {e}"));
                                     return Ok(true);
                                 }
                                 out.println(&format!(
-                                    "[board] linked to Jira {p} ({s}){} through `{}` — its tickets are coming in",
+                                    "[board] linked to Jira {p} ({s}){}{} through `{}` — its tickets are coming in",
                                     assignee.map(|n| format!(", only tickets assigned to {n}")).unwrap_or_default(),
+                                    if sprint { ", open sprints only" } else { "" },
                                     server.name
                                 ));
                                 match dcode_ai_cli::jira_sync::sync(&mcp, &ws).await {
@@ -266,14 +379,15 @@ impl Repl {
                         let b = Board::load(&ws);
                         match &b.jira {
                             Some(l) => out.println(&format!(
-                                "[board] linked to Jira {} ({}){} through `{}` · last sync {} · /board sync · /board jira assignee <name>|all · /board jira field <name> = <value> · /board jira off",
+                                "[board] linked to Jira {} ({}){}{} through `{}` · last sync {} · /board sync · /board jira assignee <name>|me|all · /board jira sprint on|off · /board jira move <KEY> [name] · /board jira comment <KEY> [internal] <text> · /board jira field <name> = <value> · /board jira off",
                                 l.project,
                                 l.site,
                                 l.assignee.as_deref().map(|n| format!(", only tickets assigned to {n}")).unwrap_or_default(),
+                                if l.sprint { ", open sprints only" } else { "" },
                                 l.server,
                                 l.last_sync.map(|t| t.with_timezone(&chrono::Local).format("%H:%M").to_string()).unwrap_or_else(|| "never".into())
                             )),
-                            None => out.println("[board] /board jira <PROJECT-KEY> [site] [me|assignee <name>] links the board's Jira space to a project, through Atlassian's MCP server (dcode-ai mcp add atlassian --transport http https://mcp.atlassian.com/v1/mcp, then dcode-ai mcp login atlassian)"),
+                            None => out.println("[board] /board jira <PROJECT-KEY> [site] [me|assignee <name>] [sprint] links the board's Jira space to a project, through Atlassian's MCP server (dcode-ai mcp add atlassian --transport http https://mcp.atlassian.com/v1/mcp, then dcode-ai mcp login atlassian)"),
                         }
                     }
                     "sync" => {

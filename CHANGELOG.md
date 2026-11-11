@@ -1,5 +1,48 @@
 # Changelog
 
+## 1.0.56 — 2026-11-11
+
+### Fixed
+- **`/board jira <PROJECT> me` shows only your tickets — for good**: a
+  background sync that set out before the filter changed came back ~10s
+  later and filled the board with the whole project's tickets. A round
+  whose link changed while it was out now drops what it read. `me` is kept
+  as `me` and asked of Jira as `assignee = currentUser()` — no lookup of
+  who you are that can fail and leave the board unfiltered. Relinking keeps
+  your `/board jira field` values and clears tickets from the old filter.
+- **Moving a ticket to Done**: workflows whose done transitions have a
+  screen (BSI: "Resolve Issue", "Close Issue") refused the move without a
+  resolution. The transition's required resolution is now filled ("Done",
+  else "Fixed", …). A move Jira's workflow can't make says where the ticket
+  *can* go.
+- **Review / Backlog on a workflow without them**: the card stays in
+  Review (Backlog) with a note instead of failing, and the next pull no
+  longer throws it back while Jira hasn't moved the ticket.
+- A board file that doesn't read is never overwritten with an empty board.
+
+### New
+- **Pick the transition yourself**: in a Jira card's full view, `t` lists
+  the moves its workflow allows from where it is (`1 Resolve Issue →
+  Resolved · 2 Close Issue → Closed · …`) — type the number or a name. Or
+  `/board jira move <KEY> [number|transition|status]` (no name lists them).
+  A required resolution is filled as for column moves.
+- **Comments from the board**: `c` comments, `C` adds a service-desk
+  internal note, `R` replies to the newest comment (quoting it — Jira has
+  no threaded replies). Or `/board jira comment <KEY> [internal] <text>`.
+  Comments wait on the card until sent; a refused one is kept in the card's
+  notes.
+- **Sprint filter**: `/board jira BSI me sprint` (or `/board jira sprint
+  on|off`) shows only tickets in the open sprints, any status.
+- **Every page of a big filter**: a sync follows `nextPageToken` (up to
+  1000 tickets) instead of stopping at 100; when even that's cut off it
+  says `1000+ tickets` and forgets nothing it didn't get to.
+- **More of each ticket on the board**: the search uses the v2 server's
+  evidence view (reporter, description, account ids), and each ticket that
+  changed since the last look gets its details read once — parent/epic,
+  custom fields (Task Type, planned dates, …), sub-tasks and linked
+  tickets, and the newest five comments. Shown in the card's full view
+  (Enter; ↑↓ or the wheel scroll it) and to the agent's `board_view`.
+
 ## 1.0.55 — 2026-11-05
 
 ### Fixed
