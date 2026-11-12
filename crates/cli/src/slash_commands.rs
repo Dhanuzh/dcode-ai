@@ -74,6 +74,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/terminal-setup",
     "/project-config",
     "/browser",
+    "/app",
     "/second-opinion",
     "/add-dir",
     "/todos",
@@ -169,6 +170,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/terminal-setup" => "make Shift+Enter insert a newline in this terminal",
         "/browser" => {
             "the agent's web browser: status, open [url], connect <port>, save [name] (recorded steps), close"
+        }
+        "/app" => {
+            "drive a desktop app (VS Code, Slack, Teams, Outlook, Postman…): /app open <name|path>, list, close"
         }
         "/project-config" => {
             "shared project settings (.dcode.toml): save the model or mode for the team"

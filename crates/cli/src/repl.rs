@@ -988,6 +988,9 @@ impl Repl {
     async fn handle_command(&mut self, input: &str, out: ReplOutput<'_>) -> anyhow::Result<bool> {
         let mut parts = input.split_whitespace();
         let command = parts.next().unwrap_or_default();
+        if crate::slash_commands::SLASH_COMMANDS.contains(&command) {
+            dcode_ai_cli::tui::slash_entries::record_recent_command(command);
+        }
         let rest = input
             .strip_prefix(command)
             .map(str::trim)
@@ -1015,8 +1018,8 @@ impl Repl {
             | "/terminal-setup" | "/project-config" => {
                 return self.cmd_settings(input, command, rest, parts, out).await;
             }
-            "/reload" | "/add-dir" | "/skills" | "/memory" | "/browser" | "/setup" | "/plugins"
-            | "/plugin" | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
+            "/reload" | "/add-dir" | "/skills" | "/memory" | "/browser" | "/app" | "/setup"
+            | "/plugins" | "/plugin" | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
             "/office" | "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff"
@@ -1361,10 +1364,13 @@ impl Repl {
         }
         // sudo in agent / `!` commands asks through the TUI's password popup.
         crate::askpass::start(tui_state.clone());
-        // The inline view leaves the mouse to the terminal (native scrollback
-        // and selection); `[ui] mouse_capture = true` opts into in-app wheel
-        // scroll and drag-to-copy. The dashboard and overlays always take it.
-        let effective_mouse_capture = self.runtime.config().ui.mouse_capture;
+        // The inline view always leaves the mouse to the terminal: the
+        // conversation lives in the terminal's own scrollback, so only the
+        // terminal can scroll it (and select text in it). `[ui]
+        // mouse_capture = true` — written into many configs by older
+        // versions — used to keep the wheel captured here, where it scrolled
+        // nothing. The dashboard and overlays always take the mouse.
+        let effective_mouse_capture = false;
         if let Ok(mut g) = tui_state.lock() {
             g.mouse_capture_on = effective_mouse_capture;
             g.notifications_enabled = self.runtime.config().ui.notifications;

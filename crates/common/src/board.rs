@@ -433,6 +433,9 @@ pub struct Board {
     /// Synced with a Jira project, when set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jira: Option<JiraLink>,
+    /// Work-in-progress limits by column id (`in_progress` → 3).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub wip: std::collections::BTreeMap<String, u32>,
     /// Fields this version doesn't know (a newer dcode-ai wrote them), kept
     /// so saving here doesn't drop them.
     #[serde(flatten)]
@@ -567,6 +570,7 @@ impl Board {
             milestones: Vec::new(),
             cards: Vec::new(),
             jira: None,
+            wip: Default::default(),
             extra: Extra::new(),
         }
     }
@@ -670,6 +674,28 @@ impl Board {
             created: now,
             updated: now,
         });
+    }
+
+    /// The column's work-in-progress limit, if set.
+    pub fn wip_limit(&self, status: Status) -> Option<u32> {
+        self.wip.get(status.id()).copied().filter(|n| *n > 0)
+    }
+
+    /// The swimlane a card belongs to: its parent/epic (Jira) or milestone.
+    pub fn lane_of(&self, c: &Card) -> String {
+        if let Some(p) = c
+            .remote
+            .as_ref()
+            .map(|r| r.parent.as_str())
+            .filter(|p| !p.is_empty())
+        {
+            return p.to_string();
+        }
+        c.milestone
+            .as_deref()
+            .and_then(|m| self.milestone_title(m))
+            .map(str::to_string)
+            .unwrap_or_default()
     }
 
     /// Cards waiting to go to the tracker.

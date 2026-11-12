@@ -127,13 +127,234 @@ pub(crate) fn filter_slash_entries<'a>(
         return Vec::new();
     }
     let needle = buffer.trim_start_matches('/').to_lowercase();
-    entries
+    let recent = recent_commands();
+    // Recently used first (when they match), then commands that start
+    // with what's typed, then ones that mention it anywhere (name or
+    // description) — each by group, then name.
+    let mut ranked: Vec<(u8, usize, u8, String, &SlashEntry)> = entries
         .iter()
-        .filter(|e| {
-            e.command_str()
-                .trim_start_matches('/')
-                .to_lowercase()
-                .starts_with(&needle)
+        .filter_map(|e| {
+            let cmd = e.command_str();
+            let name = cmd.trim_start_matches('/').to_lowercase();
+            let tier = if name.starts_with(&needle) {
+                1
+            } else if needle.len() >= 3
+                && (name.contains(&needle) || e.description_text().to_lowercase().contains(&needle))
+            {
+                2
+            } else {
+                return None;
+            };
+            let recency = recent.iter().position(|r| *r == cmd);
+            let (tier, rank) = match recency {
+                Some(i) if tier == 1 => (0, i),
+                _ => (tier, 0),
+            };
+            Some((tier, rank, command_group(&cmd).0, name, e))
         })
-        .collect()
+        .collect();
+    ranked.sort_by(|a, b| (a.0, a.1, a.2, &a.3).cmp(&(b.0, b.1, b.2, &b.3)));
+    ranked.into_iter().map(|r| r.4).collect()
+}
+
+/// The group a command belongs to in the `/` menu: its order and name.
+pub(crate) fn command_group(cmd: &str) -> (u8, &'static str) {
+    const GROUPS: &[(&str, &[&str])] = &[
+        (
+            "Session",
+            &[
+                "/resume",
+                "/new",
+                "/clear",
+                "/fork",
+                "/rewind",
+                "/undo",
+                "/redo",
+                "/rename",
+                "/session-name",
+                "/sessions",
+                "/sessions-clean",
+                "/delete",
+                "/export",
+                "/share",
+                "/handoff",
+                "/side",
+                "/btw",
+                "/retry",
+                "/stop",
+                "/quit",
+                "/exit",
+                "/q",
+                "/logs",
+                "/attach",
+                "/input",
+            ],
+        ),
+        (
+            "Context & cost",
+            &[
+                "/context", "/compact", "/cost", "/usage", "/stats", "/memory", "/effort",
+                "/model", "/models", "/think", "/add-dir",
+            ],
+        ),
+        (
+            "Board & Jira",
+            &["/board", "/plan", "/goal", "/goals", "/todo"],
+        ),
+        (
+            "Team",
+            &[
+                "/invite", "/join", "/chat", "/people", "/kick", "/call", "/mute", "/watch",
+                "/office",
+            ],
+        ),
+        (
+            "Agents & tools",
+            &[
+                "/agents",
+                "/browser",
+                "/app",
+                "/mcp",
+                "/plugins",
+                "/plugin",
+                "/skills",
+                "/hooks",
+                "/run-bg",
+                "/bashes",
+                "/ps",
+                "/diff",
+                "/review",
+                "/verify",
+                "/second-opinion",
+                "/security-review",
+                "/pr-comments",
+                "/init",
+                "/ide",
+            ],
+        ),
+        (
+            "Settings",
+            &[
+                "/config",
+                "/theme",
+                "/permissions",
+                "/mode",
+                "/vim",
+                "/sounds",
+                "/speak",
+                "/terminal-setup",
+                "/statusline",
+                "/keymaps",
+                "/login",
+                "/logout",
+                "/connect",
+                "/setup",
+                "/reload",
+            ],
+        ),
+        (
+            "Help",
+            &[
+                "/help",
+                "/status",
+                "/release-notes",
+                "/doctor",
+                "/dashboard",
+                "/dash",
+                "/transcript",
+            ],
+        ),
+    ];
+    for (i, (name, cmds)) in GROUPS.iter().enumerate() {
+        if cmds.contains(&cmd) {
+            return (i as u8, name);
+        }
+    }
+    (GROUPS.len() as u8, "")
+}
+
+/// Recently used commands, newest first (`~/.dcode-ai/recent-commands`),
+/// read once and kept in memory.
+static RECENT: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+const RECENT_KEEP: usize = 12;
+
+fn recent_path() -> Option<PathBuf> {
+    dcode_ai_common::config::dcode_ai_home_dir().map(|h| h.join("recent-commands"))
+}
+
+pub(crate) fn recent_commands() -> Vec<String> {
+    let Ok(mut r) = RECENT.lock() else {
+        return Vec::new();
+    };
+    r.get_or_insert_with(|| {
+        if cfg!(test) {
+            return Vec::new();
+        }
+        recent_path()
+            .and_then(|p| std::fs::read_to_string(p).ok())
+            .map(|t| {
+                t.lines()
+                    .map(str::to_string)
+                    .filter(|l| l.starts_with('/'))
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
+    .clone()
+}
+
+/// Remember `cmd` (e.g. `/board`) as just used.
+pub fn record_recent_command(cmd: &str) {
+    if !cmd.starts_with('/') || cmd.len() < 2 || cmd.contains(char::is_whitespace) {
+        return;
+    }
+    let mut list = recent_commands();
+    list.retain(|c| c != cmd);
+    list.insert(0, cmd.to_string());
+    list.truncate(RECENT_KEEP);
+    if let Ok(mut r) = RECENT.lock() {
+        *r = Some(list.clone());
+    }
+    if !cfg!(test)
+        && let Some(p) = recent_path()
+    {
+        let _ = std::fs::write(p, list.join("\n") + "\n");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cmds(list: &[&'static str]) -> Vec<SlashEntry> {
+        list.iter().map(|c| SlashEntry::Command(c)).collect()
+    }
+
+    fn names(v: Vec<&SlashEntry>) -> Vec<String> {
+        v.into_iter().map(|e| e.command_str()).collect()
+    }
+
+    #[test]
+    fn grouped_recent_first_and_found_by_description() {
+        let all = cmds(&[
+            "/theme", "/compact", "/board", "/context", "/resume", "/cost",
+        ]);
+        // Grouped: Session, then Context & cost, then Board, then Settings.
+        let by_group = names(filter_slash_entries(&all, "/"));
+        assert_eq!(by_group[0], "/resume");
+        assert_eq!(by_group.last().unwrap(), "/theme");
+        // Prefix first.
+        assert_eq!(
+            names(filter_slash_entries(&all, "/co")),
+            ["/compact", "/context", "/cost"]
+        );
+        // A word from a description finds the command (`/board` mentions Jira).
+        assert!(names(filter_slash_entries(&all, "/jira")).contains(&"/board".to_string()));
+        // Just used: on top.
+        record_recent_command("/cost");
+        assert_eq!(names(filter_slash_entries(&all, "/co"))[0], "/cost");
+        assert_eq!(names(filter_slash_entries(&all, "/"))[0], "/cost");
+        // Not a slash panel: nothing.
+        assert!(filter_slash_entries(&all, "/co x").is_empty());
+    }
 }

@@ -1,5 +1,38 @@
 # Changelog
 
+## 1.0.60 — 2026-11-12
+
+### Fixed
+- **Mouse wheel and text selection in the normal view**: configs written by
+  older versions carry `[ui] mouse_capture = true`, which kept the wheel
+  captured in the normal view — where the conversation lives in the
+  terminal's scrollback, so nothing scrolled. The normal view now always
+  leaves the mouse to the terminal; the dashboard and overlays still use it.
+
+### New
+- **Smaller images, fewer tokens**: pasted screenshots, attached images and
+  browser screenshots are scaled to what the model actually uses (1568px on
+  the long edge, ~1.15 megapixels) before they're sent — once per image,
+  cached — instead of at full size.
+- **A findable `/` menu**: recently used commands first, then grouped
+  (Session, Context & cost, Board & Jira, Team, Agents & tools, Settings,
+  Help — shown dim on the right), each with its description; typing three
+  letters also finds commands by a word in their description (`/jira` →
+  `/board`).
+- **Board power features**: `/` searches cards (key, title, description,
+  assignee, labels, parent); `f` cycles filters — unassigned, each
+  assignee, each label; `w` shows swimlanes by parent/epic (or milestone);
+  `/board wip <column> <n>` sets a work-in-progress limit (the column's
+  count turns red past it). The header shows what's narrowing the board.
+- **Long replies**: while a reply is taller than the normal view's pane, a
+  dim line says how much is above and that `Ctrl+O` shows it all.
+- **Desktop apps (Electron / WebView2)**: `/app open vscode|slack|discord|
+  postman|notion|teams|outlook` (or a path to the app) starts it with a
+  debug port and connects; the agent then drives it like the browser, with
+  the browser tool's `target`. `/app list`, `/app close <name>`. An app
+  that's already running is reported first (it would ignore the debug
+  flag). Native apps without a web view come next.
+
 ## 1.0.59 — 2026-11-11
 
 ### Fewer credits

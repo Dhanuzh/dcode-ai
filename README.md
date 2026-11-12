@@ -185,8 +185,8 @@ Sub-agents work in their own git worktrees and you merge, keep or discard their 
 </td>
 <td valign="top">
 
-#### 🌐 A real browser
-The agent drives Chrome or Edge, sees screenshots, follows your tabs, and records steps you can replay.
+#### 🌐 A real browser — and desktop apps
+The agent drives Chrome or Edge, sees screenshots, follows your tabs, and records steps you can replay. `/app open vscode|slack|teams|outlook|…` lets it drive Electron and WebView2 desktop apps the same way.
 
 </td>
 <td valign="top">
@@ -213,7 +213,8 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 | **Talk while it works** | `Enter` steers the running turn; `Tab` queues a message for after it |
 | **Stop just one thing** | `Esc` stops a running shell command and the agent carries on; `Esc` again stops the turn. Long commands show a spinner, elapsed time and live output |
 | **Find** | `Ctrl+F` searches the whole conversation, with highlighted matches |
-| **Context** | `@` fuzzy file search, `[Image #N]` paste (`Ctrl+V`, or `Alt+V` on Windows/WSL), `!` shell mode, `# note` memory |
+| **Context** | `@` fuzzy file search, `[Image #N]` paste (`Ctrl+V`, or `Alt+V` on Windows/WSL) — scaled to what the model uses before sending, `!` shell mode, `# note` memory |
+| **Commands** | The `/` menu puts your recent commands first, groups the rest, and finds a command by a word in its description |
 | **Diffs** | Approvals show a line-numbered diff; `/diff` opens a full-screen viewer with hunk revert |
 | **Insight** | `/context` grid with the window and compaction points, `/usage` token breakdown with cache hit rate, `/cost today\|week\|month` history by day, model and sub-agent, a note when the prompt cache misses and why, `/effort`, `Ctrl+T` thinking |
 | **Looks** | Claude's dark, light, colorblind-friendly and ANSI themes with a live `/theme` preview, plus `tokyonight`, `catppuccin`, `gruvbox`, `dracula`, `nord` … |
@@ -243,6 +244,7 @@ A Jira-style kanban for the project: **Backlog · To do · In progress · Review
 | **Run** | `/board run [n]`: the head agent takes the ready cards (nothing blocking them), starts up to `n` sub-agents in their own worktrees in parallel, moves each card along and picks up what became unblocked. Gated cards wait in Review for you |
 | **Jira** | `/board jira SHOP` links the Jira space through Atlassian's MCP server: tickets come in, new Jira cards become tickets (required fields filled in), moving or renaming a card updates its ticket; in a card, `t` picks the workflow transition, `c`/`R` comment or reply, `w` logs time, `a` gets attachments, and `●` flags what others did. `/board jira SHOP me [sprint]` keeps only your tickets; `/board jira view add` saves other filters (`v` switches). `/board work SHOP-12` branches, starts the ticket and has the agent work it to a PR linked on the ticket. `/board jira today` is your Jira day at a glance (shown once a day, no model call) and `/board jira doctor` checks the live link. Personal cards never leave your computer |
 | **Work it yourself** | Drag cards between columns with the mouse, or: `t` Personal/Jira, `←/→/↑/↓` move, `Shift+←/→` (or `<` `>`) move a card, `n` new, `e` rename, `p` priority, `b` blockers, `g` gate, `Enter` details, `o` open in Jira, `s` sync, `r` run |
+| **Find your way** | `/` searches cards, `f` filters by assignee or label, `w` shows swimlanes by epic, `/board wip in_progress 3` sets a work-in-progress limit |
 
 ### 👥 Work together
 
@@ -351,7 +353,6 @@ subagent_max_minutes = 20
 [ui]
 theme = "claude"
 working_style = "bar"          # bar | dots | plain
-mouse_capture = false          # the inline view leaves scrolling and selection to the terminal
 ```
 
 Every option is documented in [docs/configuration.md](docs/configuration.md).

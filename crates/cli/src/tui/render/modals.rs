@@ -39,6 +39,7 @@ pub(crate) fn render_slash_panel(
         .unwrap_or(8)
         .clamp(8, 22);
     let avail = area.width.saturating_sub(4) as usize;
+    let recent = crate::tui::slash_entries::recent_commands();
 
     let mut lines: Vec<Line> = Vec::new();
     for (i, e) in entries.iter().enumerate().skip(start).take(inner_h) {
@@ -63,12 +64,40 @@ pub(crate) fn render_slash_panel(
             Span::styled(marker.to_string(), cmd_style),
             Span::styled(format!("{cmd:<cmd_col$}"), cmd_style),
         ];
+        // The command's group, dim on the right (recent ones say so).
+        let group = if recent.contains(&cmd) {
+            "recent"
+        } else {
+            crate::tui::slash_entries::command_group(&cmd).1
+        };
+        let group_w = if group.is_empty() {
+            0
+        } else {
+            group.chars().count() + 2
+        };
         if !desc.is_empty() {
-            let desc_room = avail.saturating_sub(cmd_col + 2);
+            let desc_room = avail.saturating_sub(cmd_col + 2 + group_w);
+            let d = truncate_chars(&desc, desc_room.max(8));
+            let pad = desc_room.saturating_sub(d.chars().count());
             spans.push(Span::styled("  ".to_string(), desc_style));
+            spans.push(Span::styled(d, desc_style));
+            if group_w > 0 {
+                spans.push(Span::styled(" ".repeat(pad + 2), desc_style));
+            }
+        } else if group_w > 0 {
             spans.push(Span::styled(
-                truncate_chars(&desc, desc_room.max(8)),
+                " ".repeat(avail.saturating_sub(cmd_col + group_w) + 2),
                 desc_style,
+            ));
+        }
+        if group_w > 0 {
+            spans.push(Span::styled(
+                group.to_string(),
+                if sel {
+                    desc_style
+                } else {
+                    Style::default().fg(theme::border())
+                },
             ));
         }
         lines.push(Line::from(spans));

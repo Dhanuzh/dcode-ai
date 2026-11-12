@@ -89,6 +89,36 @@ impl Repl {
                     }
                 }
             }
+            "/app" => {
+                use dcode_ai_core::apps;
+                let mut words = rest.split_whitespace();
+                let sub = words.next().unwrap_or("");
+                let arg = rest.trim_start().trim_start_matches(sub).trim();
+                let msg = match sub {
+                    "open" if !arg.is_empty() => apps::open(arg).await,
+                    "close" if !arg.is_empty() => apps::close(arg).await,
+                    "" | "list" => {
+                        let l = apps::list().await;
+                        Ok(if l.is_empty() {
+                            format!(
+                                "no apps connected — /app open <{}|path to .exe> (Electron or WebView2 apps; the agent then reaches it with the browser tool's target)",
+                                apps::KNOWN
+                                    .iter()
+                                    .map(|k| k.name)
+                                    .collect::<Vec<_>>()
+                                    .join("|")
+                            )
+                        } else {
+                            l.join("\n")
+                        })
+                    }
+                    _ => Err("usage: /app open <name|path> · /app list · /app close <name>".into()),
+                };
+                match msg {
+                    Ok(m) => out.println(&format!("[app] {m}")),
+                    Err(e) => out.eprintln(&format!("[app] {e}")),
+                }
+            }
             "/browser" => {
                 use dcode_ai_core::browser;
                 let mut words = rest.split_whitespace();

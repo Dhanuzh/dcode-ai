@@ -350,7 +350,7 @@ fn http() -> reqwest::Client {
 }
 
 /// Whether something answers CDP on `port`.
-async fn port_alive(port: u16) -> bool {
+pub(crate) async fn port_alive(port: u16) -> bool {
     http()
         .get(format!("http://127.0.0.1:{port}/json/version"))
         .send()
@@ -506,12 +506,19 @@ pub async fn attach(port: u16) -> Result<Page, String> {
 /// The connected page, launching dcode-ai's browser first if needed. When
 /// the tab it drives was closed or left blank while the user opened
 /// another one, it follows the user's tab. Returns a note when it moved.
-async fn ensure_page(slot: &mut Option<Page>) -> Result<(&Page, Option<String>), String> {
+async fn ensure_page(
+    slot: &mut Option<Page>,
+    launch_if_needed: bool,
+) -> Result<(&Page, Option<String>), String> {
     if slot.as_ref().is_some_and(|p| !p.is_alive()) {
         *slot = None;
     }
     let mut note = None;
     match slot.as_ref() {
+        // An app target never launches the browser.
+        None if !launch_if_needed => {
+            return Err("that app isn't connected any more — /app open it again".into());
+        }
         None => {
             if !port_alive(DEFAULT_PORT).await {
                 launch(DEFAULT_PORT, None).await?;
@@ -888,12 +895,47 @@ fn with_scheme(url: &str) -> String {
 
 /// Run one `browser` action; returns text for the model.
 pub async fn run_action(input: &Value, workspace_root: &Path) -> Result<String, String> {
-    let action = input["action"].as_str().unwrap_or("snapshot");
-    let mut slot = shared().lock().await;
-    if matches!(action, "switch" | "switch_tab" | "new_tab") {
-        return tab_action(action, input, &mut slot).await;
+    // `target`: an app opened with `/app open` instead of the browser.
+    if let Some(name) = input["target"]
+        .as_str()
+        .map(str::trim)
+        .filter(|t| !t.is_empty() && !t.eq_ignore_ascii_case("browser"))
+    {
+        let mut apps = crate::apps::apps().lock().await;
+        let Some(page) = apps.remove(name) else {
+            let open: Vec<String> = apps.keys().cloned().collect();
+            return Err(format!(
+                "no app `{name}` connected{} — the user opens one with /app open <name>",
+                if open.is_empty() {
+                    String::new()
+                } else {
+                    format!(" (connected: {})", open.join(", "))
+                }
+            ));
+        };
+        let mut slot = Some(page);
+        let result = run_on(&mut slot, false, input, workspace_root).await;
+        if let Some(p) = slot {
+            apps.insert(name.to_string(), p);
+        }
+        return result;
     }
-    let (page, note) = ensure_page(&mut slot).await?;
+    let mut slot = shared().lock().await;
+    run_on(&mut slot, true, input, workspace_root).await
+}
+
+/// One action on the page in `slot` (the browser's, or an app's).
+async fn run_on(
+    slot: &mut Option<Page>,
+    launch_if_needed: bool,
+    input: &Value,
+    workspace_root: &Path,
+) -> Result<String, String> {
+    let action = input["action"].as_str().unwrap_or("snapshot");
+    if matches!(action, "switch" | "switch_tab" | "new_tab") {
+        return tab_action(action, input, slot, launch_if_needed).await;
+    }
+    let (page, note) = ensure_page(slot, launch_if_needed).await?;
     if action == "tabs" {
         let tabs = list_tabs(page.port).await?;
         let mut out = String::from("Open tabs (switch with {\"action\":\"switch\",\"tab\":N}):\n");
@@ -1060,8 +1102,9 @@ async fn tab_action(
     action: &str,
     input: &Value,
     slot: &mut Option<Page>,
+    launch_if_needed: bool,
 ) -> Result<String, String> {
-    let (page, _) = ensure_page(slot).await?;
+    let (page, _) = ensure_page(slot, launch_if_needed).await?;
     let port = page.port;
     let next = if action == "new_tab" {
         let url = with_scheme(input["url"].as_str().unwrap_or("about:blank").trim());
@@ -1303,6 +1346,7 @@ impl ToolExecutor for BrowserTool {
                         "enum": ["navigate", "snapshot", "find", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval", "tabs", "switch", "new_tab", "wait_for", "steps", "replay"]
                     },
                     "tab": {"type": "integer", "description": "Tab number from `tabs` (for switch)"},
+                    "target": {"type": "string", "description": "A desktop app the user opened with /app open (e.g. \"vscode\", \"slack\", \"teams\") instead of the browser"},
                     "query": {"type": "string", "description": "find: text to look for (case-insensitive)"},
                     "gone": {"type": "boolean", "description": "wait_for: wait until the text is gone"},
                     "timeout_ms": {"type": "integer"},

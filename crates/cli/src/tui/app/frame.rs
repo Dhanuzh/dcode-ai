@@ -142,6 +142,17 @@ pub(super) fn draw_session_pane(
             inner_w as usize,
         );
     }
+    // Inline, a reply taller than the pane loses its top (the terminal's
+    // scrollback only gets it once finished): say where the rest is.
+    if !dashboard && start > 0 && !visible.is_empty() {
+        visible[0] = ratatui::text::Line::from(ratatui::text::Span::styled(
+            format!(
+                "  ↑ {} lines above · Ctrl+O shows the whole reply",
+                start + 1
+            ),
+            ratatui::style::Style::default().fg(crate::tui::theme::muted()),
+        ));
+    }
     let live_h = visible.len() as u16;
 
     // Contiguous block from the top:

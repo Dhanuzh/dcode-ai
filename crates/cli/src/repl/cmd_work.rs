@@ -595,6 +595,38 @@ Goal:
                         )
                         .await?
                     }
+                    "wip" => {
+                        // `/board wip <column> <n>` (0 clears); bare: list.
+                        use dcode_ai_common::board::Status;
+                        let mut w = arg.split_whitespace();
+                        match (w.next().and_then(Status::parse), w.next().and_then(|n| n.parse::<u32>().ok())) {
+                            (Some(st), Some(n)) => {
+                                let _ = Board::update(&ws, |b| {
+                                    if n == 0 {
+                                        b.wip.remove(st.id());
+                                    } else {
+                                        b.wip.insert(st.id().to_string(), n);
+                                    }
+                                });
+                                out.println(&if n == 0 {
+                                    format!("[board] {}: no work-in-progress limit", st.label())
+                                } else {
+                                    format!("[board] {}: at most {n} cards (the column turns red past it)", st.label())
+                                });
+                            }
+                            _ => {
+                                let b = Board::load(&ws);
+                                if b.wip.is_empty() {
+                                    out.println("[board] no work-in-progress limits — /board wip <column> <n>, e.g. /board wip in_progress 3");
+                                }
+                                for st in Status::ALL {
+                                    if let Some(n) = b.wip_limit(st) {
+                                        out.println(&format!("[board] {}: {} / {n}", st.label(), b.column(st).len()));
+                                    }
+                                }
+                            }
+                        }
+                    }
                     "work" if !arg.is_empty() => {
                         use dcode_ai_common::board::Status;
                         let mut words = arg.split_whitespace();

@@ -57,6 +57,8 @@ enum Typing {
     Worklog(String),
     /// Which attachment to download: a number, or `all`.
     Download(String),
+    /// `/`: search the cards.
+    Search,
 }
 
 /// The board view's state while it's open.
@@ -76,6 +78,90 @@ pub struct BoardUi {
     press: Option<Press>,
     /// While dragging a card: the column it would land in.
     drop_col: Option<usize>,
+    /// `/` search: cards mentioning this (live while typing).
+    query: String,
+    /// `f`: which cards show.
+    filter: CardFilter,
+    /// `l`: cards grouped by parent/epic (or milestone) in each column.
+    lanes: bool,
+}
+
+/// What `f` cycles through.
+#[derive(Debug, Clone, PartialEq, Default)]
+enum CardFilter {
+    #[default]
+    All,
+    Unassigned,
+    Assignee(String),
+    Label(String),
+}
+
+impl CardFilter {
+    fn keeps(&self, c: &Card) -> bool {
+        match self {
+            CardFilter::All => true,
+            CardFilter::Unassigned => c.assignee.is_none(),
+            CardFilter::Assignee(a) => c.assignee.as_deref() == Some(a.as_str()),
+            CardFilter::Label(l) => c
+                .remote
+                .as_ref()
+                .is_some_and(|r| r.labels.iter().any(|x| x == l)),
+        }
+    }
+
+    fn label(&self) -> String {
+        match self {
+            CardFilter::All => String::new(),
+            CardFilter::Unassigned => "unassigned".into(),
+            CardFilter::Assignee(a) => format!("@{a}"),
+            CardFilter::Label(l) => format!("#{l}"),
+        }
+    }
+
+    /// The next filter: everyone → unassigned → each assignee → each label.
+    fn next(&self, cards: &[&Card]) -> CardFilter {
+        let mut options = vec![CardFilter::All, CardFilter::Unassigned];
+        let mut people: Vec<String> = cards.iter().filter_map(|c| c.assignee.clone()).collect();
+        people.sort();
+        people.dedup();
+        options.extend(people.into_iter().map(CardFilter::Assignee));
+        let mut labels: Vec<String> = cards
+            .iter()
+            .filter_map(|c| c.remote.as_ref())
+            .flat_map(|r| r.labels.clone())
+            .collect();
+        labels.sort();
+        labels.dedup();
+        options.extend(labels.into_iter().map(CardFilter::Label));
+        let i = options.iter().position(|o| o == self).unwrap_or(0);
+        options[(i + 1) % options.len()].clone()
+    }
+}
+
+/// Whether a card mentions `q` (key, title, description, assignee, labels,
+/// Jira status).
+fn card_matches(c: &Card, q: &str) -> bool {
+    let q = q.trim().to_lowercase();
+    if q.is_empty() {
+        return true;
+    }
+    let mut hay = format!(
+        "{} {} {} {}",
+        c.shown_key(),
+        c.title,
+        c.description,
+        c.assignee.as_deref().unwrap_or("")
+    );
+    if let Some(r) = &c.remote {
+        hay.push(' ');
+        hay.push_str(&r.status);
+        hay.push(' ');
+        hay.push_str(&r.labels.join(" "));
+        hay.push(' ');
+        hay.push_str(&r.parent);
+    }
+    let hay = hay.to_lowercase();
+    q.split_whitespace().all(|w| hay.contains(w))
 }
 
 /// A left-button press on a card, until the button comes up.
@@ -257,6 +343,9 @@ impl Default for BoardUi {
             message: None,
             press: None,
             drop_col: None,
+            query: String::new(),
+            filter: CardFilter::All,
+            lanes: false,
         }
     }
 }
@@ -533,15 +622,30 @@ pub(crate) fn run_board_overlay(
                 return Ok(());
             }
             let space = ui.space;
+            // Live while typing the search.
+            let query = match &ui.typing {
+                Some((Typing::Search, buf)) => buf.clone(),
+                _ => ui.query.clone(),
+            };
             let columns: Vec<Vec<Card>> = Status::ALL
                 .iter()
                 .map(|s| {
-                    board
+                    let mut col: Vec<Card> = board
                         .column(*s)
                         .into_iter()
                         .filter(|c| c.space == space)
+                        .filter(|c| ui.filter.keeps(c) && card_matches(c, &query))
                         .cloned()
-                        .collect()
+                        .collect();
+                    if ui.lanes {
+                        // Stable: each lane keeps the column's order;
+                        // cards without a lane go last.
+                        col.sort_by_key(|c| {
+                            let l = board.lane_of(c);
+                            (l.is_empty(), l)
+                        });
+                    }
+                    col
                 })
                 .collect();
             ui.col = ui.col.min(Status::ALL.len() - 1);
@@ -650,6 +754,23 @@ pub(crate) fn run_board_overlay(
                     Space::Jira,
                 ),
             ];
+            // What narrows the board right now.
+            let mut narrowing = Vec::new();
+            if !ui.query.is_empty() {
+                narrowing.push(format!("“{}”", ui.query));
+            }
+            if ui.filter != CardFilter::All {
+                narrowing.push(ui.filter.label());
+            }
+            if ui.lanes {
+                narrowing.push("lanes".into());
+            }
+            if !narrowing.is_empty() {
+                head.push(Span::styled(
+                    format!(" · {}", narrowing.join(" · ")),
+                    Style::default().fg(theme::accent()),
+                ));
+            }
             let right = format!("{sync_text}  ");
             let used: usize = head.iter().map(|s| s.content.chars().count()).sum();
             let pad = (area.width as usize).saturating_sub(used + right.chars().count());
@@ -664,6 +785,9 @@ pub(crate) fn run_board_overlay(
             ));
 
             let footer = match (&ui.typing, &ui.message, &ui.confirm_delete) {
+                (Some((Typing::Search, buf)), _, _) => format!(
+                    " Search cards: {buf}▏   Enter keeps it · Esc clears"
+                ),
                 (Some((Typing::NewCard, buf)), _, _) => format!(
                     " New {} card in {}: {buf}▏   Enter adds · Esc cancels",
                     if space == Space::Jira {
@@ -737,7 +861,7 @@ pub(crate) fn run_board_overlay(
                     format!(" Delete {k}? x again deletes, any other key keeps it")
                 }
                 (None, Some(m), None) => format!(" {m}"),
-                _ => " t Personal/Jira · ←→↑↓ · ⇧←/→ move card · n new · e edit · p priority · b blockers · g gate · ⏎ details · o open in Jira · s sync · v view · r run · q close".into(),
+                _ => " t Personal/Jira · ←→↑↓ · ⇧←/→ move card · n new · e edit · p priority · b blockers · g gate · ⏎ details · / search · f filter · w lanes · o open in Jira · s sync · v view · r run · q close".into(),
             };
 
             term.draw(|frame| {
@@ -773,10 +897,28 @@ pub(crate) fn run_board_overlay(
                                     .fg(status_color(status))
                                     .add_modifier(Modifier::BOLD),
                             ),
-                            Span::styled(
-                                format!("{} ", cards.len()),
-                                Style::default().fg(theme::muted()),
-                            ),
+                            match board.wip_limit(status) {
+                                // Over the limit: the count in the error colour.
+                                Some(limit) => {
+                                    let n = board
+                                        .column(status)
+                                        .iter()
+                                        .filter(|c| c.space == space)
+                                        .count();
+                                    Span::styled(
+                                        format!("{n}/{limit} "),
+                                        Style::default().fg(if n as u32 > limit {
+                                            theme::error()
+                                        } else {
+                                            theme::muted()
+                                        }),
+                                    )
+                                }
+                                None => Span::styled(
+                                    format!("{} ", cards.len()),
+                                    Style::default().fg(theme::muted()),
+                                ),
+                            },
                         ]));
                     let inner = col_block.inner(rect);
                     frame.render_widget(col_block, rect);
@@ -802,8 +944,26 @@ pub(crate) fn run_board_overlay(
                     let w = inner.width.saturating_sub(4) as usize;
                     let blocks: Vec<Vec<Line>> =
                         cards.iter().map(|c| card_lines(&board, c, w)).collect();
+                    // Swimlanes: a heading row above the first card of each.
+                    let lane_heads: Vec<Option<String>> = (0..cards.len())
+                        .map(|i| {
+                            if !ui.lanes {
+                                return None;
+                            }
+                            let l = board.lane_of(&cards[i]);
+                            let prev = (i > 0).then(|| board.lane_of(&cards[i - 1]));
+                            (prev.as_deref() != Some(l.as_str())).then(|| {
+                                if l.is_empty() {
+                                    "no parent".to_string()
+                                } else {
+                                    l
+                                }
+                            })
+                        })
+                        .collect();
                     // Scroll so the selected card shows.
-                    let height = |i: usize| blocks[i].len() as u16 + 2;
+                    let height =
+                        |i: usize| blocks[i].len() as u16 + 2 + u16::from(lane_heads[i].is_some());
                     let mut start = 0usize;
                     if focused {
                         let last = ui.row.min(blocks.len() - 1);
@@ -827,7 +987,8 @@ pub(crate) fn run_board_overlay(
                     }
                     for (i, lines) in blocks.into_iter().enumerate().skip(start) {
                         let h = lines.len() as u16 + 2;
-                        if y + h > bottom {
+                        let head = u16::from(lane_heads[i].is_some());
+                        if y + h + head > bottom {
                             if y < bottom {
                                 frame.render_widget(
                                     Paragraph::new(Span::styled(
@@ -838,6 +999,18 @@ pub(crate) fn run_board_overlay(
                                 );
                             }
                             break;
+                        }
+                        if let Some(lane) = &lane_heads[i] {
+                            frame.render_widget(
+                                Paragraph::new(Span::styled(
+                                    truncate(&format!("▸ {lane}"), inner.width as usize),
+                                    Style::default()
+                                        .fg(theme::accent())
+                                        .add_modifier(Modifier::BOLD),
+                                )),
+                                Rect::new(inner.x, y, inner.width, 1),
+                            );
+                            y += 1;
                         }
                         let r = Rect::new(inner.x, y, inner.width, h);
                         let sel = focused && i == ui.row;
@@ -961,7 +1134,21 @@ pub(crate) fn run_board_overlay(
                     // Typing on the bottom line.
                     if let Some((what, mut buf)) = ui.typing.take() {
                         match key.code {
+                            // Esc on the search clears it.
+                            KeyCode::Esc if what == Typing::Search => {
+                                ui.query.clear();
+                                ui.row = 0;
+                            }
                             KeyCode::Esc => {}
+                            KeyCode::Enter if what == Typing::Search => {
+                                ui.query = buf.trim().to_string();
+                                ui.row = 0;
+                                ui.message = Some(if ui.query.is_empty() {
+                                    "showing every card".into()
+                                } else {
+                                    format!("cards matching “{}” · / then Esc clears", ui.query)
+                                });
+                            }
                             KeyCode::Enter => {
                                 let text = buf.trim().to_string();
                                 let result = match &what {
@@ -1456,6 +1643,26 @@ pub(crate) fn run_board_overlay(
                             }
                         }
                         KeyCode::Enter => ui.detail = selected.is_some(),
+                        KeyCode::Char('/') => {
+                            ui.typing = Some((Typing::Search, ui.query.clone()));
+                        }
+                        KeyCode::Char('f') => {
+                            let cards: Vec<&Card> = board.in_space(space).collect();
+                            ui.filter = ui.filter.next(&cards);
+                            ui.row = 0;
+                            ui.message = Some(match &ui.filter {
+                                CardFilter::All => "showing every card".into(),
+                                f => format!("showing {} · f for the next filter", f.label()),
+                            });
+                        }
+                        KeyCode::Char('w') => {
+                            ui.lanes = !ui.lanes;
+                            ui.message = Some(if ui.lanes {
+                                "swimlanes: cards grouped by parent / milestone".into()
+                            } else {
+                                "swimlanes off".into()
+                            });
+                        }
                         KeyCode::Char('v') => {
                             let r = Board::update(&ws, |b| {
                                 let l = b.jira.as_mut()?;
@@ -1709,5 +1916,51 @@ mod tests {
         on_mouse(&mut ui, &hits, &columns, ev(DOWN, 25, 6));
         assert_eq!(ui.col, Status::Todo.index());
         assert!(ui.typing.is_some());
+    }
+
+    #[test]
+    fn search_filters_and_lanes() {
+        use dcode_ai_common::board::{NewCard, Remote};
+        let mut b = Board::new("BSI");
+        let a = b.add(
+            NewCard {
+                title: "Release notes page".into(),
+                assignee: Some("Dhanush".into()),
+                ..Default::default()
+            },
+            "you",
+        );
+        let c = b.add(
+            NewCard {
+                title: "Fix login".into(),
+                ..Default::default()
+            },
+            "you",
+        );
+        b.card_mut(&a).unwrap().remote = Some(Remote {
+            key: "BSI-9".into(),
+            labels: vec!["sharepoint".into()],
+            parent: "BSI-476 Release Management".into(),
+            ..Default::default()
+        });
+        let card = |k: &str| b.card(k).unwrap().clone();
+        // Search: words anywhere (key, title, labels, parent).
+        assert!(card_matches(&card(&a), "release sharepoint"));
+        assert!(card_matches(&card(&a), "bsi-9"));
+        assert!(!card_matches(&card(&c), "release"));
+        // Filters cycle: everyone → unassigned → each person → each label.
+        let all: Vec<Card> = vec![card(&a), card(&c)];
+        let refs: Vec<&Card> = all.iter().collect();
+        let f = CardFilter::All.next(&refs);
+        assert_eq!(f, CardFilter::Unassigned);
+        assert!(f.keeps(&card(&c)) && !f.keeps(&card(&a)));
+        let f = f.next(&refs);
+        assert_eq!(f, CardFilter::Assignee("Dhanush".into()));
+        let f = f.next(&refs);
+        assert_eq!(f, CardFilter::Label("sharepoint".into()));
+        assert_eq!(f.next(&refs), CardFilter::All);
+        // Lanes: the parent, else nothing.
+        assert_eq!(b.lane_of(&card(&a)), "BSI-476 Release Management");
+        assert_eq!(b.lane_of(&card(&c)), "");
     }
 }

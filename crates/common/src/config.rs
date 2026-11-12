@@ -354,10 +354,10 @@ pub struct UiConfig {
     /// Lines per scroll event (default 3).
     #[serde(default = "default_scroll_speed")]
     pub scroll_speed: u16,
-    /// Mouse capture in the inline view: in-app wheel scroll, drag-to-copy
-    /// and clicks, at the cost of the terminal's own scrollback and text
-    /// selection. Default false: the terminal scrolls and selects natively.
-    /// (The dashboard and overlays always capture the mouse.)
+    /// No longer used by the normal view, which always leaves the mouse to
+    /// the terminal (its scrollback holds the conversation); kept so older
+    /// configs still load. The dashboard and overlays always capture the
+    /// mouse.
     #[serde(default = "default_mouse_capture", skip_serializing_if = "is_false")]
     pub mouse_capture: bool,
     /// Show line numbers for fenced code blocks in assistant markdown output.

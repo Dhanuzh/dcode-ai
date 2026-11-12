@@ -762,9 +762,8 @@ impl TranscriptRenderCache {
 /// the async loop is stuck in `run_turn` (that task does not poll `cmd_rx` until the turn ends).
 /// `mouse_capture`: retained for API compatibility; fullscreen TUI always enables mouse capture.
 /// `scroll_speed`: lines per scroll event.
-/// Mouse capture for the inline view: off (the terminal's own scrollback
-/// and selection work) unless `[ui] mouse_capture` asks for in-app wheel
-/// scroll and drag-to-copy.
+/// Mouse capture for the inline view: off, so the terminal's own scrollback
+/// (where the conversation is) scrolls and selects natively.
 fn inline_mouse(capture: bool) {
     if capture {
         let _ = execute!(stdout(), crossterm::event::EnableMouseCapture);

@@ -4,6 +4,7 @@
 pub mod agent;
 pub mod agent_defs;
 pub mod approval;
+pub mod apps;
 pub mod browser;
 pub mod code_intel;
 pub mod code_map;
@@ -11,6 +12,7 @@ pub mod command_safety;
 pub mod cost;
 pub mod harness;
 pub mod hooks;
+pub mod image_shrink;
 pub mod mcp_oauth;
 pub mod nested_instructions;
 pub mod plugin_installer;

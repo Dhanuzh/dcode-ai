@@ -726,7 +726,11 @@ fn openai_user_content_value(
                     }
                     ContentPart::Image { media_type, path } => {
                         let full = workspace_root.join(path);
-                        let bytes = std::fs::read(&full).map_err(|e| {
+                        // Sized for the model (no bigger than it uses).
+                        let (bytes, media_type) = crate::image_shrink::read_for_model(
+                            &full, media_type,
+                        )
+                        .map_err(|e| {
                             ProviderError::RequestFailed(format!(
                                 "failed to read image {}: {e}",
                                 full.display()
@@ -765,7 +769,11 @@ fn responses_user_content(
                     })),
                     ContentPart::Image { media_type, path } => {
                         let full = workspace_root.join(path);
-                        let bytes = std::fs::read(&full).map_err(|e| {
+                        // Sized for the model (no bigger than it uses).
+                        let (bytes, media_type) = crate::image_shrink::read_for_model(
+                            &full, media_type,
+                        )
+                        .map_err(|e| {
                             ProviderError::RequestFailed(format!(
                                 "failed to read image {}: {e}",
                                 full.display()
