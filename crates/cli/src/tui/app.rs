@@ -857,6 +857,10 @@ pub fn run_blocking(
     let mut was_busy = false;
     let mut busy_since: Option<std::time::Instant> = None;
     let mut had_active_approval = false;
+    // herdr (when running inside it) and the terminal title follow what
+    // dcode-ai is doing.
+    let mut herdr = crate::herdr::Reporter::from_env();
+    let mut shown_title = String::new();
 
     // Flush the Antigravity-style startup banner once into the terminal's
     // native scrollback (it scrolls away as the conversation grows). Shown on
@@ -1155,6 +1159,69 @@ pub fn run_blocking(
             was_busy = g.busy;
             had_active_approval = g.active_approval.is_some();
 
+            g.user_present = terminal_focused
+                || g.last_key_at
+                    .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(600));
+
+            // ── Status for herdr and the terminal title ──
+            {
+                use crate::herdr::State;
+                let blocked = g.active_approval.is_some()
+                    || g.active_question.is_some()
+                    || g.sudo_prompt.is_some();
+                let state = if blocked {
+                    State::Blocked
+                } else if g.busy || g.subagents.iter().any(|s| s.running) {
+                    State::Working
+                } else {
+                    State::Idle
+                };
+                let message = if let Some(a) = &g.active_approval {
+                    Some(format!(
+                        "needs approval: {}",
+                        crate::tool_ui::metadata(&a.tool).label
+                    ))
+                } else if g.active_question.is_some() {
+                    Some("has a question for you".to_string())
+                } else {
+                    None
+                };
+                // What it's working on: the last thing you asked.
+                let task: String = g
+                    .blocks
+                    .iter()
+                    .rev()
+                    .find_map(|b| match b {
+                        crate::tui::state::DisplayBlock::User(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .unwrap_or("")
+                    .lines()
+                    .next()
+                    .unwrap_or("")
+                    .chars()
+                    .take(60)
+                    .collect();
+                if let Some(h) = herdr.as_mut() {
+                    h.state(state, message, Some(g.session_id.clone()));
+                    h.title(&task);
+                }
+                let folder = g
+                    .workspace_root
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("workspace")
+                    .to_string();
+                let title = crate::herdr::terminal_title(state, &folder, &task);
+                if title != shown_title {
+                    let _ = crossterm::execute!(
+                        std::io::stdout(),
+                        crossterm::terminal::SetTitle(&title)
+                    );
+                    shown_title = title;
+                }
+            }
+
             // Width-drift safety net (Codex's `note_width`/`reflow_needed_for_width`
             // model): the terminal can widen without us receiving a clean
             // `Event::Resize` (coalesced/dropped events, some terminals). When
@@ -1444,6 +1511,11 @@ pub fn run_blocking(
                 Event::FocusLost => {
                     terminal_focused = false;
                 }
+                Event::Key(_)
+                    if {
+                        g.last_key_at = Some(std::time::Instant::now());
+                        false
+                    } => {}
                 Event::Key(key) => {
                     let terminal_size = terminal.size().ok();
                     let flow = handle_key_event(
@@ -1482,6 +1554,10 @@ pub fn run_blocking(
     }
     restore_terminal(mouse_capture);
     let _ = execute!(stdout(), MoveToColumn(0));
+    // Quitting: hand the herdr pane back.
+    if let Some(h) = herdr {
+        h.release();
+    }
     Ok(())
 }
 

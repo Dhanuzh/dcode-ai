@@ -1,5 +1,58 @@
 # Changelog
 
+## 1.0.61 — 2026-11-12
+
+### New
+- **Status in herdr and terminal tabs**: inside a [herdr](https://herdr.dev)
+  pane dcode-ai now reports itself — working, idle, or blocked with what it
+  waits on ("needs approval: edit_file") — plus what it's working on and its
+  session, so herdr's session restore reopens the same conversation. Before,
+  herdr showed dcode-ai as an unknown idle agent. In every terminal the tab
+  title follows the state: `✳ dcode-ai · <task>` while working,
+  `● dcode-ai needs you` when blocked.
+- **`browser_task`**: multi-step browser and desktop-app work (logins, forms,
+  collecting data across pages, testing a flow) runs in a helper sub-agent
+  with only the browser and read-only file tools. Only its short report
+  enters the conversation — page text and screenshots stay out of your
+  context. Same budget, approvals and `x` to stop as other sub-agents; the
+  page stays open afterwards. `[harness] browser_task_model` sets a cheaper
+  model for it.
+- **Prompt-cache keep-warm**: on the Anthropic API backend, after 4½ minutes
+  idle (while you're at the terminal) dcode-ai re-reads the conversation at
+  cache price so the next turn stays cached instead of paying full price
+  again — up to 3 times per pause, then idle compaction as before. Shown in
+  `/cost` as `(keep-warm)`. `[memory.context] keep_warm = false` turns it
+  off, `keep_warm_max` sets the count.
+- **Code Mode (`run_script`)**: the agent can chain several tool calls in one
+  short JavaScript script — run by Boa, a JavaScript engine written in Rust
+  (no Node). Only what the script prints or returns comes back, so
+  intermediate results don't fill the conversation. A script can call only
+  tools your mode allows without asking; anything that would need approval
+  fails inside the script and the agent calls it directly instead. Hooks,
+  undo checkpoints and secret masking apply to every call. Limits: 50 calls,
+  60 s, 20k characters. `[harness] code_mode = false` turns it off.
+- **Scheduled runs (`/schedule`)**: `/schedule add "weekdays 09:00" <prompt>`
+  — also `daily 09:00`, `mon 18:30`, `every 2h` or a cron expression. Runs go
+  in the background (read-only by default, `--auto` for auto mode) while
+  dcode-ai is open in the project; one missed while it was closed runs once
+  on the next start; a run never overlaps itself. `list`, `run`, `pause`,
+  `resume`, `rm`. You get a note and a desktop notification when one
+  finishes; the run is in `/resume`.
+- **The agent opens apps itself**: browser actions `open_app {app, new?}`
+  and `apps`, so "open Postman and …" works without `/app` first.
+- **`/app open <name> --new`**: a separate copy with its own profile beside
+  the one you have open (Electron apps; VS Code keeps your extensions) —
+  no need to close your work.
+- **`/app connect <name> <port>`**: attach to an app you started with
+  `--remote-debugging-port=<port>`.
+
+### Fixed
+- **The agent knows it can drive apps**: the browser tool is loaded on
+  demand, and its entry in `tool_search` now says it drives web pages *and
+  desktop apps* — before, the agent answered "I can't control VS Code".
+  Connecting an app (`/app open` / `/app connect`) loads the browser tool
+  and tells the agent the app's name to use as `target`.
+
 ## 1.0.60 — 2026-11-12
 
 ### Fixed

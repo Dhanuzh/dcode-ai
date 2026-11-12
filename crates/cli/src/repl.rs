@@ -439,6 +439,10 @@ pub struct Repl {
     agent_profile: AgentProfile,
     current_agent_label: String,
     background_jobs: Vec<BackgroundJob>,
+    /// Scheduled runs going right now: schedule id, session id, process.
+    schedule_runs: Vec<(u32, String, std::process::Child)>,
+    /// When the schedules were last looked at.
+    schedules_checked: Option<std::time::Instant>,
     next_job_id: u32,
     /// Stack of message snapshots for ephemeral `/side` asides (supports nesting).
     side_snapshots: Vec<Vec<dcode_ai_common::message::Message>>,
@@ -472,6 +476,8 @@ impl Repl {
             agent_profile,
             current_agent_label,
             background_jobs: Vec::new(),
+            schedule_runs: Vec::new(),
+            schedules_checked: None,
             next_job_id: 1,
             side_snapshots: Vec::new(),
             self_cmd_tx: None,
@@ -1048,7 +1054,7 @@ impl Repl {
             }
             "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/goal"
             | "/plan" | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit"
-            | "/board" => {
+            | "/board" | "/schedule" => {
                 return self.cmd_work(input, command, rest, parts, out).await;
             }
             _ => {
@@ -1177,6 +1183,7 @@ impl Repl {
             parent_mode: Some(PermissionMode::Auto),
             child_id: None,
             approval: None,
+            browser_task: false,
         };
         let result =
             dcode_ai_runtime::supervisor::spawn_child_session(cfg, self.runtime.event_sender())
@@ -1728,6 +1735,32 @@ impl Repl {
                 }
             }
 
+            // Scheduled runs: start what's due, report what finished.
+            if pending_cmds.is_empty() {
+                self.tick_schedules(&tui_state);
+            }
+            // Keep the prompt cache warm while the user is around: a request
+            // billed as a cache read, just before the cache would expire.
+            if pending_cmds.is_empty() {
+                let (ui_idle, present) = tui_state
+                    .lock()
+                    .map(|g| {
+                        (
+                            !g.busy
+                                && g.active_approval.is_none()
+                                && g.active_question.is_none()
+                                && !g.subagents.iter().any(|s| s.running),
+                            g.user_present,
+                        )
+                    })
+                    .unwrap_or((false, false));
+                if ui_idle
+                    && self.runtime.keep_warm_due(present)
+                    && let Some(k) = self.runtime.keep_warm().await
+                {
+                    tracing::info!("kept the prompt cache warm ({} tokens read)", k.cache_read);
+                }
+            }
             // Idle compaction: a long conversation sitting idle is compacted
             // once, just before the provider's prompt cache expires, so the
             // next turn starts small instead of re-sending it all uncached.

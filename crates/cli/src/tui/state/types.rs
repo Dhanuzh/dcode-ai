@@ -232,6 +232,11 @@ pub struct TuiSessionState {
     pub rail_tab: RailTab,
     /// Keys go to the changes tab instead of the composer.
     pub rail_focus: bool,
+    /// The user is around: the terminal has focus, or a key was pressed in
+    /// the last 10 minutes (keep the prompt cache warm only then).
+    pub user_present: bool,
+    /// When a key was last pressed.
+    pub last_key_at: Option<std::time::Instant>,
     pub(crate) diff_review: crate::tui::diff_review::DiffReview,
     pub dash_hits: DashHits,
     /// `/rewind` scope step (after a message was picked).

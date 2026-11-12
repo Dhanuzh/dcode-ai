@@ -895,6 +895,29 @@ fn with_scheme(url: &str) -> String {
 
 /// Run one `browser` action; returns text for the model.
 pub async fn run_action(input: &Value, workspace_root: &Path) -> Result<String, String> {
+    match input["action"].as_str().unwrap_or("") {
+        // Desktop apps: start one with debugging and connect, or list them.
+        "open_app" => {
+            let app = input["app"]
+                .as_str()
+                .filter(|a| !a.trim().is_empty())
+                .ok_or("open_app needs `app` (vscode, slack, teams, outlook, postman, discord, notion, or a path to the .exe)")?;
+            let new = input["new"].as_bool().unwrap_or(false);
+            return crate::apps::open(app, new).await;
+        }
+        "apps" => {
+            let l = crate::apps::list().await;
+            return Ok(if l.is_empty() {
+                "No apps connected. open_app starts one (vscode, slack, teams, outlook, postman, discord, notion).".into()
+            } else {
+                format!(
+                    "Connected apps (use their name as `target`):\n{}",
+                    l.join("\n")
+                )
+            });
+        }
+        _ => {}
+    }
     // `target`: an app opened with `/app open` instead of the browser.
     if let Some(name) = input["target"]
         .as_str()
@@ -1336,17 +1359,22 @@ impl ToolExecutor for BrowserTool {
                 click, press, scroll, wait_for and type with submit return only what changed \
                 on the same page (call snapshot for everything). An element keeps its number \
                 until the page is left. If the user opens a tab, the tool follows it. Never \
-                type passwords: ask the user to sign in in the browser window."
+                type passwords: ask the user to sign in in the browser window. Desktop apps built on web \
+tech (VS Code, Slack, Teams, Outlook, Postman, Discord, Notion) work the same way: open_app \
+{app, new?} starts and connects one, apps lists them, and `target: \"<app>\"` on any other \
+action drives it instead of the browser."
                 .into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["navigate", "snapshot", "find", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval", "tabs", "switch", "new_tab", "wait_for", "steps", "replay"]
+                        "enum": ["navigate", "snapshot", "find", "click", "type", "press", "scroll", "back", "screenshot", "console", "eval", "tabs", "switch", "new_tab", "wait_for", "steps", "replay", "open_app", "apps"]
                     },
                     "tab": {"type": "integer", "description": "Tab number from `tabs` (for switch)"},
-                    "target": {"type": "string", "description": "A desktop app the user opened with /app open (e.g. \"vscode\", \"slack\", \"teams\") instead of the browser"},
+                    "target": {"type": "string", "description": "A connected desktop app (e.g. \"vscode\", \"slack\", \"teams\") instead of the browser"},
+                    "app": {"type": "string", "description": "open_app: vscode, slack, teams, outlook, postman, discord, notion, or a path to an Electron/WebView2 .exe"},
+                    "new": {"type": "boolean", "description": "open_app: a separate copy beside one that's already open (Electron apps)"},
                     "query": {"type": "string", "description": "find: text to look for (case-insensitive)"},
                     "gone": {"type": "boolean", "description": "wait_for: wait until the text is gone"},
                     "timeout_ms": {"type": "integer"},

@@ -157,6 +157,7 @@ pub fn spawn_subagent_consumer(
                 parent_mode: req.parent_mode,
                 child_id: None,
                 approval: req.approval.clone(),
+                browser_task: req.browser_task,
             };
             let mut child_cfg = child_cfg;
             // Background: answer the tool at once with the agent's id; the
@@ -583,6 +584,9 @@ pub struct ChildSessionConfig {
     /// The parent's approval handler; the child's prompts reach the user
     /// through it. `None` denies them.
     pub approval: Option<Arc<dyn ApprovalHandler>>,
+    /// A `browser_task`: browser and read-only file tools only, a short
+    /// report back.
+    pub browser_task: bool,
 }
 
 /// A child's approval prompts, shown in the parent session: announced on the
@@ -666,6 +670,11 @@ fn child_mode_and_model(
                 None
             }
         })
+        .or_else(|| {
+            cfg.browser_task
+                .then(|| cfg.config.harness.browser_task_model.clone())
+                .flatten()
+        })
         .or_else(|| cfg.config.model.subagent_model.clone());
     (mode, model)
 }
@@ -746,7 +755,7 @@ pub async fn spawn_child_session(
     sup.agent_mut().tools.retain_by_name(|name| {
         !matches!(
             name,
-            "spawn_subagent" | "agent_output" | "agent_kill" | "update_goal"
+            "spawn_subagent" | "agent_output" | "agent_kill" | "update_goal" | "browser_task"
         )
     });
 
@@ -754,6 +763,22 @@ pub async fn spawn_child_session(
         sup.agent_mut()
             .tools
             .retain_by_name(|name| allowed.iter().any(|a| a == name));
+    }
+    if cfg.browser_task {
+        // The browser (loaded, not behind a search) and reading files.
+        const KEEP: [&str; 7] = [
+            "browser",
+            "tool_search",
+            "read_file",
+            "list_directory",
+            "search",
+            "search_code",
+            "find_files",
+        ];
+        sup.agent_mut()
+            .tools
+            .retain_by_name(|name| KEEP.contains(&name));
+        sup.agent_mut().tools.activate("browser");
     }
 
     sup.set_parent(
@@ -782,6 +807,13 @@ pub async fn spawn_child_session(
     }
 
     let role = match &cfg.agent {
+        _ if cfg.browser_task => "You are a browser helper agent, spawned by a parent session. \
+Do the task below with the browser tool (in the browser, or in the desktop app named), step by \
+step, until it's done or clearly can't be. Never type passwords: if a sign-in is needed, say so \
+and stop. End with a short report for the parent agent — what you did, the data it asked for \
+(exact values), what's on screen now, and the paths of any screenshots you saved. Keep it under \
+300 words; don't paste whole pages."
+            .to_string(),
         Some(agent) => format!(
             "You are the `{}` agent, spawned by a parent session.\n\n## Agent Instructions\n{}",
             agent.name, agent.prompt
@@ -1087,6 +1119,7 @@ mod tests {
             parent_mode: Some(dcode_ai_common::config::PermissionMode::Auto),
             child_id: None,
             approval: None,
+            browser_task: false,
         };
         let (mode, model) = child_mode_and_model(&cfg(true));
         assert_eq!(mode, dcode_ai_common::config::PermissionMode::Plan);
@@ -1094,6 +1127,12 @@ mod tests {
         let (mode, model) = child_mode_and_model(&cfg(false));
         assert_eq!(mode, dcode_ai_common::config::PermissionMode::Auto);
         assert_eq!(model.as_deref(), Some("sonnet"));
+        // A browser task uses its own model when one is set.
+        let mut browser = cfg(false);
+        browser.browser_task = true;
+        assert_eq!(child_mode_and_model(&browser).1.as_deref(), Some("sonnet"));
+        browser.config.harness.browser_task_model = Some("haiku".into());
+        assert_eq!(child_mode_and_model(&browser).1.as_deref(), Some("haiku"));
     }
 
     #[test]

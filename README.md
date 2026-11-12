@@ -296,6 +296,10 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **`/goal <objective>`** keeps working across turns until it's done, within a budget you set.
 - **Fallback models** take over when the main one is overloaded. **`/btw`** answers a side question without derailing the turn.
 - **Browser control:** a real Chrome or Edge window. The agent waits for text to appear, takes screenshots it can see, and records steps you replay with `/browser save`.
+- **`browser_task`:** multi-step browser or app work runs in a helper sub-agent; only its short report enters the conversation, so page dumps and screenshots don't fill your context (`[harness] browser_task_model` for a cheaper model).
+- **Code Mode (`run_script`):** the agent chains several tool calls in one short JavaScript script (run by Boa, a pure-Rust engine) and only the result comes back. Scripts can call only what your mode allows without asking. `[harness] code_mode = false` turns it off.
+- **Scheduled runs:** `/schedule add "weekdays 09:00" <prompt>` (also `daily`, `mon 18:30`, `every 2h`, cron) runs a prompt in the background while dcode-ai is open in the project — read-only by default, `--auto` for auto mode.
+- **herdr and terminal tabs:** inside [herdr](https://herdr.dev) dcode-ai reports working / idle / needs-you and its session (so herdr's restore reopens it); every terminal's tab title follows its state.
 - **Reviews:** `/verify` (a read-only reviewer over your diff), `/second-opinion` (a model from another family), `/security-review`, `/pr-comments`.
 - **Headless and CI:**
   - `--json`, `--stream ndjson`, Unix-socket IPC, stable exit codes;
@@ -323,7 +327,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 
 **Files:** `read_file` (line ranges, PDF, notebooks), `edit_file`, `apply_patch`, `write_file`, `notebook_edit` …
 **Search:** `search_code`, `code_intel`, `repo_map` · **Shell:** `execute_bash`, `run_background`, `run_validation`
-**Git** · **Web:** `web_search`, `fetch_url`, `browser` · **Agents:** `spawn_subagent`, `ask_question`, `update_plan`, `invoke_skill`
+**Git** · **Web:** `web_search`, `fetch_url`, `browser`, `browser_task` · **Agents:** `spawn_subagent`, `run_script`, `ask_question`, `update_plan`, `invoke_skill`
 Rarely used tools load on demand through `tool_search`, which keeps every request small.
 
 ## ⚙️ Configuration

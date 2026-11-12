@@ -263,6 +263,8 @@ impl TuiSessionState {
             view_mode: ViewMode::Inline,
             rail_tab: RailTab::Context,
             rail_focus: false,
+            user_present: true,
+            last_key_at: None,
             diff_review: Default::default(),
             dash_hits: Default::default(),
             rewind_pending: None,

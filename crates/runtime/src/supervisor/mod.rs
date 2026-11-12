@@ -100,6 +100,10 @@ pub struct Supervisor {
     last_cache_hit: Option<u8>,
     /// Background sub-agents, so the user can stop one from the TUI.
     background_agents: dcode_ai_core::tools::spawn_subagent::BackgroundAgents,
+    /// Keep-warm refreshes sent since the last turn.
+    warms_this_idle: u32,
+    /// The provider can't keep the cache warm (not the Anthropic API).
+    keep_warm_unsupported: bool,
 }
 
 type McpLoad = tokio::task::JoinHandle<(
@@ -207,6 +211,12 @@ impl SupervisorHandle {
     pub fn take_spawn_rx(&mut self) -> Option<mpsc::Receiver<SpawnRequest>> {
         self.spawn_rx.take()
     }
+}
+
+/// A keep-warm refresh goes out 4.5 minutes after the last request — before
+/// the 5-minute cache entry expires — and not once it surely has.
+pub fn keep_warm_window_open(idle: std::time::Duration) -> bool {
+    idle >= std::time::Duration::from_secs(270) && idle < std::time::Duration::from_secs(295)
 }
 
 /// Idle long enough to compact (`after_secs`), but not so long that the
@@ -347,6 +357,7 @@ impl Supervisor {
             .into_iter()
             .map(|d| (d.name, d.description))
             .collect();
+            let browser_spawn_tx = spawn_tx.clone();
             tools.register(Box::new(
                 SpawnSubagentTool::new(spawn_tx)
                     .with_agents(agents)
@@ -358,6 +369,17 @@ impl Supervisor {
                     .with_background_default(background_default.clone())
                     .with_approval(prompt_handler.clone().filter(|_| cfg.interactive_approvals)),
             ));
+            tools.register(Box::new(
+                dcode_ai_core::tools::spawn_subagent::BrowserTaskTool::new(
+                    browser_spawn_tx,
+                    Some(mode_cell.clone()),
+                    background_agents.clone(),
+                    prompt_handler.clone().filter(|_| cfg.interactive_approvals),
+                ),
+            ));
+        }
+        if config.harness.code_mode {
+            tools.register(Box::new(dcode_ai_core::tools::run_script::RunScriptTool));
         }
 
         let approval = if cfg.interactive_approvals {
@@ -537,6 +559,8 @@ impl Supervisor {
             late_tools_note: None,
             last_cache_hit: None,
             background_agents: background_agents.clone(),
+            warms_this_idle: 0,
+            keep_warm_unsupported: false,
         };
         sup.attach_checkpoints();
         sup.run_session_hook(HookEventKind::SessionStart, json!(sup.snapshot()))
@@ -802,7 +826,7 @@ impl Supervisor {
                     let names = self.agent.tools.defer_late(|n| n.starts_with("mcp__"));
                     if !names.is_empty() {
                         tracing::info!("{} late MCP tool(s) behind tool_search", names.len());
-                        self.late_tools_note = Some(late_tools_note(&names));
+                        self.add_turn_note(late_tools_note(&names));
                     }
                 }
                 Ok((loaded, errors)) => register_mcp_tools(
@@ -814,6 +838,20 @@ impl Supervisor {
                 Err(e) => tracing::warn!("MCP load task failed: {e}"),
             }
         }
+    }
+
+    /// A note for the model, sent with the next prompt (tools that arrived,
+    /// an app the user connected, …).
+    pub fn add_turn_note(&mut self, note: String) {
+        self.late_tools_note = Some(match self.late_tools_note.take() {
+            Some(prev) => format!("{prev}\n{note}"),
+            None => note,
+        });
+    }
+
+    /// Load a deferred tool now; false when it isn't deferred.
+    pub fn activate_tool(&mut self, name: &str) -> bool {
+        self.agent.tools.activate(name)
     }
 
     /// The tool list as the provider sees it, hashed (a change to it makes
@@ -879,10 +917,12 @@ impl Supervisor {
         attachments: &[dcode_ai_common::message::ImageAttachment],
     ) -> Result<String, ProviderError> {
         self.adopt_ready_mcp().await;
+        // A new idle stretch starts after this turn.
+        self.warms_this_idle = 0;
         let with_note;
         let prompt = match self.late_tools_note.take() {
-            Some(note) => {
-                with_note = format!("{prompt}\n\n{note}");
+            Some(notes) => {
+                with_note = format!("{prompt}\n\n{notes}");
                 with_note.as_str()
             }
             None => prompt,
@@ -1242,6 +1282,10 @@ impl Supervisor {
         if !c.idle_compaction || !self.auto_compact_enabled() {
             return false;
         }
+        // Keeping the cache warm comes first; compaction once that's over.
+        if self.keep_warm_on() && self.warms_this_idle < c.keep_warm_max {
+            return false;
+        }
         let Some(idle) = self.agent.idle_for() else {
             return false;
         };
@@ -1281,6 +1325,56 @@ impl Supervisor {
         let after = self.agent.context_used() as usize;
         let _ = self.save().await;
         Some((before, after))
+    }
+
+    fn keep_warm_on(&self) -> bool {
+        self.config.memory.context.keep_warm && !self.keep_warm_unsupported
+    }
+
+    /// A keep-warm refresh is due: on, under its limit, the user around, and
+    /// the cache about to expire (it lives 5 minutes from the last request).
+    pub fn keep_warm_due(&self, user_present: bool) -> bool {
+        let c = &self.config.memory.context;
+        user_present
+            && self.keep_warm_on()
+            && self.warms_this_idle < c.keep_warm_max
+            && self.agent.idle_for().is_some_and(keep_warm_window_open)
+            // Not worth it for a short conversation.
+            && (self.agent.context_used() as usize) >= 8_000
+    }
+
+    /// Refresh the prompt cache now. `None` when it didn't happen.
+    pub async fn keep_warm(&mut self) -> Option<dcode_ai_core::provider::KeepWarm> {
+        let before = self.agent.cost_tracker.clone();
+        match self.agent.keep_warm(&self.workspace_root.clone()).await {
+            Ok(Some(k)) => {
+                self.warms_this_idle += 1;
+                let after = &self.agent.cost_tracker;
+                crate::usage_log::record(&crate::usage_log::TurnUsage {
+                    at: Utc::now(),
+                    workspace: self.workspace_root.display().to_string(),
+                    model: format!("{} (keep-warm)", self.model),
+                    tokens: k.cache_read + k.cache_write + k.input,
+                    input: k.input,
+                    cache_read: k.cache_read,
+                    cache_write: k.cache_write,
+                    cost_usd: (after.estimated_cost_usd() - before.estimated_cost_usd()).max(0.0),
+                    session: self.session_id.clone(),
+                    ..Default::default()
+                });
+                Some(k)
+            }
+            Ok(None) => {
+                self.keep_warm_unsupported = true;
+                None
+            }
+            Err(e) => {
+                tracing::debug!("keep-warm failed: {e}");
+                // Don't retry a failing one every half second.
+                self.warms_this_idle = u32::MAX;
+                None
+            }
+        }
     }
 
     /// Automatic compaction is on and hasn't failed three times in a row.
@@ -2743,6 +2837,16 @@ pub(crate) fn utility_model(config: &DcodeAiConfig) -> Option<String> {
 mod tests {
     use super::*;
     use chrono::{Duration, Utc};
+
+    #[test]
+    fn keep_warm_goes_out_just_before_the_cache_expires() {
+        let s = std::time::Duration::from_secs;
+        assert!(!keep_warm_window_open(s(200)));
+        assert!(keep_warm_window_open(s(270)));
+        assert!(keep_warm_window_open(s(290)));
+        // Past five minutes the entry is gone: a refresh would be a full write.
+        assert!(!keep_warm_window_open(s(300)));
+    }
 
     #[test]
     fn idle_compaction_runs_only_while_the_cache_is_warm() {

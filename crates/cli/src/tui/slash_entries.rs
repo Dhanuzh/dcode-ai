@@ -220,6 +220,7 @@ pub(crate) fn command_group(cmd: &str) -> (u8, &'static str) {
                 "/skills",
                 "/hooks",
                 "/run-bg",
+                "/schedule",
                 "/bashes",
                 "/ps",
                 "/diff",

@@ -254,6 +254,16 @@ impl SessionRuntime {
         b
     }
 
+    /// A note for the model with the next prompt.
+    pub fn add_turn_note(&mut self, note: String) {
+        self.supervisor.add_turn_note(note);
+    }
+
+    /// Load a deferred tool now (e.g. the browser for a connected app).
+    pub fn activate_tool(&mut self, name: &str) -> bool {
+        self.supervisor.activate_tool(name)
+    }
+
     /// The session's background sub-agents.
     pub fn background_agents(&self) -> dcode_ai_core::tools::spawn_subagent::BackgroundAgents {
         self.supervisor.background_agents()
@@ -573,6 +583,16 @@ impl SessionRuntime {
         focus: Option<&str>,
     ) -> Result<(usize, usize, String), String> {
         self.supervisor.compact_now(focus).await
+    }
+
+    /// Whether a keep-warm refresh is due now.
+    pub fn keep_warm_due(&self, user_present: bool) -> bool {
+        self.supervisor.keep_warm_due(user_present)
+    }
+
+    /// Refresh the prompt cache now.
+    pub async fn keep_warm(&mut self) -> Option<dcode_ai_core::provider::KeepWarm> {
+        self.supervisor.keep_warm().await
     }
 
     /// Whether an idle compaction is due now.

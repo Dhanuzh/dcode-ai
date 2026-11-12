@@ -39,6 +39,9 @@ pub struct SpawnRequest {
     pub parent_mode: Option<dcode_ai_common::config::PermissionMode>,
     /// Return at once and report completion with a notification.
     pub background: bool,
+    /// A `browser_task`: the child gets only the browser and read-only file
+    /// tools, and reports back briefly.
+    pub browser_task: bool,
     pub agents: BackgroundAgents,
     /// The parent's approval handler: the child's prompts go to the user
     /// through it instead of being denied.
@@ -259,6 +262,7 @@ impl SpawnSubagentTool {
                 .as_ref()
                 .and_then(|c| c.read().ok().map(|m| *m)),
             background,
+            browser_task: false,
             agents: self.registry.clone(),
             approval: self.approval.clone(),
             reply: reply_tx,
@@ -411,6 +415,112 @@ need the result now; otherwise a <task-notification> arrives when it ends."
                 };
             }
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    }
+}
+
+/// `browser_task`: a multi-step job in the browser or a connected desktop app,
+/// done by a sub-agent so the page snapshots and screenshots stay in its
+/// context — only its short report comes back.
+pub struct BrowserTaskTool {
+    spawn_tx: mpsc::Sender<SpawnRequest>,
+    parent_mode: Option<crate::approval::ModeCell>,
+    registry: BackgroundAgents,
+    approval: Option<Arc<dyn ApprovalHandler>>,
+}
+
+impl BrowserTaskTool {
+    pub fn new(
+        spawn_tx: mpsc::Sender<SpawnRequest>,
+        parent_mode: Option<crate::approval::ModeCell>,
+        registry: BackgroundAgents,
+        approval: Option<Arc<dyn ApprovalHandler>>,
+    ) -> Self {
+        Self {
+            spawn_tx,
+            parent_mode,
+            registry,
+            approval,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for BrowserTaskTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "browser_task".into(),
+            description: "Do a multi-step job in the web browser or a connected desktop app \
+(VS Code, Slack, Teams, Outlook, …) through a helper agent: logging in, filling forms, \
+collecting data across pages, testing a flow. Its page snapshots and screenshots stay in its own \
+context; you get back a short report — what it did, the data you asked for, what's on screen \
+now. Prefer this over many `browser` calls; use `browser` directly for one quick look or click. \
+The page or app stays open afterwards."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "goal": {"type": "string", "description": "What to get done, and what to report back (the data you need)"},
+                    "target": {"type": "string", "description": "A connected desktop app (e.g. \"vscode\") instead of the browser"},
+                    "url": {"type": "string", "description": "Page to start from"}
+                },
+                "required": ["goal"]
+            }),
+        }
+    }
+
+    async fn execute(&self, call: &ToolCall) -> ToolResult {
+        let fail = |e: String| ToolResult {
+            call_id: call.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some(e),
+        };
+        let goal = call.input["goal"].as_str().unwrap_or("").trim().to_string();
+        if goal.is_empty() {
+            return fail("goal is required".into());
+        }
+        let mut task = goal;
+        if let Some(t) = call.input["target"]
+            .as_str()
+            .filter(|t| !t.trim().is_empty())
+        {
+            task.push_str(&format!(
+                "\n\nWork in the desktop app `{t}`: pass target: \"{t}\" to the browser tool."
+            ));
+        }
+        if let Some(u) = call.input["url"].as_str().filter(|u| !u.trim().is_empty()) {
+            task.push_str(&format!("\n\nStart at {u}."));
+        }
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let req = SpawnRequest {
+            task,
+            agent: None,
+            focus_files: Vec::new(),
+            use_worktree: false,
+            explore: false,
+            parent_mode: self
+                .parent_mode
+                .as_ref()
+                .and_then(|c| c.read().ok().map(|m| *m)),
+            background: false,
+            browser_task: true,
+            agents: self.registry.clone(),
+            approval: self.approval.clone(),
+            reply: reply_tx,
+        };
+        if self.spawn_tx.send(req).await.is_err() {
+            return fail("Sub-agent spawner is not available".into());
+        }
+        match tokio::time::timeout(std::time::Duration::from_secs(1800), reply_rx).await {
+            Ok(Ok(r)) => ToolResult {
+                call_id: call.id.clone(),
+                success: r.status == "completed",
+                output: r.output.clone(),
+                error: (r.status != "completed").then(|| format!("browser task {}", r.status)),
+            },
+            Ok(Err(_)) => fail("the browser task ended without a report".into()),
+            Err(_) => fail("the browser task took more than 30 minutes".into()),
         }
     }
 }

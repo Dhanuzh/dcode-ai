@@ -1590,6 +1590,14 @@ pub struct HarnessConfig {
     /// Most minutes one sub-agent may run. 0 = no limit.
     #[serde(default = "default_subagent_max_minutes")]
     pub subagent_max_minutes: u64,
+    /// The model `browser_task` helpers use (a cheaper one for routine
+    /// clicking); unset = the sub-agent model, else the session's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_task_model: Option<String>,
+    /// Code Mode: offer `run_script` (chain tool calls in a short script;
+    /// only its result enters the conversation).
+    #[serde(default = "default_true")]
+    pub code_mode: bool,
     /// Extra system-prompt text for this run (`--append-system-prompt`).
     /// Never saved.
     #[serde(skip)]
@@ -1713,6 +1721,15 @@ pub struct ContextConfig {
     /// lifetime (5 minutes on Anthropic by default).
     #[serde(default = "default_idle_compaction_after_secs")]
     pub idle_compaction_after_secs: u64,
+    /// While you're around but idle, refresh the provider's prompt cache
+    /// just before it expires (a request billed as a cache read), so your
+    /// next turn doesn't re-send everything at full price. Anthropic API only.
+    #[serde(default = "default_true")]
+    pub keep_warm: bool,
+    /// Most keep-warm refreshes per idle stretch (~4.5 min apart); after
+    /// that, idle compaction takes over.
+    #[serde(default = "default_keep_warm_max")]
+    pub keep_warm_max: u32,
     /// The most context to use: `"full"` (the model's whole window, e.g. 1M
     /// for Claude 5.x — the default), `"200k"`, or a number of tokens.
     #[serde(default)]
@@ -1818,6 +1835,10 @@ fn default_turn_headroom_tokens() -> usize {
     400_000
 }
 
+fn default_keep_warm_max() -> u32 {
+    3
+}
+
 fn default_idle_compaction_min_tokens() -> usize {
     40_000
 }
@@ -1840,6 +1861,8 @@ impl Default for ContextConfig {
             idle_compaction: true,
             idle_compaction_min_tokens: default_idle_compaction_min_tokens(),
             idle_compaction_after_secs: default_idle_compaction_after_secs(),
+            keep_warm: true,
+            keep_warm_max: default_keep_warm_max(),
             max_window: WindowSetting::default(),
             compact_at_tokens: default_compact_at_tokens(),
             turn_headroom_tokens: default_turn_headroom_tokens(),
@@ -1957,6 +1980,8 @@ impl Default for HarnessConfig {
             include_repo_map: false,
             subagent_max_tokens: default_subagent_max_tokens(),
             subagent_max_minutes: default_subagent_max_minutes(),
+            browser_task_model: None,
+            code_mode: true,
             append_system_prompt: None,
         }
     }
@@ -1981,6 +2006,12 @@ impl HarnessConfig {
         }
         if let Some(v) = partial.subagent_max_minutes {
             self.subagent_max_minutes = v;
+        }
+        if let Some(v) = partial.browser_task_model {
+            self.browser_task_model = Some(v).filter(|m| !m.trim().is_empty());
+        }
+        if let Some(v) = partial.code_mode {
+            self.code_mode = v;
         }
         if let Some(include_repo_map) = partial.include_repo_map {
             self.include_repo_map = include_repo_map;
@@ -2065,6 +2096,12 @@ impl ContextConfig {
         }
         if let Some(v) = partial.idle_compaction_after_secs {
             self.idle_compaction_after_secs = v.max(30);
+        }
+        if let Some(v) = partial.keep_warm {
+            self.keep_warm = v;
+        }
+        if let Some(v) = partial.keep_warm_max {
+            self.keep_warm_max = v;
         }
         if let Some(v) = partial.max_window {
             self.max_window = v;
@@ -2293,6 +2330,8 @@ struct PartialHarnessConfig {
     include_repo_map: Option<bool>,
     subagent_max_tokens: Option<u64>,
     subagent_max_minutes: Option<u64>,
+    browser_task_model: Option<String>,
+    code_mode: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2325,6 +2364,8 @@ struct PartialContextConfig {
     idle_compaction: Option<bool>,
     idle_compaction_min_tokens: Option<usize>,
     idle_compaction_after_secs: Option<u64>,
+    keep_warm: Option<bool>,
+    keep_warm_max: Option<u32>,
     max_window: Option<WindowSetting>,
     compact_at_tokens: Option<usize>,
     turn_headroom_tokens: Option<usize>,

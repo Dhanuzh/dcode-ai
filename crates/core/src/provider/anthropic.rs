@@ -284,11 +284,126 @@ impl Provider for AnthropicProvider {
 
         Ok(spawn_anthropic_stream(response, "anthropic"))
     }
+
+    async fn keep_warm(
+        &self,
+        messages: &[Message],
+        tools: &[ToolDefinition],
+        model: &str,
+        workspace_root: &Path,
+    ) -> Result<Option<super::KeepWarm>, ProviderError> {
+        let model = super::anthropic_compat::normalize_claude_model_id(if model.is_empty() {
+            &self.config.model
+        } else {
+            model
+        });
+        let options = AnthropicRequestOptions {
+            thinking: self.thinking,
+            thinking_budget: self.thinking_budget,
+            effort: self.config.effort.clone(),
+        };
+        // The very request a turn sends (same system, tools, thinking and
+        // effort — they're all part of the cached prefix)…
+        let mut body = anthropic_request_body_with(
+            messages,
+            tools,
+            &model,
+            self.max_tokens,
+            self.config.temperature,
+            workspace_root,
+            &options,
+        )?;
+        let body = keep_warm_body(&mut body);
+        let endpoint = self.endpoint();
+        let send = |force_refresh: bool| {
+            let endpoint = endpoint.clone();
+            let body = body.clone();
+            async move {
+                let resp = self
+                    .authorize(self.client.post(&endpoint), force_refresh)
+                    .await?
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(ProviderError::from_reqwest_send)?;
+                let status = resp.status();
+                let text = resp.text().await.unwrap_or_default();
+                if status.is_success() {
+                    Ok(text)
+                } else {
+                    Err(map_provider_error(status, text))
+                }
+            }
+        };
+        let text = match send(false).await {
+            Err(ProviderError::AuthError(_))
+                if matches!(self.credential, AnthropicCredential::AntOAuth(_)) =>
+            {
+                send(true).await?
+            }
+            other => other?,
+        };
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        let u = &v["usage"];
+        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+        Ok(Some(super::KeepWarm {
+            cache_read: n("cache_read_input_tokens"),
+            cache_write: n("cache_creation_input_tokens"),
+            input: n("input_tokens"),
+        }))
+    }
+}
+
+/// …turned into a keep-warm: no reply (`max_tokens: 0`), not streamed (a
+/// zero-token request rejects `stream`), and — when the conversation ends
+/// with the assistant's reply — a placeholder user line *after* the cache
+/// breakpoint, since the newest models reject a request that ends with the
+/// assistant. The breakpoint stays on the last real message, so the next
+/// turn reads everything up to it from the cache.
+fn keep_warm_body(body: &mut serde_json::Value) -> serde_json::Value {
+    body["max_tokens"] = serde_json::json!(0);
+    if let Some(o) = body.as_object_mut() {
+        o.remove("stream");
+    }
+    if let Some(msgs) = body["messages"].as_array_mut()
+        && msgs.last().is_some_and(|m| m["role"] == "assistant")
+    {
+        msgs.push(serde_json::json!({
+            "role": "user",
+            "content": [{"type": "text", "text": "(keep-alive)"}]
+        }));
+    }
+    body.clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_keep_warm_is_the_same_request_without_a_reply() {
+        let mut body = serde_json::json!({
+            "model": "claude-opus-5-5",
+            "max_tokens": 64000,
+            "stream": true,
+            "thinking": {"type": "adaptive"},
+            "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "hello", "cache_control": {"type": "ephemeral"}}]}
+            ]
+        });
+        let warm = keep_warm_body(&mut body);
+        assert_eq!(warm["max_tokens"], 0);
+        assert!(warm.get("stream").is_none());
+        // Same thinking settings: they're part of the cached prefix.
+        assert_eq!(warm["thinking"]["type"], "adaptive");
+        let msgs = warm["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2]["role"], "user");
+        // The breakpoint stays on the last real message.
+        assert!(msgs[1]["content"][0].get("cache_control").is_some());
+        assert!(msgs[2]["content"][0].get("cache_control").is_none());
+    }
     use crate::provider::StopReason;
     use crate::provider::test_support::{collect_chunks, spawn_sse_server};
     use dcode_ai_common::message::Message;

@@ -195,8 +195,26 @@ pub fn launch_command(exe: &Path, kind: Kind, port: u16) -> std::process::Comman
     cmd
 }
 
-/// `/app open <name|path>`: start the app with a debug port and connect.
-pub async fn open(what: &str) -> Result<String, String> {
+/// A profile folder for a separate copy of `name` (`--new`), as the app
+/// expects it (a Windows path from WSL).
+fn separate_profile(name: &str) -> Option<String> {
+    let base = local_app_data()?;
+    let dir = base
+        .join("dcode-ai")
+        .join("apps")
+        .join(format!("{name}-profile"));
+    std::fs::create_dir_all(&dir).ok()?;
+    if is_wsl() {
+        return output_of("wslpath", &["-w", &dir.to_string_lossy()]);
+    }
+    Some(dir.to_string_lossy().into_owned())
+}
+
+/// `/app open <name|path> [--new]`: start the app with a debug port and
+/// connect. `new`: a separate copy with its own profile, so an app that's
+/// already open can stay open (Electron apps only; VS Code keeps your
+/// extensions, not your settings).
+pub async fn open(what: &str, new: bool) -> Result<String, String> {
     let what = what.trim();
     let (name, exe, kind) = match known(what) {
         Some(k) => {
@@ -228,15 +246,29 @@ pub async fn open(what: &str) -> Result<String, String> {
             "{name} is already connected — the agent reaches it with target \"{name}\""
         ));
     }
-    // A running single-instance app hands the new start to itself and the
-    // debug flag is lost.
-    if running(&exe) {
+    if new && kind == Kind::WebView2 {
         return Err(format!(
-            "{name} is already running — close it (quit from its tray icon too), then /app open {name} again"
+            "{name} can't run a second copy — close it (quit from its tray icon too), then /app open {name}"
+        ));
+    }
+    // A running single-instance app hands the new start to itself and the
+    // debug flag is lost — unless this is a separate copy with its own
+    // profile.
+    if !new && running(&exe) {
+        return Err(format!(
+            "{name} is already running — close it (quit from its tray icon too) and /app open {name} again, or /app open {name} --new for a separate copy beside it"
         ));
     }
     let port = free_port().await;
     let mut cmd = launch_command(&exe, kind, port);
+    if new {
+        let profile = separate_profile(&name)
+            .ok_or("could not make a profile folder for the separate copy")?;
+        cmd.arg(format!("--user-data-dir={profile}"));
+        if name == "vscode" {
+            cmd.arg("--new-window");
+        }
+    }
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("could not start {}: {e}", exe.display()))?;
@@ -260,6 +292,19 @@ pub async fn open(what: &str) -> Result<String, String> {
         } else {
             ""
         }
+    ))
+}
+
+/// `/app connect <name> <port>`: attach to an app you started yourself
+/// with `--remote-debugging-port=<port>`.
+pub async fn connect(name: &str, port: u16) -> Result<String, String> {
+    let name = name.trim().to_ascii_lowercase();
+    let page = attach(port)
+        .await
+        .map_err(|e| format!("{e} — start the app with --remote-debugging-port={port} first"))?;
+    apps().lock().await.insert(name.clone(), page);
+    Ok(format!(
+        "connected to {name} on port {port} — the agent reaches it with the browser tool's target \"{name}\""
     ))
 }
 

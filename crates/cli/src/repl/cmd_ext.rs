@@ -91,31 +91,49 @@ impl Repl {
             }
             "/app" => {
                 use dcode_ai_core::apps;
-                let mut words = rest.split_whitespace();
-                let sub = words.next().unwrap_or("");
-                let arg = rest.trim_start().trim_start_matches(sub).trim();
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let sub = words.first().copied().unwrap_or("");
+                let new = words.contains(&"--new");
+                let args: Vec<&str> = words
+                    .iter()
+                    .skip(1)
+                    .copied()
+                    .filter(|w| *w != "--new")
+                    .collect();
+                let arg = args.join(" ");
                 let msg = match sub {
-                    "open" if !arg.is_empty() => apps::open(arg).await,
-                    "close" if !arg.is_empty() => apps::close(arg).await,
+                    "open" if !arg.is_empty() => apps::open(&arg, new).await,
+                    "connect" => match (args.first(), args.get(1).and_then(|p| p.parse::<u16>().ok())) {
+                        (Some(name), Some(port)) => apps::connect(name, port).await,
+                        _ => Err("usage: /app connect <name> <port> — for an app you started with --remote-debugging-port=<port>".into()),
+                    },
+                    "close" if !arg.is_empty() => apps::close(&arg).await,
                     "" | "list" => {
                         let l = apps::list().await;
                         Ok(if l.is_empty() {
                             format!(
-                                "no apps connected — /app open <{}|path to .exe> (Electron or WebView2 apps; the agent then reaches it with the browser tool's target)",
-                                apps::KNOWN
-                                    .iter()
-                                    .map(|k| k.name)
-                                    .collect::<Vec<_>>()
-                                    .join("|")
+                                "no apps connected — /app open <{}|path to .exe> [--new] (Electron or WebView2 apps), or /app connect <name> <port>",
+                                apps::KNOWN.iter().map(|k| k.name).collect::<Vec<_>>().join("|")
                             )
                         } else {
                             l.join("\n")
                         })
                     }
-                    _ => Err("usage: /app open <name|path> · /app list · /app close <name>".into()),
+                    _ => Err("usage: /app open <name|path> [--new] · /app connect <name> <port> · /app list · /app close <name>".into()),
                 };
                 match msg {
-                    Ok(m) => out.println(&format!("[app] {m}")),
+                    Ok(m) => {
+                        // Tell the agent it can drive it now, and load the
+                        // browser tool so it doesn't have to search for it.
+                        if matches!(sub, "open" | "connect") && m.contains("target") {
+                            let name = m.split('"').nth(1).unwrap_or("").to_string();
+                            self.runtime.activate_tool("browser");
+                            self.runtime.add_turn_note(format!(
+                                "(Note from dcode-ai: the user connected the desktop app `{name}`. You can see and control it with the browser tool — pass target: \"{name}\" with snapshot, find, click, type, press, scroll, screenshot.)"
+                            ));
+                        }
+                        out.println(&format!("[app] {m}"));
+                    }
                     Err(e) => out.eprintln(&format!("[app] {e}")),
                 }
             }

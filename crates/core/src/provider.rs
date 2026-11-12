@@ -102,6 +102,28 @@ pub trait Provider: Send + Sync {
         model: &str,
         workspace_root: &Path,
     ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError>;
+
+    /// Refresh the prompt cache for this conversation without a reply: the
+    /// same request with `max_tokens: 0`, billed as a cache read. Returns the
+    /// tokens read from the cache; `Ok(None)` where the provider can't (the
+    /// default — only the Anthropic API can).
+    async fn keep_warm(
+        &self,
+        _messages: &[Message],
+        _tools: &[ToolDefinition],
+        _model: &str,
+        _workspace_root: &Path,
+    ) -> Result<Option<KeepWarm>, ProviderError> {
+        Ok(None)
+    }
+}
+
+/// What a keep-warm request cost.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct KeepWarm {
+    pub cache_read: u64,
+    pub cache_write: u64,
+    pub input: u64,
 }
 
 #[derive(Debug, thiserror::Error)]

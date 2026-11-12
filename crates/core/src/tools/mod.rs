@@ -19,6 +19,7 @@ pub mod notebook;
 pub mod rename_path;
 pub mod replace_match;
 pub mod repo_map;
+pub mod run_script;
 pub mod run_validation;
 pub mod search;
 pub mod spawn_subagent;
@@ -127,6 +128,16 @@ impl ToolRegistry {
             self.defer_behind_search(|n| set.contains(n));
         }
         new
+    }
+
+    /// Load a deferred tool now (as if `tool_search` found it) — e.g. the
+    /// browser once the user connects an app. False when it isn't deferred.
+    pub fn activate(&self, name: &str) -> bool {
+        if !self.deferred.contains(name) {
+            return false;
+        }
+        self.activated.add(name);
+        true
     }
 
     /// Whether the list has been sent to a model yet.

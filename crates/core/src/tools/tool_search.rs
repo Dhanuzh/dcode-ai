@@ -20,7 +20,7 @@ impl Activated {
         self.0.lock().map(|s| s.clone()).unwrap_or_default()
     }
 
-    fn add(&self, name: &str) {
+    pub fn add(&self, name: &str) {
         if let Ok(mut s) = self.0.lock()
             && !s.iter().any(|n| n == name)
         {
@@ -36,6 +36,19 @@ pub struct ToolSearchTool {
     /// sent: tools deferred later are searchable but not listed, so the
     /// definition (and the cached prompt) doesn't change.
     listed: Vec<String>,
+}
+
+/// What a deferred built-in tool is for, in a few words.
+fn hint(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "browser" => {
+            "drive web pages, and desktop apps like VS Code, Slack, Teams, Outlook — it can open them"
+        }
+        "notebook_edit" => "edit Jupyter notebooks",
+        "inspect_binary" => "look inside binary files",
+        "query_symbols" => "find code symbols",
+        _ => return None,
+    })
 }
 
 /// Most tools one search loads.
@@ -119,7 +132,16 @@ impl ToolSearchTool {
 #[async_trait::async_trait]
 impl ToolExecutor for ToolSearchTool {
     fn definition(&self) -> ToolDefinition {
-        let names: Vec<&str> = self.listed.iter().map(String::as_str).collect();
+        // Built-in tools get a few words, so the model knows what they're for
+        // without loading them (MCP tool names say enough).
+        let names: Vec<String> = self
+            .listed
+            .iter()
+            .map(|n| match hint(n) {
+                Some(h) => format!("{n} ({h})"),
+                None => n.clone(),
+            })
+            .collect();
         ToolDefinition {
             name: "tool_search".into(),
             description: format!(
@@ -301,5 +323,29 @@ mod tests {
             .output;
         assert!(found.contains("mcp__jira__search"), "{found}");
         assert_eq!(names(&reg).last().unwrap(), "mcp__jira__search");
+    }
+
+    #[test]
+    fn the_browser_says_it_drives_apps_and_can_be_loaded_directly() {
+        let mut reg = ToolRegistry::new();
+        reg.register(Box::new(Fake("read_file", "Read a file")));
+        reg.register(Box::new(Fake("browser", "Control a browser")));
+        reg.defer_behind_search(|n| n == "browser");
+        let search = reg
+            .definitions()
+            .into_iter()
+            .find(|d| d.name == "tool_search")
+            .unwrap();
+        assert!(
+            search
+                .description
+                .contains("browser (drive web pages, and desktop apps like VS Code"),
+            "{}",
+            search.description
+        );
+        // `/app open` loads it without a search.
+        assert!(reg.activate("browser"));
+        assert!(reg.definitions().iter().any(|d| d.name == "browser"));
+        assert!(!reg.activate("read_file"), "not deferred");
     }
 }

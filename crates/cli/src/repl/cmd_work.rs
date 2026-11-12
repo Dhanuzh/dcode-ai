@@ -13,6 +13,107 @@ impl Repl {
         out: ReplOutput<'_>,
     ) -> anyhow::Result<bool> {
         match command {
+            "/schedule" => {
+                use dcode_ai_cli::schedule::Schedules;
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let mut words = rest.split_whitespace();
+                let sub = words.next().unwrap_or("list");
+                let mut list = Schedules::load(&ws);
+                let id = |w: Option<&str>| w.and_then(|n| n.trim_start_matches('#').parse::<u32>().ok());
+                let msg: Result<String, String> = match sub {
+                    "add" => {
+                        // `/schedule add "<when>" [--auto] <prompt>` — when in
+                        // quotes, or the first two words (`weekdays 09:00`).
+                        let after = rest.trim_start().trim_start_matches("add").trim();
+                        let (when, tail) = if let Some(r) = after.strip_prefix('"') {
+                            match r.split_once('"') {
+                                Some((w, t)) => (w.to_string(), t.trim().to_string()),
+                                None => (String::new(), String::new()),
+                            }
+                        } else {
+                            let mut it = after.splitn(3, char::is_whitespace);
+                            let (a, b) = (it.next().unwrap_or(""), it.next().unwrap_or(""));
+                            (format!("{a} {b}"), it.next().unwrap_or("").trim().to_string())
+                        };
+                        let auto = tail.split_whitespace().any(|w| w == "--auto");
+                        let prompt: String = tail
+                            .split_whitespace()
+                            .filter(|w| *w != "--auto")
+                            .collect::<Vec<_>>()
+                            .join(" ");
+                        if prompt.is_empty() {
+                            Err("usage: /schedule add \"weekdays 09:00\" [--auto] <what to do> — when: daily 9am · weekdays 09:00 · mon 18:30 · every 2h · cron (0 9 * * 1-5); --auto lets it run commands and edit files".into())
+                        } else {
+                            list.add(&when, &prompt, if auto { "auto" } else { "plan" }, chrono::Local::now())
+                                .map(|n| {
+                                    let next = list.items.iter().find(|s| s.id == n).and_then(|s| s.next_run);
+                                    format!(
+                                        "#{n} added — {}{}",
+                                        when.trim(),
+                                        next.map(|t| format!(", next {}", t.format("%a %d %b %H:%M"))).unwrap_or_default()
+                                    )
+                                })
+                        }
+                    }
+                    "rm" | "remove" | "delete" => match id(words.next()) {
+                        Some(n) if list.items.iter().any(|s| s.id == n) => {
+                            list.items.retain(|s| s.id != n);
+                            Ok(format!("#{n} removed"))
+                        }
+                        _ => Err("usage: /schedule rm <n>".into()),
+                    },
+                    "pause" | "resume" => {
+                        let pause = sub == "pause";
+                        match id(words.next()).and_then(|n| list.items.iter_mut().find(|s| s.id == n)) {
+                            Some(s) => {
+                                s.paused = pause;
+                                if !pause {
+                                    s.next_run = dcode_ai_cli::schedule::When::parse(&s.when)
+                                        .and_then(|w| w.next_after(chrono::Local::now()));
+                                }
+                                Ok(format!("#{} {}", s.id, if pause { "paused" } else { "resumed" }))
+                            }
+                            None => Err(format!("usage: /schedule {sub} <n>")),
+                        }
+                    }
+                    "run" => match id(words.next()).and_then(|n| list.items.iter_mut().find(|s| s.id == n)) {
+                        Some(s) => {
+                            s.next_run = Some(chrono::Local::now());
+                            Ok(format!("#{} runs now", s.id))
+                        }
+                        None => Err("usage: /schedule run <n>".into()),
+                    },
+                    _ => {
+                        if list.items.is_empty() {
+                            out.println("[schedule] nothing scheduled — /schedule add \"weekdays 09:00\" draft my stand-up from /board jira today");
+                        }
+                        for s in &list.items {
+                            out.println(&format!(
+                                "[schedule] #{} {}{} · {} · next {} · {}",
+                                s.id,
+                                s.when,
+                                if s.paused { " (paused)" } else { "" },
+                                if s.mode == "auto" { "auto" } else { "read-only" },
+                                s.next_run.map(|t| t.format("%a %d %b %H:%M").to_string()).unwrap_or_else(|| "—".into()),
+                                s.prompt.chars().take(60).collect::<String>()
+                            ));
+                        }
+                        return Ok(true);
+                    }
+                };
+                match msg {
+                    Ok(m) => {
+                        if let Err(e) = list.save(&ws) {
+                            out.eprintln(&format!("[schedule] could not save: {e}"));
+                        } else {
+                            out.println(&format!("[schedule] {m} · runs while dcode-ai is open here; a missed run happens once at the next start"));
+                        }
+                        // `run` should start now, not in up to a minute.
+                        self.schedules_checked = None;
+                    }
+                    Err(e) => out.eprintln(&format!("[schedule] {e}")),
+                }
+            }
             "/verify" => {
                 self.run_verifier(rest.trim(), &out).await?;
             }
@@ -1276,6 +1377,86 @@ impl Repl {
             && let Some(s) = &g.board_syncer
         {
             s.kick();
+        }
+    }
+}
+
+impl Repl {
+    /// Start the scheduled runs that are due (each at most once at a time)
+    /// and report the ones that finished. Looks every 30 seconds.
+    pub(super) fn tick_schedules(
+        &mut self,
+        tui_state: &std::sync::Arc<std::sync::Mutex<crate::tui::state::TuiSessionState>>,
+    ) {
+        use dcode_ai_cli::schedule::{Schedules, launch};
+        if self
+            .schedules_checked
+            .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(30))
+        {
+            return;
+        }
+        self.schedules_checked = Some(std::time::Instant::now());
+        let ws = self.runtime.workspace_root().to_path_buf();
+        let mut notes: Vec<String> = Vec::new();
+        // Finished runs.
+        self.schedule_runs
+            .retain_mut(|(id, session, child)| match child.try_wait() {
+                Ok(Some(status)) => {
+                    notes.push(format!(
+                        "Scheduled run #{id} {} — /resume {session} to read it",
+                        if status.success() {
+                            "finished"
+                        } else {
+                            "ended with an error"
+                        }
+                    ));
+                    false
+                }
+                Ok(None) => true,
+                Err(_) => false,
+            });
+        // Due runs.
+        let mut list = Schedules::load(&ws);
+        let now = chrono::Local::now();
+        let due = list.due(now);
+        let mut changed = false;
+        for id in due {
+            if self.schedule_runs.iter().any(|(i, _, _)| *i == id) {
+                continue; // never overlaps itself
+            }
+            let Some(s) = list.items.iter().find(|s| s.id == id).cloned() else {
+                continue;
+            };
+            match launch(&ws, &s) {
+                Ok((session, child)) => {
+                    notes.push(format!(
+                        "Scheduled run #{id} started: {}",
+                        s.prompt.chars().take(60).collect::<String>()
+                    ));
+                    list.started(id, &session, now);
+                    self.schedule_runs.push((id, session, child));
+                }
+                Err(e) => {
+                    notes.push(format!("Scheduled run #{id} couldn't start: {e}"));
+                    list.started(id, "", now);
+                }
+            }
+            changed = true;
+        }
+        if changed {
+            let _ = list.save(&ws);
+        }
+        if notes.is_empty() {
+            return;
+        }
+        if let Ok(mut g) = tui_state.lock() {
+            for n in &notes {
+                g.push_block(crate::tui::state::DisplayBlock::System(n.clone()));
+            }
+            g.touch_transcript();
+            if g.notifications_enabled {
+                crate::tui::notify::desktop_notify("dcode-ai", &notes.join(" · "));
+            }
         }
     }
 }
