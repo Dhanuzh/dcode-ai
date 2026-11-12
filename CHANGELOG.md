@@ -1,5 +1,35 @@
 # Changelog
 
+## 1.0.62 — 2026-11-12
+
+### New
+- **Continue a sub-agent (`send_message`)**: the agent can message a
+  sub-agent it started — a follow-up, a fix to its work, the next step —
+  instead of starting a new one and re-explaining. A running agent reads it
+  at its next step; a finished one is resumed with its whole history, in
+  the same worktree with the same tools, and replies (in the background or
+  not, like `spawn_subagent`). Only this session's own agents; one you
+  stopped stays stopped.
+- **Fork**: `spawn_subagent` with `fork: true` starts the helper with a copy
+  of the whole conversation instead of a summary — for side work that needs
+  everything discussed so far.
+- **`/fleet [n] <task>`**: a head agent splits the task into work items with
+  dependencies, runs the ready ones as background sub-agents in their own
+  worktrees (n at a time, default 3), continues one with `send_message` when
+  it needs a fix, merges each finished branch before starting what waited
+  on it, and reports what was merged and what's left. Like `/board run`,
+  without making cards.
+- **More agent-file settings** (Claude Code's names, so `.claude/agents`
+  files work unchanged): `disallowedTools`, `permissionMode` (never more
+  than the parent's mode allows), `maxTurns`, `effort`, `skills` (their
+  instructions go in the agent's prompt), `isolation: worktree|none`,
+  `background: true`.
+
+### Fixed
+- **Sub-agents see the conversation as it is now**: the parent context a
+  sub-agent got was a summary of the conversation from when the session
+  started; it's now the conversation at the moment it's spawned.
+
 ## 1.0.61 — 2026-11-12
 
 ### New

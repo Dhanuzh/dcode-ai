@@ -221,6 +221,7 @@ pub(crate) fn command_group(cmd: &str) -> (u8, &'static str) {
                 "/hooks",
                 "/run-bg",
                 "/schedule",
+                "/fleet",
                 "/bashes",
                 "/ps",
                 "/diff",

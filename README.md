@@ -294,6 +294,8 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 ### 🤖 Agents and automation
 
 - **Sub-agents** in isolated git worktrees, with parent/child lineage. Merge, keep or discard their changes. They can run in the background while you keep chatting, within a token and time budget (`[harness] subagent_max_tokens`, `subagent_max_minutes`); `x` in the sub-agents list stops one.
+- **Continue, fork, fleet:** the agent continues a sub-agent with `send_message` (history intact, same worktree) instead of starting over; `fork: true` gives a helper the whole conversation; **`/fleet [n] <task>`** splits a task into parallel sub-agents with dependencies and merges their branches as they finish.
+- **Agent files the Claude Code way:** `agents/*.md` with `tools`, `disallowedTools`, `model`, `permissionMode`, `maxTurns`, `effort`, `skills`, `isolation`, `background`.
 - **`/goal <objective>`** keeps working across turns until it's done, within a budget you set.
 - **Fallback models** take over when the main one is overloaded. **`/btw`** answers a side question without derailing the turn.
 - **Browser and app control:** a real Chrome or Edge window, or a desktop app (`/app open <name> [--new]`, `/app connect <name> <port>`, or the agent opens it itself). The agent waits for text to appear, takes screenshots it can see, and records steps you replay with `/browser save`.
@@ -328,7 +330,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 
 **Files:** `read_file` (line ranges, PDF, notebooks), `edit_file`, `apply_patch`, `write_file`, `notebook_edit` …
 **Search:** `search_code`, `code_intel`, `repo_map` · **Shell:** `execute_bash`, `run_background`, `run_validation`
-**Git** · **Web:** `web_search`, `fetch_url`, `browser`, `browser_task` · **Agents:** `spawn_subagent`, `run_script`, `ask_question`, `update_plan`, `invoke_skill`
+**Git** · **Web:** `web_search`, `fetch_url`, `browser`, `browser_task` · **Agents:** `spawn_subagent`, `send_message`, `run_script`, `ask_question`, `update_plan`, `invoke_skill`
 Rarely used tools load on demand through `tool_search`, which keeps every request small.
 
 ## ⚙️ Configuration

@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-autoresearch"
-version = "1.0.61"
+version = "1.0.62"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-cli"
-version = "1.0.61"
+version = "1.0.62"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -1591,7 +1591,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-common"
-version = "1.0.61"
+version = "1.0.62"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1608,7 +1608,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-core"
-version = "1.0.61"
+version = "1.0.62"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -1642,7 +1642,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-runtime"
-version = "1.0.61"
+version = "1.0.62"
 dependencies = [
  "anyhow",
  "async-trait",

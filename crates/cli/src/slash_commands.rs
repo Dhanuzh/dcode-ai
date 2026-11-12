@@ -76,6 +76,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/browser",
     "/app",
     "/schedule",
+    "/fleet",
     "/second-opinion",
     "/add-dir",
     "/todos",
@@ -171,6 +172,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/terminal-setup" => "make Shift+Enter insert a newline in this terminal",
         "/browser" => {
             "the agent's web browser: status, open [url], connect <port>, save [name] (recorded steps), close"
+        }
+        "/fleet" => {
+            "split a task into parallel sub-agents (each in its own worktree), merge as they finish: /fleet [n] <task>"
         }
         "/schedule" => {
             "run a prompt on a schedule: /schedule add \"weekdays 09:00\" [--auto] <what to do> · list · run|pause|resume|rm <n>"

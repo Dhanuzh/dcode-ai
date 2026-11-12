@@ -293,6 +293,7 @@ impl ApprovalPolicy {
                 // Spawning a sub-agent is a coordination action equivalent to
                 // delegating file-edit work; auto-approve at AcceptEdits and above.
                 | "spawn_subagent"
+                | "send_message"
         );
         let destructive = matches!(tool_name, "delete_path");
         // The browser tool is tiered by action: reading the page is like a

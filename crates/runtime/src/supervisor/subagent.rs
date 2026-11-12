@@ -109,7 +109,41 @@ pub fn spawn_subagent_consumer(
             let config = config.clone();
             let event_tx = event_tx.clone();
             let parent_store = SessionStore::new(parent_sessions_dir.clone());
-            let parent_summary = parent_summary.clone();
+            // The conversation as it is now, when the request carries it.
+            let parent_summary = req
+                .parent_messages
+                .as_deref()
+                .map(build_parent_summary)
+                .unwrap_or_else(|| parent_summary.clone());
+            let fail = |reply: tokio::sync::oneshot::Sender<
+                dcode_ai_core::tools::spawn_subagent::SpawnResponse,
+            >,
+                        msg: String| {
+                let _ = reply.send(dcode_ai_core::tools::spawn_subagent::SpawnResponse {
+                    child_session_id: String::new(),
+                    status: "error".into(),
+                    output: msg,
+                    workspace: workspace_root.display().to_string(),
+                    branch: None,
+                    worktree_path: None,
+                });
+            };
+            // Only this session's own agents can be continued.
+            if let Some(id) = &req.resume {
+                let known = req
+                    .agents
+                    .lock()
+                    .map(|m| m.contains_key(id))
+                    .unwrap_or(false);
+                let ours = known
+                    || parent_store.load(id).await.ok().is_some_and(|c| {
+                        c.meta.parent_session_id.as_deref() == Some(parent_session_id.as_str())
+                    });
+                if !ours {
+                    fail(req.reply, format!("no sub-agent `{id}` in this session"));
+                    continue;
+                }
+            }
 
             let agent = match req.agent.as_deref() {
                 None => None,
@@ -122,28 +156,43 @@ pub fn spawn_subagent_consumer(
                         Some(def) => Some(def.clone()),
                         None => {
                             let names: Vec<_> = defs.iter().map(|d| d.name.as_str()).collect();
-                            let _ = req.reply.send(
-                                dcode_ai_core::tools::spawn_subagent::SpawnResponse {
-                                    child_session_id: String::new(),
-                                    status: "error".into(),
-                                    output: format!(
-                                        "unknown agent `{name}`; available: {}",
-                                        if names.is_empty() {
-                                            "none".to_string()
-                                        } else {
-                                            names.join(", ")
-                                        }
-                                    ),
-                                    workspace: workspace_root.display().to_string(),
-                                    branch: None,
-                                    worktree_path: None,
-                                },
+                            fail(
+                                req.reply,
+                                format!(
+                                    "unknown agent `{name}`; available: {}",
+                                    if names.is_empty() {
+                                        "none".to_string()
+                                    } else {
+                                        names.join(", ")
+                                    }
+                                ),
                             );
                             continue;
                         }
                     }
                 }
             };
+            // An agent file's `isolation` and `background` win over the call.
+            let use_worktree = match agent.as_ref().and_then(|a| a.worktree) {
+                Some(w) if !req.explore => w,
+                _ => req.use_worktree,
+            };
+            let run_background = req.background || agent.as_ref().is_some_and(|a| a.background);
+            let agent_name = agent.as_ref().map(|a| a.name.clone());
+            let id = req
+                .resume
+                .clone()
+                .unwrap_or_else(super::session::generate_session_id);
+            // Every agent is recorded (foreground too), so it can be continued.
+            if let Ok(mut agents) = req.agents.lock() {
+                let mut rec = dcode_ai_core::tools::spawn_subagent::AgentRecord::new(&req.task);
+                rec.agent = agent_name;
+                rec.explore = req.explore;
+                if let Some(old) = agents.get(&id) {
+                    rec.task = old.task.clone();
+                }
+                agents.insert(id.clone(), rec);
+            }
             let child_cfg = ChildSessionConfig {
                 parent_session_id: parent_session_id.clone(),
                 task: req.task.clone(),
@@ -151,34 +200,24 @@ pub fn spawn_subagent_consumer(
                 workspace_root: workspace_root.clone(),
                 config,
                 parent_summary,
-                use_worktree: req.use_worktree,
+                use_worktree,
                 focus_files: req.focus_files,
                 explore: req.explore,
                 parent_mode: req.parent_mode,
-                child_id: None,
+                child_id: Some(id.clone()),
                 approval: req.approval.clone(),
                 browser_task: req.browser_task,
+                resume: req.resume.is_some(),
+                fork_messages: req
+                    .fork
+                    .then(|| req.parent_messages.as_deref().map(fork_history))
+                    .flatten(),
+                registry: Some((req.agents.clone(), id.clone())),
             };
-            let mut child_cfg = child_cfg;
             // Background: answer the tool at once with the agent's id; the
             // result is delivered as a notification when it settles.
             let mut reply = Some(req.reply);
-            let background = if req.background {
-                let id = super::session::generate_session_id();
-                child_cfg.child_id = Some(id.clone());
-                if let Ok(mut agents) = req.agents.lock() {
-                    agents.insert(
-                        id.clone(),
-                        dcode_ai_core::tools::spawn_subagent::AgentRecord {
-                            task: req.task.clone(),
-                            status: "running".into(),
-                            output: String::new(),
-                            started: std::time::Instant::now(),
-                            finished: None,
-                            abort: None,
-                        },
-                    );
-                }
+            let background = if run_background {
                 if let Some(r) = reply.take() {
                     let _ = r.send(dcode_ai_core::tools::spawn_subagent::SpawnResponse {
                         child_session_id: id.clone(),
@@ -189,13 +228,12 @@ pub fn spawn_subagent_consumer(
                         worktree_path: None,
                     });
                 }
-                Some((req.agents.clone(), id, req.task.clone()))
+                Some((req.agents.clone(), id.clone(), req.task.clone()))
             } else {
                 None
             };
-            let registry_for_abort = background
-                .as_ref()
-                .map(|(a, id, _)| (a.clone(), id.clone()));
+            let registry_for_abort = Some((req.agents.clone(), id.clone()));
+            let foreground_registry = (req.agents.clone(), id.clone());
 
             let handle = tokio::spawn(async move {
                 let hook_runner = {
@@ -260,7 +298,7 @@ pub fn spawn_subagent_consumer(
                             branch: res.branch,
                             worktree_path: res.worktree_path,
                         };
-                        deliver(response, reply, background, &event_tx).await;
+                        deliver(response, reply, background, &foreground_registry, &event_tx).await;
                     }
                     Err(e) => {
                         if let Some(hooks) = &hook_runner {
@@ -291,7 +329,7 @@ pub fn spawn_subagent_consumer(
                             branch: None,
                             worktree_path: None,
                         };
-                        deliver(response, reply, background, &event_tx).await;
+                        deliver(response, reply, background, &foreground_registry, &event_tx).await;
                     }
                 }
             });
@@ -317,18 +355,34 @@ async fn deliver(
         String,
         String,
     )>,
+    record: &(
+        dcode_ai_core::tools::spawn_subagent::BackgroundAgents,
+        String,
+    ),
     event_tx: &Option<tokio::sync::mpsc::Sender<AgentEvent>>,
 ) {
-    let Some((agents, id, task)) = background else {
-        if let Some(r) = reply {
-            let _ = r.send(response);
-        }
-        return;
-    };
     let status = if response.status == "completed" {
         "completed".to_string()
     } else {
         "error".to_string()
+    };
+    let Some((agents, id, task)) = background else {
+        // A foreground agent: settle its record (so it can be continued)
+        // and answer the waiting call.
+        if let Ok(mut map) = record.0.lock()
+            && let Some(r) = map.get_mut(&record.1)
+            && r.status == "running"
+        {
+            r.status = status;
+            r.output = response.output.clone();
+            r.finished = Some(std::time::Instant::now());
+            r.abort = None;
+            r.steer = None;
+        }
+        if let Some(r) = reply {
+            let _ = r.send(response);
+        }
+        return;
     };
     if let Ok(mut map) = agents.lock()
         && let Some(r) = map.get_mut(&id)
@@ -341,6 +395,7 @@ async fn deliver(
         r.output = response.output.clone();
         r.finished = Some(std::time::Instant::now());
         r.abort = None;
+        r.steer = None;
     }
     if let Some(tx) = event_tx {
         let _ = tx
@@ -587,6 +642,39 @@ pub struct ChildSessionConfig {
     /// A `browser_task`: browser and read-only file tools only, a short
     /// report back.
     pub browser_task: bool,
+    /// Continue the existing child `child_id` (`send_message`): `task` is
+    /// the parent's next message to it.
+    pub resume: bool,
+    /// A fork: the child starts with this copy of the parent's conversation.
+    pub fork_messages: Option<Vec<dcode_ai_common::message::Message>>,
+    /// Where to leave the child's message inbox once it runs (registry, id).
+    pub registry: Option<(
+        dcode_ai_core::tools::spawn_subagent::BackgroundAgents,
+        String,
+    )>,
+}
+
+/// The parent's conversation as a fork's starting history: system messages
+/// dropped (the child has its own), the in-flight tool call that spawned the
+/// fork dropped (it has no result yet), provider-specific blocks cleared.
+pub fn fork_history(
+    messages: &[dcode_ai_common::message::Message],
+) -> Vec<dcode_ai_common::message::Message> {
+    use dcode_ai_common::message::Role;
+    let mut out: Vec<_> = messages
+        .iter()
+        .filter(|m| m.role != Role::System)
+        .cloned()
+        .collect();
+    while out.last().is_some_and(|m| {
+        m.role == Role::Assistant && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
+    }) {
+        out.pop();
+    }
+    for m in &mut out {
+        m.provider_blocks = None;
+    }
+    out
 }
 
 /// A child's approval prompts, shown in the parent session: announced on the
@@ -648,6 +736,27 @@ pub fn child_permission_mode(
     }
 }
 
+/// An agent file's `permissionMode`, never more permissive than what the
+/// parent's mode gives a child.
+pub fn cap_mode(
+    asked: dcode_ai_common::config::PermissionMode,
+    allowed: dcode_ai_common::config::PermissionMode,
+) -> dcode_ai_common::config::PermissionMode {
+    use dcode_ai_common::config::PermissionMode as M;
+    let rank = |m: M| match m {
+        M::Plan => 0,
+        M::Default | M::DontAsk => 1,
+        M::AcceptEdits => 2,
+        M::Auto => 3,
+        M::BypassPermissions => 4,
+    };
+    if rank(asked) <= rank(allowed) {
+        asked
+    } else {
+        allowed
+    }
+}
+
 /// The child's permission mode and model. Explorers only read and take the
 /// cheap utility model (Haiku on Claude); an agent definition's own model
 /// wins, then `[model] subagent_model`.
@@ -657,7 +766,12 @@ fn child_mode_and_model(
     let mode = if cfg.explore {
         dcode_ai_common::config::PermissionMode::Plan
     } else {
-        child_permission_mode(cfg.parent_mode.unwrap_or(cfg.config.permissions.mode))
+        let from_parent =
+            child_permission_mode(cfg.parent_mode.unwrap_or(cfg.config.permissions.mode));
+        match cfg.agent.as_ref().and_then(|a| a.permission_mode) {
+            Some(asked) => cap_mode(asked, from_parent),
+            None => from_parent,
+        }
     };
     let model = cfg
         .agent
@@ -702,6 +816,15 @@ pub async fn spawn_child_session(
     if let Some(model) = routed {
         apply_agent_model(&mut child_config, &model);
     }
+    if let Some(agent) = &cfg.agent {
+        if let Some(n) = agent.max_turns {
+            child_config.session.max_turns_per_run = n;
+        }
+        if let Some(e) = &agent.effort {
+            child_config.provider.anthropic.effort = Some(e.clone());
+            child_config.provider.copilot.reasoning_effort = Some(e.clone());
+        }
+    }
     // The child's session record stays with the parent's, even when it works
     // in a worktree.
     child_config.session.history_dir = cfg.workspace_root.join(&cfg.config.session.history_dir);
@@ -713,7 +836,7 @@ pub async fn spawn_child_session(
         .clone()
         .unwrap_or_else(super::session::generate_session_id);
     let mut worktree = None;
-    if cfg.use_worktree {
+    if cfg.use_worktree && !cfg.resume {
         let wt_mgr = crate::worktree::WorktreeManager::new(&cfg.workspace_root);
         if wt_mgr.is_git_repo() {
             match wt_mgr.create_worktree(&child_id) {
@@ -729,24 +852,55 @@ pub async fn spawn_child_session(
         .map(|w| w.worktree_path.clone())
         .unwrap_or_else(|| cfg.workspace_root.clone());
 
-    let mut sup = Supervisor::create(SupervisorConfig {
-        config: child_config,
-        workspace_root: root,
-        safe_mode: false,
-        interactive_approvals: false,
-        session_id: Some(child_id.clone()),
-        approval_handler: Some(match cfg.approval.clone() {
-            Some(parent) => Arc::new(BridgedApproval {
-                parent,
-                events: event_tx.clone(),
-                task: cfg.task.clone(),
-            }) as Arc<dyn ApprovalHandler>,
-            None => Arc::new(AutoDenyHandler) as Arc<dyn ApprovalHandler>,
+    let approval_handler: Arc<dyn ApprovalHandler> = match cfg.approval.clone() {
+        Some(parent) => Arc::new(BridgedApproval {
+            parent,
+            events: event_tx.clone(),
+            task: cfg.task.clone(),
         }),
-        orchestration_context: None,
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+        None => Arc::new(AutoDenyHandler),
+    };
+    let mut sup = if cfg.resume {
+        // Continue where it stopped: its own checkout (worktree) if that
+        // still exists, else the parent's.
+        let store = SessionStore::new(child_config.session.history_dir.clone());
+        let saved = store.load(&child_id).await.map_err(|e| e.to_string())?;
+        let own = saved.meta.workspace.clone();
+        let root = if own.is_dir() {
+            own
+        } else {
+            cfg.workspace_root.clone()
+        };
+        let mut sup = Supervisor::resume(
+            child_config,
+            &root,
+            false,
+            false,
+            &child_id,
+            Some(approval_handler),
+        )
+        .await
+        .map_err(|e| e.to_string())?;
+        if !sup.workspace_root.is_dir() {
+            sup.workspace_root = cfg.workspace_root.clone();
+            sup.worktree_path = None;
+            sup.branch = None;
+            sup.base_branch = None;
+        }
+        sup
+    } else {
+        Supervisor::create(SupervisorConfig {
+            config: child_config,
+            workspace_root: root,
+            safe_mode: false,
+            interactive_approvals: false,
+            session_id: Some(child_id.clone()),
+            approval_handler: Some(approval_handler),
+            orchestration_context: None,
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    };
     // Nobody can answer a prompt here: deny that one call and let the child
     // carry on (and report it) rather than ending its run.
     sup.agent_mut().approval.set_fail_on_ask(false);
@@ -755,7 +909,12 @@ pub async fn spawn_child_session(
     sup.agent_mut().tools.retain_by_name(|name| {
         !matches!(
             name,
-            "spawn_subagent" | "agent_output" | "agent_kill" | "update_goal" | "browser_task"
+            "spawn_subagent"
+                | "agent_output"
+                | "agent_kill"
+                | "update_goal"
+                | "browser_task"
+                | "send_message"
         )
     });
 
@@ -763,6 +922,29 @@ pub async fn spawn_child_session(
         sup.agent_mut()
             .tools
             .retain_by_name(|name| allowed.iter().any(|a| a == name));
+    }
+    if let Some(denied) = cfg.agent.as_ref().map(|a| a.disallowed_tools.clone())
+        && !denied.is_empty()
+    {
+        sup.agent_mut()
+            .tools
+            .retain_by_name(|name| !denied.iter().any(|d| d == name));
+    }
+    // `send_message` reaches it while it runs.
+    if let Some((agents, id)) = &cfg.registry
+        && let Ok(mut map) = agents.lock()
+        && let Some(r) = map.get_mut(id)
+    {
+        r.steer = Some(sup.steer_handle());
+    }
+    if let Some(history) = &cfg.fork_messages {
+        let msgs = &mut sup.agent_mut().messages;
+        let keep = msgs
+            .iter()
+            .take_while(|m| m.role == dcode_ai_common::message::Role::System)
+            .count();
+        msgs.truncate(keep);
+        msgs.extend(history.iter().cloned());
     }
     if cfg.browser_task {
         // The browser (loaded, not behind a search) and reading files.
@@ -781,11 +963,13 @@ pub async fn spawn_child_session(
         sup.agent_mut().tools.activate("browser");
     }
 
-    sup.set_parent(
-        cfg.parent_session_id.clone(),
-        Some(cfg.parent_summary.clone()),
-        Some(cfg.task.clone()),
-    );
+    if !cfg.resume {
+        sup.set_parent(
+            cfg.parent_session_id.clone(),
+            Some(cfg.parent_summary.clone()),
+            Some(cfg.task.clone()),
+        );
+    }
     if let Some(info) = worktree {
         sup.set_worktree_info(
             info.worktree_path.clone(),
@@ -822,12 +1006,49 @@ and stop. End with a short report for the parent agent — what you did, the dat
             "You are a sub-agent spawned by a parent session to handle a specific task.".to_string()
         }
     };
-    let mut context_prompt = format!(
-        "{role}\n\n\
-         ## Parent Context\n{}\n\n\
-         ## Your Task\n{}",
-        cfg.parent_summary, cfg.task
-    );
+    let mut context_prompt = if cfg.resume {
+        format!(
+            "Message from the parent agent (continue from where you left off, then report back):\n\n{}",
+            cfg.task
+        )
+    } else if cfg.fork_messages.is_some() {
+        format!(
+            "You are now a fork of the agent above: a sub-agent with this whole conversation, \
+             started to do one piece of side work. Do only the task below (the parent carries \
+             on with everything else), then end with a short report for the parent.\n\n\
+             ## Your Task\n{}",
+            cfg.task
+        )
+    } else {
+        format!(
+            "{role}\n\n\
+             ## Parent Context\n{}\n\n\
+             ## Your Task\n{}",
+            cfg.parent_summary, cfg.task
+        )
+    };
+    // An agent file's `skills`: their instructions, up front.
+    if let Some(agent) = cfg
+        .agent
+        .as_ref()
+        .filter(|a| !a.skills.is_empty() && !cfg.resume)
+    {
+        let all = dcode_ai_core::skills::SkillCatalog::discover(
+            &cfg.workspace_root,
+            &cfg.config.harness.skill_directories,
+        )
+        .unwrap_or_default();
+        for name in &agent.skills {
+            match all.iter().find(|s| &s.name == name) {
+                Some(skill) => context_prompt.push_str(&format!(
+                    "\n\n## Skill: {}\n{}",
+                    skill.name,
+                    skill.body.trim()
+                )),
+                None => tracing::warn!("agent `{}`: skill `{name}` not found", agent.name),
+            }
+        }
+    }
 
     if !cfg.focus_files.is_empty() {
         context_prompt.push_str("\n\n## Focus Files\n");
@@ -976,6 +1197,38 @@ mod tests {
     use dcode_ai_common::message::{Message, MessageToolCall, Role};
 
     #[test]
+    fn a_fork_gets_the_conversation_without_the_call_in_flight() {
+        let call = |id: &str| MessageToolCall {
+            id: id.into(),
+            name: "spawn_subagent".into(),
+            arguments: serde_json::json!({}),
+        };
+        let mut asked = Message::assistant_with_tool_calls("", vec![call("t1")]);
+        asked.provider_blocks = Some(vec![serde_json::json!({"type": "thinking"})]);
+        let msgs = vec![
+            Message::system("sys"),
+            Message::user("fix login"),
+            asked,
+            Message::tool("t1", "done"),
+            Message::assistant_with_tool_calls("forking", vec![call("t2")]),
+        ];
+        let h = fork_history(&msgs);
+        assert_eq!(h.len(), 3, "system and the in-flight call dropped");
+        assert_eq!(h[0].role, Role::User);
+        assert!(h.iter().all(|m| m.provider_blocks.is_none()));
+        assert_eq!(h[2].role, Role::Tool);
+    }
+
+    #[test]
+    fn an_agent_file_cannot_raise_its_mode_above_the_parents() {
+        use dcode_ai_common::config::PermissionMode as M;
+        assert_eq!(cap_mode(M::BypassPermissions, M::Auto), M::Auto);
+        assert_eq!(cap_mode(M::Plan, M::Auto), M::Plan);
+        assert_eq!(cap_mode(M::AcceptEdits, M::Auto), M::AcceptEdits);
+        assert_eq!(cap_mode(M::Auto, M::Plan), M::Plan);
+    }
+
+    #[test]
     fn compaction_fallback_summary_uses_default_when_empty() {
         let summary = build_compaction_fallback_summary(&[]);
         assert_eq!(
@@ -1120,6 +1373,9 @@ mod tests {
             child_id: None,
             approval: None,
             browser_task: false,
+            resume: false,
+            fork_messages: None,
+            registry: None,
         };
         let (mode, model) = child_mode_and_model(&cfg(true));
         assert_eq!(mode, dcode_ai_common::config::PermissionMode::Plan);

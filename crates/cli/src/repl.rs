@@ -1054,7 +1054,7 @@ impl Repl {
             }
             "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/goal"
             | "/plan" | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit"
-            | "/board" | "/schedule" => {
+            | "/board" | "/schedule" | "/fleet" => {
                 return self.cmd_work(input, command, rest, parts, out).await;
             }
             _ => {
@@ -1184,6 +1184,9 @@ impl Repl {
             child_id: None,
             approval: None,
             browser_task: false,
+            resume: false,
+            fork_messages: None,
+            registry: None,
         };
         let result =
             dcode_ai_runtime::supervisor::spawn_child_session(cfg, self.runtime.event_sender())

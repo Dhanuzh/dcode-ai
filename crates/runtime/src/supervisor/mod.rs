@@ -339,6 +339,8 @@ impl Supervisor {
         let background_agents: dcode_ai_core::tools::spawn_subagent::BackgroundAgents =
             Default::default();
         let background_default: Arc<std::sync::atomic::AtomicBool> = Default::default();
+        let messages_mirror: dcode_ai_core::tools::spawn_subagent::MessagesMirror =
+            Default::default();
         if !cfg.safe_mode {
             tools.register(Box::new(
                 dcode_ai_core::tools::spawn_subagent::AgentOutputTool::new(
@@ -359,7 +361,17 @@ impl Supervisor {
             .collect();
             let browser_spawn_tx = spawn_tx.clone();
             tools.register(Box::new(
+                dcode_ai_core::tools::spawn_subagent::SendMessageTool::new(
+                    spawn_tx.clone(),
+                    background_agents.clone(),
+                    Some(mode_cell.clone()),
+                    background_default.clone(),
+                    prompt_handler.clone().filter(|_| cfg.interactive_approvals),
+                ),
+            ));
+            tools.register(Box::new(
                 SpawnSubagentTool::new(spawn_tx)
+                    .with_mirror(messages_mirror.clone())
                     .with_agents(agents)
                     .with_parent_mode(mode_cell.clone())
                     .with_registry(background_agents.clone())
@@ -477,6 +489,7 @@ impl Supervisor {
             hook_runner.clone(),
         );
         agent.max_cost_usd = config.session.max_cost_usd;
+        agent.messages_mirror = Some(messages_mirror.clone());
         agent.fallback_models = config.model.fallback_models.clone();
         let mut system_prompt =
             build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());

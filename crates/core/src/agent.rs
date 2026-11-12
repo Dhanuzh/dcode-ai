@@ -104,6 +104,9 @@ pub struct AgentLoop {
     checkpoint_interval: u32,
     cancel_flag: Arc<AtomicBool>,
     steer: SteerInbox,
+    /// Shared with `spawn_subagent`: the conversation as of a batch that
+    /// starts a sub-agent (its summary, or a fork's copy).
+    pub messages_mirror: Option<crate::tools::spawn_subagent::MessagesMirror>,
     /// Called with the conversation after every tool step, so a crash or a
     /// closed terminal mid-turn loses nothing (the session saves itself).
     pub checkpoint: Option<Checkpoint>,
@@ -175,6 +178,7 @@ impl AgentLoop {
             checkpoint_interval,
             cancel_flag: Arc::new(AtomicBool::new(false)),
             steer: SteerInbox::default(),
+            messages_mirror: None,
             nested_instructions: Default::default(),
             utility_model: None,
             checkpoint: None,
@@ -973,6 +977,12 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
 
             for (_, call) in &to_execute {
                 self.undo.record_tool_call(call, workspace_root);
+            }
+            if let Some(mirror) = &self.messages_mirror
+                && to_execute.iter().any(|(_, c)| c.name == "spawn_subagent")
+                && let Ok(mut m) = mirror.lock()
+            {
+                *m = self.messages.clone();
             }
 
             // Read-only calls run in parallel; a batch that writes or runs

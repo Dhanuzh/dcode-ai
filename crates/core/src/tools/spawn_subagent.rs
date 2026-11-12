@@ -20,7 +20,33 @@ pub struct AgentRecord {
     pub finished: Option<Instant>,
     /// Stops a background agent.
     pub abort: Option<tokio::task::AbortHandle>,
+    /// Its custom agent, if any (kept when it's continued).
+    pub agent: Option<String>,
+    /// A read-only explorer (kept when it's continued).
+    pub explore: bool,
+    /// Messages for it while it runs (`send_message`); read at its next step.
+    pub steer: Option<crate::agent::SteerInbox>,
 }
+
+impl AgentRecord {
+    pub fn new(task: &str) -> Self {
+        Self {
+            task: task.to_string(),
+            status: "running".into(),
+            output: String::new(),
+            started: Instant::now(),
+            finished: None,
+            abort: None,
+            agent: None,
+            explore: false,
+            steer: None,
+        }
+    }
+}
+
+/// The parent's conversation as of its latest tool batch that spawns or
+/// messages an agent — so a sub-agent sees the conversation as it is now.
+pub type MessagesMirror = Arc<Mutex<Vec<dcode_ai_common::message::Message>>>;
 
 /// Every sub-agent of this session, by id.
 pub type BackgroundAgents = Arc<Mutex<HashMap<String, AgentRecord>>>;
@@ -42,6 +68,13 @@ pub struct SpawnRequest {
     /// A `browser_task`: the child gets only the browser and read-only file
     /// tools, and reports back briefly.
     pub browser_task: bool,
+    /// Continue this existing sub-agent (its id) with `task` as its next
+    /// message, instead of starting a new one.
+    pub resume: Option<String>,
+    /// Start with a copy of the parent's conversation, not a summary.
+    pub fork: bool,
+    /// The parent's conversation now (for the summary, or the fork).
+    pub parent_messages: Option<Vec<dcode_ai_common::message::Message>>,
     pub agents: BackgroundAgents,
     /// The parent's approval handler: the child's prompts go to the user
     /// through it instead of being denied.
@@ -76,6 +109,7 @@ pub struct SpawnSubagentTool {
     /// delivers completion notifications (the TUI).
     background_default: Arc<std::sync::atomic::AtomicBool>,
     approval: Option<Arc<dyn ApprovalHandler>>,
+    mirror: Option<MessagesMirror>,
 }
 
 impl SpawnSubagentTool {
@@ -87,7 +121,14 @@ impl SpawnSubagentTool {
             registry: Default::default(),
             background_default: Default::default(),
             approval: None,
+            mirror: None,
         }
+    }
+
+    /// Read the parent's current conversation from `mirror`.
+    pub fn with_mirror(mut self, mirror: MessagesMirror) -> Self {
+        self.mirror = Some(mirror);
+        self
     }
 
     /// Share the session's agent registry (for `agent_output` / `agent_kill`).
@@ -181,7 +222,9 @@ impl SpawnSubagentTool {
             description: "Spawn a sub-agent that runs as a separate session to handle a specific \
                 task in parallel. The sub-agent inherits your conversation context and workspace. \
                 Use this to delegate independent tasks (e.g. creating files, running builds) \
-                to child agents that work in isolated git worktrees."
+                to child agents that work in isolated git worktrees. The result includes the \
+                agent's id: `send_message` continues it later with its history intact (better \
+                than re-explaining to a new agent)."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
@@ -206,6 +249,10 @@ impl SpawnSubagentTool {
                     "run_in_background": {
                         "type": "boolean",
                         "description": "Start the agent and return at once with its id; you get a <task-notification> when it finishes (agent_output shows progress, agent_kill stops it). Use false when you need the result before your next step."
+                    },
+                    "fork": {
+                        "type": "boolean",
+                        "description": "Start the agent with a copy of this whole conversation instead of a summary — for side work that needs everything discussed so far. Costs more; use only when a summary won't do."
                     }
                 },
                 "required": ["task"]
@@ -240,6 +287,7 @@ impl SpawnSubagentTool {
             .unwrap_or_default();
 
         let explore = call.input["explore"].as_bool().unwrap_or(false);
+        let fork = !explore && call.input["fork"].as_bool().unwrap_or(false);
         // Explorers only read: no worktree to create and clean up.
         let use_worktree = !explore && call.input["use_worktree"].as_bool().unwrap_or(true);
         let background = call.input["run_in_background"]
@@ -263,64 +311,81 @@ impl SpawnSubagentTool {
                 .and_then(|c| c.read().ok().map(|m| *m)),
             background,
             browser_task: false,
+            resume: None,
+            fork,
+            parent_messages: self
+                .mirror
+                .as_ref()
+                .and_then(|m| m.lock().ok().map(|v| v.clone())),
             agents: self.registry.clone(),
             approval: self.approval.clone(),
             reply: reply_tx,
         };
 
-        if self.spawn_tx.send(req).await.is_err() {
-            return ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("Sub-agent spawner is not available".into()),
-            };
-        }
+        send_and_wait(&self.spawn_tx, req, reply_rx, call).await
+    }
+}
 
-        match tokio::time::timeout(std::time::Duration::from_secs(600), reply_rx).await {
-            Ok(Ok(response)) if response.status == "running" => ToolResult {
-                call_id: call.id.clone(),
-                success: true,
-                output: format!(
-                    "Agent {id} started in the background on: {task}\n\
+/// Sends a spawn (or continue) request and turns the answer into the tool's
+/// result.
+async fn send_and_wait(
+    spawn_tx: &mpsc::Sender<SpawnRequest>,
+    req: SpawnRequest,
+    reply_rx: oneshot::Receiver<SpawnResponse>,
+    call: &ToolCall,
+) -> ToolResult {
+    if spawn_tx.send(req).await.is_err() {
+        return ToolResult {
+            call_id: call.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some("Sub-agent spawner is not available".into()),
+        };
+    }
+
+    match tokio::time::timeout(std::time::Duration::from_secs(600), reply_rx).await {
+        Ok(Ok(response)) if response.status == "running" => ToolResult {
+            call_id: call.id.clone(),
+            success: true,
+            output: format!(
+                "Agent {id} started in the background on: {task}\n\
 You get a <task-notification> when it finishes — don't poll. Use agent_output with \
 agent_id {id} for its progress (wait=<seconds> to block until it finishes), agent_kill to stop it.",
-                    id = response.child_session_id,
-                    task = response.output,
-                ),
-                error: None,
-            },
-            Ok(Ok(response)) => {
-                let output = serde_json::to_string_pretty(&response).unwrap_or_default();
-                let success = response.status == "completed";
-                ToolResult {
-                    call_id: call.id.clone(),
-                    success,
-                    output,
-                    error: if success {
-                        None
-                    } else {
-                        let detail = summarize_subagent_error(&response.output, 180);
-                        Some(format!(
-                            "Sub-agent finished with status: {} ({detail})",
-                            response.status,
-                        ))
-                    },
-                }
+                id = response.child_session_id,
+                task = response.output,
+            ),
+            error: None,
+        },
+        Ok(Ok(response)) => {
+            let output = serde_json::to_string_pretty(&response).unwrap_or_default();
+            let success = response.status == "completed";
+            ToolResult {
+                call_id: call.id.clone(),
+                success,
+                output,
+                error: if success {
+                    None
+                } else {
+                    let detail = summarize_subagent_error(&response.output, 180);
+                    Some(format!(
+                        "Sub-agent finished with status: {} ({detail})",
+                        response.status,
+                    ))
+                },
             }
-            Ok(Err(_)) => ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("Sub-agent spawner dropped the reply channel".into()),
-            },
-            Err(_) => ToolResult {
-                call_id: call.id.clone(),
-                success: false,
-                output: String::new(),
-                error: Some("Sub-agent timed out after 600 seconds".into()),
-            },
         }
+        Ok(Err(_)) => ToolResult {
+            call_id: call.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some("Sub-agent spawner dropped the reply channel".into()),
+        },
+        Err(_) => ToolResult {
+            call_id: call.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some("Sub-agent timed out after 600 seconds".into()),
+        },
     }
 }
 
@@ -505,6 +570,9 @@ The page or app stays open afterwards."
                 .and_then(|c| c.read().ok().map(|m| *m)),
             background: false,
             browser_task: true,
+            resume: None,
+            fork: false,
+            parent_messages: None,
             agents: self.registry.clone(),
             approval: self.approval.clone(),
             reply: reply_tx,
@@ -585,18 +653,172 @@ impl ToolExecutor for AgentKillTool {
     }
 }
 
+/// `send_message`: continue a sub-agent this session started. A running one
+/// gets the message at its next step; a finished one is resumed with its
+/// history and works the message as its next turn.
+pub struct SendMessageTool {
+    spawn_tx: mpsc::Sender<SpawnRequest>,
+    registry: BackgroundAgents,
+    parent_mode: Option<crate::approval::ModeCell>,
+    background_default: Arc<std::sync::atomic::AtomicBool>,
+    approval: Option<Arc<dyn ApprovalHandler>>,
+}
+
+impl SendMessageTool {
+    pub fn new(
+        spawn_tx: mpsc::Sender<SpawnRequest>,
+        registry: BackgroundAgents,
+        parent_mode: Option<crate::approval::ModeCell>,
+        background_default: Arc<std::sync::atomic::AtomicBool>,
+        approval: Option<Arc<dyn ApprovalHandler>>,
+    ) -> Self {
+        Self {
+            spawn_tx,
+            registry,
+            parent_mode,
+            background_default,
+            approval,
+        }
+    }
+}
+
+/// What `send_message` does with an agent, from its record.
+#[derive(Debug, PartialEq)]
+enum Delivery {
+    /// It's running: the message went to its inbox.
+    Steered,
+    /// It was stopped on purpose; not continued.
+    Stopped,
+    /// Finished (or unknown here): resume it.
+    Resume,
+}
+
+fn deliver_to_running(registry: &BackgroundAgents, id: &str, message: &str) -> Delivery {
+    let Ok(map) = registry.lock() else {
+        return Delivery::Resume;
+    };
+    match map.get(id) {
+        Some(r) if r.status == "running" => match &r.steer {
+            Some(inbox) => {
+                if let Ok(mut q) = inbox.lock() {
+                    q.push(format!("Message from the parent agent: {message}"));
+                }
+                Delivery::Steered
+            }
+            // Running but not reachable yet (just starting): resume would
+            // race it, so queue nothing and say so.
+            None => Delivery::Stopped,
+        },
+        Some(r) if r.status == "stopped" => Delivery::Stopped,
+        _ => Delivery::Resume,
+    }
+}
+
+#[async_trait::async_trait]
+impl ToolExecutor for SendMessageTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "send_message".into(),
+            description: "Continue a sub-agent you started (by its agent_id / child_session_id), \
+with its whole history: a follow-up question, a fix to its work, the next step. A running agent \
+reads the message at its next step; a finished one picks up where it left off (same worktree, \
+same tools) and replies. Cheaper and better than starting a new agent and re-explaining."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "agent_id": {"type": "string"},
+                    "message": {"type": "string", "description": "What to tell it"},
+                    "run_in_background": {"type": "boolean", "description": "For a finished agent: return at once and get a <task-notification> when it replies."}
+                },
+                "required": ["agent_id", "message"]
+            }),
+        }
+    }
+
+    async fn execute(&self, call: &ToolCall) -> ToolResult {
+        let fail = |e: String| ToolResult {
+            call_id: call.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some(e),
+        };
+        let id = call.input["agent_id"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        let message = call.input["message"]
+            .as_str()
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if id.is_empty() || message.is_empty() {
+            return fail("agent_id and message are required".into());
+        }
+        match deliver_to_running(&self.registry, &id, &message) {
+            Delivery::Steered => {
+                return ToolResult {
+                    call_id: call.id.clone(),
+                    success: true,
+                    output: format!(
+                        "Sent to running agent {id}; it reads it at its next step. Its reply comes with its final report."
+                    ),
+                    error: None,
+                };
+            }
+            Delivery::Stopped => {
+                return fail(format!(
+                    "agent {id} was stopped (or is just starting) — start a new agent instead, or try again in a moment"
+                ));
+            }
+            Delivery::Resume => {}
+        }
+        let (agent, explore) = self
+            .registry
+            .lock()
+            .ok()
+            .and_then(|m| m.get(&id).map(|r| (r.agent.clone(), r.explore)))
+            .unwrap_or((None, false));
+        let background = call.input["run_in_background"]
+            .as_bool()
+            .unwrap_or_else(|| {
+                self.background_default
+                    .load(std::sync::atomic::Ordering::Relaxed)
+            });
+        let (reply_tx, reply_rx) = oneshot::channel();
+        let req = SpawnRequest {
+            task: message,
+            agent,
+            focus_files: Vec::new(),
+            use_worktree: false,
+            explore,
+            parent_mode: self
+                .parent_mode
+                .as_ref()
+                .and_then(|c| c.read().ok().map(|m| *m)),
+            background,
+            browser_task: false,
+            resume: Some(id),
+            fork: false,
+            parent_messages: None,
+            agents: self.registry.clone(),
+            approval: self.approval.clone(),
+            reply: reply_tx,
+        };
+        send_and_wait(&self.spawn_tx, req, reply_rx, call).await
+    }
+}
+
 #[cfg(test)]
 mod registry_tests {
     use super::*;
 
     fn record(status: &str) -> AgentRecord {
         AgentRecord {
-            task: "t".into(),
             status: status.into(),
             output: "report".into(),
-            started: Instant::now(),
-            finished: None,
-            abort: None,
+            ..AgentRecord::new("t")
         }
     }
 
@@ -635,5 +857,25 @@ mod registry_tests {
             .await;
         assert!(k.success);
         assert_eq!(reg.lock().unwrap()["a2"].status, "stopped");
+    }
+
+    #[test]
+    fn messages_reach_a_running_agent_and_never_a_stopped_one() {
+        let reg: BackgroundAgents = Default::default();
+        let inbox: crate::agent::SteerInbox = Default::default();
+        let mut running = record("running");
+        running.steer = Some(inbox.clone());
+        reg.lock().unwrap().insert("r".into(), running);
+        reg.lock().unwrap().insert("s".into(), record("stopped"));
+        reg.lock().unwrap().insert("c".into(), record("completed"));
+        assert_eq!(
+            deliver_to_running(&reg, "r", "also check X"),
+            Delivery::Steered
+        );
+        assert_eq!(inbox.lock().unwrap().len(), 1);
+        assert!(inbox.lock().unwrap()[0].ends_with("also check X"));
+        assert_eq!(deliver_to_running(&reg, "s", "x"), Delivery::Stopped);
+        assert_eq!(deliver_to_running(&reg, "c", "x"), Delivery::Resume);
+        assert_eq!(deliver_to_running(&reg, "unknown", "x"), Delivery::Resume);
     }
 }

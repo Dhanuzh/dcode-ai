@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// The head-agent instructions for `/fleet`; the task follows.
+pub(crate) fn fleet_prompt(n: usize) -> String {
+    format!(
+        "You are the head agent of a fleet: split the task below into parallel work and run it with sub-agents.
+1. Look just enough (read, search, or a quick `spawn_subagent` with explore) to split the task into self-contained work items — each a clear deliverable that touches its own files, with what it depends on. Show them with `update_plan`. If the task is too small to split, do it yourself instead.
+2. Start every item whose dependencies are done as a background sub-agent (`spawn_subagent` with run_in_background true, its own worktree), several in one turn, at most {n} running at once. Give each a complete task: the goal, the files, what done means, how to check it.
+3. When one finishes: review its report. If it needs a fix, continue it with `send_message` (it keeps its history) rather than starting a new agent. When it's good, merge its branch into the current branch (`git merge --no-ff <branch>`; resolve conflicts carefully), mark it done in the plan, then start the items that were waiting on it — they branch from the merged work.
+4. Keep going until every item is merged or clearly blocked. Run the project's checks once at the end.
+Finish with a short report: what each agent did, what was merged, what failed or is left for the user.
+
+The task:
+"
+    )
+}
+
 impl Repl {
     #[allow(unused_variables, unused_mut)]
     pub(super) async fn cmd_work(
@@ -13,6 +28,21 @@ impl Repl {
         out: ReplOutput<'_>,
     ) -> anyhow::Result<bool> {
         match command {
+            "/fleet" => {
+                // `/fleet [n] <task>`: n agents at a time (default 3, max 8).
+                let (n, task) = match rest.trim().split_once(char::is_whitespace) {
+                    Some((first, tail)) if first.parse::<usize>().is_ok() => {
+                        (first.parse::<usize>().unwrap_or(3), tail.trim())
+                    }
+                    _ => (3, rest.trim()),
+                };
+                if task.is_empty() {
+                    out.println("usage: /fleet [n] <task> — split it into parallel sub-agents, n at a time (default 3)");
+                    return Ok(true);
+                }
+                let prompt = fleet_prompt(n.clamp(1, 8));
+                self.run_preset(&prompt, task, out).await?;
+            }
             "/schedule" => {
                 use dcode_ai_cli::schedule::Schedules;
                 let ws = self.runtime.workspace_root().to_path_buf();

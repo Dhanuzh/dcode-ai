@@ -7,6 +7,13 @@
 //! description: Runs the test suite and fixes failures. Use after code changes.
 //! tools: Read, Grep, Bash, Edit      # optional; omit for every tool
 //! model: sonnet                      # optional; `inherit` or omitted = parent's
+//! disallowedTools: Bash              # optional; removed after `tools`
+//! permissionMode: acceptEdits        # optional; never above what the parent allows
+//! maxTurns: 30                       # optional; the child's turn limit
+//! effort: high                       # optional; low | medium | high | xhigh | max
+//! skills: [rust-style]               # optional; skills put in the child's prompt
+//! isolation: worktree                # optional; `worktree` or `none`
+//! background: true                   # optional; always run in the background
 //! ---
 //! You are a test specialist. Run the tests, read failures, fix them …
 //! ```
@@ -19,7 +26,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AgentDef {
     pub name: String,
     pub description: String,
@@ -30,6 +37,40 @@ pub struct AgentDef {
     /// System instructions (the Markdown body).
     pub prompt: String,
     pub path: PathBuf,
+    /// Tools taken away after `tools` (Claude Code's `disallowedTools`).
+    pub disallowed_tools: Vec<String>,
+    /// The mode it asks for (`permissionMode`); the parent's mode caps it.
+    pub permission_mode: Option<dcode_ai_common::config::PermissionMode>,
+    /// The child's turn limit (`maxTurns`).
+    pub max_turns: Option<u32>,
+    /// Reasoning effort for the child (`effort`).
+    pub effort: Option<String>,
+    /// Skills whose instructions go in the child's prompt (`skills`).
+    pub skills: Vec<String>,
+    /// `isolation`: `Some(true)` = worktree, `Some(false)` = the checkout.
+    pub worktree: Option<bool>,
+    /// `background: true`: always run in the background.
+    pub background: bool,
+}
+
+/// A Claude Code `permissionMode` (or dcode-ai's kebab-case name).
+pub fn parse_permission_mode(s: &str) -> Option<dcode_ai_common::config::PermissionMode> {
+    use dcode_ai_common::config::PermissionMode as M;
+    let k: String = s
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_ascii_lowercase();
+    Some(match k.as_str() {
+        "plan" => M::Plan,
+        "default" | "manual" => M::Default,
+        "acceptedits" => M::AcceptEdits,
+        "auto" => M::Auto,
+        "dontask" => M::DontAsk,
+        "bypasspermissions" | "bypass" => M::BypassPermissions,
+        _ => return None,
+    })
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -39,6 +80,38 @@ struct Frontmatter {
     #[serde(default)]
     tools: Option<serde_yaml::Value>,
     model: Option<String>,
+    #[serde(default, alias = "disallowed-tools", alias = "disallowed_tools")]
+    #[serde(rename = "disallowedTools")]
+    disallowed_tools: Option<serde_yaml::Value>,
+    #[serde(default, rename = "permissionMode", alias = "permission-mode")]
+    permission_mode: Option<String>,
+    #[serde(default, rename = "maxTurns", alias = "max-turns")]
+    max_turns: Option<u32>,
+    #[serde(default)]
+    effort: Option<String>,
+    #[serde(default)]
+    skills: Option<serde_yaml::Value>,
+    #[serde(default)]
+    isolation: Option<String>,
+    #[serde(default)]
+    background: Option<bool>,
+}
+
+/// A YAML string (comma-separated) or list, as names.
+fn names(value: &serde_yaml::Value) -> Vec<String> {
+    match value {
+        serde_yaml::Value::String(s) => s
+            .split(',')
+            .map(|t| t.trim().to_string())
+            .filter(|t| !t.is_empty())
+            .collect(),
+        serde_yaml::Value::Sequence(seq) => seq
+            .iter()
+            .filter_map(|v| v.as_str().map(|s| s.trim().to_string()))
+            .filter(|t| !t.is_empty())
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// dcode-ai tools for one name in a `tools:` list. Claude Code names map to
@@ -108,6 +181,25 @@ pub fn parse_agent_file(path: &Path) -> Result<AgentDef, String> {
         .model
         .map(|m| m.trim().to_string())
         .filter(|m| !m.is_empty() && m != "inherit");
+    let mut disallowed: Vec<String> = Vec::new();
+    for n in fm.disallowed_tools.as_ref().map(names).unwrap_or_default() {
+        // `Bash(git push *)` takes away the whole tool, as in Claude Code.
+        let base = n.split('(').next().unwrap_or(&n).trim().to_string();
+        for t in map_tool(&base) {
+            if !disallowed.iter().any(|d| d == t) {
+                disallowed.push(t.to_string());
+            }
+        }
+    }
+    let effort = fm
+        .effort
+        .map(|e| e.trim().to_ascii_lowercase())
+        .filter(|e| matches!(e.as_str(), "low" | "medium" | "high" | "xhigh" | "max"));
+    let worktree = match fm.isolation.as_deref().map(str::trim) {
+        Some("worktree") => Some(true),
+        Some("none") => Some(false),
+        _ => None,
+    };
     Ok(AgentDef {
         name: fm.name.unwrap_or(stem).trim().to_string(),
         description: fm.description.unwrap_or_default().trim().to_string(),
@@ -115,6 +207,16 @@ pub fn parse_agent_file(path: &Path) -> Result<AgentDef, String> {
         model,
         prompt: body.trim().to_string(),
         path: path.to_path_buf(),
+        disallowed_tools: disallowed,
+        permission_mode: fm
+            .permission_mode
+            .as_deref()
+            .and_then(parse_permission_mode),
+        max_turns: fm.max_turns.filter(|n| *n > 0),
+        effort,
+        skills: fm.skills.as_ref().map(names).unwrap_or_default(),
+        worktree,
+        background: fm.background.unwrap_or(false),
     })
 }
 
@@ -187,6 +289,7 @@ pub fn verifier() -> AgentDef {
         model: None,
         prompt: VERIFIER_PROMPT.trim().to_string(),
         path: PathBuf::new(),
+        ..Default::default()
     }
 }
 
@@ -302,6 +405,33 @@ mod tests {
     }
 
     #[test]
+    fn claude_code_agent_settings_are_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("r.md");
+        std::fs::write(
+            &p,
+            "---\nname: r\ndescription: d\ntools: Read, Bash, Edit\ndisallowedTools: Bash(git push *), Write\npermissionMode: acceptEdits\nmaxTurns: 12\neffort: High\nskills:\n  - rust-style\n  - testing\nisolation: worktree\nbackground: true\n---\nbody",
+        )
+        .unwrap();
+        let d = parse_agent_file(&p).unwrap();
+        assert!(d.disallowed_tools.contains(&"execute_bash".to_string()));
+        assert!(d.disallowed_tools.contains(&"write_file".to_string()));
+        assert_eq!(
+            d.permission_mode,
+            Some(dcode_ai_common::config::PermissionMode::AcceptEdits)
+        );
+        assert_eq!(d.max_turns, Some(12));
+        assert_eq!(d.effort.as_deref(), Some("high"));
+        assert_eq!(d.skills, ["rust-style", "testing"]);
+        assert_eq!((d.worktree, d.background), (Some(true), true));
+        assert_eq!(
+            parse_permission_mode("bypass-permissions"),
+            Some(dcode_ai_common::config::PermissionMode::BypassPermissions)
+        );
+        assert_eq!(parse_permission_mode("nonsense"), None);
+    }
+
+    #[test]
     fn missing_tools_means_all_and_star_means_all() {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("a.md");
@@ -321,6 +451,7 @@ mod tests {
             model: None,
             prompt: String::new(),
             path: PathBuf::new(),
+            ..Default::default()
         };
         let defs = vec![def("demo:helper"), def("x:dup"), def("y:dup")];
         assert_eq!(find(&defs, "helper").unwrap().name, "demo:helper");
