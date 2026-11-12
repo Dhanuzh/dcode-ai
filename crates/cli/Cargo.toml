@@ -53,6 +53,12 @@ snow = "0.9"
 # Direct peer-to-peer invites: hole-punched QUIC, dialed by public key.
 iroh = { version = "1.4", default-features = false, features = ["tls-ring", "portmapper"] }
 qrcode = { version = "0.14", default-features = false }
+# Slack Socket Mode (`/slack`): a websocket out to Slack, no public URL.
+tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+# Speech to text on this machine (`/talk`): Whisper in pure Rust, CPU only.
+candle-core = { version = "0.11", default-features = false }
+candle-nn = { version = "0.11", default-features = false }
+candle-transformers = { version = "0.11", default-features = false }
 
 # No `scrolling-regions`: with it, `Terminal::insert_before` flushes history
 # with DECSTBM partial-screen scrolls, and lines scrolled out of a margin

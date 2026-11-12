@@ -302,6 +302,10 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **`browser_task`:** multi-step browser or app work runs in a helper sub-agent; only its short report enters the conversation, so page dumps and screenshots don't fill your context (`[harness] browser_task_model` for a cheaper model).
 - **Code Mode (`run_script`):** the agent chains several tool calls in one short JavaScript script (run by Boa, a pure-Rust engine) and only the result comes back. Scripts can call only what your mode allows without asking. `[harness] code_mode = false` turns it off.
 - **Scheduled runs:** `/schedule add "weekdays 09:00" <prompt>` (also `daily`, `mon 18:30`, `every 2h`, cron) runs a prompt in the background while dcode-ai is open in the project — read-only by default, `--auto` for auto mode.
+- **Talk to it:** `/talk` turns speech into text on your machine (Whisper in Rust, nothing uploaded); `/talk loop` is a hands-free conversation; `/standup voice` turns your day into board cards and Jira comments.
+- **Diagrams:** Mermaid flowcharts and sequence diagrams from replies, drawn full screen in the terminal (`/diagram`, Ctrl+]).
+- **Away from the desk:** `/invite phone` puts approvals on your phone with Allow / Deny; `[ui] push_url` pings you when something waits. `/slack on` and `/teams on` answer `@dcode-ai` questions about the project in Slack or Microsoft Teams (read-only, people you allow).
+- **Show and share:** `/tour` walks a newcomer through the codebase; `/replay` turns a session into a terminal recording (GIF with `agg`).
 - **herdr and terminal tabs:** inside [herdr](https://herdr.dev) dcode-ai reports working / idle / needs-you and its session (so herdr's restore reopens it); every terminal's tab title follows its state.
 - **Reviews:** `/verify` (a read-only reviewer over your diff), `/second-opinion` (a model from another family), `/security-review`, `/pr-comments`.
 - **Headless and CI:**
@@ -363,6 +367,8 @@ code_mode = true               # offer run_script (chain tool calls in one scrip
 
 [ui]
 theme = "claude"
+# push_url = "https://ntfy.sh/<your-topic>"   # ping your phone when an approval waits
+# stt_model = "base.en"                       # /talk: bigger, more accurate speech model
 working_style = "bar"          # bar | dots | plain
 ```
 

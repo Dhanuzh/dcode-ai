@@ -1259,6 +1259,10 @@ pub(super) fn handle_key_event(
             g.command_palette_query.clear();
             g.palette_index = 0;
         }
+        // Ctrl+] (some terminals send it as Ctrl+5): the diagram viewer.
+        (KeyCode::Char(']') | KeyCode::Char('5'), KeyModifiers::CONTROL) => {
+            g.diagram_open = true;
+        }
         (KeyCode::Char('t'), KeyModifiers::CONTROL) => {
             // Toggle reasoning/thinking, then re-render ALL history
             // (purge + re-flush) so already-scrolled content reflects

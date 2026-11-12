@@ -2,6 +2,19 @@
 
 use super::*;
 
+/// `/tour`: a guided, read-only walk through the codebase; the focus follows.
+pub(crate) const TOUR_PROMPT: &str = "Give me a guided tour of this codebase, as you would to a new teammate on their first day. Only read — don't change any file or run anything that changes state.
+First look around: the README and docs, the build files, the entry points, the repo map, the tests. Then the tour, in this order:
+1. **What it is** — what the project does and for whom, in three sentences.
+2. **The map** — the main parts (folders, crates, packages, services), one line each, with how they depend on each other.
+3. **Read these first** — 5–8 files in the order to read them, each with `path:line` of the place to start and why it matters.
+4. **One request, end to end** — follow one typical action (a request, a command, a job) from where it enters to where it ends, naming each function on the way with `path:line`.
+5. **Where things are** — tests and how to run them, configuration, how to build and run it locally, where errors and logs go.
+6. **Watch out** — non-obvious conventions, generated code, sharp edges you found.
+End by offering three directions to go deeper.
+
+Focus of the tour: ";
+
 /// The head-agent instructions for `/fleet`; the task follows.
 pub(crate) fn fleet_prompt(n: usize) -> String {
     format!(
@@ -28,6 +41,51 @@ impl Repl {
         out: ReplOutput<'_>,
     ) -> anyhow::Result<bool> {
         match command {
+            "/replay" => {
+                let words: Vec<&str> = rest.split_whitespace().collect();
+                let gif = words.contains(&"--gif");
+                let speed = words
+                    .iter()
+                    .position(|w| *w == "--speed")
+                    .and_then(|i| words.get(i + 1))
+                    .and_then(|s| s.parse::<f64>().ok())
+                    .unwrap_or(1.0);
+                let id = words
+                    .iter()
+                    .find(|w| !w.starts_with("--") && w.parse::<f64>().is_err())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| self.runtime.session_id().to_string());
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let sessions = ws.join(&self.runtime.config().session.history_dir);
+                let opts = dcode_ai_cli::replay::Options {
+                    speed,
+                    title: format!("dcode-ai · {id}"),
+                    ..Default::default()
+                };
+                match dcode_ai_cli::replay::write(&ws, &sessions, &id, &opts, gif) {
+                    Ok((cast, gif_path, note)) => {
+                        out.println(&format!(
+                            "[replay] {} — play it with `dcode-ai replay {id} --play` or `asciinema play`",
+                            cast.display()
+                        ));
+                        if let Some(g) = gif_path {
+                            out.println(&format!("[replay] GIF: {}", g.display()));
+                        }
+                        if let Some(n) = note {
+                            out.println(&format!("[replay] {n}"));
+                        }
+                    }
+                    Err(e) => out.eprintln(&format!("[replay] {e}")),
+                }
+            }
+            "/tour" => {
+                let focus = if rest.trim().is_empty() {
+                    "the whole project"
+                } else {
+                    rest.trim()
+                };
+                self.run_preset(TOUR_PROMPT, focus, out).await?;
+            }
             "/fleet" => {
                 // `/fleet [n] <task>`: n agents at a time (default 3, max 8).
                 let (n, task) = match rest.trim().split_once(char::is_whitespace) {
@@ -1457,6 +1515,13 @@ impl Repl {
             let Some(s) = list.items.iter().find(|s| s.id == id).cloned() else {
                 continue;
             };
+            // A lapsed sign-in would only fail the run: skip it and say why.
+            if let Some(problem) = dcode_ai_cli::signin::known_problem() {
+                notes.push(format!("Scheduled run #{id} skipped: {problem}"));
+                list.started(id, "", now);
+                changed = true;
+                continue;
+            }
             match launch(&ws, &s) {
                 Ok((session, child)) => {
                     notes.push(format!(

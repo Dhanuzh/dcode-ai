@@ -67,6 +67,24 @@ pub fn speakable(text: &str) -> String {
 /// macOS, the speech synthesizer on Windows (also from WSL), `spd-say` or
 /// `espeak` on Linux. The text goes in on stdin, never in a command line.
 pub fn speak(text: &str) -> Result<(), String> {
+    let mut child = speak_child(text)?;
+    // Reap it in the background.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// Reads `text` aloud and returns when it's done (so the microphone
+/// doesn't hear it).
+pub fn speak_and_wait(text: &str) -> Result<(), String> {
+    speak_child(text)?
+        .wait()
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn speak_child(text: &str) -> Result<std::process::Child, String> {
     use std::io::Write;
     let text = speakable(text);
     if text.is_empty() {
@@ -110,11 +128,7 @@ pub fn speak(text: &str) -> Result<(), String> {
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(text.as_bytes());
     }
-    // Reap it in the background.
-    std::thread::spawn(move || {
-        let _ = child.wait();
-    });
-    Ok(())
+    Ok(child)
 }
 
 /// AppleScript string literal.

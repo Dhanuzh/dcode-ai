@@ -534,13 +534,26 @@ pub(crate) fn render_markdown_lines_with_hits(
                             flush_md_render_line(&mut out, &mut hits, &mut current);
                         }
                         let start = out.len();
+                        let lang = code_language.take();
+                        let mermaid = lang
+                            .as_deref()
+                            .is_some_and(|l| l.trim().eq_ignore_ascii_case("mermaid"));
                         render_code_block_lines(
                             &mut out,
                             &mut hits,
-                            code_language.take(),
+                            lang,
                             &code_buf,
                             code_line_numbers,
                         );
+                        if mermaid {
+                            out.push(Line::from(Span::styled(
+                                "◇ diagram — Ctrl+] or /diagram to view it drawn",
+                                Style::default()
+                                    .fg(crate::tui::theme::accent())
+                                    .add_modifier(Modifier::ITALIC),
+                            )));
+                            hits.push(None);
+                        }
                         no_wrap.push(start..out.len());
                         code_buf.clear();
                         out.push(Line::default());

@@ -861,6 +861,9 @@ pub fn run_blocking(
     // dcode-ai is doing.
     let mut herdr = crate::herdr::Reporter::from_env();
     let mut shown_title = String::new();
+    // `[ui] push_url`: since when something waits, and whether it was sent.
+    let mut blocked_since: Option<std::time::Instant> = None;
+    let mut pushed = false;
 
     // Flush the Antigravity-style startup banner once into the terminal's
     // native scrollback (it scrolls away as the conversation grows). Shown on
@@ -968,6 +971,7 @@ pub fn run_blocking(
             timeline_requested,
             office_requested,
             board_requested,
+            diagram_requested,
         ) = state
             .lock()
             .map(|g| {
@@ -977,16 +981,20 @@ pub fn run_blocking(
                     g.timeline_open,
                     g.office_open,
                     g.board_open,
+                    g.diagram_open,
                 )
             })
-            .unwrap_or((false, false, false, false, false));
+            .unwrap_or((false, false, false, false, false, false));
         if overlay_requested
             || diff_requested
             || timeline_requested
             || office_requested
             || board_requested
+            || diagram_requested
         {
-            if board_requested {
+            if diagram_requested {
+                let _ = crate::tui::diagram_overlay::run_diagram_overlay(&state);
+            } else if board_requested {
                 let _ = crate::tui::board_overlay::run_board_overlay(&state, &cmd_tx);
             } else if office_requested {
                 let _ = crate::tui::office_overlay::run_office_overlay(&state);
@@ -1202,16 +1210,43 @@ pub fn run_blocking(
                     .chars()
                     .take(60)
                     .collect();
-                if let Some(h) = herdr.as_mut() {
-                    h.state(state, message, Some(g.session_id.clone()));
-                    h.title(&task);
-                }
                 let folder = g
                     .workspace_root
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("workspace")
                     .to_string();
+                // Away from the terminal and it's waited 30 s: push once.
+                if blocked {
+                    let since = *blocked_since.get_or_insert_with(std::time::Instant::now);
+                    if !pushed
+                        && !terminal_focused
+                        && since.elapsed() >= std::time::Duration::from_secs(30)
+                        && let Some(url) = g.push_url.clone()
+                    {
+                        pushed = true;
+                        let body = format!(
+                            "dcode-ai needs you in {folder}: {}",
+                            message.as_deref().unwrap_or("waiting")
+                        );
+                        tokio::spawn(async move {
+                            let _ = reqwest::Client::new()
+                                .post(url)
+                                .header("Title", "dcode-ai")
+                                .body(body)
+                                .timeout(std::time::Duration::from_secs(10))
+                                .send()
+                                .await;
+                        });
+                    }
+                } else {
+                    blocked_since = None;
+                    pushed = false;
+                }
+                if let Some(h) = herdr.as_mut() {
+                    h.state(state, message, Some(g.session_id.clone()));
+                    h.title(&task);
+                }
                 let title = crate::herdr::terminal_title(state, &folder, &task);
                 if title != shown_title {
                     let _ = crossterm::execute!(

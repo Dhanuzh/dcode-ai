@@ -211,6 +211,9 @@ pub struct WebChat {
     pub guests: std::sync::Mutex<std::collections::HashMap<String, (String, String)>>,
     /// Page tokens let in only to watch and chat (not to ask the agent).
     pub watchers: std::sync::Mutex<std::collections::HashSet<String>>,
+    /// People who drive may also answer approvals and questions
+    /// (`/invite phone`, `/invite web --let-approve`).
+    pub let_approve: bool,
 }
 
 impl WebChat {
@@ -220,6 +223,7 @@ impl WebChat {
             socket,
             guests: Default::default(),
             watchers: Default::default(),
+            let_approve: false,
         }
     }
 
@@ -321,8 +325,9 @@ pub(crate) async fn serve(
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("/");
     let path = target.split('?').next().unwrap_or("/");
-    let posting =
-        method == "POST" && chat.is_some() && matches!(path, "/knock" | "/say" | "/chat" | "/todo");
+    let posting = method == "POST"
+        && chat.is_some()
+        && matches!(path, "/knock" | "/say" | "/chat" | "/todo" | "/act");
     if method != "GET" && !posting {
         return respond(
             &mut write,
@@ -347,7 +352,15 @@ pub(crate) async fn serve(
             let page = PAGE
                 .replace("__TITLE__", &html_escape(title))
                 .replace("__TOKEN__", token)
-                .replace("__CHAT__", if chat.is_some() { "1" } else { "" });
+                .replace("__CHAT__", if chat.is_some() { "1" } else { "" })
+                .replace(
+                    "__APPROVE__",
+                    if chat.as_ref().is_some_and(|c| c.let_approve) {
+                        "1"
+                    } else {
+                        ""
+                    },
+                );
             respond(&mut write, "200 OK", "text/html; charset=utf-8", &page).await
         }
         ("/knock", Some(chat)) => {
@@ -406,6 +419,34 @@ pub(crate) async fn serve(
             }
             respond(&mut write, "200 OK", "application/json", "{\"ok\":true}").await
         }
+        ("/act", Some(chat)) => {
+            // Approve / deny a tool call, or answer a question — only for a
+            // driver on an invite that allows it.
+            if chat.guest(guest_token).is_none()
+                || !chat.can_drive(guest_token)
+                || !chat.let_approve
+            {
+                return respond(&mut write, "403 Forbidden", "text/plain", "not allowed").await;
+            }
+            let mut body = vec![0u8; body_len.min(4000)];
+            reader.read_exact(&mut body).await?;
+            let Some(cmd) = act_command(&body) else {
+                return respond(&mut write, "400 Bad Request", "text/plain", "bad action").await;
+            };
+            let ipc = dcode_ai_runtime::ipc::IpcClient::new(chat.socket.clone());
+            let ok = ipc.send_command(&cmd).await.is_ok();
+            respond(
+                &mut write,
+                "200 OK",
+                "application/json",
+                if ok {
+                    "{\"ok\":true}"
+                } else {
+                    "{\"ok\":false}"
+                },
+            )
+            .await
+        }
         ("/say", Some(chat)) => {
             let Some((person, name)) = chat.guest(guest_token) else {
                 return respond(&mut write, "403 Forbidden", "text/plain", "not let in").await;
@@ -447,6 +488,33 @@ pub(crate) async fn serve(
         }
         _ => respond(&mut write, "404 Not Found", "text/plain", "not found").await,
     }
+}
+
+/// The command for an `/act` body: `{"action":"approve"|"deny","call_id"}`
+/// or `{"action":"answer","question_id","option_id"|"text"}`.
+pub(crate) fn act_command(body: &[u8]) -> Option<dcode_ai_common::event::AgentCommand> {
+    use dcode_ai_common::event::{AgentCommand, QuestionSelection};
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    let s = |k: &str| v[k].as_str().map(str::to_string).filter(|s| !s.is_empty());
+    Some(match v["action"].as_str()? {
+        "approve" => AgentCommand::ApproveToolCall {
+            call_id: s("call_id")?,
+        },
+        "deny" => AgentCommand::DenyToolCall {
+            call_id: s("call_id")?,
+        },
+        "answer" => AgentCommand::AnswerQuestion {
+            question_id: s("question_id")?,
+            selection: match (s("option_id"), s("text")) {
+                (Some(option_id), _) => QuestionSelection::Option { option_id },
+                (None, Some(text)) => QuestionSelection::Custom {
+                    text: text.chars().take(2000).collect(),
+                },
+                (None, None) => QuestionSelection::Suggested,
+            },
+        },
+        _ => return None,
+    })
 }
 
 async fn respond(
@@ -558,6 +626,26 @@ const PAGE: &str = include_str!("watch_page.html");
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn phone_actions_become_commands() {
+        use dcode_ai_common::event::{AgentCommand, QuestionSelection};
+        assert!(matches!(
+            super::act_command(br#"{"action":"approve","call_id":"c1"}"#),
+            Some(AgentCommand::ApproveToolCall { call_id }) if call_id == "c1"
+        ));
+        assert!(matches!(
+            super::act_command(br#"{"action":"deny","call_id":"c1"}"#),
+            Some(AgentCommand::DenyToolCall { .. })
+        ));
+        assert!(matches!(
+            super::act_command(br#"{"action":"answer","question_id":"q","option_id":"o2"}"#),
+            Some(AgentCommand::AnswerQuestion { selection: QuestionSelection::Option { option_id }, .. }) if option_id == "o2"
+        ));
+        assert!(super::act_command(br#"{"action":"approve"}"#).is_none());
+        assert!(super::act_command(br#"{"action":"shutdown"}"#).is_none());
+        assert!(super::act_command(b"nope").is_none());
+    }
+
     use super::*;
 
     async fn get(url: &str) -> (String, String) {

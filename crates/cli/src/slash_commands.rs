@@ -15,6 +15,11 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/btw",
     "/office",
     "/timeline",
+    "/diagram",
+    "/talk",
+    "/standup",
+    "/slack",
+    "/teams",
     "/files",
     "/watch",
     "/invite",
@@ -77,6 +82,8 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/app",
     "/schedule",
     "/fleet",
+    "/tour",
+    "/replay",
     "/second-opinion",
     "/add-dir",
     "/todos",
@@ -146,6 +153,19 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/fork" => "fork the conversation into a new session",
         "/side" => "start an ephemeral side conversation (/side end to return)",
         "/btw" => "ask a quick side question without adding it to the conversation",
+        "/talk" => {
+            "talk to the agent: /talk (into the prompt) · /talk send · /talk loop (hands-free, it answers aloud; say \"stop\")"
+        }
+        "/teams" => {
+            "answer @dcode-ai questions about this project in Microsoft Teams (read-only): /teams on|off · set up with `dcode-ai teams setup`"
+        }
+        "/slack" => {
+            "answer @dcode-ai questions about this project in Slack (read-only): /slack on|off · set up with `dcode-ai slack setup`"
+        }
+        "/standup" => {
+            "turn your day into board cards and Jira comments: /standup voice (talk) · /standup <notes>"
+        }
+        "/diagram" => "view the Mermaid diagrams from replies drawn full screen (also Ctrl+])",
         "/timeline" => {
             "scrub through the session step by step (Enter on your message: rewind there)"
         }
@@ -173,6 +193,10 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/browser" => {
             "the agent's web browser: status, open [url], connect <port>, save [name] (recorded steps), close"
         }
+        "/replay" => {
+            "this session (or another) as a terminal recording to share: /replay [session-id] [--gif] [--speed N]"
+        }
+        "/tour" => "a guided tour of this codebase for a newcomer: /tour [area or question]",
         "/fleet" => {
             "split a task into parallel sub-agents (each in its own worktree), merge as they finish: /fleet [n] <task>"
         }

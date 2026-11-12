@@ -392,6 +392,16 @@ pub struct UiConfig {
     /// an approval is requested while the terminal is unfocused.
     #[serde(default = "default_notifications")]
     pub notifications: bool,
+    /// A push URL (ntfy-style: the message is POSTed as the body) told when
+    /// an approval or question has waited 30 s while you're away from the
+    /// terminal. Only "dcode-ai needs you in <folder>: needs approval:
+    /// <tool>" is sent — no code, no commands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_url: Option<String>,
+    /// Speech-to-text model for `/talk`: `tiny.en` (default, ~40 MB) or
+    /// `base.en` (~290 MB, better).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stt_model: Option<String>,
     /// The "working…" line: `bar` (default), `dots` or `plain` (no animation).
     #[serde(default = "default_working_style")]
     pub working_style: String,
@@ -444,6 +454,8 @@ impl Default for UiConfig {
             statusline_command: None,
             keymap: BTreeMap::new(),
             notifications: default_notifications(),
+            push_url: None,
+            stt_model: None,
             working_style: default_working_style(),
             shimmer: true,
             sounds: false,
@@ -506,6 +518,13 @@ impl UiConfig {
         }
         if let Some(shimmer) = partial.shimmer {
             self.shimmer = shimmer;
+        }
+        if let Some(v) = partial.stt_model {
+            self.stt_model = Some(v).filter(|m| matches!(m.as_str(), "tiny.en" | "base.en"));
+        }
+        if let Some(v) = partial.push_url {
+            self.push_url =
+                Some(v).filter(|u| u.starts_with("https://") || u.starts_with("http://"));
         }
         if let Some(notifications) = partial.notifications {
             self.notifications = notifications;
@@ -2232,6 +2251,8 @@ struct PartialUiConfig {
     statusline_command: Option<String>,
     keymap: Option<BTreeMap<String, String>>,
     notifications: Option<bool>,
+    push_url: Option<String>,
+    stt_model: Option<String>,
     working_style: Option<String>,
     shimmer: Option<bool>,
     sounds: Option<bool>,

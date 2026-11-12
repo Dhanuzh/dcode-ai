@@ -8,6 +8,7 @@
 pub mod adpcm;
 pub mod audio;
 pub mod mixer;
+pub mod stt;
 pub mod vad;
 
 use std::collections::HashMap;

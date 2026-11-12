@@ -340,6 +340,8 @@ pub struct TuiSessionState {
     pub timeline: crate::tui::activity::Timeline,
     /// `/timeline` is open.
     pub timeline_open: bool,
+    /// `/diagram` / Ctrl+]: the Mermaid diagram viewer.
+    pub diagram_open: bool,
     /// The Agent Office (`/office`, dashboard `Alt+5`).
     pub office: crate::tui::office::Office,
     /// Esc stopped the running shell command at this moment (a second Esc
@@ -518,6 +520,8 @@ pub struct TuiSessionState {
     pub mouse_capture_on: bool,
     /// Desktop notifications (OSC 9 + bell) on turn-done/approval while unfocused.
     pub notifications_enabled: bool,
+    /// `[ui] push_url`: told when something waits for you while you're away.
+    pub push_url: Option<String>,
     /// `[ui] working_style`: `bar`, `dots` or `plain`.
     pub working_style: String,
     /// `[ui] shimmer`.

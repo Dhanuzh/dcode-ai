@@ -40,6 +40,11 @@
   .tool.bad::after { content: " ✗"; color: var(--bad); }
   .tool.run::after { content: " …"; color: var(--accent); }
   .note { color: var(--warn); font-size: 13px; margin: 0 0 10px 14px; }
+  .ask { border: 2px solid var(--warn); border-radius: 10px; padding: 12px; margin: 0 0 12px; }
+  .ask .what { font-weight: 600; margin-bottom: 6px; word-break: break-word; }
+  .ask button { font-size: 16px; padding: 10px 18px; margin: 6px 8px 0 0; border-radius: 8px; border: 0; cursor: pointer; }
+  .ask .yes { background: #3f9b5a; color: #fff; } .ask .no { background: #b94a48; color: #fff; }
+  .ask .opt { background: var(--panel, #333); color: inherit; border: 1px solid var(--warn); }
   .err { color: var(--bad); margin: 0 0 10px 14px; }
   .typing { opacity: .85; }
   aside { border-left: 1px solid var(--line); padding: 16px 18px; position: sticky; top: 49px;
@@ -106,7 +111,7 @@
   <input id="say" placeholder="message the agent · /chat <text> to people · /todo <text>" maxlength="4000" hidden>
   <button id="send" type="button" hidden>Send</button>
 </div>
-<footer>Read-only live view of a dcode-ai session · nothing here can change it</footer>
+<footer id="foot">Read-only live view of a dcode-ai session · nothing here can change it</footer>
 <script>
 (() => {
   const log = document.getElementById('log');
@@ -183,8 +188,22 @@
         if (d) { d.classList.remove('run'); d.classList.add(ev.output && ev.output.success ? 'ok' : 'bad'); }
         break;
       }
-      case 'ApprovalRequested': add(el('note', '⏸ waiting for approval: ' + ev.tool)); break;
-      case 'QuestionRequested': add(el('note', '? waiting for an answer')); break;
+      case 'ApprovalRequested':
+        if (canAct()) askCard('approval-' + ev.call_id, '⏸ ' + (ev.description || ('approve ' + ev.tool)), [
+          ['Allow', 'yes', { action: 'approve', call_id: ev.call_id }],
+          ['Deny', 'no', { action: 'deny', call_id: ev.call_id }]]);
+        else add(el('note', '⏸ waiting for approval: ' + ev.tool));
+        break;
+      case 'ApprovalResolved': closeCard('approval-' + ev.call_id); break;
+      case 'QuestionRequested': {
+        const q = ev.question || {};
+        if (canAct()) askCard('question-' + q.question_id, '? ' + (q.prompt || 'a question'),
+          (q.options || []).map(o => [o.label, 'opt', { action: 'answer', question_id: q.question_id, option_id: o.id }])
+            .concat(q.suggested_answer ? [['Suggested: ' + q.suggested_answer, 'yes', { action: 'answer', question_id: q.question_id }]] : []));
+        else add(el('note', '? waiting for an answer'));
+        break;
+      }
+      case 'QuestionResolved': closeCard('question-' + ev.question_id); break;
       case 'ContextCompaction': if (ev.phase === 'completed') add(el('note', '⟳ ' + ev.message)); break;
       case 'ChildSessionSpawned': add(el('note', '◇ sub-agent: ' + (ev.task || ''))); break;
       case 'Error': add(el('err', '✗ ' + ev.message)); break;
@@ -259,6 +278,48 @@
   let src = null;
   // `/invite web`: this page may ask to join and send messages.
   const CHAT = '__CHAT__' === '1';
+  // `/invite phone`: a driver here may also answer approvals and questions.
+  const APPROVE = '__APPROVE__' === '1';
+  if (CHAT) document.getElementById('foot').textContent = APPROVE ? 'Live dcode-ai session · people let in to drive can answer approvals here' : 'Live dcode-ai session';
+  let connectedAt = 0;
+  const canAct = () => APPROVE && guest && !watching;
+  // Get attention when something new waits (not for the history replayed on
+  // connect): vibrate, a short beep, a blinking title.
+  let audio = null, blink = null;
+  document.addEventListener('click', () => { try { audio = audio || new (window.AudioContext || window.webkitAudioContext)(); } catch (_) {} }, { once: true });
+  function alertMe(text) {
+    if (Date.now() - connectedAt < 3000) return;
+    try { navigator.vibrate && navigator.vibrate([200, 100, 200]); } catch (_) {}
+    try {
+      if (audio) { const o = audio.createOscillator(), g = audio.createGain(); o.frequency.value = 880; g.gain.value = 0.15;
+        o.connect(g); g.connect(audio.destination); o.start(); o.stop(audio.currentTime + 0.25); }
+    } catch (_) {}
+    try { if (window.Notification && Notification.permission === 'granted') new Notification('dcode-ai needs you', { body: text }); } catch (_) {}
+    const base = document.title;
+    clearInterval(blink);
+    let on = false;
+    blink = setInterval(() => { document.title = (on = !on) ? '● dcode-ai needs you' : base; }, 800);
+    setTimeout(() => { clearInterval(blink); document.title = base; }, 30000);
+  }
+  function askCard(id, text, buttons) {
+    if (!id || document.getElementById(id)) return;
+    const c = el('ask', ''); c.id = id;
+    c.appendChild(el('what', text.slice(0, 400)));
+    buttons.forEach(([label, cls, body]) => {
+      const b = document.createElement('button'); b.className = cls; b.textContent = label;
+      b.addEventListener('click', async () => {
+        c.querySelectorAll('button').forEach(x => x.disabled = true);
+        try {
+          const r = await fetch('/act?t=__TOKEN__&p=' + encodeURIComponent(guest), { method: 'POST', body: JSON.stringify(body) });
+          if (!r.ok) { c.appendChild(el('note', 'Not allowed.')); c.querySelectorAll('button').forEach(x => x.disabled = false); }
+        } catch (_) { c.querySelectorAll('button').forEach(x => x.disabled = false); }
+      });
+      c.appendChild(b);
+    });
+    add(c);
+    alertMe(text);
+  }
+  function closeCard(id) { const c = document.getElementById(id); if (c) c.remove(); }
   let guest = '';
   try { guest = sessionStorage.getItem('dcode-ai-guest') || ''; } catch (_) {}
   function connect() {
@@ -267,7 +328,7 @@
     log.textContent = ''; files.clear(); tools.clear(); toolCount = 0; typing = null; todos.length = 0;
     const q = (myName ? '&name=' + encodeURIComponent(myName) : '') + (guest ? '&p=' + encodeURIComponent(guest) : '');
     src = new EventSource('/events?t=__TOKEN__' + q);
-    src.onopen = () => setState('live', 'on');
+    src.onopen = () => { setState('live', 'on'); connectedAt = Date.now(); };
     src.onerror = () => setState('reconnecting…', '');
     src.onmessage = (m) => { try { const env = JSON.parse(m.data); handle(env.event || env); } catch (_) {} };
   }

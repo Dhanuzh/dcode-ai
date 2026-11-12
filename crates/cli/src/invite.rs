@@ -715,10 +715,9 @@ async fn host_on(
         .map(|t| format!("http://{ip}:{port}/?t={t}"));
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let web_chat = opts.web.then(|| {
-        Arc::new(crate::watch::WebChat::new(
-            opts.knocks.clone(),
-            opts.socket.clone(),
-        ))
+        let mut chat = crate::watch::WebChat::new(opts.knocks.clone(), opts.socket.clone());
+        chat.let_approve = opts.let_approve;
+        Arc::new(chat)
     });
     let shared = Arc::new(Host {
         web_chat,

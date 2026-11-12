@@ -156,6 +156,7 @@ pub(crate) enum ReviewKind {
 }
 
 /// Where slash-command and preset output goes (TTY transcript vs full-screen TUI).
+#[derive(Clone, Copy)]
 pub(crate) enum ReplOutput<'a> {
     Stdio,
     Tui(&'a Arc<Mutex<TuiSessionState>>),
@@ -441,6 +442,10 @@ pub struct Repl {
     background_jobs: Vec<BackgroundJob>,
     /// Scheduled runs going right now: schedule id, session id, process.
     schedule_runs: Vec<(u32, String, std::process::Child)>,
+    /// `/slack on`: answering Slack mentions.
+    slack: Option<tokio::task::JoinHandle<()>>,
+    /// `/teams on`: answering Teams mentions.
+    teams: Option<tokio::task::JoinHandle<()>>,
     /// When the schedules were last looked at.
     schedules_checked: Option<std::time::Instant>,
     next_job_id: u32,
@@ -477,6 +482,8 @@ impl Repl {
             current_agent_label,
             background_jobs: Vec::new(),
             schedule_runs: Vec::new(),
+            slack: None,
+            teams: None,
             schedules_checked: None,
             next_job_id: 1,
             side_snapshots: Vec::new(),
@@ -1028,9 +1035,9 @@ impl Repl {
             | "/plugins" | "/plugin" | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
-            "/office" | "/timeline" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff"
-            | "/invite" | "/chat" | "/todo" | "/people" | "/kick" | "/call" | "/mute"
-            | "/hangup" => {
+            "/office" | "/timeline" | "/diagram" | "/talk" | "/standup" | "/slack" | "/teams"
+            | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff" | "/invite" | "/chat"
+            | "/todo" | "/people" | "/kick" | "/call" | "/mute" | "/hangup" => {
                 return self.cmd_team(input, command, rest, parts, out).await;
             }
             "/btw" => {
@@ -1054,7 +1061,7 @@ impl Repl {
             }
             "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/goal"
             | "/plan" | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit"
-            | "/board" | "/schedule" | "/fleet" => {
+            | "/board" | "/schedule" | "/fleet" | "/tour" | "/replay" => {
                 return self.cmd_work(input, command, rest, parts, out).await;
             }
             _ => {
@@ -1374,6 +1381,22 @@ impl Repl {
         }
         // sudo in agent / `!` commands asks through the TUI's password popup.
         crate::askpass::start(tui_state.clone());
+        // A sign-in about to lapse (checked once a day, in the background).
+        {
+            let st = tui_state.clone();
+            let cfg = self.runtime.config().clone();
+            tokio::spawn(async move {
+                let warnings = dcode_ai_cli::signin::warnings(&cfg, false).await;
+                if !warnings.is_empty()
+                    && let Ok(mut g) = st.lock()
+                {
+                    for w in warnings {
+                        g.push_block(crate::tui::state::DisplayBlock::System(w));
+                    }
+                    g.touch_transcript();
+                }
+            });
+        }
         // The inline view always leaves the mouse to the terminal: the
         // conversation lives in the terminal's own scrollback, so only the
         // terminal can scroll it (and select text in it). `[ui]
@@ -1384,6 +1407,7 @@ impl Repl {
         if let Ok(mut g) = tui_state.lock() {
             g.mouse_capture_on = effective_mouse_capture;
             g.notifications_enabled = self.runtime.config().ui.notifications;
+            g.push_url = self.runtime.config().ui.push_url.clone();
             g.working_style = self.runtime.config().ui.working_style.clone();
             g.shimmer = self.runtime.config().ui.shimmer;
             g.sounds = self.runtime.config().ui.sounds;

@@ -471,6 +471,37 @@ enum Command {
     },
     /// Show OAuth auth status.
     Auth,
+    /// Answer `@dcode-ai` questions about this project in Slack (read-only).
+    Slack {
+        #[command(subcommand)]
+        command: SlackCmd,
+    },
+    /// Answer `@dcode-ai` questions about this project in Microsoft Teams
+    /// (read-only; an outgoing webhook through a tunnel).
+    Teams {
+        #[command(subcommand)]
+        command: SlackCmd,
+    },
+    /// A session as a terminal recording (asciinema `.cast`; `--gif` with
+    /// agg; `--play` plays it here).
+    Replay {
+        /// Session id (default: the latest).
+        session: Option<String>,
+        #[arg(long)]
+        gif: bool,
+        #[arg(long)]
+        play: bool,
+        #[arg(long, default_value_t = 1.0)]
+        speed: f64,
+    },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum SlackCmd {
+    /// Create the Slack app and save its tokens.
+    Setup,
+    /// Answer mentions in this folder until stopped.
+    Serve,
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -1273,6 +1304,61 @@ async fn try_main() -> anyhow::Result<()> {
         }
         Some(Command::Auth) => {
             oauth_login::show_auth_status()?;
+        }
+        Some(Command::Teams { command }) => match command {
+            SlackCmd::Setup => dcode_ai_cli::teams::setup().await?,
+            SlackCmd::Serve => {
+                let Some(cfg) = dcode_ai_cli::teams::TeamsConfig::load() else {
+                    anyhow::bail!("run `dcode-ai teams setup` first");
+                };
+                let report: dcode_ai_cli::slack::Report =
+                    std::sync::Arc::new(|s: String| eprintln!("[teams] {s}"));
+                dcode_ai_cli::teams::serve(cfg, workspace_root.clone(), report)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+            }
+        },
+        Some(Command::Slack { command }) => match command {
+            SlackCmd::Setup => dcode_ai_cli::slack::setup().await?,
+            SlackCmd::Serve => {
+                let Some(cfg) = dcode_ai_cli::slack::SlackConfig::load() else {
+                    anyhow::bail!("run `dcode-ai slack setup` first");
+                };
+                let report: dcode_ai_cli::slack::Report =
+                    std::sync::Arc::new(|s: String| eprintln!("[slack] {s}"));
+                dcode_ai_cli::slack::serve(cfg, workspace_root.clone(), report)
+                    .await
+                    .map_err(|e| anyhow::anyhow!(e))?;
+            }
+        },
+        Some(Command::Replay {
+            session,
+            gif,
+            play,
+            speed,
+        }) => {
+            let sessions = workspace_root.join(&config.session.history_dir);
+            let Some(id) = session.or_else(|| dcode_ai_cli::replay::latest_session(&sessions))
+            else {
+                anyhow::bail!("no sessions in {}", sessions.display());
+            };
+            let opts = dcode_ai_cli::replay::Options {
+                speed,
+                title: format!("dcode-ai · {id}"),
+                ..Default::default()
+            };
+            let (cast, gif_path, note) =
+                dcode_ai_cli::replay::write(&workspace_root, &sessions, &id, &opts, gif)?;
+            if play {
+                dcode_ai_cli::replay::play(&cast, 1.0)?;
+            }
+            println!("recording: {}", cast.display());
+            if let Some(g) = gif_path {
+                println!("gif: {}", g.display());
+            }
+            if let Some(n) = note {
+                println!("{n}");
+            }
         }
         None => {
             // --pipe mode: read prompt from stdin, print response, exit.
@@ -2922,6 +3008,17 @@ async fn show_doctor(
             }
         } else if !check {
             println!("Provider health: run `dcode-ai doctor --check` for live probes");
+        }
+        let signins = dcode_ai_cli::signin::check(config, true).await;
+        if !signins.is_empty() {
+            println!("Sign-ins:");
+            let now = chrono::Utc::now();
+            for s in &signins {
+                println!("  {}", dcode_ai_cli::signin::doctor_line(s, now));
+                if let Some(w) = dcode_ai_cli::signin::warning(s, now) {
+                    println!("    {w}");
+                }
+            }
         }
         println!("Skills discovered: {}", output.skill_count);
         println!("MCP servers enabled: {}", output.mcp_server_count);

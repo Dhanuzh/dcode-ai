@@ -3,6 +3,16 @@
 
 use super::*;
 
+/// `/standup`: turn what you said (or typed) about your day into board
+/// cards, Jira comments and a stand-up note.
+const STANDUP_PROMPT: &str = "Here is my stand-up, spoken or typed — rough notes about what I did, what I'm doing next and what blocks me. Turn it into action:
+1. Write a short stand-up note: **Yesterday** · **Today** · **Blockers** (bullets, my words tidied, nothing invented).
+2. Look at the task board (`board_view`). For work I mentioned that matches a card: update it (`board_update` — status, a note). For new work I said I'll do: add cards (`board_add`) in To do.
+3. For Jira tickets I named (or cards linked to Jira) where a comment would help the team, draft the comments — then ask me once (`ask_question`) which to post before posting any.
+4. End with what you changed and the stand-up note to paste.
+
+What I said: ";
+
 /// Who is handing a session over: git's user name, else the login name.
 fn handoff_author(workspace: &std::path::Path) -> String {
     dcode_ai_cli::people::my_name(workspace)
@@ -44,6 +54,15 @@ impl Repl {
                     g.office_open = true;
                 } else {
                     out.println("[office] the office needs the full-screen terminal UI");
+                }
+            }
+            "/diagram" => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.diagram_open = true;
+                } else {
+                    out.println("[diagram] the diagram viewer needs the full-screen terminal UI");
                 }
             }
             "/timeline" => {
@@ -128,6 +147,202 @@ impl Repl {
                     "[sounds] {} (saved to your config)",
                     if on { "on" } else { "off" }
                 ));
+            }
+            "/slack" => match rest.trim() {
+                "off" | "stop" => {
+                    if let Some(h) = self.slack.take() {
+                        h.abort();
+                        out.println("[slack] stopped answering");
+                    } else {
+                        out.println("[slack] not running");
+                    }
+                }
+                "on" | "" => {
+                    if self.slack.as_ref().is_some_and(|h| !h.is_finished()) {
+                        out.println("[slack] already answering — /slack off stops it");
+                        return Ok(true);
+                    }
+                    let Some(cfg) = dcode_ai_cli::slack::SlackConfig::load() else {
+                        out.println(
+                            "[slack] not set up — run `dcode-ai slack setup` in a terminal first",
+                        );
+                        return Ok(true);
+                    };
+                    let report: dcode_ai_cli::slack::Report = match &out {
+                        ReplOutput::Tui(st) => {
+                            let st = (*st).clone();
+                            std::sync::Arc::new(move |s: String| {
+                                if let Ok(mut g) = st.lock() {
+                                    g.push_block(crate::tui::state::DisplayBlock::System(format!(
+                                        "[slack] {s}"
+                                    )));
+                                    g.touch_transcript();
+                                }
+                            })
+                        }
+                        ReplOutput::Stdio => {
+                            std::sync::Arc::new(|s: String| eprintln!("[slack] {s}"))
+                        }
+                    };
+                    let ws = self.runtime.workspace_root().to_path_buf();
+                    let r2 = report.clone();
+                    self.slack = Some(tokio::spawn(async move {
+                        if let Err(e) = dcode_ai_cli::slack::serve(cfg, ws, r2.clone()).await {
+                            r2(format!("stopped: {e}"));
+                        }
+                    }));
+                    out.println("[slack] answering @dcode-ai mentions about this project (read-only) for the people you allowed · /slack off stops");
+                }
+                _ => out.println("usage: /slack on|off — set up once with `dcode-ai slack setup`"),
+            },
+            "/teams" => match rest.trim() {
+                "off" | "stop" => {
+                    if let Some(h) = self.teams.take() {
+                        h.abort();
+                        out.println("[teams] stopped answering");
+                    } else {
+                        out.println("[teams] not running");
+                    }
+                }
+                "on" | "" => {
+                    if self.teams.as_ref().is_some_and(|h| !h.is_finished()) {
+                        out.println("[teams] already answering — /teams off stops it");
+                        return Ok(true);
+                    }
+                    let Some(cfg) = dcode_ai_cli::teams::TeamsConfig::load() else {
+                        out.println(
+                            "[teams] not set up — run `dcode-ai teams setup` in a terminal first",
+                        );
+                        return Ok(true);
+                    };
+                    let report: dcode_ai_cli::slack::Report = match &out {
+                        ReplOutput::Tui(st) => {
+                            let st = (*st).clone();
+                            std::sync::Arc::new(move |s: String| {
+                                if let Ok(mut g) = st.lock() {
+                                    g.push_block(crate::tui::state::DisplayBlock::System(format!(
+                                        "[teams] {s}"
+                                    )));
+                                    g.touch_transcript();
+                                }
+                            })
+                        }
+                        ReplOutput::Stdio => {
+                            std::sync::Arc::new(|s: String| eprintln!("[teams] {s}"))
+                        }
+                    };
+                    let ws = self.runtime.workspace_root().to_path_buf();
+                    let r2 = report.clone();
+                    self.teams = Some(tokio::spawn(async move {
+                        if let Err(e) = dcode_ai_cli::teams::serve(cfg, ws, r2.clone()).await {
+                            r2(format!("stopped: {e}"));
+                        }
+                    }));
+                    out.println("[teams] answering @dcode-ai mentions about this project (read-only) for the people you allowed — keep your tunnel running · /teams off stops");
+                }
+                _ => out.println("usage: /teams on|off — set up once with `dcode-ai teams setup`"),
+            },
+            "/talk" | "/standup" => {
+                let model = self
+                    .runtime
+                    .config()
+                    .ui
+                    .stt_model
+                    .clone()
+                    .unwrap_or_else(|| "tiny.en".into());
+                let sub = rest.trim();
+                if command == "/standup" && sub != "voice" {
+                    if sub.is_empty() {
+                        out.println(
+                            "usage: /standup voice (talk through your day) · /standup <your notes>",
+                        );
+                    } else {
+                        self.run_preset(STANDUP_PROMPT, sub, out).await?;
+                    }
+                    return Ok(true);
+                }
+                let progress = |s: String| out.println(&format!("[talk] {s}"));
+                let (max, quiet) = if command == "/standup" {
+                    (
+                        std::time::Duration::from_secs(180),
+                        std::time::Duration::from_secs(3),
+                    )
+                } else {
+                    (
+                        std::time::Duration::from_secs(90),
+                        std::time::Duration::from_millis(1500),
+                    )
+                };
+                let listen = || dcode_ai_cli::voice::stt::listen(&model, max, quiet, progress);
+                if command == "/standup" {
+                    match listen().await {
+                        Ok(t) if !t.is_empty() => {
+                            out.println(&format!("[talk] you said: {t}"));
+                            self.run_preset(STANDUP_PROMPT, &t, out).await?;
+                        }
+                        Ok(_) => out.println("[talk] didn't catch that — try again"),
+                        Err(e) => out.eprintln(&format!("[talk] {e}")),
+                    }
+                    return Ok(true);
+                }
+                match sub {
+                    // Hands-free: listen → send → read the reply → listen.
+                    "loop" => {
+                        out.println("[talk] hands-free — say \"stop\" to end");
+                        for _ in 0..30 {
+                            let text = match listen().await {
+                                Ok(t) => t,
+                                Err(e) => {
+                                    out.eprintln(&format!("[talk] {e}"));
+                                    break;
+                                }
+                            };
+                            if text.is_empty() {
+                                continue;
+                            }
+                            if dcode_ai_cli::voice::stt::is_stop(&text) {
+                                out.println("[talk] ended");
+                                break;
+                            }
+                            out.println(&format!("[talk] you: {text}"));
+                            self.run_preset("", &text, out).await?;
+                            let reply = self
+                                .runtime
+                                .messages()
+                                .iter()
+                                .rev()
+                                .find(|m| m.role == dcode_ai_common::message::Role::Assistant)
+                                .map(|m| m.content.to_summary_text())
+                                .unwrap_or_default();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                crate::tui::notify::speak_and_wait(&reply)
+                            })
+                            .await;
+                        }
+                    }
+                    _ => match listen().await {
+                        Ok(t) if t.is_empty() => {
+                            out.println("[talk] didn't catch that — try again")
+                        }
+                        Ok(t) if sub == "send" => {
+                            out.println(&format!("[talk] you: {t}"));
+                            self.run_preset("", &t, out).await?;
+                        }
+                        Ok(t) => {
+                            if let ReplOutput::Tui(st) = &out
+                                && let Ok(mut g) = st.lock()
+                            {
+                                g.set_input_text(t.clone());
+                                out.println(
+                                    "[talk] in the prompt — edit it or press Enter to send",
+                                );
+                            } else {
+                                out.println(&format!("[talk] {t}"));
+                            }
+                        }
+                        Err(e) => out.eprintln(&format!("[talk] {e}")),
+                    },
+                }
             }
             "/speak" => {
                 let last = self
@@ -237,8 +452,11 @@ impl Repl {
                     );
                     return Ok(true);
                 };
-                let web = words.contains(&"web");
-                let let_approve = words.contains(&"--let-approve");
+                // `/invite phone`: the web page, with approvals, for you on
+                // your phone.
+                let phone = words.contains(&"phone");
+                let web = phone || words.contains(&"web");
+                let let_approve = phone || words.contains(&"--let-approve");
                 let port: u16 = words.iter().find_map(|w| w.parse().ok()).unwrap_or(0);
                 // A new invite replaces the old one (and its key).
                 self.invite = None;
@@ -306,6 +524,9 @@ impl Repl {
                             out.println(&format!(
                                 "[invite] in a browser (no install; plain HTTP, so people on this network could read it): {url}"
                             ));
+                            if phone {
+                                out.println("[invite] phone: scan the code (same Wi-Fi, or Tailscale), tap \"Ask to join\" and let yourself in to drive — approvals and questions then show there with Allow / Deny, with a buzz when one waits (keep the page open)");
+                            }
                         }
                         out.println(&format!(
                             "[invite] open on port {} — send this line to whoever should join (copied):",

@@ -1,5 +1,55 @@
 # Changelog
 
+## 1.0.63 — 2026-11-12
+
+### New
+- **Talk to the agent (`/talk`)**: speak instead of typing. Speech is
+  turned into text on your machine by Whisper (run in Rust; the ~40 MB
+  model downloads once to `~/.dcode-ai/models/`) — audio never leaves the
+  computer. `/talk` puts what you said in the prompt to check, `/talk send`
+  sends it, `/talk loop` is hands-free: it answers aloud and listens again
+  until you say "stop". `[ui] stt_model = "base.en"` for a bigger, more
+  accurate model.
+- **Voice stand-up (`/standup voice`)**: talk through your day; the agent
+  writes the Yesterday / Today / Blockers note, updates and adds board
+  cards, and drafts Jira comments — asking before it posts any.
+  `/standup <notes>` does the same from typed notes.
+- **Diagrams in the terminal (`/diagram`, Ctrl+])**: Mermaid flowcharts
+  and sequence diagrams from replies drawn full screen with boxes and
+  arrows; Tab between diagrams, `c` copies the source. Replies with a
+  diagram show a hint under it. Other diagram kinds show their source.
+- **Approvals on your phone (`/invite phone`)**: scan the code, let yourself
+  in, and approvals and questions show on the page with Allow / Deny — it
+  buzzes and blinks when one waits. `[ui] push_url` (an ntfy-style URL)
+  also gets "dcode-ai needs you in <folder>" when something has waited 30 s
+  while you're away from the terminal — no code or commands are sent.
+- **Codebase tour (`/tour [area]`)**: a guided, read-only walk through the
+  project for a newcomer — what it is, the map, what to read first, one
+  request end to end, where tests and config live.
+- **Slack (`/slack on`)**: `@dcode-ai <question>` in a channel gets an
+  answer about this project in the thread, read from the code on your
+  machine (read-only). Socket Mode: no public URL or open port. Only the
+  Slack members you allow can ask. Set up once with `dcode-ai slack setup`
+  (it prints the app manifest to paste); `dcode-ai slack serve` runs it
+  without a session.
+- **Microsoft Teams (`/teams on`)**: the same for Teams — `@dcode-ai
+  <question>` in a channel, answered read-only from your machine. Teams can
+  only reach a bot over public HTTPS, so it uses an *outgoing webhook* (a
+  team owner adds it; no admin or Azure) through a tunnel you run
+  (Tailscale Funnel, a dev tunnel or a Cloudflare tunnel); every request
+  must carry the webhook's signature. Teams waits only 5 s, so it replies
+  "looking into it" at once and posts the answer to the channel through a
+  Workflows webhook. Set up with `dcode-ai teams setup`; `dcode-ai teams
+  serve` runs it without a session.
+- **Replays (`/replay`)**: a session as a terminal recording (asciinema
+  `.cast`) with the long pauses shortened — `dcode-ai replay <id> --play`
+  plays it, `--gif` makes a GIF when `agg` is installed.
+- **Sign-in expiry warning**: when your Claude sign-in (through `claude`)
+  expires within 10 days — or the Copilot sign-in was revoked — dcode-ai
+  says so at start with the command to renew; `dcode-ai doctor` lists each
+  sign-in and when it expires; a scheduled run is skipped (and you're told)
+  instead of failing on a lapsed sign-in.
+
 ## 1.0.62 — 2026-11-12
 
 ### New
