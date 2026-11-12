@@ -8,7 +8,7 @@ One binary · your Claude or GitHub Copilot sign-in · no API keys, no Electron,
 
 [![Release](https://img.shields.io/github/v/release/Dhanuzh/dcode-ai?style=for-the-badge&color=d97757&labelColor=211d1b)](https://github.com/Dhanuzh/dcode-ai/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/Dhanuzh/dcode-ai/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=211d1b)](https://github.com/Dhanuzh/dcode-ai/actions)
-[![Rust](https://img.shields.io/badge/rust-1.88%2B-e8e2dc?style=for-the-badge&logo=rust&logoColor=white&labelColor=211d1b)](https://www.rust-lang.org)
+[![Rust](https://img.shields.io/badge/rust-1.91%2B-e8e2dc?style=for-the-badge&logo=rust&logoColor=white&labelColor=211d1b)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-7fbf7f?style=for-the-badge&labelColor=211d1b)](#license)
 
 **[Install](#-install)** · **[Quick start](#-quick-start)** · **[Highlights](#-highlights)** · **[Features](#-features)** · **[Work together](#-work-together)** · **[Configuration](#%EF%B8%8F-configuration)** · **[Docs](#-documentation)** · **[Changelog](CHANGELOG.md)**
@@ -42,13 +42,13 @@ Plugins, marketplaces, `.mcp.json`, skills, commands, agents and hooks work unch
 <td width="50%" valign="top">
 
 ### 🚀 Built to spawn work
-Detached sessions, sub-agents in isolated git worktrees, background agents, `/goal` loops, NDJSON streams, Unix-socket IPC and a CI mode.
+Detached sessions, sub-agents in isolated git worktrees, background agents, `/goal` loops, `/schedule` runs, NDJSON streams, Unix-socket IPC and a CI mode.
 
 </td>
 <td width="50%" valign="top">
 
 ### ⚡ Small, fast, careful with credit
-One Rust binary that starts instantly. The model's whole context window (1M on Claude 5.x) with early compaction so turns stay cheap, a tool list that never breaks the prompt cache, idle compaction before the cache expires, sub-agent budgets, and `/cost today|week` shows where every token went.
+One Rust binary that starts instantly. The model's whole context window (1M on Claude 5.x) with early compaction so turns stay cheap, a tool list that never breaks the prompt cache, keep-warm pings and idle compaction so a pause doesn't cost the cache, Code Mode scripts and `browser_task` helpers that keep tool output out of the context, sub-agent budgets, and `/cost today|week` shows where every token went.
 
 </td>
 </tr>
@@ -98,7 +98,7 @@ curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | D
 # user-local, no sudo
 curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | DCODE_AI_INSTALL_DIR="$HOME/.local/bin" bash
 
-# from source (Rust 1.88+)
+# from source (Rust 1.91+)
 cargo build --release
 sudo cp target/release/dcode-ai /usr/local/bin/
 ```
@@ -186,7 +186,7 @@ Sub-agents work in their own git worktrees and you merge, keep or discard their 
 <td valign="top">
 
 #### 🌐 A real browser — and desktop apps
-The agent drives Chrome or Edge, sees screenshots, follows your tabs, and records steps you can replay. `/app open vscode|slack|teams|outlook|…` lets it drive Electron and WebView2 desktop apps the same way.
+The agent drives Chrome or Edge, sees screenshots, follows your tabs, and records steps you can replay. `/app open vscode|slack|teams|outlook|…` (or just asking it) lets it drive Electron and WebView2 desktop apps the same way — `--new` opens a separate copy beside your own, `/app connect` attaches to one already running. Long web or app jobs run in a `browser_task` helper.
 
 </td>
 <td valign="top">
@@ -286,7 +286,8 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **The `/resume` picker:** a tree of sessions with their forks and sub-agents, search over titles, content *and the files they changed*, and auto-generated titles.
 - **Checkpoints that last:** `/undo`, `/redo` and `/rewind` keep their snapshots on disk, so they work after a restart or `/resume`, and across compactions.
 - **The whole window, at a sensible cost:** the model's full context window (1M for Claude 5.x; Copilot's own limit per model) with compaction at `compact_at_tokens` (160k) so each turn stays cheap; a tool loop may grow to 400k before compacting mid-work. `/context window full|200k|<n>` changes it for a session.
-- **Idle compaction:** a long conversation left idle is compacted once, just before the provider's prompt cache expires, so your next turn starts small.
+- **Keep-warm:** on the Anthropic API backend, a pause of 4½ minutes while you're at the terminal gets a cache-price ping that keeps the prompt cache alive (up to 3 per pause, shown in `/cost` as keep-warm), so the next turn doesn't pay full price.
+- **Idle compaction:** a long conversation left idle after that is compacted once, just before the provider's prompt cache expires, so your next turn starts small.
 - **Small logs:** only what resume needs is stored. `dcode-ai sessions --tidy` shrinks old logs.
 - **`/export` and `/share`** as Markdown with secrets masked, to a file, the clipboard or a secret gist.
 
@@ -295,7 +296,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **Sub-agents** in isolated git worktrees, with parent/child lineage. Merge, keep or discard their changes. They can run in the background while you keep chatting, within a token and time budget (`[harness] subagent_max_tokens`, `subagent_max_minutes`); `x` in the sub-agents list stops one.
 - **`/goal <objective>`** keeps working across turns until it's done, within a budget you set.
 - **Fallback models** take over when the main one is overloaded. **`/btw`** answers a side question without derailing the turn.
-- **Browser control:** a real Chrome or Edge window. The agent waits for text to appear, takes screenshots it can see, and records steps you replay with `/browser save`.
+- **Browser and app control:** a real Chrome or Edge window, or a desktop app (`/app open <name> [--new]`, `/app connect <name> <port>`, or the agent opens it itself). The agent waits for text to appear, takes screenshots it can see, and records steps you replay with `/browser save`.
 - **`browser_task`:** multi-step browser or app work runs in a helper sub-agent; only its short report enters the conversation, so page dumps and screenshots don't fill your context (`[harness] browser_task_model` for a cheaper model).
 - **Code Mode (`run_script`):** the agent chains several tool calls in one short JavaScript script (run by Boa, a pure-Rust engine) and only the result comes back. Scripts can call only what your mode allows without asking. `[harness] code_mode = false` turns it off.
 - **Scheduled runs:** `/schedule add "weekdays 09:00" <prompt>` (also `daily`, `mon 18:30`, `every 2h`, cron) runs a prompt in the background while dcode-ai is open in the project — read-only by default, `--auto` for auto mode.
@@ -348,11 +349,15 @@ sandbox_bash = true
 [memory.context]
 max_window = "full"            # the model's whole window; or "200k", or tokens
 compact_at_tokens = 160000     # compact early so each turn stays cheap (0 = only at the window's own point)
+keep_warm = true               # API backend: keep the prompt cache alive through short pauses
+keep_warm_max = 3              # pings per pause, then idle compaction
 idle_compaction = true         # compact once before the prompt cache expires
 
 [harness]
 subagent_max_tokens = 2000000  # per sub-agent; 0 = no limit
 subagent_max_minutes = 20
+code_mode = true               # offer run_script (chain tool calls in one script)
+# browser_task_model = "claude-haiku-5-5"   # cheaper model for browser_task helpers
 
 [ui]
 theme = "claude"
