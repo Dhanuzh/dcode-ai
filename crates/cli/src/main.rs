@@ -471,6 +471,24 @@ enum Command {
     },
     /// Show OAuth auth status.
     Auth,
+    /// Sessions running in the background (they outlive the terminal):
+    /// list, attach, stop.
+    Bg {
+        #[command(subcommand)]
+        command: Option<BgCmd>,
+    },
+    /// (internal) The background host of a session.
+    #[command(name = "__host", hide = true)]
+    HostRun {
+        #[arg(long)]
+        id: String,
+        #[arg(long, default_value_t = 100)]
+        cols: u16,
+        #[arg(long, default_value_t = 30)]
+        rows: u16,
+        #[arg(last = true)]
+        args: Vec<String>,
+    },
     /// Answer `@dcode-ai` questions about this project in Slack (read-only).
     Slack {
         #[command(subcommand)]
@@ -494,6 +512,16 @@ enum Command {
         #[arg(long, default_value_t = 1.0)]
         speed: f64,
     },
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum BgCmd {
+    /// List the sessions running in the background.
+    List,
+    /// Show one in this terminal (the newest here when no id is given).
+    Attach { id: Option<String> },
+    /// Stop one.
+    Kill { id: String },
 }
 
 #[derive(clap::Subcommand, Debug)]
@@ -685,6 +713,41 @@ fn main() -> ExitCode {
     result.join().unwrap_or(ExitCode::FAILURE)
 }
 
+/// "1 session is running here in the background — attach?" (Enter = yes).
+#[cfg(unix)]
+fn ask_attach(running: &[dcode_ai_cli::host::HostInfo]) -> bool {
+    use std::io::Write;
+    let h = &running[0];
+    print!(
+        "{} running here in the background (since {}) — attach? [Y/n] ",
+        if running.len() == 1 {
+            "A session is".to_string()
+        } else {
+            format!("{} sessions are", running.len())
+        },
+        h.started.with_timezone(&chrono::Local).format("%a %H:%M")
+    );
+    let _ = std::io::stdout().flush();
+    let mut line = String::new();
+    let _ = std::io::stdin().read_line(&mut line);
+    !matches!(line.trim().to_ascii_lowercase().as_str(), "n" | "no")
+}
+
+/// Shows a background session here; exits with its code when it ends.
+#[cfg(unix)]
+fn finish_attach(id: &str) -> anyhow::Result<()> {
+    let ended = dcode_ai_cli::host::attach(id)?;
+    if let Some(msg) = dcode_ai_cli::host::farewell(&ended, id) {
+        println!("{msg}");
+    }
+    if let dcode_ai_cli::host::Ended::Exited(code) = ended
+        && code != 0
+    {
+        std::process::exit(code);
+    }
+    Ok(())
+}
+
 fn print_connect_hint_if_missing_provider_auth(error: &anyhow::Error) {
     let mut combined = String::new();
     for (idx, cause) in error.chain().enumerate() {
@@ -804,6 +867,25 @@ async fn try_main() -> anyhow::Result<()> {
 
     tracing::info!("dcode-ai starting");
     let mut config = DcodeAiConfig::load()?;
+    // An interactive session runs in a background host, so it outlives this
+    // terminal; this process just shows it.
+    #[cfg(unix)]
+    if tui_owns_terminal
+        && cli.prompt.is_none()
+        && !cli.pipe
+        && config.session.keep_running
+        && std::env::var_os(dcode_ai_cli::host::HOSTED_ENV).is_none()
+        && std::env::var_os("DCODE_AI_NO_HOST").is_none()
+    {
+        let cwd = std::env::current_dir()?;
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        let running = dcode_ai_cli::host::here(&cwd);
+        let id = match running.first() {
+            Some(h) if args.is_empty() && ask_attach(&running) => h.id.clone(),
+            _ => dcode_ai_cli::host::spawn(&cwd, &args)?,
+        };
+        return finish_attach(&id);
+    }
     // Picking a provider can ask `claude` whether it is signed in (a few
     // hundred ms); commands that never call a model skip it.
     if uses_model(cli.command.as_ref()) {
@@ -1318,6 +1400,78 @@ async fn try_main() -> anyhow::Result<()> {
                     .map_err(|e| anyhow::anyhow!(e))?;
             }
         },
+        Some(Command::HostRun {
+            id,
+            cols,
+            rows,
+            args,
+        }) => {
+            #[cfg(unix)]
+            {
+                let exe = std::env::current_exe()?;
+                let cwd = std::env::current_dir()?;
+                let code = tokio::task::spawn_blocking(move || {
+                    dcode_ai_cli::host::run(&id, &exe, &args, &cwd, (cols, rows))
+                })
+                .await??;
+                std::process::exit(code);
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = (id, cols, rows, args);
+                anyhow::bail!("background sessions need Linux or macOS for now");
+            }
+        }
+        Some(Command::Bg { command }) => {
+            #[cfg(unix)]
+            match command.unwrap_or(BgCmd::List) {
+                BgCmd::List => {
+                    let all = dcode_ai_cli::host::list();
+                    if all.is_empty() {
+                        println!("No sessions running in the background.");
+                    }
+                    for h in all {
+                        println!(
+                            "{}  {}  since {}{}",
+                            h.id,
+                            h.cwd.display(),
+                            h.started.with_timezone(&chrono::Local).format("%a %H:%M"),
+                            if h.args.is_empty() {
+                                String::new()
+                            } else {
+                                format!("  ({})", h.args.join(" "))
+                            }
+                        );
+                    }
+                }
+                BgCmd::Attach { id } => {
+                    let cwd = std::env::current_dir()?;
+                    let id = match id {
+                        Some(id) => id,
+                        None => dcode_ai_cli::host::here(&cwd)
+                            .first()
+                            .or(dcode_ai_cli::host::list().first())
+                            .map(|h| h.id.clone())
+                            .ok_or_else(|| {
+                                anyhow::anyhow!("no sessions running in the background")
+                            })?,
+                    };
+                    return finish_attach(&id);
+                }
+                BgCmd::Kill { id } => {
+                    if dcode_ai_cli::host::kill(&id) {
+                        println!("Stopped {id}.");
+                    } else {
+                        anyhow::bail!("no background session {id}");
+                    }
+                }
+            }
+            #[cfg(not(unix))]
+            {
+                let _ = command;
+                println!("Background sessions need Linux or macOS for now.");
+            }
+        }
         Some(Command::Slack { command }) => match command {
             SlackCmd::Setup => dcode_ai_cli::slack::setup().await?,
             SlackCmd::Serve => {
@@ -3413,6 +3567,7 @@ fn uses_model(command: Option<&Command>) -> bool {
             Command::Sessions { .. }
                 | Command::Logs { .. }
                 | Command::Attach { .. }
+                | Command::Bg { .. }
                 | Command::Remote { .. }
                 | Command::Session { .. }
                 | Command::Join { .. }

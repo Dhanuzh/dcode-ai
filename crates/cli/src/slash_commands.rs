@@ -20,6 +20,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/standup",
     "/slack",
     "/teams",
+    "/detach",
     "/files",
     "/watch",
     "/invite",
@@ -155,6 +156,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/btw" => "ask a quick side question without adding it to the conversation",
         "/talk" => {
             "talk to the agent: /talk (into the prompt) · /talk send · /talk loop (hands-free, it answers aloud; say \"stop\")"
+        }
+        "/detach" => {
+            "leave this session running in the background (`dcode-ai` in this folder brings it back)"
         }
         "/teams" => {
             "answer @dcode-ai questions about this project in Microsoft Teams (read-only): /teams on|off · set up with `dcode-ai teams setup`"

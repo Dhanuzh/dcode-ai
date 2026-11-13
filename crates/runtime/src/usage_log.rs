@@ -32,6 +32,48 @@ pub struct TurnUsage {
     /// The parent session, for a sub-agent's turn.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub parent: String,
+    /// Code Mode in this turn: scripts run, tool calls made inside them, and
+    /// the tokens their intermediate results would have added to the
+    /// conversation (inner results minus what the scripts returned).
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub scripts: u32,
+    #[serde(default, skip_serializing_if = "is_zero32")]
+    pub script_calls: u32,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub script_kept_out: u64,
+}
+
+fn is_zero32(n: &u32) -> bool {
+    *n == 0
+}
+
+/// Below this, on average per script, Code Mode isn't paying for itself.
+const CODE_MODE_MIN_KEPT_OUT: u64 = 300;
+/// Scripts needed before judging.
+const CODE_MODE_SAMPLE: u32 = 20;
+
+/// Code Mode's record in `entries`: (scripts, inner calls, tokens kept out).
+pub fn code_mode_totals(entries: &[TurnUsage]) -> (u32, u32, u64) {
+    entries.iter().fold((0, 0, 0), |(s, c, k), e| {
+        (s + e.scripts, c + e.script_calls, k + e.script_kept_out)
+    })
+}
+
+/// Why Code Mode should be off, judged on the last 30 days: after enough
+/// scripts, they kept too little out of the conversation to be worth it.
+pub fn code_mode_verdict(entries: &[TurnUsage], now: DateTime<Utc>) -> Option<String> {
+    let recent: Vec<TurnUsage> = entries
+        .iter()
+        .filter(|e| now - e.at <= Duration::days(30))
+        .cloned()
+        .collect();
+    let (scripts, _, kept) = code_mode_totals(&recent);
+    (scripts >= CODE_MODE_SAMPLE && kept / u64::from(scripts) < CODE_MODE_MIN_KEPT_OUT).then(|| {
+        format!(
+            "Code Mode is off: its last {scripts} scripts kept only ~{} tokens each out of the conversation — not worth a script ([harness] code_mode_auto = false keeps it on)",
+            kept / u64::from(scripts)
+        )
+    })
 }
 
 fn is_zero(n: &u64) -> bool {
@@ -171,6 +213,16 @@ pub fn cost_lines(entries: &[TurnUsage], today: NaiveDate, days: i64) -> Vec<Str
             money(agents.cost)
         ));
     }
+    let owned: Vec<TurnUsage> = picked.iter().map(|e| (*e).clone()).collect();
+    let (scripts, calls, kept) = code_mode_totals(&owned);
+    if scripts > 0 {
+        lines.push(String::new());
+        lines.push(format!(
+            "Code Mode: {scripts} scripts ran {calls} tool calls and kept ~{} tokens of their results out of the conversation (~{} per script) — each of those tokens would otherwise be re-read on every later turn",
+            fmt_tokens(kept),
+            fmt_tokens(kept / u64::from(scripts))
+        ));
+    }
     lines
 }
 
@@ -237,6 +289,39 @@ fn fmt_tokens(n: u64) -> String {
 
 /// `/stats` lines: tokens per day for the last `days` days (today last) and
 /// per project over the same span, busiest first.
+#[cfg(test)]
+mod code_mode_tests {
+    use super::*;
+
+    fn turn(scripts: u32, kept: u64) -> TurnUsage {
+        TurnUsage {
+            at: Utc::now(),
+            scripts,
+            script_calls: scripts * 3,
+            script_kept_out: kept,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn code_mode_is_judged_on_what_it_keeps_out() {
+        let now = Utc::now();
+        // Too few scripts to judge.
+        assert!(code_mode_verdict(&[turn(5, 0)], now).is_none());
+        // Plenty kept out: stays on.
+        assert!(code_mode_verdict(&[turn(25, 25 * 4_000)], now).is_none());
+        // Many scripts, little kept out: off.
+        let v = code_mode_verdict(&[turn(25, 25 * 50)], now).unwrap();
+        assert!(v.contains("Code Mode is off"), "{v}");
+        let lines =
+            cost_lines(&[turn(4, 8_000)], now.with_timezone(&Local).date_naive(), 1).join("\n");
+        assert!(
+            lines.contains("Code Mode: 4 scripts ran 12 tool calls"),
+            "{lines}"
+        );
+    }
+}
+
 pub fn summary_lines(entries: &[TurnUsage], today: NaiveDate, days: i64) -> Vec<String> {
     let since = today - Duration::days(days - 1);
     let mut per_day: BTreeMap<NaiveDate, (u64, u32)> = BTreeMap::new();

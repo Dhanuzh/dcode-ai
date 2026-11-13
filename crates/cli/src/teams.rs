@@ -162,6 +162,54 @@ pub fn question(html: &str) -> String {
     out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
+/// Where a mention was posted: the thread's first message (what a reply
+/// attaches to), the channel and the team.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Place {
+    pub message_id: String,
+    pub channel_id: String,
+    pub team_id: String,
+}
+
+/// The mention's thread, from Teams' activity.
+pub fn place(v: &serde_json::Value) -> Place {
+    let conv = v["conversation"]["id"].as_str().unwrap_or("");
+    // Inside a thread the conversation id ends with `;messageid=<root>`.
+    let message_id = conv
+        .split(";messageid=")
+        .nth(1)
+        .map(str::to_string)
+        .or_else(|| v["id"].as_str().map(str::to_string))
+        .unwrap_or_default();
+    let cd = &v["channelData"];
+    Place {
+        message_id,
+        channel_id: cd["teamsChannelId"]
+            .as_str()
+            .or(cd["channel"]["id"].as_str())
+            .or(conv.split(';').next())
+            .unwrap_or("")
+            .to_string(),
+        team_id: cd["teamsTeamId"]
+            .as_str()
+            .or(cd["team"]["id"].as_str())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+/// The Adaptive Card the Workflows webhook posts, with where it belongs: a
+/// flow that replies in the thread reads `replyToId`, `channelId`, `teamId`
+/// (the plain "Post to a channel" flow ignores them).
+pub fn card_for(asker: &str, q: &str, answer: &str, at: &Place) -> serde_json::Value {
+    let mut c = card(asker, q, answer);
+    c["replyToId"] = at.message_id.clone().into();
+    c["channelId"] = at.channel_id.clone().into();
+    c["teamId"] = at.team_id.clone().into();
+    c["card"] = c["attachments"][0]["content"].clone();
+    c
+}
+
 /// The Adaptive Card the Workflows webhook posts.
 pub fn card(asker: &str, q: &str, answer: &str) -> serde_json::Value {
     let mut body = vec![
@@ -259,6 +307,7 @@ async fn handle(
     let name = v["from"]["name"].as_str().unwrap_or("").to_string();
     let aad = v["from"]["aadObjectId"].as_str().unwrap_or("").to_string();
     let q = question(v["text"].as_str().unwrap_or(""));
+    let at = place(&v);
     if !cfg.allows(&name, &aad) {
         report(format!(
             "Teams: {name} isn't allowed — add them with `dcode-ai teams setup` (id {aad})"
@@ -291,7 +340,7 @@ async fn handle(
     tokio::spawn(async move {
         let _permit = busy.acquire().await;
         let answer = crate::slack::answer(&workspace, &q).await;
-        match post_answer(&cfg.post_url, &card(&name, &q, &answer)).await {
+        match post_answer(&cfg.post_url, &card_for(&name, &q, &answer, &at)).await {
             Ok(()) => report("Teams: answered".into()),
             Err(e) => report(format!(
                 "Teams: {e} — check the Workflows URL in `dcode-ai teams setup`"
@@ -355,10 +404,16 @@ pub async fn setup() -> anyhow::Result<()> {
     println!(
         "   Name: dcode-ai · Callback URL: your tunnel's https address · then copy the security token it shows."
     );
+    println!("3. A Workflows webhook for the answers, then copy its URL — either:");
     println!(
-        "3. In the channel for answers: ⋯ → Workflows → \"Post to a channel when a webhook request is received\","
+        "   • quick: the channel's ⋯ → Workflows → \"Post to a channel when a webhook request is received\" (answers arrive as new posts), or"
     );
-    println!("   and copy the URL it gives.\n");
+    println!(
+        "   • in the thread: a flow \"When a Teams webhook request is received\" → \"Reply with an adaptive card in a channel\""
+    );
+    println!(
+        "     with Team = teamId, Channel = channelId, Message = replyToId, Adaptive Card = card (all from the request body).\n"
+    );
     let hmac_token = ask("Outgoing webhook security token: ");
     if base64::engine::general_purpose::STANDARD
         .decode(hmac_token.trim())
@@ -436,6 +491,28 @@ mod tests {
         assert!(c.allows("priya rao", ""));
         assert!(c.allows("Someone", "11111111-2222"));
         assert!(!c.allows("Mallory", "999"));
+    }
+
+    #[test]
+    fn replies_know_their_thread() {
+        let v: serde_json::Value = serde_json::from_str(
+            r#"{"id":"1700000000002","conversation":{"id":"19:abc@thread.tacv2;messageid=1700000000001"},
+                "channelData":{"teamsChannelId":"19:abc@thread.tacv2","teamsTeamId":"19:team@thread.tacv2"}}"#,
+        )
+        .unwrap();
+        let p = place(&v);
+        assert_eq!(p.message_id, "1700000000001");
+        assert_eq!(p.channel_id, "19:abc@thread.tacv2");
+        assert_eq!(p.team_id, "19:team@thread.tacv2");
+        // A new post: the message itself starts the thread.
+        let v: serde_json::Value =
+            serde_json::from_str(r#"{"id":"42","conversation":{"id":"19:abc@thread.tacv2"}}"#)
+                .unwrap();
+        assert_eq!(place(&v).message_id, "42");
+        assert_eq!(place(&v).channel_id, "19:abc@thread.tacv2");
+        let c = card_for("P", "q", "a", &p);
+        assert_eq!(c["replyToId"], "1700000000001");
+        assert_eq!(c["card"]["type"], "AdaptiveCard");
     }
 
     #[test]

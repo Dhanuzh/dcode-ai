@@ -29,6 +29,11 @@ impl Tui {
     }
 
     fn start_sized(home: &Path, workspace: &Path, args: &[&str], rows: u16) -> Self {
+        Self::start_hosted(home, workspace, args, rows, false)
+    }
+
+    /// `hosted`: let the session run in its background host (as users get).
+    fn start_hosted(home: &Path, workspace: &Path, args: &[&str], rows: u16, hosted: bool) -> Self {
         let pty = native_pty_system()
             .openpty(PtySize {
                 rows,
@@ -45,6 +50,9 @@ impl Tui {
         cmd.env("XDG_CONFIG_HOME", home.join(".config"));
         cmd.env("XDG_RUNTIME_DIR", runtime_dir(home));
         cmd.env("TERM", "xterm-256color");
+        if !hosted {
+            cmd.env("DCODE_AI_NO_HOST", "1");
+        }
         // Calls use a fake microphone (a tone) and speakers.
         cmd.env("DCODE_AI_FAKE_AUDIO", "tone");
         // Only ever sent to the local mock model in these tests.
@@ -308,6 +316,59 @@ fn the_board_and_the_scratch_tab() {
     tui.wait_for("Alt+1-7");
     tui.send(b"\x1b7");
     tui.wait_for("nothing yet");
+}
+
+/// Closing the terminal leaves the session running; `dcode-ai` again
+/// brings it back; quitting ends the host.
+#[cfg(unix)]
+#[test]
+fn a_session_outlives_its_terminal() {
+    let (_dir, home, ws) = setup();
+    let bg = |args: &[&str]| {
+        let out = std::process::Command::new(env!("CARGO_BIN_EXE_dcode-ai"))
+            .args(args)
+            .current_dir(&ws)
+            .env("HOME", &home)
+            .env("XDG_RUNTIME_DIR", runtime_dir(&home))
+            .output()
+            .expect("run dcode-ai");
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    let mut tui = Tui::start_hosted(&home, &ws, &[], ROWS, true);
+    tui.wait_for("? for shortcuts");
+    tui.send(b"remember me");
+    tui.wait_for("remember me");
+    // The terminal goes away; the session doesn't.
+    drop(tui);
+    std::thread::sleep(Duration::from_millis(500));
+    let listed = bg(&["bg", "list"]);
+    assert!(
+        listed.contains(ws.file_name().unwrap().to_str().unwrap()),
+        "{listed}"
+    );
+    // Back in the folder: offered, accepted, the same session with its draft.
+    let mut tui = Tui::start_hosted(&home, &ws, &[], ROWS, true);
+    tui.wait_for("attach? [Y/n]");
+    tui.send(b"\r");
+    tui.wait_for("remember me");
+    // `/detach` leaves on purpose; `dcode-ai bg attach` comes back.
+    tui.send(b"\x15/detach\r");
+    tui.wait_for("Detached — the session keeps running");
+    drop(tui);
+    let mut tui = Tui::start_hosted(&home, &ws, &["bg", "attach"], ROWS, true);
+    tui.wait_for("? for shortcuts");
+    // Quitting ends it for good.
+    tui.send(b"\x15/quit\r");
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(15) && !bg(&["bg", "list"]).contains("No sessions")
+    {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        bg(&["bg", "list"]).contains("No sessions"),
+        "host ended with the session"
+    );
+    drop(tui);
 }
 
 fn tui_has(tui: &Tui, needle: &str) -> bool {

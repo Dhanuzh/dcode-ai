@@ -102,6 +102,9 @@ pub struct Supervisor {
     background_agents: dcode_ai_core::tools::spawn_subagent::BackgroundAgents,
     /// Keep-warm refreshes sent since the last turn.
     warms_this_idle: u32,
+    /// A resumed conversation: warm its cache once, right away, so the
+    /// first turn doesn't pay full price (or wait) for the whole history.
+    warm_on_start: bool,
     /// The provider can't keep the cache warm (not the Anthropic API).
     keep_warm_unsupported: bool,
 }
@@ -390,7 +393,18 @@ impl Supervisor {
                 ),
             ));
         }
-        if config.harness.code_mode {
+        // Code Mode, unless the record shows it isn't saving anything.
+        let code_mode_off = (config.harness.code_mode && config.harness.code_mode_auto)
+            .then(|| {
+                crate::usage_log::log_path()
+                    .map(|p| crate::usage_log::load(&p))
+                    .and_then(|log| crate::usage_log::code_mode_verdict(&log, Utc::now()))
+            })
+            .flatten();
+        if let Some(why) = &code_mode_off {
+            tracing::info!("{why}");
+        }
+        if config.harness.code_mode && code_mode_off.is_none() {
             tools.register(Box::new(dcode_ai_core::tools::run_script::RunScriptTool));
         }
 
@@ -573,6 +587,7 @@ impl Supervisor {
             last_cache_hit: None,
             background_agents: background_agents.clone(),
             warms_this_idle: 0,
+            warm_on_start: false,
             keep_warm_unsupported: false,
         };
         sup.attach_checkpoints();
@@ -673,6 +688,7 @@ impl Supervisor {
         })
         .await?;
         sup.resumed = true;
+        sup.warm_on_start = true;
 
         sup.session_id = loaded.meta.id.clone();
         sup.session_name = loaded.meta.session_name.clone();
@@ -932,6 +948,7 @@ impl Supervisor {
         self.adopt_ready_mcp().await;
         // A new idle stretch starts after this turn.
         self.warms_this_idle = 0;
+        self.warm_on_start = false;
         let with_note;
         let prompt = match self.late_tools_note.take() {
             Some(notes) => {
@@ -976,7 +993,13 @@ impl Supervisor {
             cost_usd: (after.estimated_cost_usd() - before.estimated_cost_usd()).max(0.0),
             session: self.session_id.clone(),
             parent: self.parent_session_id.clone().unwrap_or_default(),
+            ..Default::default()
         };
+        let mut turn = turn;
+        let (scripts, calls, inner, out) = std::mem::take(&mut self.agent.script_stats);
+        turn.scripts = scripts;
+        turn.script_calls = calls;
+        turn.script_kept_out = inner.saturating_sub(out) / 4;
         crate::usage_log::record(&turn);
         self.note_cache_break(&turn, &tools_before, idle_before)
             .await;
@@ -1348,6 +1371,14 @@ impl Supervisor {
     /// the cache about to expire (it lives 5 minutes from the last request).
     pub fn keep_warm_due(&self, user_present: bool) -> bool {
         let c = &self.config.memory.context;
+        // Just resumed: warm the history once, right away.
+        if self.warm_on_start
+            && user_present
+            && self.keep_warm_on()
+            && (self.agent.context_used() as usize) >= 8_000
+        {
+            return true;
+        }
         user_present
             && self.keep_warm_on()
             && self.warms_this_idle < c.keep_warm_max
@@ -1358,10 +1389,14 @@ impl Supervisor {
 
     /// Refresh the prompt cache now. `None` when it didn't happen.
     pub async fn keep_warm(&mut self) -> Option<dcode_ai_core::provider::KeepWarm> {
+        let at_start = std::mem::take(&mut self.warm_on_start);
         let before = self.agent.cost_tracker.clone();
         match self.agent.keep_warm(&self.workspace_root.clone()).await {
             Ok(Some(k)) => {
-                self.warms_this_idle += 1;
+                // The start-up warm-up doesn't use up the pause's warm-ups.
+                if !at_start {
+                    self.warms_this_idle += 1;
+                }
                 let after = &self.agent.cost_tracker;
                 crate::usage_log::record(&crate::usage_log::TurnUsage {
                     at: Utc::now(),

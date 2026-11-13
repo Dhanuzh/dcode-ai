@@ -240,10 +240,26 @@ async fn handle_connection(
     stream: impl AsyncRead + AsyncWrite + Unpin + Send + 'static,
     mut event_rx: broadcast::Receiver<String>,
     command_tx: mpsc::UnboundedSender<AgentCommand>,
+    token: Option<std::sync::Arc<String>>,
 ) {
     let (reader, mut writer) = tokio::io::split(stream);
+    let mut messages = MessageReader::new(reader);
+    // A secret-guarded endpoint: the first message must carry it, before
+    // anything is sent or accepted.
+    if let Some(token) = token {
+        let first =
+            tokio::time::timeout(std::time::Duration::from_secs(5), messages.next_message()).await;
+        let ok = matches!(&first, Ok(Ok(Some(m)))
+            if serde_json::from_str::<serde_json::Value>(m)
+                .ok()
+                .and_then(|v| v["auth"].as_str().map(|t| t == token.as_str()))
+                .unwrap_or(false));
+        if !ok {
+            tracing::warn!("refused an IPC connection without the session's secret");
+            return;
+        }
+    }
     let read_task = tokio::spawn(async move {
-        let mut messages = MessageReader::new(reader);
         while let Ok(Some(message)) = messages.next_message().await {
             if let Ok(command) = serde_json::from_str::<AgentCommand>(&message) {
                 let _ = command_tx.send(command);
@@ -305,6 +321,9 @@ const HEARTBEAT_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1
 /// runtime as gone. 4× the heartbeat so a single delayed tick can't false-fire.
 const STALL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// Where session sockets live: private to this user. On Unix
+/// `$XDG_RUNTIME_DIR/dcode-ai` (already private), else
+/// `<tmp>/dcode-ai-<uid>` — never a folder another user could create first.
 pub fn runtime_ipc_dir() -> PathBuf {
     #[cfg(windows)]
     {
@@ -315,11 +334,81 @@ pub fn runtime_ipc_dir() -> PathBuf {
     }
     #[cfg(not(windows))]
     {
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(std::env::temp_dir)
-            .join("dcode-ai")
+        match std::env::var_os("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+            Some(dir) => PathBuf::from(dir).join("dcode-ai"),
+            None => std::env::temp_dir().join(format!("dcode-ai-{}", current_uid())),
+        }
     }
+}
+
+#[cfg(unix)]
+pub fn current_uid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Creates `dir` (0700) or checks an existing one: it must be a real
+/// directory owned by this user; its mode is tightened to 0700.
+#[cfg(unix)]
+pub fn ensure_private_dir(dir: &std::path::Path) -> std::io::Result<()> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(dir)?;
+    let md = std::fs::symlink_metadata(dir)?;
+    if md.file_type().is_symlink() || !md.is_dir() {
+        return Err(std::io::Error::other(format!(
+            "{} is not a plain directory",
+            dir.display()
+        )));
+    }
+    if md.uid() != current_uid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            format!("{} belongs to another user", dir.display()),
+        ));
+    }
+    if md.mode() & 0o077 != 0 {
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+/// The Windows endpoint's secret (the marker file's content): a client sends
+/// it first, so other users' programs on this machine can't connect.
+#[cfg(windows)]
+fn new_token() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    // Each RandomState is keyed from the OS random source.
+    (0..4)
+        .map(|i| {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            h.write_u64(i);
+            h.write_u128(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            );
+            format!("{:016x}", h.finish())
+        })
+        .collect()
+}
+
+#[cfg(windows)]
+fn read_token(endpoint: &std::path::Path) -> String {
+    std::fs::read_to_string(endpoint)
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// The first message on a Windows connection.
+#[cfg(windows)]
+fn auth_frame(token: &str) -> Vec<u8> {
+    serde_json::json!({ "auth": token })
+        .to_string()
+        .into_bytes()
 }
 
 pub fn ipc_endpoint_path(session_id: &str) -> PathBuf {
@@ -344,11 +433,10 @@ async fn start_transport_accept_loop(
 ) -> Result<PathBuf, IpcError> {
     use tokio::net::UnixListener;
 
+    use std::os::unix::fs::PermissionsExt;
     let socket_path = &ipc_endpoint_path(session_id);
     if let Some(parent) = socket_path.parent() {
-        tokio::fs::create_dir_all(parent)
-            .await
-            .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
+        ensure_private_dir(parent).map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
     }
     if socket_path.exists() {
         let _ = tokio::fs::remove_file(socket_path).await;
@@ -356,18 +444,26 @@ async fn start_transport_accept_loop(
 
     let listener = UnixListener::bind(socket_path)
         .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
+    let _ = std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o600));
     let socket_path = socket_path.to_path_buf();
     let cleanup_path = socket_path.clone();
+    let me = current_uid();
 
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
+            // Only this user's own programs.
+            if !stream.peer_cred().is_ok_and(|c| c.uid() == me) {
+                tracing::warn!("refused an IPC connection from another user");
+                continue;
+            }
             tokio::spawn(handle_connection(
                 stream,
                 event_tx.subscribe(),
                 command_tx.clone(),
+                None,
             ));
         }
         let _ = tokio::fs::remove_file(cleanup_path).await;
@@ -410,11 +506,15 @@ async fn start_transport_accept_loop(
         }
     }
     let socket_path = dir.join(format!("{session_id}.{port}.tcp"));
-    tokio::fs::write(&socket_path, b"")
+    // The marker (in this user's own %LOCALAPPDATA%) carries the secret a
+    // client must send first.
+    let token = new_token();
+    tokio::fs::write(&socket_path, token.as_bytes())
         .await
         .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
 
     let marker = socket_path.clone();
+    let token = std::sync::Arc::new(token);
     tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
@@ -424,6 +524,7 @@ async fn start_transport_accept_loop(
                 stream,
                 event_tx.subscribe(),
                 command_tx.clone(),
+                Some(token.clone()),
             ));
         }
         let _ = std::fs::remove_file(marker);
@@ -448,7 +549,10 @@ async fn spawn_event_reader(
     socket_path: &std::path::Path,
     tx: mpsc::Sender<EventEnvelope>,
 ) -> Result<(), IpcError> {
-    let stream = tokio::net::TcpStream::connect(tcp_addr_from_endpoint(socket_path)?)
+    let mut stream = tokio::net::TcpStream::connect(tcp_addr_from_endpoint(socket_path)?)
+        .await
+        .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
+    write_message(&mut stream, &auth_frame(&read_token(socket_path)))
         .await
         .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
     spawn_event_reader_for_stream(stream, tx);
@@ -536,7 +640,10 @@ async fn send_command_to_endpoint(
     socket_path: &std::path::Path,
     cmd: &AgentCommand,
 ) -> Result<(), IpcError> {
-    let stream = tokio::net::TcpStream::connect(tcp_addr_from_endpoint(socket_path)?)
+    let mut stream = tokio::net::TcpStream::connect(tcp_addr_from_endpoint(socket_path)?)
+        .await
+        .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
+    write_message(&mut stream, &auth_frame(&read_token(socket_path)))
         .await
         .map_err(|err| IpcError::ConnectionFailed(err.to_string()))?;
     write_command(stream, cmd).await
@@ -680,5 +787,57 @@ mod tests {
             endpoint.extension().and_then(|ext| ext.to_str()),
             Some("tcp")
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn socket_folders_are_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("run");
+        ensure_private_dir(&dir).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o700);
+        // An existing, too-open folder of ours is tightened.
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        ensure_private_dir(&dir).unwrap();
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        // A symlink in its place is refused.
+        let link = tmp.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).unwrap();
+        assert!(ensure_private_dir(&link).is_err());
+        // Without XDG_RUNTIME_DIR the folder is per user, never shared /tmp/dcode-ai.
+        assert!(
+            !runtime_ipc_dir().ends_with("dcode-ai")
+                || std::env::var_os("XDG_RUNTIME_DIR").is_some()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_socket_is_only_for_this_user() {
+        use std::os::unix::fs::PermissionsExt;
+        let id = format!("test-perm-{}", std::process::id());
+        let server = IpcServer::new(&id);
+        let handle = server.start().await.unwrap();
+        let mode = std::fs::metadata(handle.socket_path())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "socket file is private");
+        let dir_mode = std::fs::metadata(handle.socket_path().parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(dir_mode, 0o700, "its folder is private");
+        // This user still connects.
+        let client = IpcClient::new(handle.socket_path().clone());
+        assert!(client.connect().await.is_ok());
+        let _ = std::fs::remove_file(handle.socket_path());
     }
 }

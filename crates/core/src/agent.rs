@@ -107,6 +107,9 @@ pub struct AgentLoop {
     /// Shared with `spawn_subagent`: the conversation as of a batch that
     /// starts a sub-agent (its summary, or a fork's copy).
     pub messages_mirror: Option<crate::tools::spawn_subagent::MessagesMirror>,
+    /// Code Mode so far (the supervisor takes it after each turn):
+    /// (scripts, inner calls, inner result chars, script output chars).
+    pub script_stats: (u32, u32, u64, u64),
     /// Called with the conversation after every tool step, so a crash or a
     /// closed terminal mid-turn loses nothing (the session saves itself).
     pub checkpoint: Option<Checkpoint>,
@@ -179,6 +182,7 @@ impl AgentLoop {
             cancel_flag: Arc::new(AtomicBool::new(false)),
             steer: SteerInbox::default(),
             messages_mirror: None,
+            script_stats: (0, 0, 0, 0),
             nested_instructions: Default::default(),
             utility_model: None,
             checkpoint: None,
@@ -1633,15 +1637,21 @@ Take it into account now and continue with the task."
             match msg {
                 Some(ScriptMsg::Call { name, args, reply }) => {
                     n += 1;
+                    self.script_stats.1 += 1;
                     let inner = ToolCall {
                         id: format!("{}.{n}", call.id),
                         name,
                         input: args,
                     };
                     let answer = self.script_tool_call(&inner, workspace_root).await;
+                    self.script_stats.2 += match &answer {
+                        Ok(t) | Err(t) => t.chars().count() as u64,
+                    };
                     let _ = reply.send(answer);
                 }
                 Some(ScriptMsg::Done(Ok(out))) => {
+                    self.script_stats.0 += 1;
+                    self.script_stats.3 += out.chars().count() as u64;
                     return ToolResult {
                         call_id: call.id.clone(),
                         success: true,

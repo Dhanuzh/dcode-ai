@@ -3,6 +3,16 @@
 `dcode-ai` uses newline-delimited JSON for event logs and `attach --json`
 output. Unix uses Unix domain sockets; Windows uses loopback TCP.
 
+## Who may connect
+
+- **Unix:** the socket is in a folder only you can open (`$XDG_RUNTIME_DIR/dcode-ai`,
+  else `<tmp>/dcode-ai-<uid>`, mode 0700), the socket itself is 0600, and the
+  session checks the connecting process's user id — other users are refused.
+- **Windows:** the `<session>.<port>.tcp` marker in `%LOCALAPPDATA%\dcode-ai`
+  holds a secret. A client's **first message** must be `{"auth": "<secret>"}`
+  (framed like any other); without it the connection is closed before
+  anything is sent.
+
 ## Socket wire framing (v2)
 
 Runtime IPC **sockets** now use length-prefixed frames instead of raw NDJSON:

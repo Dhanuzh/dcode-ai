@@ -386,7 +386,11 @@ pub async fn record(
         }
     }
     if !heard {
-        return Err("didn't hear anything — check the microphone".into());
+        return Err(if stop.load(Ordering::SeqCst) {
+            "stopped".into()
+        } else {
+            "didn't hear anything — check the microphone".into()
+        });
     }
     Ok(pcm)
 }
@@ -400,14 +404,20 @@ pub async fn listen(
     model: &str,
     max: std::time::Duration,
     quiet: std::time::Duration,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     progress: impl Fn(String),
 ) -> Result<String, String> {
     if !is_downloaded(model) {
         ensure_model(model, &progress).await?;
     }
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    progress("🎙 listening… (stops when you pause)".into());
-    let pcm = record(max, quiet, stop).await?;
+    progress("🎙 listening… (stops when you pause · Esc stops)".into());
+    let recorded = record(max, quiet, stop.clone()).await;
+    // Done listening: Esc goes back to its usual job.
+    let stopped = stop.swap(true, std::sync::atomic::Ordering::SeqCst);
+    let pcm = recorded?;
+    if stopped && pcm.len() < 16_000 / 2 {
+        return Err("stopped".into());
+    }
     progress("✎ transcribing…".into());
     let name = model.to_string();
     tokio::task::spawn_blocking(move || {

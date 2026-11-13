@@ -281,6 +281,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 
 ### 🗂️ Sessions that last
 
+- **Outlives the terminal** (Linux, macOS, WSL): close the terminal and the session keeps running; `dcode-ai` in the folder brings it back with the screen as you left it. `/detach` leaves on purpose, `dcode-ai bg` lists what's running.
 - **Crash-safe:** saved after every step of a turn, so a crash or a closed terminal loses nothing.
 - **Full resume:** `/resume` brings back the whole conversation in order, quickly, even for sessions with thousands of steps.
 - **The `/resume` picker:** a tree of sessions with their forks and sub-agents, search over titles, content *and the files they changed*, and auto-generated titles.
@@ -329,6 +330,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - `policy.toml` allow / ask / deny rules, testable with `dcode-ai policy test execute_bash "git push"`.
 - Optional shell sandbox: Landlock on Linux, Seatbelt on macOS.
 - Secrets are masked in tool output and exports. Cap spending with `[session] max_cost_usd`.
+- The session's local socket is private to you: other users on the machine can't connect to it.
 
 ### 🔧 Built-in tools
 

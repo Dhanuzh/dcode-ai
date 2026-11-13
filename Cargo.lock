@@ -1703,6 +1703,7 @@ dependencies = [
  "image",
  "insta",
  "iroh",
+ "libc",
  "notify-rust",
  "portable-pty",
  "predicates",

@@ -53,6 +53,11 @@ snow = "0.9"
 # Direct peer-to-peer invites: hole-punched QUIC, dialed by public key.
 iroh = { version = "1.4", default-features = false, features = ["tls-ring", "portmapper"] }
 qrcode = { version = "0.14", default-features = false }
+# Sessions that outlive the terminal: the session runs in a pseudo-terminal
+# owned by a background host.
+portable-pty = "0.9"
+libc = "0.2"
+vt100 = "0.15"
 # Slack Socket Mode (`/slack`): a websocket out to Slack, no public URL.
 tokio-tungstenite = { version = "0.27", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 # Speech to text on this machine (`/talk`): Whisper in pure Rust, CPU only.

@@ -195,6 +195,16 @@ impl Repl {
                 }
                 _ => out.println("usage: /slack on|off — set up once with `dcode-ai slack setup`"),
             },
+            "/detach" => {
+                if std::env::var_os(dcode_ai_cli::host::HOSTED_ENV).is_some() {
+                    use std::io::Write;
+                    let mut o = std::io::stdout();
+                    let _ = o.write_all(dcode_ai_cli::host::DETACH_MARKER);
+                    let _ = o.flush();
+                } else {
+                    out.println("[detach] this session isn't running in the background, so closing the terminal ends it — `[session] keep_running = true` (Linux/macOS) makes new sessions outlive the terminal");
+                }
+            }
             "/teams" => match rest.trim() {
                 "off" | "stop" => {
                     if let Some(h) = self.teams.take() {
@@ -262,6 +272,13 @@ impl Repl {
                     return Ok(true);
                 }
                 let progress = |s: String| out.println(&format!("[talk] {s}"));
+                // Esc in the TUI stops listening (and a hands-free loop).
+                let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.talk_stop = Some(stop.clone());
+                }
                 let (max, quiet) = if command == "/standup" {
                     (
                         std::time::Duration::from_secs(180),
@@ -273,7 +290,10 @@ impl Repl {
                         std::time::Duration::from_millis(1500),
                     )
                 };
-                let listen = || dcode_ai_cli::voice::stt::listen(&model, max, quiet, progress);
+                let listen = || {
+                    stop.store(false, std::sync::atomic::Ordering::SeqCst);
+                    dcode_ai_cli::voice::stt::listen(&model, max, quiet, stop.clone(), progress)
+                };
                 if command == "/standup" {
                     match listen().await {
                         Ok(t) if !t.is_empty() => {
@@ -342,6 +362,11 @@ impl Repl {
                         }
                         Err(e) => out.eprintln(&format!("[talk] {e}")),
                     },
+                }
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.talk_stop = None;
                 }
             }
             "/speak" => {

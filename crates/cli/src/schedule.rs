@@ -312,9 +312,14 @@ impl Schedules {
     }
 }
 
-/// Starts a scheduled run: a background `dcode-ai run` session in `ws`.
-/// Returns its session id and the process.
-pub fn launch(ws: &Path, s: &Schedule) -> std::io::Result<(String, std::process::Child)> {
+/// Starts a scheduled run: a background `dcode-ai run` session in `ws` —
+/// in a worktree of its own when it may change files (`--auto`) and `ws`
+/// is a git repository, so your checkout is never touched. Returns its
+/// session id, the process and the worktree's branch.
+pub fn launch(
+    ws: &Path,
+    s: &Schedule,
+) -> std::io::Result<(String, std::process::Child, Option<String>)> {
     let session_id = format!("session-{}", chrono::Utc::now().timestamp_millis());
     let sessions = ws.join(".dcode-ai").join("sessions");
     std::fs::create_dir_all(&sessions)?;
@@ -325,8 +330,20 @@ pub fn launch(ws: &Path, s: &Schedule) -> std::io::Result<(String, std::process:
         s.id, s.when, s.prompt
     );
     let mode = if s.mode == "auto" { "auto" } else { "plan" };
+    let mut dir = ws.to_path_buf();
+    let mut branch = None;
+    if mode == "auto" {
+        let mgr = dcode_ai_runtime::worktree::WorktreeManager::new(ws);
+        if mgr.is_git_repo()
+            && let Ok(info) = mgr.create_worktree(&session_id)
+        {
+            dir = info.worktree_path;
+            branch = Some(info.branch_name);
+        }
+    }
     let child = std::process::Command::new(std::env::current_exe()?)
-        .current_dir(ws)
+        .current_dir(&dir)
+        .env("DCODE_AI_HISTORY_DIR", &sessions)
         .args([
             "run",
             "--prompt",
@@ -341,7 +358,7 @@ pub fn launch(ws: &Path, s: &Schedule) -> std::io::Result<(String, std::process:
         .stdout(log)
         .stderr(err)
         .spawn()?;
-    Ok((session_id, child))
+    Ok((session_id, child, branch))
 }
 
 #[cfg(test)]

@@ -522,6 +522,8 @@ pub struct TuiSessionState {
     pub notifications_enabled: bool,
     /// `[ui] push_url`: told when something waits for you while you're away.
     pub push_url: Option<String>,
+    /// Set while `/talk` listens; Esc sets it to stop.
+    pub talk_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// `[ui] working_style`: `bar`, `dots` or `plain`.
     pub working_style: String,
     /// `[ui] shimmer`.

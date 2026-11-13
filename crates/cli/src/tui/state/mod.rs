@@ -216,6 +216,7 @@ impl TuiSessionState {
             mouse_capture_on: true,
             notifications_enabled: true,
             push_url: None,
+            talk_stop: None,
             working_style: "bar".into(),
             shimmer: true,
             sounds: false,

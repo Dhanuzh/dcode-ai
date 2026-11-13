@@ -8,6 +8,7 @@ pub mod chat_image;
 pub mod diagram;
 pub mod file_mentions;
 pub mod herdr;
+pub mod host;
 pub mod image_attach;
 pub mod invite;
 pub mod ipc_pending;

@@ -1,5 +1,44 @@
 # Changelog
 
+## 1.0.64 — 2026-11-13
+
+### New
+- **Sessions that outlive the terminal** (Linux, macOS, WSL): an
+  interactive session now runs in a small background host; your terminal
+  only shows it. Close the terminal and the session — a turn in progress,
+  background agents, a pending approval — keeps going. Run `dcode-ai` in the
+  folder again and it offers to attach ("A session is running here in the
+  background — attach? [Y/n]"), with the screen as you left it. `/detach`
+  leaves on purpose; `dcode-ai bg` lists the background sessions, `dcode-ai
+  bg attach [id]` shows one, `dcode-ai bg kill <id>` stops one. While no
+  terminal is attached the session counts as unfocused, so approvals notify
+  you (desktop, `[ui] push_url`). `[session] keep_running = false` turns it
+  off; Windows keeps the old behaviour for now.
+- **Code Mode is measured**: `/cost` shows how many scripts ran, the tool
+  calls inside them and the tokens their intermediate results kept out of
+  the conversation. After 20 scripts that kept under ~300 tokens each out,
+  Code Mode turns itself off (and `/cost` says so);
+  `[harness] code_mode_auto = false` keeps it on regardless.
+- **Warm start on resume**: on the Anthropic API backend, a resumed
+  conversation's prompt cache is warmed right away, so the first turn
+  doesn't wait on (or pay full price for) the whole history.
+- **Scheduled runs that change files work in a worktree**: `/schedule add
+  … --auto` runs in its own branch, so your checkout is never touched; the
+  finish note names the branch to merge.
+- **Teams answers in the thread**: the answer payload now carries the
+  thread (`replyToId`, `channelId`, `teamId`, `card`), so a Workflows flow
+  with "Reply with an adaptive card in a channel" posts it as a reply —
+  `dcode-ai teams setup` shows both flows.
+- **Esc stops `/talk`** while it listens (and ends a hands-free loop).
+
+### Security
+- **The session socket is private**: on Unix its folder is only yours
+  (0700; never a shared `/tmp/dcode-ai` another user could create first),
+  the socket is 0600, and the session refuses connections from other users.
+  On Windows, where the socket is local TCP, a client must first send the
+  secret kept in the session's marker file — before, any program on the
+  machine could connect and send messages or approve tool calls.
+
 ## 1.0.63 — 2026-11-12
 
 ### New

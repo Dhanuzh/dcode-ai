@@ -1488,10 +1488,14 @@ impl Repl {
         let mut notes: Vec<String> = Vec::new();
         // Finished runs.
         self.schedule_runs
-            .retain_mut(|(id, session, child)| match child.try_wait() {
+            .retain_mut(|(id, session, child, branch)| match child.try_wait() {
                 Ok(Some(status)) => {
+                    let changes = branch
+                        .as_ref()
+                        .map(|b| format!(" · its changes are on branch {b} (`dcode-ai worktrees merge {session}`)"))
+                        .unwrap_or_default();
                     notes.push(format!(
-                        "Scheduled run #{id} {} — /resume {session} to read it",
+                        "Scheduled run #{id} {} — /resume {session} to read it{changes}",
                         if status.success() {
                             "finished"
                         } else {
@@ -1509,7 +1513,7 @@ impl Repl {
         let due = list.due(now);
         let mut changed = false;
         for id in due {
-            if self.schedule_runs.iter().any(|(i, _, _)| *i == id) {
+            if self.schedule_runs.iter().any(|(i, _, _, _)| *i == id) {
                 continue; // never overlaps itself
             }
             let Some(s) = list.items.iter().find(|s| s.id == id).cloned() else {
@@ -1523,13 +1527,13 @@ impl Repl {
                 continue;
             }
             match launch(&ws, &s) {
-                Ok((session, child)) => {
+                Ok((session, child, branch)) => {
                     notes.push(format!(
                         "Scheduled run #{id} started: {}",
                         s.prompt.chars().take(60).collect::<String>()
                     ));
                     list.started(id, &session, now);
-                    self.schedule_runs.push((id, session, child));
+                    self.schedule_runs.push((id, session, child, branch));
                 }
                 Err(e) => {
                     notes.push(format!("Scheduled run #{id} couldn't start: {e}"));

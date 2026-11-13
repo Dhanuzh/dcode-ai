@@ -384,11 +384,20 @@ impl Repl {
                 let history = dcode_ai_runtime::usage_log::log_path()
                     .map(|p| dcode_ai_runtime::usage_log::load(&p))
                     .unwrap_or_default();
-                let lines = dcode_ai_runtime::usage_log::cost_lines(
+                let mut lines = dcode_ai_runtime::usage_log::cost_lines(
                     &history,
                     chrono::Local::now().date_naive(),
                     days,
                 );
+                let h = &self.runtime.config().harness;
+                if h.code_mode
+                    && h.code_mode_auto
+                    && let Some(why) =
+                        dcode_ai_runtime::usage_log::code_mode_verdict(&history, chrono::Utc::now())
+                {
+                    lines.push(String::new());
+                    lines.push(why);
+                }
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {
                         g.open_info_modal("usage", lines);

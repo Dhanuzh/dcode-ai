@@ -256,6 +256,14 @@ impl DcodeAiConfig {
             self.provider.anthropic.model = migrate_claude_model_id(&model);
         }
 
+        // Where sessions are saved (scheduled runs in a worktree save theirs
+        // with the project's).
+        if let Ok(dir) = env::var("DCODE_AI_HISTORY_DIR")
+            && !dir.is_empty()
+        {
+            self.session.history_dir = PathBuf::from(dir);
+        }
+
         if let Ok(memory_path) = env::var("DCODE_AI_MEMORY_PATH") {
             self.memory.file_path = PathBuf::from(memory_path);
         }
@@ -1551,6 +1559,10 @@ pub struct SessionConfig {
     /// USD (API list prices; 0 = no limit).
     #[serde(default)]
     pub max_cost_usd: f64,
+    /// Interactive sessions run in a background host, so closing the
+    /// terminal doesn't end them (`dcode-ai` again reattaches). Unix only.
+    #[serde(default = "default_true")]
+    pub keep_running: bool,
     /// No longer used (turns aren't paused for their token count since
     /// 1.0.51); still read so older config files load, never written.
     #[serde(default, skip_serializing)]
@@ -1583,6 +1595,7 @@ impl Default for SessionConfig {
             last_session_file: PathBuf::from(".dcode-ai/.last_session"),
             auto_compact_on_finish: false,
             max_cost_usd: 0.0,
+            keep_running: true,
             turn_token_alarm: 0,
             verify_after_edits: false,
             cross_review: false,
@@ -1617,6 +1630,10 @@ pub struct HarnessConfig {
     /// only its result enters the conversation).
     #[serde(default = "default_true")]
     pub code_mode: bool,
+    /// Turn Code Mode off by itself when `/cost` shows it isn't saving
+    /// (after 20 scripts, under ~300 tokens kept out each).
+    #[serde(default = "default_true")]
+    pub code_mode_auto: bool,
     /// Extra system-prompt text for this run (`--append-system-prompt`).
     /// Never saved.
     #[serde(skip)]
@@ -2001,6 +2018,7 @@ impl Default for HarnessConfig {
             subagent_max_minutes: default_subagent_max_minutes(),
             browser_task_model: None,
             code_mode: true,
+            code_mode_auto: true,
             append_system_prompt: None,
         }
     }
@@ -2031,6 +2049,9 @@ impl HarnessConfig {
         }
         if let Some(v) = partial.code_mode {
             self.code_mode = v;
+        }
+        if let Some(v) = partial.code_mode_auto {
+            self.code_mode_auto = v;
         }
         if let Some(include_repo_map) = partial.include_repo_map {
             self.include_repo_map = include_repo_map;
@@ -2180,6 +2201,9 @@ impl HookConfig {
 
 impl SessionConfig {
     fn merge(&mut self, partial: PartialSessionConfig) {
+        if let Some(v) = partial.keep_running {
+            self.keep_running = v;
+        }
         if let Some(v) = partial.max_cost_usd {
             self.max_cost_usd = v.max(0.0);
         }
@@ -2335,6 +2359,7 @@ struct PartialSessionConfig {
     last_session_file: Option<PathBuf>,
     auto_compact_on_finish: Option<bool>,
     max_cost_usd: Option<f64>,
+    keep_running: Option<bool>,
     turn_token_alarm: Option<u64>,
     verify_after_edits: Option<bool>,
     cross_review: Option<bool>,
@@ -2353,6 +2378,7 @@ struct PartialHarnessConfig {
     subagent_max_minutes: Option<u64>,
     browser_task_model: Option<String>,
     code_mode: Option<bool>,
+    code_mode_auto: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

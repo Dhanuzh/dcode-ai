@@ -10,6 +10,14 @@ on Boa; inner calls limited to what the mode allows without asking, rather
 than prompting mid-script). Next: C (sessions that outlive the terminal),
 its own release.
 
+**Status (v1.0.64).** C built differently from the plan below: instead of
+splitting the REPL from the TUI, the whole TUI runs unchanged in a
+pseudo-terminal owned by a background host (like dtach/tmux); the terminal
+is a thin client, and a reattaching one gets the current screen from the
+host's copy (vt100). Unix only. Browser/phone owner attach (C3) stays with
+`/invite phone`. Also built: warm on resume, worktrees for `--auto`
+schedules, Code Mode measurement with auto-off.
+
 ## A. Prompt-cache warming
 
 **Why.** The provider caches the prompt prefix for ~5 minutes. After a pause

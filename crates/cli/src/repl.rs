@@ -441,7 +441,8 @@ pub struct Repl {
     current_agent_label: String,
     background_jobs: Vec<BackgroundJob>,
     /// Scheduled runs going right now: schedule id, session id, process.
-    schedule_runs: Vec<(u32, String, std::process::Child)>,
+    /// (schedule id, session, process, worktree branch).
+    schedule_runs: Vec<(u32, String, std::process::Child, Option<String>)>,
     /// `/slack on`: answering Slack mentions.
     slack: Option<tokio::task::JoinHandle<()>>,
     /// `/teams on`: answering Teams mentions.
@@ -1036,8 +1037,8 @@ impl Repl {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
             "/office" | "/timeline" | "/diagram" | "/talk" | "/standup" | "/slack" | "/teams"
-            | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff" | "/invite" | "/chat"
-            | "/todo" | "/people" | "/kick" | "/call" | "/mute" | "/hangup" => {
+            | "/detach" | "/files" | "/sounds" | "/speak" | "/watch" | "/handoff" | "/invite"
+            | "/chat" | "/todo" | "/people" | "/kick" | "/call" | "/mute" | "/hangup" => {
                 return self.cmd_team(input, command, rest, parts, out).await;
             }
             "/btw" => {

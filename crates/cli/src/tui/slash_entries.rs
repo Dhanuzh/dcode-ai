@@ -164,6 +164,7 @@ pub(crate) fn command_group(cmd: &str) -> (u8, &'static str) {
             "Session",
             &[
                 "/resume",
+                "/detach",
                 "/new",
                 "/clear",
                 "/fork",
