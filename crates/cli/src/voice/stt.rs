@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use candle_core::{D, Device, IndexOp, Tensor};
 use candle_transformers::models::whisper::{self as w, Config};
@@ -299,6 +300,18 @@ impl Transcriber {
 
     /// Text for 16 kHz mono samples (any length; 30 s at a time).
     pub fn transcribe(&mut self, pcm: &[i16]) -> Result<String, String> {
+        self.transcribe_with_stop(pcm, None)
+    }
+
+    /// Like [`Self::transcribe`], but stops early when `stop` is set.
+    pub fn transcribe_with_stop(
+        &mut self,
+        pcm: &[i16],
+        stop: Option<&AtomicBool>,
+    ) -> Result<String, String> {
+        if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            return Err("stopped".into());
+        }
         let samples: Vec<f32> = pcm.iter().map(|&s| s as f32 / 32768.0).collect();
         let mel = w::audio::pcm_to_mel(&self.config, &samples, &self.mel_filters);
         let bins = self.config.num_mel_bins;
@@ -308,25 +321,46 @@ impl Transcriber {
         let mut out = Vec::new();
         let mut seek = 0;
         while seek < frames {
+            if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+                return Err("stopped".into());
+            }
             let len = (frames - seek).min(w::N_FRAMES);
             let seg = mel.narrow(2, seek, len).map_err(|e| e.to_string())?;
-            out.push(self.segment(&seg).map_err(|e| e.to_string())?);
+            out.push(self.segment(&seg, stop)?);
             seek += len;
         }
         Ok(out.join(" ").trim().to_string())
     }
 
-    fn segment(&mut self, mel: &Tensor) -> candle_core::Result<String> {
-        let audio = self.model.encode(mel)?;
+    fn segment(&mut self, mel: &Tensor, stop: Option<&AtomicBool>) -> Result<String, String> {
+        let audio = self.model.encode(mel).map_err(|e| e.to_string())?;
         let mut tokens = vec![self.sot, self.no_timestamps];
         let limit = self.config.max_target_positions / 2;
         for i in 0..limit {
-            let t = Tensor::new(tokens.as_slice(), mel.device())?.unsqueeze(0)?;
-            let ys = self.model.decode(&t, &audio, i == 0)?;
-            let (_, seq, _) = ys.dims3()?;
-            let logits = self.model.logits(&ys.i((..1, seq - 1..))?)?.i(0)?.i(0)?;
-            let logits = logits.broadcast_add(&self.suppress)?;
-            let v: Vec<f32> = logits.to_vec1()?;
+            if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+                return Err("stopped".into());
+            }
+            let t = Tensor::new(tokens.as_slice(), mel.device())
+                .map_err(|e| e.to_string())?
+                .unsqueeze(0)
+                .map_err(|e| e.to_string())?;
+            let ys = self
+                .model
+                .decode(&t, &audio, i == 0)
+                .map_err(|e| e.to_string())?;
+            let (_, seq, _) = ys.dims3().map_err(|e| e.to_string())?;
+            let logits = self
+                .model
+                .logits(&ys.i((..1, seq - 1..)).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?
+                .i(0)
+                .map_err(|e| e.to_string())?
+                .i(0)
+                .map_err(|e| e.to_string())?;
+            let logits = logits
+                .broadcast_add(&self.suppress)
+                .map_err(|e| e.to_string())?;
+            let v: Vec<f32> = logits.to_vec1().map_err(|e| e.to_string())?;
             let next = v
                 .iter()
                 .enumerate()
@@ -398,6 +432,24 @@ pub async fn record(
 /// The loaded model, kept for the next `/talk`.
 static LOADED: std::sync::Mutex<Option<(String, Transcriber)>> = std::sync::Mutex::new(None);
 
+/// Pre-load the STT model in the background when already downloaded.
+/// Returns `Ok(true)` when a model is ready in memory.
+pub async fn warm_up_if_downloaded(model: &str) -> Result<bool, String> {
+    if !is_downloaded(model) {
+        return Ok(false);
+    }
+    let name = model.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut slot = LOADED.lock().map_err(|e| e.to_string())?;
+        if slot.as_ref().is_none_or(|(n, _)| *n != name) {
+            *slot = Some((name.clone(), Transcriber::load(&name)?));
+        }
+        Ok::<bool, String>(true)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Listens (until a pause of `quiet`, at most `max`) and returns what was
 /// said. Downloads and loads the model the first time.
 pub async fn listen(
@@ -420,17 +472,35 @@ pub async fn listen(
     }
     progress("✎ transcribing…".into());
     let name = model.to_string();
-    tokio::task::spawn_blocking(move || {
+    let stop_for_transcribe = stop.clone();
+    let mut transcribe = tokio::task::spawn_blocking(move || {
         let mut slot = LOADED.lock().map_err(|e| e.to_string())?;
         if slot.as_ref().is_none_or(|(n, _)| *n != name) {
             *slot = Some((name.clone(), Transcriber::load(&name)?));
         }
         let (_, t) = slot.as_mut().ok_or("no model")?;
-        t.transcribe(&pcm)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-    .map(|t| clean(&t))
+        t.transcribe_with_stop(&pcm, Some(stop_for_transcribe.as_ref()))
+    });
+    let started = std::time::Instant::now();
+    loop {
+        tokio::select! {
+            out = &mut transcribe => {
+                return out
+                    .map_err(|e| e.to_string())?
+                    .map(|t| clean(&t));
+            }
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                if stop.load(Ordering::SeqCst) {
+                    progress("✎ transcribing… stopping".into());
+                } else {
+                    let secs = started.elapsed().as_secs();
+                    if secs > 0 {
+                        progress(format!("✎ transcribing… {secs}s"));
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// Whisper's habits on near-silence ("you", "Thank you.") and stray marks.

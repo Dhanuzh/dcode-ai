@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.0.65 — 2026-11-13
+
+### Fixed
+- **`/talk` / voice stand-up no longer leave the TUI stuck**: the talk-stop
+  flag is now always cleared after voice capture/transcription paths,
+  including error/early-return branches, so keyboard input and normal Esc
+  behavior reliably recover after transcribing.
+
+### Improved
+- **`/talk` stop handling is RAII-safe**: talk mode now uses a drop guard so
+  stale stop state cannot leak across command exits.
+- **Transcription now reports heartbeat progress** (`✎ transcribing… Ns`) so
+  long model load/transcribe stages are visible instead of appearing frozen.
+- **Esc cancellation now reaches transcribe work too**: stop tokens are checked
+  during decode loops, not only during microphone capture.
+- **Optional STT warm-up at TUI startup** (`[ui] warm_stt_model = true` by
+  default) reduces first `/talk` latency when the model is already downloaded.
+- **Regression tests added** for talk-stop state cleanup and stale-state
+  replacement (`talk_stop_guard_*`).
+
 ## 1.0.64 — 2026-11-13
 
 ### New

@@ -410,6 +410,10 @@ pub struct UiConfig {
     /// `base.en` (~290 MB, better).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stt_model: Option<String>,
+    /// Warm a downloaded speech model in the background at TUI startup so
+    /// first `/talk` latency is lower.
+    #[serde(default = "default_true")]
+    pub warm_stt_model: bool,
     /// The "working…" line: `bar` (default), `dots` or `plain` (no animation).
     #[serde(default = "default_working_style")]
     pub working_style: String,
@@ -464,6 +468,7 @@ impl Default for UiConfig {
             notifications: default_notifications(),
             push_url: None,
             stt_model: None,
+            warm_stt_model: true,
             working_style: default_working_style(),
             shimmer: true,
             sounds: false,
@@ -529,6 +534,9 @@ impl UiConfig {
         }
         if let Some(v) = partial.stt_model {
             self.stt_model = Some(v).filter(|m| matches!(m.as_str(), "tiny.en" | "base.en"));
+        }
+        if let Some(v) = partial.warm_stt_model {
+            self.warm_stt_model = v;
         }
         if let Some(v) = partial.push_url {
             self.push_url =
@@ -2277,6 +2285,7 @@ struct PartialUiConfig {
     notifications: Option<bool>,
     push_url: Option<String>,
     stt_model: Option<String>,
+    warm_stt_model: Option<bool>,
     working_style: Option<String>,
     shimmer: Option<bool>,
     sounds: Option<bool>,

@@ -1551,11 +1551,12 @@ pub fn run_blocking(
                         g.last_key_at = Some(std::time::Instant::now());
                         false
                     } => {}
-                // Esc while `/talk` listens: stop listening.
+                // Esc while `/talk` listens: stop listening and return Esc
+                // to normal behavior right away.
                 Event::Key(key)
                     if key.code == crossterm::event::KeyCode::Esc
                         && !matches!(key.kind, crossterm::event::KeyEventKind::Release)
-                        && g.talk_stop.as_ref().is_some_and(|s| {
+                        && g.talk_stop.take().is_some_and(|s| {
                             !s.swap(true, std::sync::atomic::Ordering::SeqCst)
                         }) => {}
                 Event::Key(key) => {

@@ -36,6 +36,53 @@ fn changed_files(workspace: &std::path::Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// Set while `/talk` is active; dropped to restore normal Esc handling.
+struct TalkStopGuard {
+    state: Option<Arc<Mutex<TuiSessionState>>>,
+}
+
+fn run_talk_stop_guard_with_state(
+    state: Option<Arc<Mutex<TuiSessionState>>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> TalkStopGuard {
+    if let Some(state) = state {
+        if let Ok(mut g) = state.lock() {
+            g.talk_stop = Some(stop);
+        }
+        TalkStopGuard { state: Some(state) }
+    } else {
+        TalkStopGuard { state: None }
+    }
+}
+
+#[cfg(test)]
+fn talk_stop_guard_for_tui(
+    state: Arc<Mutex<TuiSessionState>>,
+    stop: Arc<std::sync::atomic::AtomicBool>,
+) -> TalkStopGuard {
+    run_talk_stop_guard_with_state(Some(state), stop)
+}
+
+impl TalkStopGuard {
+    fn install(out: ReplOutput<'_>, stop: Arc<std::sync::atomic::AtomicBool>) -> Self {
+        let state = match out {
+            ReplOutput::Tui(st) => Some(Arc::clone(st)),
+            ReplOutput::Stdio => None,
+        };
+        run_talk_stop_guard_with_state(state, stop)
+    }
+}
+
+impl Drop for TalkStopGuard {
+    fn drop(&mut self) {
+        if let Some(state) = &self.state
+            && let Ok(mut g) = state.lock()
+        {
+            g.talk_stop = None;
+        }
+    }
+}
+
 impl Repl {
     #[allow(unused_variables, unused_mut)]
     pub(super) async fn cmd_team(
@@ -274,100 +321,98 @@ impl Repl {
                 let progress = |s: String| out.println(&format!("[talk] {s}"));
                 // Esc in the TUI stops listening (and a hands-free loop).
                 let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                if let ReplOutput::Tui(st) = &out
-                    && let Ok(mut g) = st.lock()
-                {
-                    g.talk_stop = Some(stop.clone());
-                }
-                let (max, quiet) = if command == "/standup" {
-                    (
-                        std::time::Duration::from_secs(180),
-                        std::time::Duration::from_secs(3),
-                    )
-                } else {
-                    (
-                        std::time::Duration::from_secs(90),
-                        std::time::Duration::from_millis(1500),
-                    )
-                };
-                let listen = || {
-                    stop.store(false, std::sync::atomic::Ordering::SeqCst);
-                    dcode_ai_cli::voice::stt::listen(&model, max, quiet, stop.clone(), progress)
-                };
-                if command == "/standup" {
-                    match listen().await {
-                        Ok(t) if !t.is_empty() => {
-                            out.println(&format!("[talk] you said: {t}"));
-                            self.run_preset(STANDUP_PROMPT, &t, out).await?;
+                let _talk_stop_guard = TalkStopGuard::install(out, stop.clone());
+
+                let talk_run = async {
+                    let (max, quiet) = if command == "/standup" {
+                        (
+                            std::time::Duration::from_secs(180),
+                            std::time::Duration::from_secs(3),
+                        )
+                    } else {
+                        (
+                            std::time::Duration::from_secs(90),
+                            std::time::Duration::from_millis(1500),
+                        )
+                    };
+                    let listen = || {
+                        stop.store(false, std::sync::atomic::Ordering::SeqCst);
+                        dcode_ai_cli::voice::stt::listen(&model, max, quiet, stop.clone(), progress)
+                    };
+                    if command == "/standup" {
+                        match listen().await {
+                            Ok(t) if !t.is_empty() => {
+                                out.println(&format!("[talk] you said: {t}"));
+                                self.run_preset(STANDUP_PROMPT, &t, out).await?;
+                            }
+                            Ok(_) => out.println("[talk] didn't catch that — try again"),
+                            Err(e) => out.eprintln(&format!("[talk] {e}")),
                         }
-                        Ok(_) => out.println("[talk] didn't catch that — try again"),
-                        Err(e) => out.eprintln(&format!("[talk] {e}")),
+                        return Ok::<(), anyhow::Error>(());
                     }
-                    return Ok(true);
-                }
-                match sub {
-                    // Hands-free: listen → send → read the reply → listen.
-                    "loop" => {
-                        out.println("[talk] hands-free — say \"stop\" to end");
-                        for _ in 0..30 {
-                            let text = match listen().await {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    out.eprintln(&format!("[talk] {e}"));
+                    match sub {
+                        // Hands-free: listen → send → read the reply → listen.
+                        "loop" => {
+                            out.println("[talk] hands-free — say \"stop\" to end");
+                            for _ in 0..30 {
+                                let text = match listen().await {
+                                    Ok(t) => t,
+                                    Err(e) => {
+                                        out.eprintln(&format!("[talk] {e}"));
+                                        break;
+                                    }
+                                };
+                                if text.is_empty() {
+                                    continue;
+                                }
+                                if dcode_ai_cli::voice::stt::is_stop(&text) {
+                                    out.println("[talk] ended");
                                     break;
                                 }
-                            };
-                            if text.is_empty() {
-                                continue;
+                                out.println(&format!("[talk] you: {text}"));
+                                self.run_preset("", &text, out).await?;
+                                let reply = self
+                                    .runtime
+                                    .messages()
+                                    .iter()
+                                    .rev()
+                                    .find(|m| m.role == dcode_ai_common::message::Role::Assistant)
+                                    .map(|m| m.content.to_summary_text())
+                                    .unwrap_or_default();
+                                let _ = tokio::task::spawn_blocking(move || {
+                                    crate::tui::notify::speak_and_wait(&reply)
+                                })
+                                .await;
                             }
-                            if dcode_ai_cli::voice::stt::is_stop(&text) {
-                                out.println("[talk] ended");
-                                break;
-                            }
-                            out.println(&format!("[talk] you: {text}"));
-                            self.run_preset("", &text, out).await?;
-                            let reply = self
-                                .runtime
-                                .messages()
-                                .iter()
-                                .rev()
-                                .find(|m| m.role == dcode_ai_common::message::Role::Assistant)
-                                .map(|m| m.content.to_summary_text())
-                                .unwrap_or_default();
-                            let _ = tokio::task::spawn_blocking(move || {
-                                crate::tui::notify::speak_and_wait(&reply)
-                            })
-                            .await;
                         }
+                        _ => match listen().await {
+                            Ok(t) if t.is_empty() => {
+                                out.println("[talk] didn't catch that — try again")
+                            }
+                            Ok(t) if sub == "send" => {
+                                out.println(&format!("[talk] you: {t}"));
+                                self.run_preset("", &t, out).await?;
+                            }
+                            Ok(t) => {
+                                if let ReplOutput::Tui(st) = &out
+                                    && let Ok(mut g) = st.lock()
+                                {
+                                    g.set_input_text(t.clone());
+                                    out.println(
+                                        "[talk] in the prompt — edit it or press Enter to send",
+                                    );
+                                } else {
+                                    out.println(&format!("[talk] {t}"));
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[talk] {e}")),
+                        },
                     }
-                    _ => match listen().await {
-                        Ok(t) if t.is_empty() => {
-                            out.println("[talk] didn't catch that — try again")
-                        }
-                        Ok(t) if sub == "send" => {
-                            out.println(&format!("[talk] you: {t}"));
-                            self.run_preset("", &t, out).await?;
-                        }
-                        Ok(t) => {
-                            if let ReplOutput::Tui(st) = &out
-                                && let Ok(mut g) = st.lock()
-                            {
-                                g.set_input_text(t.clone());
-                                out.println(
-                                    "[talk] in the prompt — edit it or press Enter to send",
-                                );
-                            } else {
-                                out.println(&format!("[talk] {t}"));
-                            }
-                        }
-                        Err(e) => out.eprintln(&format!("[talk] {e}")),
-                    },
+                    Ok::<(), anyhow::Error>(())
                 }
-                if let ReplOutput::Tui(st) = &out
-                    && let Ok(mut g) = st.lock()
-                {
-                    g.talk_stop = None;
-                }
+                .await;
+
+                talk_run?;
             }
             "/speak" => {
                 let last = self
@@ -1002,5 +1047,61 @@ fn print_qr(out: &ReplOutput<'_>, label: &str, url: &str) {
                 out.println(&l);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::state::TuiSessionState;
+    use std::path::PathBuf;
+
+    fn make_state() -> Arc<Mutex<TuiSessionState>> {
+        Arc::new(Mutex::new(TuiSessionState::new(
+            "session".into(),
+            "model".into(),
+            "@agent".into(),
+            "Default".into(),
+            PathBuf::from("."),
+            false,
+        )))
+    }
+
+    #[test]
+    fn talk_stop_guard_clears_after_drop() {
+        let state = make_state();
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        {
+            let _guard = talk_stop_guard_for_tui(state.clone(), stop.clone());
+            assert!(state
+                .lock()
+                .ok()
+                .and_then(|g| g.talk_stop.as_ref().cloned())
+                .is_some());
+        }
+
+        assert!(state.lock().is_ok_and(|g| g.talk_stop.is_none()));
+    }
+
+    #[test]
+    fn talk_stop_guard_replaces_stale_flag_and_restores_none() {
+        let state = make_state();
+        let stale = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        if let Ok(mut g) = state.lock() {
+            g.talk_stop = Some(stale);
+        }
+
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        {
+            let _guard = talk_stop_guard_for_tui(state.clone(), stop.clone());
+            assert!(state.lock().is_ok_and(|g| {
+                g.talk_stop
+                    .as_ref()
+                    .is_some_and(|cur| Arc::ptr_eq(cur, &stop))
+            }));
+        }
+
+        assert!(state.lock().is_ok_and(|g| g.talk_stop.is_none()));
     }
 }

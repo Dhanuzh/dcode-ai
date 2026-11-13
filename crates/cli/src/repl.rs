@@ -1677,6 +1677,37 @@ impl Repl {
             g.agents_registry = Some(self.runtime.background_agents());
             g.steer_inbox = Some(steer_inbox.clone());
         }
+        if self.runtime.config().ui.warm_stt_model {
+            let model = self
+                .runtime
+                .config()
+                .ui
+                .stt_model
+                .clone()
+                .unwrap_or_else(|| "tiny.en".into());
+            let st = tui_state.clone();
+            tokio::spawn(async move {
+                match dcode_ai_cli::voice::stt::warm_up_if_downloaded(&model).await {
+                    Ok(true) => {
+                        if let Ok(mut g) = st.lock() {
+                            g.push_block(DisplayBlock::System(format!(
+                                "[talk] speech model warm and ready ({model})"
+                            )));
+                            g.touch_transcript();
+                        }
+                    }
+                    Ok(false) => {}
+                    Err(e) => {
+                        if let Ok(mut g) = st.lock() {
+                            g.push_block(DisplayBlock::System(format!(
+                                "[talk] speech model warm-up skipped: {e}"
+                            )));
+                            g.touch_transcript();
+                        }
+                    }
+                }
+            });
+        }
         let mut pending_cmds: VecDeque<TuiCmd> = VecDeque::new();
         let mut idle_compacted = false;
         if let Some(p) = self.startup_prompt.take() {
