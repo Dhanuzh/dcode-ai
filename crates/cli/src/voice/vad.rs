@@ -38,6 +38,11 @@ impl Gate {
         let speech = level > (self.noise * MARGIN).max(MIN_LEVEL);
         if speech {
             self.hang = HANGOVER;
+            // Creep up even while "speaking": a steady noise louder than the
+            // floor (a fan, mic hiss, a gain change) must not count as
+            // speech forever, or listening never sees a pause. Real speech
+            // dips between words, which pulls the floor back down.
+            self.noise += (level - self.noise) * 0.002;
         } else {
             // Follow the background slowly (and quickly when it drops).
             let k = if level < self.noise { 0.2 } else { 0.02 };
@@ -70,5 +75,17 @@ mod tests {
             }
         }
         assert_eq!(open_after, HANGOVER as usize - 1);
+    }
+
+    #[test]
+    fn steady_noise_stops_counting_as_speech() {
+        let mut g = Gate::default();
+        let hum: Vec<i16> = (0..320)
+            .map(|i| if i % 2 == 0 { 2000 } else { -2000 })
+            .collect();
+        assert!(g.open(&hum), "a new sound opens the gate");
+        // Within ~10 s of an unchanging sound the gate closes again.
+        let closed = (0..500).any(|_| !g.open(&hum));
+        assert!(closed, "steady noise kept the gate open");
     }
 }

@@ -318,10 +318,29 @@ impl Repl {
                     }
                     return Ok(true);
                 }
-                let progress = |s: String| out.println(&format!("[talk] {s}"));
+                // Listening/transcribing status rewrites one line in place
+                // (instead of a new line every second).
+                let progress = |s: String| {
+                    let line = format!("[talk] {s}");
+                    if let ReplOutput::Tui(st) = &out
+                        && let Ok(mut g) = st.lock()
+                    {
+                        let live = |b: &DisplayBlock| {
+                            matches!(b, DisplayBlock::System(t)
+                                if t.starts_with("[talk] 🎙 listening")
+                                    || t.starts_with("[talk] ✎ transcribing"))
+                        };
+                        if g.blocks.last().is_some_and(live) {
+                            g.blocks.pop();
+                        }
+                        g.blocks.push(DisplayBlock::System(line));
+                        g.touch_transcript();
+                        return;
+                    }
+                    out.println(&line);
+                };
                 // Esc in the TUI stops listening (and a hands-free loop).
                 let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-                let _talk_stop_guard = TalkStopGuard::install(out, stop.clone());
 
                 let talk_run = async {
                     let (max, quiet) = if command == "/standup" {
@@ -335,12 +354,16 @@ impl Repl {
                             std::time::Duration::from_millis(1500),
                         )
                     };
-                    let listen = || {
+                    // Esc belongs to `/talk` only while it listens or
+                    // transcribes; during the agent's reply it works as usual.
+                    let listen = || async {
                         stop.store(false, std::sync::atomic::Ordering::SeqCst);
+                        let _armed = TalkStopGuard::install(out, stop.clone());
                         dcode_ai_cli::voice::stt::listen(&model, max, quiet, stop.clone(), progress)
+                            .await
                     };
                     if command == "/standup" {
-                        match listen().await {
+                        match listen().await.map(|h| h.text) {
                             Ok(t) if !t.is_empty() => {
                                 out.println(&format!("[talk] you said: {t}"));
                                 self.run_preset(STANDUP_PROMPT, &t, out).await?;
@@ -353,16 +376,20 @@ impl Repl {
                     match sub {
                         // Hands-free: listen → send → read the reply → listen.
                         "loop" => {
-                            out.println("[talk] hands-free — say \"stop\" to end");
+                            out.println("[talk] hands-free — say \"stop\" (or press Esc while silent) to end");
                             for _ in 0..30 {
-                                let text = match listen().await {
-                                    Ok(t) => t,
+                                let (text, esc) = match listen().await {
+                                    Ok(h) => (h.text, h.by_esc),
                                     Err(e) => {
                                         out.eprintln(&format!("[talk] {e}"));
                                         break;
                                     }
                                 };
                                 if text.is_empty() {
+                                    if esc {
+                                        out.println("[talk] ended");
+                                        break;
+                                    }
                                     continue;
                                 }
                                 if dcode_ai_cli::voice::stt::is_stop(&text) {
@@ -385,7 +412,7 @@ impl Repl {
                                 .await;
                             }
                         }
-                        _ => match listen().await {
+                        _ => match listen().await.map(|h| h.text) {
                             Ok(t) if t.is_empty() => {
                                 out.println("[talk] didn't catch that — try again")
                             }

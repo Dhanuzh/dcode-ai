@@ -371,10 +371,24 @@ impl Transcriber {
                 break;
             }
             tokens.push(next);
+            if repeating(&tokens[2..]) {
+                break;
+            }
         }
         let _ = D::Minus1;
         Ok(self.tokens.decode(&tokens))
     }
+}
+
+/// Whisper on noise can loop on the same few tokens until the limit;
+/// stop once the tail repeats (a 1–8 token phrase, four times running).
+fn repeating(t: &[u32]) -> bool {
+    (1..=8).any(|n| {
+        t.len() >= n * 4 && {
+            let tail = &t[t.len() - n..];
+            (2..=4).all(|k| &t[t.len() - n * k..t.len() - n * (k - 1)] == tail)
+        }
+    })
 }
 
 /// Records from the microphone until `max` passes, or after speech `quiet`
@@ -450,28 +464,52 @@ pub async fn warm_up_if_downloaded(model: &str) -> Result<bool, String> {
     .map_err(|e| e.to_string())?
 }
 
-/// Listens (until a pause of `quiet`, at most `max`) and returns what was
-/// said. Downloads and loads the model the first time.
+/// What [`listen`] heard.
+pub struct Heard {
+    pub text: String,
+    /// Listening was ended with Esc ("done talking") rather than a pause.
+    pub by_esc: bool,
+}
+
+/// Listens (until a pause of `quiet`, at most `max`, or Esc) and returns
+/// what was said. Downloads and loads the model the first time.
+///
+/// `stop` is Esc: while listening it means "done talking" (what was said is
+/// still transcribed); while transcribing it cancels.
 pub async fn listen(
     model: &str,
     max: std::time::Duration,
     quiet: std::time::Duration,
     stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     progress: impl Fn(String),
-) -> Result<String, String> {
+) -> Result<Heard, String> {
     if !is_downloaded(model) {
         ensure_model(model, &progress).await?;
     }
-    progress("🎙 listening… (stops when you pause · Esc stops)".into());
-    let recorded = record(max, quiet, stop.clone()).await;
-    // Only Esc counts as stopping: the flag stays as it is, so Esc can still
-    // cancel the transcription below (the `/talk` guard clears it after).
-    let stopped = stop.load(std::sync::atomic::Ordering::SeqCst);
+    progress("🎙 listening… (stops when you pause · Esc when done)".into());
+    let started = std::time::Instant::now();
+    let recording = record(max, quiet, stop.clone());
+    tokio::pin!(recording);
+    let recorded = loop {
+        tokio::select! {
+            r = &mut recording => break r,
+            _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
+                let secs = started.elapsed().as_secs();
+                progress(format!("🎙 listening… {secs}s (stops when you pause · Esc when done)"));
+            }
+        }
+    };
+    // Esc while listening ended the recording: clear it so a second Esc can
+    // cancel the transcription.
+    let by_esc = stop.swap(false, Ordering::SeqCst);
     let pcm = recorded?;
-    if stopped && pcm.len() < 16_000 / 2 {
+    if by_esc && pcm.len() < 16_000 / 2 {
         return Err("stopped".into());
     }
-    progress("✎ transcribing…".into());
+    progress(format!(
+        "✎ transcribing {:.0}s of audio… (Esc cancels)",
+        pcm.len() as f32 / 16_000.0
+    ));
     let name = model.to_string();
     let stop_for_transcribe = stop.clone();
     let mut transcribe = tokio::task::spawn_blocking(move || {
@@ -486,18 +524,15 @@ pub async fn listen(
     loop {
         tokio::select! {
             out = &mut transcribe => {
-                return out
-                    .map_err(|e| e.to_string())?
-                    .map(|t| clean(&t));
+                let text = out.map_err(|e| e.to_string())??;
+                return Ok(Heard { text: clean(&text), by_esc });
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
                 if stop.load(Ordering::SeqCst) {
                     progress("✎ transcribing… stopping".into());
                 } else {
                     let secs = started.elapsed().as_secs();
-                    if secs > 0 {
-                        progress(format!("✎ transcribing… {secs}s"));
-                    }
+                    progress(format!("✎ transcribing… {secs}s (Esc cancels)"));
                 }
             }
         }
@@ -556,6 +591,14 @@ mod tests {
     }
 
     #[test]
+    fn repeat_loops_are_caught() {
+        assert!(!repeating(&[1, 2, 3, 4, 5, 6]));
+        assert!(repeating(&[9, 7, 7, 7, 7]));
+        assert!(repeating(&[1, 5, 6, 5, 6, 5, 6, 5, 6]));
+        assert!(!repeating(&[5, 6, 5, 6, 5, 6]));
+    }
+
+    #[test]
     fn mel_filters_are_whispers_80_bins() {
         // 80 bins × 201 FFT frequencies, f32.
         assert_eq!(MEL_80.len(), 80 * 201 * 4);
@@ -593,11 +636,40 @@ mod tests {
             |s| eprintln!("{s}"),
         )
         .await;
-        assert!(r.is_ok(), "{r:?}");
+        assert!(
+            r.as_ref().is_ok_and(|h| !h.by_esc),
+            "{:?}",
+            r.as_ref().err()
+        );
         assert!(
             !stop.load(std::sync::atomic::Ordering::SeqCst),
             "nobody pressed Esc"
         );
+    }
+
+    /// Esc while listening means "done talking": what was heard is still
+    /// transcribed, and the flag is cleared so a second Esc can cancel.
+    #[tokio::test]
+    #[ignore]
+    async fn listen_esc_while_talking_still_transcribes() {
+        // SAFETY: test-only, set before the audio thread starts.
+        unsafe { std::env::set_var("DCODE_AI_FAKE_AUDIO", "tone") };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let esc = stop.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+            esc.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        let r = listen(
+            "tiny.en",
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(5),
+            stop.clone(),
+            |s| eprintln!("{s}"),
+        )
+        .await;
+        assert!(r.as_ref().is_ok_and(|h| h.by_esc), "{:?}", r.as_ref().err());
+        assert!(!stop.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// Downloads tiny.en and transcribes a generated tone (no words): runs

@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.68 — 2026-11-16
+
+### Fixed
+- **`/talk` kept listening and never produced text**: the voice detector
+  only learned the background noise level during silence, so a steady sound
+  (a fan, microphone hiss, a gain change) counted as speech forever —
+  listening ran the full 90 seconds and dcode-ai looked frozen. It now adapts
+  to steady noise too, so a pause is noticed.
+- **Esc while talking threw the recording away**: Esc while listening now
+  means "done talking" — what you said is transcribed. Esc while
+  transcribing still cancels.
+- **Esc during the agent's reply was swallowed** after `/talk send` and in
+  `/talk loop`: Esc belongs to `/talk` only while it listens or transcribes.
+- Whisper stuck repeating itself on noisy audio stops early instead of
+  decoding to the limit.
+- The "listening… / transcribing…" status updates one line in place, with a
+  seconds counter, instead of adding a line every second.
+
 ## 1.0.67 — 2026-11-16
 
 ### New
