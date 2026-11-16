@@ -1074,11 +1074,13 @@ mod tests {
 
         {
             let _guard = talk_stop_guard_for_tui(state.clone(), stop.clone());
-            assert!(state
-                .lock()
-                .ok()
-                .and_then(|g| g.talk_stop.as_ref().cloned())
-                .is_some());
+            assert!(
+                state
+                    .lock()
+                    .ok()
+                    .and_then(|g| g.talk_stop.as_ref().cloned())
+                    .is_some()
+            );
         }
 
         assert!(state.lock().is_ok_and(|g| g.talk_stop.is_none()));

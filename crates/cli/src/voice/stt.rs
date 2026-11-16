@@ -464,8 +464,9 @@ pub async fn listen(
     }
     progress("🎙 listening… (stops when you pause · Esc stops)".into());
     let recorded = record(max, quiet, stop.clone()).await;
-    // Done listening: Esc goes back to its usual job.
-    let stopped = stop.swap(true, std::sync::atomic::Ordering::SeqCst);
+    // Only Esc counts as stopping: the flag stays as it is, so Esc can still
+    // cancel the transcription below (the `/talk` guard clears it after).
+    let stopped = stop.load(std::sync::atomic::Ordering::SeqCst);
     let pcm = recorded?;
     if stopped && pcm.len() < 16_000 / 2 {
         return Err("stopped".into());
@@ -573,6 +574,30 @@ mod tests {
         let t = Tokens::load(&p).unwrap();
         assert_eq!(t.decode(&[0, 1, 2, 3]), "Hello world!");
         assert_eq!(t.id("<|endoftext|>").unwrap(), 3);
+    }
+
+    /// `listen` end to end with the fake microphone: finishing listening
+    /// must not count as Esc (it used to, so every transcription "stopped").
+    /// Needs the model downloaded: `cargo test -- --ignored listen_`.
+    #[tokio::test]
+    #[ignore]
+    async fn listen_transcribes_after_a_pause_without_esc() {
+        // SAFETY: test-only, set before the audio thread starts.
+        unsafe { std::env::set_var("DCODE_AI_FAKE_AUDIO", "tone") };
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let r = listen(
+            "tiny.en",
+            std::time::Duration::from_secs(2),
+            std::time::Duration::from_millis(300),
+            stop.clone(),
+            |s| eprintln!("{s}"),
+        )
+        .await;
+        assert!(r.is_ok(), "{r:?}");
+        assert!(
+            !stop.load(std::sync::atomic::Ordering::SeqCst),
+            "nobody pressed Esc"
+        );
     }
 
     /// Downloads tiny.en and transcribes a generated tone (no words): runs

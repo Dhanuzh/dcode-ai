@@ -1,5 +1,12 @@
 # Changelog
 
+## 1.0.66 — 2026-11-16
+
+### Fixed
+- **`/talk` said "stopped" after every recording**: finishing listening set
+  the same flag Esc uses, and since 1.0.65 transcription stops on that flag
+  — so every transcription ended at once. Only Esc counts as stopping now.
+
 ## 1.0.65 — 2026-11-13
 
 ### Fixed
