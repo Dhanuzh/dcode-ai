@@ -44,6 +44,11 @@ fn hint(name: &str) -> Option<&'static str> {
         "browser" => {
             "drive web pages, and desktop apps like VS Code, Slack, Teams, Outlook — it can open them"
         }
+        "record_start" => {
+            "record the browser or an app as a demo video (then record_stop, video_render)"
+        }
+        "record_stop" => "stop a screen recording and get its edit plan",
+        "video_render" => "render a recorded demo video: cuts, zooms, cursor, captions, music",
         "notebook_edit" => "edit Jupyter notebooks",
         "inspect_binary" => "look inside binary files",
         "query_symbols" => "find code symbols",

@@ -2,6 +2,21 @@
 
 use super::*;
 
+/// `/record <goal>`: the agent records itself doing it, then edits the video.
+pub(crate) const RECORD_PROMPT: &str = "Make a short demo video of the task below, recorded and edited by you.
+1. Load the tools with `tool_search` (record_start, record_stop, video_render, browser).
+2. With `browser`, open the starting page first (so loading isn't in the video). Then `record_start` with the task as `goal`.
+3. Do the task with `browser`, one deliberate action at a time: navigate, click, type, wait_for the result. No aimless scrolling, never type passwords (ask the user to sign in first if needed).
+4. `record_stop`. From its event track, improve the draft edit list: a clear title (≤ 6 words) and subtitle, one short friendly caption per step (≤ 10 words, present tense), end_text saying what was achieved, cut or speed up anything slow or repeated, zoom only on the clicks that matter. Aim for under 60 seconds. Keep music \"auto\" (generated background music) unless the user asked otherwise.
+5. `video_render` with the recording id and your edit list. Report the MP4/GIF paths and the length; mention any note it returns.
+
+The task: ";
+
+/// `/video edit`: change a finished video in plain words.
+pub(crate) const VIDEO_EDIT_PROMPT: &str = "Re-edit a recorded video. Read its edit list and event track (`.dcode-ai/videos/<id>/edl.json` and `events.json` — times are recording seconds), change the edit list as asked (captions, title, cuts and speeds, zooms, music: \"auto\", \"none\" or a file path, width), then call `video_render` with the id and the new edl (load it with `tool_search` first). Don't record again. Report the new length and paths.
+
+";
+
 /// `/tour`: a guided, read-only walk through the codebase; the focus follows.
 pub(crate) const TOUR_PROMPT: &str = "Give me a guided tour of this codebase, as you would to a new teammate on their first day. Only read — don't change any file or run anything that changes state.
 First look around: the README and docs, the build files, the entry points, the repo map, the tests. Then the tour, in this order:
@@ -41,6 +56,109 @@ impl Repl {
         out: ReplOutput<'_>,
     ) -> anyhow::Result<bool> {
         match command {
+            "/record" => {
+                let goal = rest.trim();
+                if goal.is_empty() {
+                    out.println("usage: /record <what to show> — the agent does it in the browser while recording, then edits the video (captions, zooms, music)");
+                    return Ok(true);
+                }
+                self.run_preset(RECORD_PROMPT, goal, out).await?;
+            }
+            "/video" => {
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let mut words = rest.split_whitespace();
+                let sub = words.next().unwrap_or("list");
+                let videos = dcode_ai_core::video::record::list(&ws);
+                let pick = |id: Option<&str>| -> Option<(String, std::path::PathBuf)> {
+                    match id {
+                        Some(id) => videos.iter().find(|(v, _)| v == id || v.ends_with(id)).cloned(),
+                        None => videos.first().cloned(),
+                    }
+                };
+                match sub {
+                    "list" => {
+                        if videos.is_empty() {
+                            out.println("[video] no recordings yet — /record <what to show>");
+                        }
+                        for (id, dir) in &videos {
+                            let mp4 = dir.join("video.mp4").is_file();
+                            let gif = dir.join("video.gif").is_file();
+                            out.println(&format!(
+                                "[video] {id}  {}",
+                                match (mp4, gif) {
+                                    (true, _) => "MP4 + GIF",
+                                    (false, true) => "GIF (no MP4 — /video setup, then /video render)",
+                                    _ => "not rendered — /video render",
+                                }
+                            ));
+                        }
+                    }
+                    "open" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            let file = ["video.mp4", "video.gif"].iter().map(|f| dir.join(f)).find(|p| p.is_file());
+                            match file {
+                                Some(f) => match dcode_ai_cli::ffmpeg_setup::open(&f) {
+                                    Ok(()) => out.println(&format!("[video] opening {id}…")),
+                                    Err(e) => out.eprintln(&format!("[video] {e} — it's at {}", f.display())),
+                                },
+                                None => out.println("[video] not rendered yet — /video render"),
+                            }
+                        }
+                        None => out.println("[video] no such recording — /video list"),
+                    },
+                    "render" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            out.println(&format!("[video] rendering {id}…"));
+                            match tokio::task::spawn_blocking(move || dcode_ai_core::video::render::render(&dir, |_| {})).await {
+                                Ok(Ok(r)) => {
+                                    if let Some(m) = &r.mp4 {
+                                        out.println(&format!("[video] MP4: {}", m.display()));
+                                    }
+                                    out.println(&format!("[video] GIF: {} · {:.0}s", r.gif.display(), r.seconds));
+                                    if let Some(n) = r.note {
+                                        out.println(&format!("[video] {n}"));
+                                    }
+                                }
+                                Ok(Err(e)) => out.eprintln(&format!("[video] {e}")),
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            }
+                        }
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "edit" => {
+                        let mut rest_words: Vec<&str> = words.collect();
+                        let id = match rest_words.first().and_then(|w| pick(Some(w))) {
+                            Some(found) => {
+                                rest_words.remove(0);
+                                Some(found)
+                            }
+                            None => pick(None),
+                        };
+                        let Some((id, _)) = id else {
+                            out.println("[video] no recordings yet — /record <what to show>");
+                            return Ok(true);
+                        };
+                        let what = rest_words.join(" ");
+                        if what.trim().is_empty() {
+                            out.println("usage: /video edit [id] <what to change> — e.g. \"under 30 seconds, bigger captions, no music\"");
+                            return Ok(true);
+                        }
+                        self.run_preset(VIDEO_EDIT_PROMPT, &format!("Video id: {id}\nChange: {what}"), out).await?;
+                    }
+                    "setup" => {
+                        if let Some(p) = dcode_ai_core::video::ffmpeg() {
+                            out.println(&format!("[video] ffmpeg is ready: {}", p.display()));
+                            return Ok(true);
+                        }
+                        let progress = |s: String| out.println(&format!("[video] {s}"));
+                        match dcode_ai_cli::ffmpeg_setup::install(progress).await {
+                            Ok(p) => out.println(&format!("[video] ffmpeg installed: {} — videos now come out as MP4 with music", p.display())),
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        }
+                    }
+                    _ => out.println("usage: /video list · open [id] · edit [id] <what to change> · render [id] · setup (downloads ffmpeg for MP4 + music)"),
+                }
+            }
             "/replay" => {
                 let words: Vec<&str> = rest.split_whitespace().collect();
                 let gif = words.contains(&"--gif");

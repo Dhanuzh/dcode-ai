@@ -307,6 +307,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **Diagrams:** Mermaid flowcharts and sequence diagrams from replies, drawn full screen in the terminal (`/diagram`, Ctrl+]).
 - **Away from the desk:** `/invite phone` puts approvals on your phone with Allow / Deny; `[ui] push_url` pings you when something waits. `/slack on` and `/teams on` answer `@dcode-ai` questions about the project in Slack or Microsoft Teams (read-only, people you allow).
 - **Show and share:** `/tour` walks a newcomer through the codebase; `/replay` turns a session into a terminal recording (GIF with `agg`).
+- **AI demo videos:** `/record <what to show>` — the agent does it in the browser while recording, then edits the video itself (speeds up waiting, zooms on clicks, cursor, captions, title and end cards, generated background music) into an MP4 and a GIF. `/video edit "<what to change>"` re-edits in plain words.
 - **herdr and terminal tabs:** inside [herdr](https://herdr.dev) dcode-ai reports working / idle / needs-you and its session (so herdr's restore reopens it); every terminal's tab title follows its state.
 - **Reviews:** `/verify` (a read-only reviewer over your diff), `/second-opinion` (a model from another family), `/security-review`, `/pr-comments`.
 - **Headless and CI:**

@@ -264,6 +264,11 @@ impl ApprovalPolicy {
                 // Each tool a script calls is checked on its own (only what
                 // the mode allows without asking runs).
                 | "run_script"
+                // Screen recordings: read the page, write only under
+                // .dcode-ai/videos.
+                | "record_start"
+                | "record_stop"
+                | "video_render"
                 | "invalid_tool_call"
                 | "query_symbols"
                 | "web_search"

@@ -1062,7 +1062,7 @@ impl Repl {
             }
             "/verify" | "/second-opinion" | "/security-review" | "/pr-comments" | "/goal"
             | "/plan" | "/review" | "/fix" | "/test" | "/image" | "/run" | "/web" | "/commit"
-            | "/board" | "/schedule" | "/fleet" | "/tour" | "/replay" => {
+            | "/board" | "/schedule" | "/fleet" | "/tour" | "/replay" | "/record" | "/video" => {
                 return self.cmd_work(input, command, rest, parts, out).await;
             }
             _ => {

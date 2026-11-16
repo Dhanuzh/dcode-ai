@@ -41,7 +41,61 @@ pub struct Page {
     alive: Arc<std::sync::atomic::AtomicBool>,
     /// The last snapshot sent to the model, to report only what changed.
     last: std::sync::Mutex<Option<Value>>,
+    /// While recording: where screencast frames go.
+    screencast: ScreencastSink,
 }
+
+type ScreencastSink = Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>>;
+
+/// Acknowledges screencast frames (the browser sends the next one only
+/// after an ack).
+pub struct ScreencastAcker {
+    out: mpsc::UnboundedSender<String>,
+}
+
+impl ScreencastAcker {
+    pub fn ack(&self, session: u64) {
+        // An id no command uses; its reply is ignored.
+        let msg = json!({
+            "id": 9_000_000_000u64 + session,
+            "method": "Page.screencastFrameAck",
+            "params": {"sessionId": session}
+        });
+        let _ = self.out.send(msg.to_string());
+    }
+}
+
+/// Starts the screencast of the page the agent drives (launching the
+/// browser if needed); frames go to `tx`.
+pub async fn start_screencast(tx: mpsc::UnboundedSender<Value>) -> Result<ScreencastAcker, String> {
+    let mut slot = shared().lock().await;
+    let (page, _) = ensure_page(&mut slot, true).await?;
+    if let Ok(mut s) = page.screencast.lock() {
+        *s = Some(tx);
+    }
+    page.call(
+        "Page.startScreencast",
+        json!({"format": "jpeg", "quality": 80, "maxWidth": 1920, "maxHeight": 1080, "everyNthFrame": 1}),
+    )
+    .await?;
+    Ok(ScreencastAcker {
+        out: page.out.clone(),
+    })
+}
+
+/// Stops the screencast.
+pub async fn stop_screencast() -> Result<(), String> {
+    let slot = shared().lock().await;
+    let page = slot.as_ref().ok_or("no browser")?;
+    let r = page.call("Page.stopScreencast", json!({})).await;
+    if let Ok(mut s) = page.screencast.lock() {
+        *s = None;
+    }
+    r.map(|_| ())
+}
+
+/// Where the last click or typing happened (CSS pixels), for the recording.
+static LAST_XY: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
 
 impl Page {
     /// Connect to a page's WebSocket debugger URL.
@@ -53,6 +107,7 @@ impl Page {
         let (out, mut out_rx) = mpsc::unbounded_channel::<String>();
         let pending: Pending = Default::default();
         let console: Arc<std::sync::Mutex<VecDeque<String>>> = Default::default();
+        let screencast: ScreencastSink = Default::default();
         let alive = Arc::new(std::sync::atomic::AtomicBool::new(true));
         tokio::spawn(async move {
             while let Some(text) = out_rx.recv().await {
@@ -65,6 +120,7 @@ impl Page {
             let pending = pending.clone();
             let console = console.clone();
             let alive = alive.clone();
+            let screencast = screencast.clone();
             tokio::spawn(async move {
                 while let Some(Ok(msg)) = stream.next().await {
                     let WsMessage::Text(text) = msg else {
@@ -83,6 +139,12 @@ impl Page {
                                 None => Ok(v["result"].clone()),
                             };
                             let _ = tx.send(r);
+                        }
+                    } else if v["method"] == "Page.screencastFrame" {
+                        if let Ok(s) = screencast.lock()
+                            && let Some(tx) = s.as_ref()
+                        {
+                            let _ = tx.send(v);
                         }
                     } else if let Some(line) = console_line(&v)
                         && let Ok(mut c) = console.lock()
@@ -111,6 +173,7 @@ impl Page {
             target_id: ws_url.rsplit('/').next().unwrap_or_default().to_string(),
             alive,
             last: std::sync::Mutex::new(None),
+            screencast,
         };
         for domain in ["Page.enable", "Runtime.enable", "Log.enable"] {
             page.call(domain, json!({})).await?;
@@ -1002,7 +1065,28 @@ async fn run_on(
     } else {
         None
     };
+    if let Ok(mut l) = LAST_XY.lock() {
+        *l = None;
+    }
     let result = run_page_action(action, input, page, workspace_root).await;
+    if result.is_ok() && crate::video::record::is_recording() {
+        // The event track of a screen recording.
+        let xy = LAST_XY.lock().ok().and_then(|l| *l);
+        let s = |k: &str| input[k].as_str().unwrap_or("").to_string();
+        let (kind, label) = match action {
+            "click" => ("click", target.clone().unwrap_or_default()),
+            "type" | "fill" => ("type", target.clone().unwrap_or_default()),
+            "navigate" | "open" | "goto" => ("navigate", s("url")),
+            "press" | "key" => ("press", s("key")),
+            "scroll" => ("scroll", s("direction")),
+            "wait_for" | "wait" => ("wait", s("text")),
+            "back" => ("navigate", "back".into()),
+            _ => ("", String::new()),
+        };
+        if !kind.is_empty() {
+            crate::video::record::note(kind, xy, &label);
+        }
+    }
     if result.is_ok() {
         record(action, input, target);
     }
@@ -1192,6 +1276,9 @@ async fn run_page_action(
         }
         "click" => {
             let (x, y, _) = locate(page, r()?).await?;
+            if let Ok(mut l) = LAST_XY.lock() {
+                *l = Some((x, y));
+            }
             click_at(page, x, y).await?;
             page.wait_loaded().await;
             Ok(format!("Clicked.\n\n{}", changes(page).await?))
@@ -1200,6 +1287,9 @@ async fn run_page_action(
             let n = r()?;
             let text = input["text"].as_str().unwrap_or("");
             let (x, y, password) = locate(page, n).await?;
+            if let Ok(mut l) = LAST_XY.lock() {
+                *l = Some((x, y));
+            }
             if password {
                 return Err(
                     "that is a password field — dcode-ai does not type passwords; ask the user to sign in in the browser window".into(),

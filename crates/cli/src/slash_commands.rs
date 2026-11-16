@@ -85,6 +85,8 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/fleet",
     "/tour",
     "/replay",
+    "/record",
+    "/video",
     "/second-opinion",
     "/add-dir",
     "/todos",
@@ -196,6 +198,12 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/terminal-setup" => "make Shift+Enter insert a newline in this terminal",
         "/browser" => {
             "the agent's web browser: status, open [url], connect <port>, save [name] (recorded steps), close"
+        }
+        "/record" => {
+            "the agent records itself doing something in the browser, then edits the video (zooms, cursor, captions, music): /record <what to show>"
+        }
+        "/video" => {
+            "your recorded videos: list · open [id] · edit [id] <what to change> · render [id] · setup (ffmpeg for MP4 + music)"
         }
         "/replay" => {
             "this session (or another) as a terminal recording to share: /replay [session-id] [--gif] [--speed N]"

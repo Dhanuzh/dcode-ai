@@ -178,6 +178,8 @@ pub(crate) fn command_group(cmd: &str) -> (u8, &'static str) {
                 "/delete",
                 "/export",
                 "/replay",
+                "/record",
+                "/video",
                 "/share",
                 "/handoff",
                 "/side",

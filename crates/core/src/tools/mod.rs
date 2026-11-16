@@ -26,6 +26,7 @@ pub mod spawn_subagent;
 pub mod tool_search;
 pub mod types;
 pub mod update_plan;
+pub mod video;
 pub mod web_search;
 pub mod write_file;
 
@@ -147,8 +148,11 @@ impl ToolRegistry {
 
     /// Built-in tools used rarely enough to load only on demand: their
     /// schemas would otherwise be sent with every request.
-    pub const RARELY_USED: [&'static str; 7] = [
+    pub const RARELY_USED: [&'static str; 10] = [
         "browser",
+        "record_start",
+        "record_stop",
+        "video_render",
         "notebook_edit",
         "inspect_binary",
         "copy_path",
@@ -247,6 +251,13 @@ impl ToolRegistry {
         registry.register(Box::new(crate::browser::BrowserTool::new(
             workspace_root.clone(),
         )));
+        registry.register(Box::new(video::RecordStartTool {
+            workspace_root: workspace_root.clone(),
+        }));
+        registry.register(Box::new(video::RecordStopTool));
+        registry.register(Box::new(video::VideoRenderTool {
+            workspace_root: workspace_root.clone(),
+        }));
         registry.register(Box::new(rename_path::RenamePathTool::new(
             workspace_root.clone(),
         )));

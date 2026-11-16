@@ -3,6 +3,22 @@
 version = 4
 
 [[package]]
+name = "ab_glyph"
+version = "0.2.32"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "01c0457472c38ea5bd1c3b5ada5e368271cb550be7a4ca4a0b4634e9913f6cc2"
+dependencies = [
+ "ab_glyph_rasterizer",
+ "owned_ttf_parser",
+]
+
+[[package]]
+name = "ab_glyph_rasterizer"
+version = "0.1.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "366ffbaa4442f4684d91e2cd7c5ea7c4ed8add41959a31447066e279e432b618"
+
+[[package]]
 name = "adler2"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1120,6 +1136,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1655,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-autoresearch"
-version = "1.0.66"
+version = "1.0.67"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1675,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-cli"
-version = "1.0.66"
+version = "1.0.67"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -1738,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-common"
-version = "1.0.66"
+version = "1.0.67"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1755,8 +1777,9 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-core"
-version = "1.0.66"
+version = "1.0.67"
 dependencies = [
+ "ab_glyph",
  "async-trait",
  "base64 0.22.1",
  "boa_engine",
@@ -1765,6 +1788,7 @@ dependencies = [
  "filetime",
  "flate2",
  "futures-util",
+ "gif",
  "image",
  "object",
  "pdf-extract",
@@ -1789,7 +1813,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-runtime"
-version = "1.0.66"
+version = "1.0.67"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2788,6 +2812,16 @@ checksum = "f0d8a4362ccb29cb0b265253fb0a2728f592895ee6854fd9bc13f2ffda266ff1"
 dependencies = [
  "opaque-debug",
  "polyval",
+]
+
+[[package]]
+name = "gif"
+version = "0.14.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ee8cfcc411d9adbbaba82fb72661cc1bcca13e8bba98b364e62b2dba8f960159"
+dependencies = [
+ "color_quant",
+ "weezl",
 ]
 
 [[package]]
@@ -4733,6 +4767,15 @@ checksum = "9aa2b01e1d916879f73a53d01d1d6cee68adbb31d6d9177a8cfce093cced1d50"
 dependencies = [
  "futures-core",
  "pin-project-lite",
+]
+
+[[package]]
+name = "owned_ttf_parser"
+version = "0.25.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "36820e9051aca1014ddc75770aab4d68bc1e9e632f0f5627c4086bc216fb583b"
+dependencies = [
+ "ttf-parser",
 ]
 
 [[package]]

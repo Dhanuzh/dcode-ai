@@ -22,3 +22,4 @@ pub mod skill_installer;
 pub mod skills;
 pub mod tools;
 pub mod undo;
+pub mod video;

@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.67 — 2026-11-16
+
+### New
+- **AI screen recordings (`/record <what to show>`)**: the agent does the
+  task in the browser (or a connected desktop app) while recording, then
+  edits the video itself: waiting sped up, a smooth zoom toward what it
+  clicks, a cursor with click ripples, one caption per step, title and end
+  cards, and generated background music (royalty-free, made on your
+  machine). Out comes an MP4 with music (when `ffmpeg` is installed — `/video
+  setup` downloads it), a GIF and a captions file, in `.dcode-ai/videos/`.
+  The recorder logs every action the agent takes (what, where, when), so the
+  edit is planned from that log instead of guessed from the picture; no
+  frames are sent to the model.
+- **`/video`**: `edit [id] <what to change>` re-edits in plain words
+  ("under 30 seconds, bigger captions, no music") without recording again;
+  `list`, `open [id]`, `render [id]`, `setup`. The agent can also use
+  `record_start`, `record_stop` and `video_render` on its own ("make a demo
+  video of the new settings page").
+
 ## 1.0.66 — 2026-11-16
 
 ### Fixed

@@ -6,6 +6,7 @@ pub mod approval_prompts;
 pub mod board_work;
 pub mod chat_image;
 pub mod diagram;
+pub mod ffmpeg_setup;
 pub mod file_mentions;
 pub mod herdr;
 pub mod host;
