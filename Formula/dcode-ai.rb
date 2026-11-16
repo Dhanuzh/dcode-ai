@@ -6,28 +6,28 @@
 class DcodeAi < Formula
   desc "Rust terminal coding agent for Claude and GitHub Copilot"
   homepage "https://github.com/Dhanuzh/dcode-ai"
-  version "1.0.67"
+  version "1.0.69"
   license "MIT"
 
   on_macos do
     on_arm do
-      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v1.0.67/dcode-ai-aarch64-apple-darwin.tar.gz"
-      sha256 "3ab13c50ad64250756795fd2e1cc7b75200bf682af17639ca51b1268f3b14ff2"
+      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v1.0.69/dcode-ai-aarch64-apple-darwin.tar.gz"
+      sha256 "bc4a5801e76d6a30c77d9a1415b046dcc10293eb3c09650637de5adf3b52cd66"
     end
     on_intel do
-      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v1.0.67/dcode-ai-x86_64-apple-darwin.tar.gz"
-      sha256 "ef2ceca01024d2ec6bbd2d0a4a9a8b4ee9fbdddcec1cd3a5b3971a060feb8221"
+      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v1.0.69/dcode-ai-x86_64-apple-darwin.tar.gz"
+      sha256 "248abdda9192e01ac42b33b35d5861d42d9138eab51552ccde070f3756878571"
     end
   end
 
   on_linux do
     on_arm do
-      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v1.0.67/dcode-ai-aarch64-unknown-linux-gnu.tar.gz"
-      sha256 "64cc4f4bc1d9027ed7d24d767e268a9997d17f5a0f84a9f9acb60e3a4b9d975c"
+      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v1.0.69/dcode-ai-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "a60333301469723ef2ec281ac546cc846f30df1a79c41129955050007d0497dd"
     end
     on_intel do
-      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v1.0.67/dcode-ai-x86_64-unknown-linux-gnu.tar.gz"
-      sha256 "07a0a0b202f7c5fbb03c9c02ed6ed4c20067c42ecc5fee56b071068284499394"
+      url "https://github.com/Dhanuzh/dcode-ai/releases/download/v1.0.69/dcode-ai-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "156d682da2a2a25223a1eb23da8026c80788d6061e45b77f66d2e41ec5562fc6"
     end
   end
 
