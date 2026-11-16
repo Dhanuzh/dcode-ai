@@ -464,6 +464,30 @@ pub async fn warm_up_if_downloaded(model: &str) -> Result<bool, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Transcribes 16 kHz mono samples with `model` (downloaded and loaded
+/// the first time; kept loaded). `stop` cancels.
+pub async fn transcribe_pcm(
+    model: &str,
+    pcm: Vec<i16>,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> Result<String, String> {
+    if !is_downloaded(model) {
+        ensure_model(model, |_| {}).await?;
+    }
+    let name = model.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut slot = LOADED.lock().map_err(|e| e.to_string())?;
+        if slot.as_ref().is_none_or(|(n, _)| *n != name) {
+            *slot = Some((name.clone(), Transcriber::load(&name)?));
+        }
+        let (_, t) = slot.as_mut().ok_or("no model")?;
+        t.transcribe_with_stop(&pcm, Some(stop.as_ref()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map(|t| clean(&t))
+}
+
 /// What [`listen`] heard.
 pub struct Heard {
     pub text: String,

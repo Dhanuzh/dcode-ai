@@ -200,10 +200,10 @@ pub fn slash_command_description(command: &str) -> &'static str {
             "the agent's web browser: status, open [url], connect <port>, save [name] (recorded steps), close"
         }
         "/record" => {
-            "the agent records itself doing something in the browser, then edits the video (zooms, cursor, captions, music): /record <what to show>"
+            "the agent records itself doing something in the browser, then edits and narrates the video (zooms, cursor, voice, captions, chapters, music): /record <what to show>"
         }
         "/video" => {
-            "your recorded videos: list · open [id] · edit [id] <what to change> · render [id] · setup (ffmpeg for MP4 + music)"
+            "narrated videos: list · open · edit <what to change> · render · short (9:16) · script · voice (record your narration) · hear · status · approve · publish (upload folders) · setup"
         }
         "/replay" => {
             "this session (or another) as a terminal recording to share: /replay [session-id] [--gif] [--speed N]"

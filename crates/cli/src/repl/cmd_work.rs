@@ -3,17 +3,22 @@
 use super::*;
 
 /// `/record <goal>`: the agent records itself doing it, then edits the video.
-pub(crate) const RECORD_PROMPT: &str = "Make a short demo video of the task below, recorded and edited by you.
+pub(crate) const RECORD_PROMPT: &str = "Make a short narrated demo video of the task below, recorded and edited by you.
 1. Load the tools with `tool_search` (record_start, record_stop, video_render, browser).
 2. With `browser`, open the starting page first (so loading isn't in the video). Then `record_start` with the task as `goal`.
 3. Do the task with `browser`, one deliberate action at a time: navigate, click, type, wait_for the result. No aimless scrolling, never type passwords (ask the user to sign in first if needed).
-4. `record_stop`. From its event track, improve the draft edit list: a clear title (≤ 6 words) and subtitle, one short friendly caption per step (≤ 10 words, present tense), end_text saying what was achieved, cut or speed up anything slow or repeated, zoom only on the clicks that matter. Aim for under 60 seconds. Keep music \"auto\" (generated background music) unless the user asked otherwise.
-5. `video_render` with the recording id and your edit list. Report the MP4/GIF paths and the length; mention any note it returns.
+4. `record_stop`. From its event track, improve the draft edit list:
+   - title (≤ 6 words), subtitle, end_text saying what was achieved;
+   - the narration script `lines`: one or two short spoken sentences per step, friendly and plain, second person (\"Click Create project to start\"), `at` about a second before the action, ids short and stable (`intro`, `create-1` …), and a `section` on each line so the video gets chapters (2–5 sections). Only say what the recording shows;
+   - optionally `inserts`: a `section` card when a new part starts, or a `bullets` card to sum up (title + items);
+   - cut or speed up anything slow or repeated, zoom only on the clicks that matter; keep music \"auto\" unless asked. Aim for under 60 seconds;
+   - cuts: [\"long\"], plus \"short\" when the user wants a vertical video (Shorts/Reels/Status).
+5. `video_render` with the recording id and your edit list. The draft voice speaks the lines (the user can record their own with /video voice). Report the MP4 path, length and the other files; mention any note it returns, and that `/video voice` records their own narration and `/video publish` makes upload folders.
 
 The task: ";
 
 /// `/video edit`: change a finished video in plain words.
-pub(crate) const VIDEO_EDIT_PROMPT: &str = "Re-edit a recorded video. Read its edit list and event track (`.dcode-ai/videos/<id>/edl.json` and `events.json` — times are recording seconds), change the edit list as asked (captions, title, cuts and speeds, zooms, music: \"auto\", \"none\" or a file path, width), then call `video_render` with the id and the new edl (load it with `tool_search` first). Don't record again. Report the new length and paths.
+pub(crate) const VIDEO_EDIT_PROMPT: &str = "Re-edit a recorded video. Read its edit list and event track (`.dcode-ai/videos/<id>/edl.json` and `events.json` — times are recording seconds), change the edit list as asked — narration `lines` (keep each line's `id` when you rewrite it: the user's recorded take is filed under it; a new line gets a new id), sections, `inserts` (section/bullets/quote cards, holds), title, cuts (\"long\", \"short\"), speeds, zooms, music (\"auto\", \"none\" or a file path), voice (\"auto\", \"draft\", \"takes\", \"none\"), width — then call `video_render` with the id and the new edl (load it with `tool_search` first). Don't record again, and never edit or delete files under `voice/` or `approved.json`: takes and approval are the user's. Report the new length and paths.
 
 ";
 
@@ -108,18 +113,100 @@ impl Repl {
                     },
                     "render" => match pick(words.next()) {
                         Some((id, dir)) => {
-                            out.println(&format!("[video] rendering {id}…"));
+                            out.println(&format!("[video] rendering {id}… (voicing the script and every cut can take a minute)"));
                             match tokio::task::spawn_blocking(move || dcode_ai_core::video::render::render(&dir, |_| {})).await {
-                                Ok(Ok(r)) => {
-                                    if let Some(m) = &r.mp4 {
-                                        out.println(&format!("[video] MP4: {}", m.display()));
-                                    }
-                                    out.println(&format!("[video] GIF: {} · {:.0}s", r.gif.display(), r.seconds));
-                                    if let Some(n) = r.note {
-                                        out.println(&format!("[video] {n}"));
-                                    }
-                                }
+                                Ok(Ok(r)) => print_rendered(out, &ws, &r),
                                 Ok(Err(e)) => out.eprintln(&format!("[video] {e}")),
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            }
+                        }
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "short" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            match add_short_cut(&dir) {
+                                Ok(()) => out.println(&format!("[video] {id}: added a 9:16 short (YouTube Shorts, Reels, WhatsApp Status) — rendering…")),
+                                Err(e) => {
+                                    out.eprintln(&format!("[video] {e}"));
+                                    return Ok(true);
+                                }
+                            }
+                            match tokio::task::spawn_blocking(move || dcode_ai_core::video::render::render(&dir, |_| {})).await {
+                                Ok(Ok(r)) => print_rendered(out, &ws, &r),
+                                Ok(Err(e)) => out.eprintln(&format!("[video] {e}")),
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            }
+                        }
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "script" => match pick(words.next()) {
+                        Some((id, dir)) => match dcode_ai_core::video::record::load(&dir) {
+                            Ok(saved) => {
+                                let edl = saved.edl.normalized(saved.duration);
+                                if edl.lines.is_empty() {
+                                    out.println(&format!("[video] {id} has no narration script — /video edit {id} add narration"));
+                                }
+                                let mut section = String::new();
+                                for l in &edl.lines {
+                                    if !l.section.is_empty() && l.section != section {
+                                        section = l.section.clone();
+                                        out.println(&format!("[video] ── {section}"));
+                                    }
+                                    let take = if dcode_ai_core::video::voice::take_path(&dir, &l.id).is_file() { "🎙" } else { "  " };
+                                    out.println(&format!("[video] {take} {:<14} {:>5.1}s  {}", l.id, l.at, l.text));
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        },
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "voice" => {
+                        let first = words.next();
+                        let (found, line_id) = match first.and_then(|w| pick(Some(w))) {
+                            Some(f) => (Some(f), words.next()),
+                            None => (pick(None), first),
+                        };
+                        let Some((id, dir)) = found else {
+                            out.println("[video] no recordings yet — /record <what to show>");
+                            return Ok(true);
+                        };
+                        self.record_takes(&id, &dir, line_id, out).await;
+                    }
+                    "hear" => match pick(words.next()) {
+                        Some((id, dir)) => self.hear_takes(&id, &dir, out).await,
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "status" => match pick(words.next()) {
+                        Some((id, dir)) => match dcode_ai_core::video::publish::status(&dir) {
+                            Ok(lines) => {
+                                out.println(&format!("[video] {id}"));
+                                for l in lines {
+                                    out.println(&format!("[video]   {l}"));
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        },
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "approve" => match pick(words.next()) {
+                        Some((id, dir)) => match dcode_ai_core::video::publish::approve(&dir) {
+                            Ok(n) => out.println(&format!("[video] {id} approved — {n} files recorded with their sha256 in approved.json; /video status shows anything that changes after")),
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        },
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "publish" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            if dcode_ai_core::video::publish::changed_since_approval(&dir).is_none_or(|c| !c.is_empty()) {
+                                out.println(&format!("[video] note: {id} isn't approved as it is now — /video approve when it's right"));
+                            }
+                            match dcode_ai_core::video::publish::publish(&dir) {
+                                Ok(lines) => {
+                                    for l in lines {
+                                        out.println(&format!("[video] {l}"));
+                                    }
+                                    out.println(&format!("[video] upload folders are in {} — nothing was uploaded", dir.join("out").display()));
+                                }
                                 Err(e) => out.eprintln(&format!("[video] {e}")),
                             }
                         }
@@ -156,7 +243,7 @@ impl Repl {
                             Err(e) => out.eprintln(&format!("[video] {e}")),
                         }
                     }
-                    _ => out.println("usage: /video list · open [id] · edit [id] <what to change> · render [id] · setup (downloads ffmpeg for MP4 + music)"),
+                    _ => out.println("usage: /video list · open [id] · edit [id] <what to change> · render [id] · short [id] · script [id] · voice [id] [line] (record your narration) · hear [id] · status [id] · approve [id] · publish [id] · setup"),
                 }
             }
             "/replay" => {
@@ -1675,5 +1762,247 @@ impl Repl {
                 crate::tui::notify::desktop_notify("dcode-ai", &notes.join(" · "));
             }
         }
+    }
+}
+
+/// The files a render wrote, as transcript lines.
+fn print_rendered(
+    out: ReplOutput<'_>,
+    ws: &std::path::Path,
+    r: &dcode_ai_core::video::render::Rendered,
+) {
+    let rel = |p: &std::path::Path| {
+        p.strip_prefix(ws)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| p.display().to_string())
+    };
+    if let Some(m) = &r.mp4 {
+        out.println(&format!("[video] MP4: {} · {:.0}s", rel(m), r.seconds));
+    } else {
+        out.println(&format!("[video] GIF: {} · {:.0}s", rel(&r.gif), r.seconds));
+    }
+    let names: Vec<String> = r
+        .files
+        .iter()
+        .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .collect();
+    if !names.is_empty() {
+        out.println(&format!("[video] also: {}", names.join(", ")));
+    }
+    if let Some(n) = &r.note {
+        out.println(&format!("[video] {n}"));
+    }
+}
+
+/// Adds the 9:16 cut to a recording's edit list.
+fn add_short_cut(dir: &std::path::Path) -> Result<(), String> {
+    let p = dir.join("edl.json");
+    let mut edl: dcode_ai_core::video::Edl =
+        serde_json::from_str(&std::fs::read_to_string(&p).map_err(|e| e.to_string())?)
+            .map_err(|e| format!("edl.json: {e}"))?;
+    if !edl.cuts.iter().any(|c| c == "short") {
+        edl.cuts.push("short".into());
+    }
+    std::fs::write(&p, serde_json::to_string_pretty(&edl).unwrap_or_default())
+        .map_err(|e| e.to_string())
+}
+
+impl Repl {
+    /// `/video voice`: you read the script, line by line, into the
+    /// microphone; each take is trimmed, saved under its line's id, and
+    /// checked with Whisper. Esc while speaking ends the take; Esc before
+    /// speaking stops.
+    async fn record_takes(
+        &mut self,
+        id: &str,
+        dir: &std::path::Path,
+        only: Option<&str>,
+        out: ReplOutput<'_>,
+    ) {
+        use dcode_ai_core::video::voice;
+        let saved = match dcode_ai_core::video::record::load(dir) {
+            Ok(s) => s,
+            Err(e) => return out.eprintln(&format!("[voice] {e}")),
+        };
+        let edl = saved.edl.normalized(saved.duration);
+        if edl.lines.is_empty() {
+            return out.println(&format!(
+                "[voice] {id} has no narration script yet — /video edit {id} add narration"
+            ));
+        }
+        let lines: Vec<_> = match only {
+            Some(l) => edl.lines.iter().filter(|x| x.id == l).collect(),
+            None => edl
+                .lines
+                .iter()
+                .filter(|l| !voice::take_path(dir, &l.id).is_file())
+                .collect(),
+        };
+        if lines.is_empty() {
+            return out.println(&match only {
+                Some(l) => format!("[voice] no line `{l}` — /video script {id} lists them"),
+                None => format!(
+                    "[voice] every line has a take — /video voice {id} <line> records one again"
+                ),
+            });
+        }
+        let model = self
+            .runtime
+            .config()
+            .ui
+            .stt_model
+            .clone()
+            .unwrap_or_else(|| "tiny.en".into());
+        out.println(&format!(
+            "[voice] {} line(s) to record. Read each when 🎙 shows; a pause ends it. Esc while speaking ends a take, Esc before speaking stops.",
+            lines.len()
+        ));
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut done, mut redo) = (0, Vec::new());
+        for (i, line) in lines.iter().enumerate() {
+            out.println(&format!(
+                "[voice] {}/{} {} — “{}”",
+                i + 1,
+                lines.len(),
+                line.id,
+                line.text
+            ));
+            tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+            out.println("[voice] 🎙 go");
+            stop.store(false, std::sync::atomic::Ordering::SeqCst);
+            let recorded = {
+                let _armed = super::cmd_team::TalkStopGuard::install(out, stop.clone());
+                dcode_ai_cli::voice::stt::record(
+                    std::time::Duration::from_secs(45),
+                    std::time::Duration::from_millis(1400),
+                    stop.clone(),
+                )
+                .await
+            };
+            let pcm = match recorded {
+                Ok(p) => p,
+                Err(e) if e == "stopped" => {
+                    out.println("[voice] stopped");
+                    break;
+                }
+                Err(e) => {
+                    out.eprintln(&format!("[voice] {e} — skipped {}", line.id));
+                    redo.push(line.id.clone());
+                    continue;
+                }
+            };
+            let take = voice::trim_silence(&voice::Pcm {
+                rate: 16_000,
+                samples: pcm,
+            });
+            let path = voice::take_path(dir, &line.id);
+            if let Err(e) = voice::write_wav_mono(&path, take.rate, &take.samples) {
+                out.eprintln(&format!("[voice] {e}"));
+                break;
+            }
+            done += 1;
+            stop.store(false, std::sync::atomic::Ordering::SeqCst);
+            match dcode_ai_cli::voice::stt::transcribe_pcm(
+                &model,
+                take.samples.clone(),
+                stop.clone(),
+            )
+            .await
+            {
+                Ok(heard) => {
+                    let sc = voice::score(&line.text, &heard);
+                    if sc >= voice::HEARD_OK {
+                        out.println(&format!(
+                            "[voice] ✓ {:.1}s · heard {:.0}% of the line",
+                            take.seconds(),
+                            sc * 100.0
+                        ));
+                    } else {
+                        out.println(&format!(
+                            "[voice] ⚠ {:.1}s · sounds different ({:.0}%): heard “{heard}”",
+                            take.seconds(),
+                            sc * 100.0
+                        ));
+                        redo.push(line.id.clone());
+                    }
+                }
+                Err(e) => out.println(&format!(
+                    "[voice] saved {:.1}s (not checked: {e})",
+                    take.seconds()
+                )),
+            }
+        }
+        out.println(&format!(
+            "[voice] {done} take(s) saved in {}. /video render uses them (the draft voice speaks the rest).",
+            voice::voice_dir(dir).display()
+        ));
+        if !redo.is_empty() {
+            out.println(&format!(
+                "[voice] worth another go: {} — /video voice {id} <line>",
+                redo.join(", ")
+            ));
+        }
+    }
+
+    /// `/video hear`: Whisper listens to every take and flags any that
+    /// doesn't sound like its line. Advice only.
+    async fn hear_takes(&mut self, id: &str, dir: &std::path::Path, out: ReplOutput<'_>) {
+        use dcode_ai_core::video::voice;
+        let saved = match dcode_ai_core::video::record::load(dir) {
+            Ok(s) => s,
+            Err(e) => return out.eprintln(&format!("[hear] {e}")),
+        };
+        let edl = saved.edl.normalized(saved.duration);
+        let model = self
+            .runtime
+            .config()
+            .ui
+            .stt_model
+            .clone()
+            .unwrap_or_else(|| "tiny.en".into());
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (mut n, mut flagged) = (0, 0);
+        for l in &edl.lines {
+            let p = voice::take_path(dir, &l.id);
+            if !p.is_file() {
+                continue;
+            }
+            let pcm = match voice::read_wav(&p) {
+                Ok(p) => p,
+                Err(e) => {
+                    out.eprintln(&format!("[hear] {e}"));
+                    continue;
+                }
+            };
+            let samples: Vec<i16> = voice::resample(&pcm, 16_000)
+                .into_iter()
+                .map(|v| (v.clamp(-1.0, 1.0) * 32767.0) as i16)
+                .collect();
+            n += 1;
+            match dcode_ai_cli::voice::stt::transcribe_pcm(&model, samples, stop.clone()).await {
+                Ok(heard) => {
+                    let sc = voice::score(&l.text, &heard);
+                    if sc < voice::HEARD_OK {
+                        flagged += 1;
+                        out.println(&format!(
+                            "[hear] ⚠ {} ({:.0}%) — said “{heard}”, script “{}”",
+                            l.id,
+                            sc * 100.0,
+                            l.text
+                        ));
+                    } else {
+                        out.println(&format!("[hear] ✓ {} ({:.0}%)", l.id, sc * 100.0));
+                    }
+                }
+                Err(e) => out.eprintln(&format!("[hear] {}: {e}", l.id)),
+            }
+        }
+        out.println(&if n == 0 {
+            format!("[hear] {id} has no takes yet — /video voice {id}")
+        } else {
+            format!(
+                "[hear] {n} take(s), {flagged} flagged — redo one with /video voice {id} <line>"
+            )
+        });
     }
 }

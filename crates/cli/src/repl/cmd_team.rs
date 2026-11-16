@@ -37,7 +37,7 @@ fn changed_files(workspace: &std::path::Path) -> Vec<String> {
 }
 
 /// Set while `/talk` is active; dropped to restore normal Esc handling.
-struct TalkStopGuard {
+pub(super) struct TalkStopGuard {
     state: Option<Arc<Mutex<TuiSessionState>>>,
 }
 
@@ -64,7 +64,7 @@ fn talk_stop_guard_for_tui(
 }
 
 impl TalkStopGuard {
-    fn install(out: ReplOutput<'_>, stop: Arc<std::sync::atomic::AtomicBool>) -> Self {
+    pub(super) fn install(out: ReplOutput<'_>, stop: Arc<std::sync::atomic::AtomicBool>) -> Self {
         let state = match out {
             ReplOutput::Tui(st) => Some(Arc::clone(st)),
             ReplOutput::Stdio => None,

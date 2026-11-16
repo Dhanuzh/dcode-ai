@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.69 — 2026-11-16
+
+### New — narrated tutorial videos, the vidni way
+Modelled on [vidni](https://github.com/dhilipsiva/vidni) (MIT/Apache): one
+script makes every version of a video, a draft voice first, then your own.
+- **Narration script** in the edit list: `lines` with permanent ids (your
+  takes are filed under them), `at`, `text`, `section` (chapters) and `only`
+  (some cuts). `/record` now writes it; `/video script` shows it.
+- **Draft voice**, cached per line: Piper when installed, else the system
+  voice — Windows speech (also from WSL), macOS `say`, espeak-ng. The video
+  holds where a line needs longer than the action; the music ducks under
+  the voice; captions follow what is said.
+- **Your voice:** `/video voice [id] [line]` prompts line by line, records,
+  trims, and checks each take with Whisper; `/video hear` checks them all.
+  Takes replace the draft voice line by line.
+- **Cuts:** a 9:16 short beside the 16:9 video (`/video short`, or
+  `"cuts": ["long", "short"]`): the page full width with the title above
+  and captions below, clear of what the apps cover; `short-review.png`
+  shades those edges.
+- **Cards** placed into the video (`inserts`): section, bullets, quote, or a
+  hold on the frame.
+- **Outputs:** captioned and clean (`video-clean.mp4`) masters,
+  `captions.srt/.vtt`, `chapters.txt`, `thumbnail.png`,
+  `short-thumbnail.png`.
+- **`/video publish`**: `out/<platform>/<cut>/` for YouTube, YouTube Shorts,
+  Instagram Reels and WhatsApp Status (TikTok, LinkedIn, X on request) with
+  video, captions, title, description with chapters, thumbnail, and length
+  checks. Nothing is uploaded.
+- **Sign-off:** `/video approve` records the files' sha256; `/video status`
+  shows takes, renders, and anything changed since approval. Recording
+  takes and approving are yours — the agent has no tool for them.
+
 ## 1.0.68 — 2026-11-16
 
 ### Fixed

@@ -71,8 +71,9 @@ impl ToolExecutor for RecordStopTool {
         ToolDefinition {
             name: "record_stop".into(),
             description: "Stop the recording. Returns its event track (what happened when) and a \
-draft edit list. Improve the draft — a clear title, one short friendly caption per step, cut or \
-speed up anything boring, zoom only on the important clicks — then call `video_render` with it."
+draft edit list. Improve the draft — a clear title, a spoken narration line or two per step \
+(`lines`, with sections for chapters), cut or speed up anything boring, zoom only on the \
+important clicks — then call `video_render` with it."
                 .into(),
             parameters: serde_json::json!({"type": "object", "properties": {}}),
         }
@@ -86,8 +87,13 @@ speed up anything boring, zoom only on the important clicks — then call `video
                     "Recorded {id}: {dur:.1}s, {frames} frames.\n\nEvent track (seconds · action · where · what):\n{track}\n\n\
 Draft edit list (times are recording seconds; segments with speed > 1 are sped up; zooms use page \
 CSS pixels; music \"auto\" = generated background music, \"none\", or a file path):\n{edl}\n\n\
-Rewrite the captions as short, friendly sentences, set the title/subtitle/end_text, adjust \
-segments and zooms if needed, then call video_render with id \"{id}\" and the edl.",
+`lines` is the narration script: each {{id, at, text, section}} is spoken from recording second \
+`at` by the draft voice (or the user's own take, recorded later under the same id) and shown as \
+captions; the video waits when a line needs longer. Rewrite them as short, friendly spoken \
+sentences, give each a `section` (chapters), keep ids short and stable. Optional: `inserts` \
+[{{at, seconds, kind: section|bullets|quote, title, items}}] for cards, `cuts` [\"long\",\"short\"] \
+for a 9:16 short too. Set title/subtitle/end_text, adjust segments and zooms if needed, then call \
+video_render with id \"{id}\" and the edl.",
                     id = s.id,
                     dur = s.duration,
                     frames = s.frames,
@@ -110,15 +116,17 @@ impl ToolExecutor for VideoRenderTool {
         ToolDefinition {
             name: "video_render".into(),
             description:
-                "Render a recording with an edit list (from record_stop, or edited later) \
-into an MP4 with background music (when ffmpeg is installed), a GIF and captions (.srt). Omit \
-`edl` to re-render the saved one; omit `id` for the newest recording."
+                "Render a recording with an edit list (from record_stop, or edited later): \
+narration (the user's takes, else the draft voice) over background music, captions (.srt/.vtt), \
+cards, chapters and thumbnails, as an MP4 (16:9, plus a 9:16 short when cuts has \"short\"; \
+needs ffmpeg) and a GIF. Omit `edl` to re-render the saved one; omit `id` for the newest \
+recording. Never touch the files in `voice/` (the user's takes) or `approved.json`."
                     .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
-                    "edl": {"type": "object", "description": "title, subtitle, end_text, segments[{from,to,speed}], zooms[{at,x,y,scale,hold}], captions[{from,to,text}], music, cursor, width"}
+                    "edl": {"type": "object", "description": "title, subtitle, end_text, segments[{from,to,speed}], zooms[{at,x,y,scale,hold}], lines[{id,at,text,section,only}] (narration), inserts[{at,seconds,kind,title,items}], cuts[\"long\",\"short\"], voice (auto|draft|takes|none), draft_voice, music, captions[{from,to,text}] (used only without lines), cursor, width, clean_master, platforms"}
                 }
             }),
         }
@@ -165,6 +173,14 @@ into an MP4 with background music (when ffmpeg is installed), a GIF and captions
                     rel(&r.gif),
                     rel(&r.srt)
                 ));
+                let names: Vec<String> = r
+                    .files
+                    .iter()
+                    .filter_map(|p| p.file_name().map(|n| n.to_string_lossy().into_owned()))
+                    .collect();
+                if !names.is_empty() {
+                    out.push_str(&format!("All files: {}\n", names.join(", ")));
+                }
                 if let Some(n) = r.note {
                     out.push_str(&format!("Note: {n}\n"));
                 }

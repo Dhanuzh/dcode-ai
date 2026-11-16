@@ -11,8 +11,11 @@
 //! - [`render`]: draws the edit frame by frame in Rust.
 
 pub mod music;
+pub mod publish;
 pub mod record;
 pub mod render;
+pub mod timeline;
+pub mod voice;
 
 use std::path::{Path, PathBuf};
 
@@ -93,6 +96,51 @@ pub struct Caption {
     pub text: String,
 }
 
+/// One line of narration: said from recording second `at`. The `id` is
+/// permanent — your recorded take is filed under it.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Line {
+    pub id: String,
+    pub at: f64,
+    pub text: String,
+    /// Chapter this line belongs to (its first line starts the chapter).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub section: String,
+    /// Only in these cuts (`long`, `short`); empty = every cut.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub only: Vec<String>,
+}
+
+impl Line {
+    pub fn in_cut(&self, cut: &str) -> bool {
+        self.only.is_empty() || self.only.iter().any(|c| c == cut)
+    }
+}
+
+/// Something placed into the video at recording second `at`, for
+/// `seconds`: a card (`section`, `bullets`, `quote`) or a `hold` on the
+/// frame there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Insert {
+    pub at: f64,
+    #[serde(default = "default_insert_seconds")]
+    pub seconds: f64,
+    #[serde(default = "hold_kind")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub items: Vec<String>,
+}
+
+fn default_insert_seconds() -> f64 {
+    3.0
+}
+
+fn hold_kind() -> String {
+    "hold".into()
+}
+
 /// The edit list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Edl {
@@ -117,6 +165,59 @@ pub struct Edl {
     /// Output width in pixels (height follows).
     #[serde(default = "default_width")]
     pub width: u32,
+    /// The narration script, in order. When there are lines, captions
+    /// follow what is said and `captions` is not used.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub lines: Vec<Line>,
+    /// Cards and holds placed into the video.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inserts: Vec<Insert>,
+    /// `long` (16:9) and/or `short` (9:16).
+    #[serde(default = "default_cuts")]
+    pub cuts: Vec<String>,
+    /// `auto` (your take when recorded, else the draft voice), `draft`,
+    /// `takes`, `none`.
+    #[serde(default = "auto_music")]
+    pub voice: String,
+    /// The draft voice: `sapi[:name]`, `say[:name]`, `piper[:model.onnx]`,
+    /// `espeak[:voice]`; empty = the first one available.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub draft_voice: String,
+    /// Also write the long cut without burned-in captions.
+    #[serde(default = "yes")]
+    pub clean_master: bool,
+    /// Upload folders `/video publish` makes.
+    #[serde(default = "default_platforms")]
+    pub platforms: Vec<String>,
+}
+
+fn default_cuts() -> Vec<String> {
+    vec!["long".into()]
+}
+
+pub fn default_platforms() -> Vec<String> {
+    [
+        "youtube",
+        "youtube-shorts",
+        "instagram-reels",
+        "whatsapp-status",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// A safe file-name id: lowercase letters, digits, hyphens.
+pub fn clean_id(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.trim().chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+        } else if !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    out.trim_end_matches('-').chars().take(48).collect()
 }
 
 fn auto_music() -> String {
@@ -165,41 +266,73 @@ impl Edl {
         self.captions
             .retain(|c| c.to > c.from && !c.text.trim().is_empty());
         self.width = self.width.clamp(320, 1920) / 2 * 2;
+        self.lines.retain(|l| !l.text.trim().is_empty());
+        let mut seen = std::collections::HashSet::new();
+        for (n, l) in self.lines.iter_mut().enumerate() {
+            l.at = if l.at.is_finite() {
+                l.at.clamp(0.0, d)
+            } else {
+                0.0
+            };
+            let mut id = clean_id(&l.id);
+            if id.is_empty() {
+                id = format!("line-{}", n + 1);
+            }
+            let base = id.clone();
+            let mut k = 2;
+            while !seen.insert(id.clone()) {
+                id = format!("{base}-{k}");
+                k += 1;
+            }
+            l.id = id;
+        }
+        self.lines.sort_by(|a, b| a.at.total_cmp(&b.at));
+        // Lines a moment apart at least, so each can wait for the one before.
+        for i in 1..self.lines.len() {
+            let prev = self.lines[i - 1].at;
+            if self.lines[i].at < prev + 0.05 {
+                self.lines[i].at = prev + 0.05;
+            }
+        }
+        for i in &mut self.inserts {
+            i.at = if i.at.is_finite() {
+                i.at.clamp(0.0, d)
+            } else {
+                0.0
+            };
+            i.seconds = if i.seconds.is_finite() {
+                i.seconds.clamp(0.3, 20.0)
+            } else {
+                3.0
+            };
+            i.kind = i.kind.trim().to_ascii_lowercase();
+            if !matches!(i.kind.as_str(), "section" | "bullets" | "quote" | "hold") {
+                i.kind = "hold".into();
+            }
+        }
+        self.inserts.sort_by(|a, b| a.at.total_cmp(&b.at));
+        self.cuts.retain(|c| c == "long" || c == "short");
+        self.cuts.dedup();
+        if self.cuts.is_empty() {
+            self.cuts = default_cuts();
+        }
+        let v = self.voice.trim().to_ascii_lowercase();
+        self.voice = if matches!(v.as_str(), "draft" | "takes" | "none") {
+            v
+        } else {
+            "auto".into()
+        };
         self
     }
 
-    /// Length of the finished video, seconds (cards included).
+    /// Length of the finished video, seconds (cards and inserts included).
     pub fn output_seconds(&self) -> f64 {
-        let body: f64 = self
-            .segments
-            .iter()
-            .map(|s| (s.to - s.from) / s.speed)
-            .sum();
-        body + if self.title.trim().is_empty() {
-            0.0
-        } else {
-            TITLE_SECONDS
-        } + if self.end_text.trim().is_empty() {
-            0.0
-        } else {
-            END_SECONDS
-        }
+        timeline::Timeline::new(self, &[]).total()
     }
 
     /// Where recording second `t` lands in the finished video, if kept.
     pub fn output_time(&self, t: f64) -> Option<f64> {
-        let mut out = if self.title.trim().is_empty() {
-            0.0
-        } else {
-            TITLE_SECONDS
-        };
-        for s in &self.segments {
-            if t >= s.from && t <= s.to {
-                return Some(out + (t - s.from) / s.speed);
-            }
-            out += (s.to - s.from) / s.speed;
-        }
-        None
+        timeline::Timeline::new(self, &[]).output_time(t)
     }
 }
 
@@ -263,33 +396,44 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
             hold: 1.2,
         });
     }
-    let captions = events
-        .iter()
-        .filter(|e| e.kind != "scroll")
-        .map(|e| Caption {
-            from: (e.t - 0.6).max(0.0),
-            to: (e.t + AFTER).min(duration),
-            text: match e.kind.as_str() {
-                "click" if !e.label.is_empty() => format!("Click {}", e.label),
-                "type" if !e.label.is_empty() => format!("Fill in {}", e.label),
-                "navigate" => format!("Open {}", e.label),
-                "press" => format!("Press {}", e.label),
-                "wait" => format!("Wait for {}", e.label),
-                _ => e.label.clone(),
-            },
-        })
-        .filter(|c| !c.text.trim().is_empty())
-        .collect();
+    let mut lines: Vec<Line> = Vec::new();
+    for e in events.iter().filter(|e| e.kind != "scroll") {
+        let text = match e.kind.as_str() {
+            "click" if !e.label.is_empty() => format!("Click {}.", e.label),
+            "type" if !e.label.is_empty() => format!("Fill in {}.", e.label),
+            "navigate" => format!("Open {}.", e.label),
+            "press" => format!("Press {}.", e.label),
+            "wait" => format!("Wait for {}.", e.label),
+            _ => e.label.clone(),
+        };
+        if text.trim().is_empty() {
+            continue;
+        }
+        lines.push(Line {
+            id: format!("step-{}", lines.len() + 1),
+            at: (e.t - 0.8).max(0.0),
+            text,
+            section: String::new(),
+            only: Vec::new(),
+        });
+    }
     Edl {
         title: goal.trim().chars().take(70).collect(),
         subtitle: String::new(),
         end_text: "Done".into(),
         segments,
         zooms,
-        captions,
+        captions: Vec::new(),
         music: auto_music(),
         cursor: true,
         width: default_width(),
+        lines,
+        inserts: Vec::new(),
+        cuts: default_cuts(),
+        voice: auto_music(),
+        draft_voice: String::new(),
+        clean_master: true,
+        platforms: default_platforms(),
     }
     .normalized(duration)
 }
@@ -350,7 +494,11 @@ mod tests {
         assert!(at(20.0) >= 6.0, "{:?}", e.segments);
         // One zoom per click, not for the field typed 0.5 s later.
         assert_eq!(e.zooms.len(), 2);
-        assert!(e.captions.iter().any(|c| c.text == "Click \"Sign up\""));
+        assert!(
+            e.lines
+                .iter()
+                .any(|l| l.text == "Click \"Sign up\"." && l.id == "step-2")
+        );
         // Much shorter than the 35 s recording, cards included.
         assert!(e.output_seconds() < 25.0, "{}", e.output_seconds());
         // Times map in order.
@@ -454,11 +602,51 @@ mod live {
         let kinds: Vec<&str> = s.events.iter().map(|e| e.kind.as_str()).collect();
         assert_eq!(kinds, ["type", "click"], "{:?}", s.events);
         assert!(s.events[1].x.is_some(), "clicks carry where");
+        // Narrated, with a card and a 9:16 short (the vidni-style path).
+        let mut edl = s.draft.clone();
+        edl.title = "Creating a project".into();
+        edl.lines = vec![
+            super::Line {
+                id: "name".into(),
+                at: (s.events[0].t - 0.8).max(0.0),
+                text: "First, give your project a name.".into(),
+                section: "Set up".into(),
+                only: Vec::new(),
+            },
+            super::Line {
+                id: "create".into(),
+                at: (s.events[1].t - 0.8).max(0.0),
+                text: "Then click Create project, and it's ready.".into(),
+                section: "Create".into(),
+                only: Vec::new(),
+            },
+        ];
+        edl.inserts = vec![super::Insert {
+            at: s.events[1].t + 1.0,
+            seconds: 2.5,
+            kind: "bullets".into(),
+            title: "What we did".into(),
+            items: vec!["Named the project".into(), "Created it".into()],
+        }];
+        edl.cuts = vec!["long".into(), "short".into()];
+        std::fs::write(s.dir.join("edl.json"), serde_json::to_string(&edl).unwrap()).unwrap();
         let r = super::render::render(&s.dir, |p| eprintln!("{p}")).unwrap();
         eprintln!("{r:?}");
         assert!(r.gif.is_file());
+        assert!(s.dir.join("chapters.txt").is_file());
         if let Ok(out) = std::env::var("DCODE_AI_LOOK") {
-            for f in ["video.gif", "video.mp4", "captions.srt", "edl.json"] {
+            for f in [
+                "video.gif",
+                "video.mp4",
+                "video-clean.mp4",
+                "short.mp4",
+                "captions.srt",
+                "chapters.txt",
+                "thumbnail.png",
+                "short-thumbnail.png",
+                "short-review.png",
+                "edl.json",
+            ] {
                 let _ = std::fs::copy(s.dir.join(f), format!("{out}/{f}"));
             }
         }
