@@ -4,9 +4,9 @@ use super::*;
 
 /// `/record <goal>`: the agent records itself doing it, then edits the video.
 pub(crate) const RECORD_PROMPT: &str = "Make a short narrated demo video of the task below, recorded and edited by you.
-1. Load the tools with `tool_search` (record_start, record_stop, video_render, browser).
-2. With `browser`, open the starting page first (so loading isn't in the video). Then `record_start` with the task as `goal`.
-3. Do the task with `browser`, one deliberate action at a time: navigate, click, type, wait_for the result. No aimless scrolling, never type passwords (ask the user to sign in first if needed).
+1. Load the tools with `tool_search` (record_start, record_stop, video_render, browser_task, browser).
+2. Get the starting page ready first (so loading isn't in the video): a `browser_task` that opens it in a fresh tab (`new_tab`, so it is the visible one) and waits until it has loaded. If it needs a sign-in, ask the user to sign in in the browser window — never type passwords. Then `record_start` with the task as `goal`.
+3. Do the task with ONE `browser_task` while recording — it drives the browser in a sub-agent, so the page snapshots stay out of this conversation (much cheaper); its clicks and typing still go into the recording's event track. Give it the exact steps in order (what to click or type, what result to wait for), and tell it: one deliberate action at a time, wait_for the result of each before the next, no aimless scrolling, stay in the same tab, never type passwords, finish by reporting what each step showed. Use the plain `browser` tool yourself only if the sub-agent gets stuck.
 4. `record_stop`. From its event track, improve the draft edit list:
    - title (≤ 6 words), subtitle, end_text saying what was achieved;
    - the narration script `lines`: one or two short spoken sentences per step, friendly and plain, second person (\"Click Create project to start\"), `at` about a second before the action, ids short and stable (`intro`, `create-1` …), and a `section` on each line so the video gets chapters (2–5 sections). Only say what the recording shows;

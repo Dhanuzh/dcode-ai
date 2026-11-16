@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.0.71 — 2026-11-16
+
+### Fixed
+- **Screen recordings came out as one still image** (1–3 frames for the
+  whole video):
+  - Each frame was confirmed to Chrome with a message id too big for it
+    (over 32 bits), so Chrome dropped the confirmations and stopped
+    sending frames. Confirmations now use ordinary ids.
+  - Chrome sends no frames at all for a tab it thinks is hidden — on
+    Windows, a window covered by your terminal. When the live frames go
+    quiet, the recorder now takes screenshots instead (3–4 a second), so
+    the video keeps moving. Recording brings the tab to the front first,
+    and tells the agent when the page still reports hidden.
+  - Chrome that dcode-ai starts now runs with occlusion throttling off and
+    vidni's screenshot surface switch, so a covered window keeps painting.
+    Close an already-open dcode-ai Chrome window once to pick these up.
+- **Windows CI:** the background-session host is Unix-only; its shared
+  pieces no longer fail clippy on Windows.
+
+### Changed
+- **`/record` drives the browser through a `browser_task` sub-agent**:
+  the page snapshots stay out of the main conversation (a dashboard demo
+  used ~780k tokens before), while every click still lands in the
+  recording's event track.
+
 ## 1.0.70 — 2026-11-16
 
 ### Fixed

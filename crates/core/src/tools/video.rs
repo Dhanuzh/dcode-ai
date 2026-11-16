@@ -38,8 +38,9 @@ impl ToolExecutor for RecordStartTool {
         ToolDefinition {
             name: "record_start".into(),
             description: "Start recording the browser page you drive (for a demo or tutorial video). \
-Then do the task with the `browser` tool — every click, field and page load is logged with where and \
-when — and call `record_stop`. Move deliberately: one action at a time, no aimless scrolling."
+Then do the task — with one `browser_task` (a sub-agent drives the browser; cheaper, and its \
+clicks are still logged) or the `browser` tool; every click, field and page load is logged with \
+where and when — and call `record_stop`. Move deliberately: one action at a time, no aimless scrolling."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
