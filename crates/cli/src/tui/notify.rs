@@ -84,6 +84,24 @@ pub fn speak_and_wait(text: &str) -> Result<(), String> {
         .map_err(|e| e.to_string())
 }
 
+/// Reads `text` aloud until it's done or `stop` is set (then the voice is
+/// cut off). Returns whether it was stopped.
+pub fn speak_until(text: &str, stop: &std::sync::atomic::AtomicBool) -> Result<bool, String> {
+    let mut child = speak_child(text)?;
+    loop {
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Ok(true);
+        }
+        match child.try_wait() {
+            Ok(Some(_)) => return Ok(false),
+            Ok(None) => std::thread::sleep(std::time::Duration::from_millis(80)),
+            Err(e) => return Err(e.to_string()),
+        }
+    }
+}
+
 fn speak_child(text: &str) -> Result<std::process::Child, String> {
     use std::io::Write;
     let text = speakable(text);

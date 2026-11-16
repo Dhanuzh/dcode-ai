@@ -83,6 +83,286 @@ impl Drop for TalkStopGuard {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum TalkMode {
+    /// What you say goes into the prompt.
+    Prompt,
+    /// …and is sent.
+    Send,
+    /// Hands-free: listen, send, read the reply aloud, listen again.
+    Loop,
+    /// `/standup voice`.
+    Standup,
+    /// Microphone check.
+    Test,
+}
+
+fn talk_say(st: &Arc<Mutex<TuiSessionState>>, line: String) {
+    if let Ok(mut g) = st.lock() {
+        g.push_block(crate::tui::state::DisplayBlock::System(line));
+        g.touch_transcript();
+    }
+}
+
+/// A status line rewritten in place (listening… / transcribing… / level).
+fn talk_live(st: &Arc<Mutex<TuiSessionState>>, line: String) {
+    if let Ok(mut g) = st.lock() {
+        let live = |b: &crate::tui::state::DisplayBlock| {
+            matches!(b, crate::tui::state::DisplayBlock::System(t)
+                if t.starts_with("[talk] 🎙") || t.starts_with("[talk] ✎"))
+        };
+        if g.blocks.last().is_some_and(live) {
+            g.blocks.pop();
+        }
+        g.push_block(crate::tui::state::DisplayBlock::System(line));
+        g.touch_transcript();
+    }
+}
+
+/// Waits for the agent to take and finish the turn just sent. False when
+/// Esc stopped it.
+async fn talk_wait_for_reply(
+    st: &Arc<Mutex<TuiSessionState>>,
+    stop: &std::sync::atomic::AtomicBool,
+) -> bool {
+    use std::sync::atomic::Ordering;
+    let busy = || st.lock().is_ok_and(|g| g.busy);
+    let started = std::time::Instant::now();
+    while !busy() && started.elapsed() < std::time::Duration::from_secs(8) {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+    while busy() {
+        if stop.load(Ordering::SeqCst) {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+    !stop.load(Ordering::SeqCst)
+}
+
+/// `/talk` in the TUI, in the background. Esc is the one key that stops it.
+async fn talk_session(
+    st: Arc<Mutex<TuiSessionState>>,
+    tx: tokio::sync::mpsc::UnboundedSender<TuiCmd>,
+    model: String,
+    mode: TalkMode,
+) {
+    use dcode_ai_cli::voice::stt;
+    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let _armed = run_talk_stop_guard_with_state(Some(Arc::clone(&st)), stop.clone());
+    if mode == TalkMode::Test {
+        talk_mic_test(&st, &model, &stop).await;
+        return;
+    }
+    let (max, quiet) = if mode == TalkMode::Standup {
+        (
+            std::time::Duration::from_secs(180),
+            std::time::Duration::from_secs(3),
+        )
+    } else {
+        (
+            std::time::Duration::from_secs(90),
+            std::time::Duration::from_millis(1500),
+        )
+    };
+    let progress = {
+        let st = Arc::clone(&st);
+        move |s: String| talk_live(&st, format!("[talk] {s}"))
+    };
+    if mode == TalkMode::Loop {
+        talk_say(
+            &st,
+            "[talk] hands-free — say \"stop\" or press Esc to end (Esc also cuts off a reply being read)".into(),
+        );
+    }
+    for _ in 0..30 {
+        let heard = match stt::listen(&model, max, quiet, stop.clone(), &progress).await {
+            Ok(h) => h,
+            Err(e) => {
+                talk_say(&st, format!("[talk] {e}"));
+                break;
+            }
+        };
+        let text = heard.text;
+        let to_prompt = |text: &str| {
+            if let Ok(mut g) = st.lock() {
+                g.set_input_text(text.to_string());
+            }
+        };
+        if mode != TalkMode::Loop || heard.by_esc {
+            if text.is_empty() {
+                talk_say(
+                    &st,
+                    if heard.by_esc {
+                        "[talk] stopped".into()
+                    } else {
+                        "[talk] didn't catch that — try again".into()
+                    },
+                );
+            } else {
+                match mode {
+                    TalkMode::Send => {
+                        talk_say(&st, format!("[talk] you: {text}"));
+                        let _ = tx.send(TuiCmd::Submit(text));
+                    }
+                    TalkMode::Standup => {
+                        talk_say(&st, format!("[talk] you said: {text}"));
+                        let _ = tx.send(TuiCmd::Submit(format!("/standup {text}")));
+                    }
+                    _ => {
+                        to_prompt(&text);
+                        talk_say(
+                            &st,
+                            "[talk] in the prompt — edit it or press Enter to send".into(),
+                        );
+                    }
+                }
+            }
+            break;
+        }
+        if text.is_empty() {
+            continue;
+        }
+        if stt::is_stop(&text) {
+            talk_say(&st, "[talk] ended".into());
+            break;
+        }
+        talk_say(&st, format!("[talk] you: {text}"));
+        let _ = tx.send(TuiCmd::Submit(text));
+        if !talk_wait_for_reply(&st, &stop).await {
+            talk_say(&st, "[talk] stopped".into());
+            break;
+        }
+        let reply = st
+            .lock()
+            .ok()
+            .and_then(|g| {
+                g.blocks.iter().rev().find_map(|b| match b {
+                    crate::tui::state::DisplayBlock::Assistant(t) => Some(t.clone()),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        let s2 = stop.clone();
+        let spoken =
+            tokio::task::spawn_blocking(move || crate::tui::notify::speak_until(&reply, &s2)).await;
+        if matches!(spoken, Ok(Ok(true))) {
+            talk_say(&st, "[talk] stopped".into());
+            break;
+        }
+    }
+}
+
+/// `/talk test`: listens for a few seconds and shows the level live, then
+/// says what's wrong (no audio, too quiet, noisy) and what it heard.
+async fn talk_mic_test(
+    st: &Arc<Mutex<TuiSessionState>>,
+    model: &str,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    use dcode_ai_cli::voice::{audio, mixer, stt, vad};
+    use std::sync::atomic::Ordering;
+    talk_say(
+        st,
+        "[talk] microphone test — say something for a few seconds (Esc stops)".into(),
+    );
+    let (atx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Vec<i16>>();
+    let io = match audio::start(atx, Arc::new(Mutex::new(mixer::Mixer::default()))) {
+        Ok(io) => io,
+        Err(e) => {
+            talk_say(st, format!("[talk] ✗ can't open the microphone: {e}"));
+            return;
+        }
+    };
+    let backend = io.backend();
+    let mut gate = vad::Gate::default();
+    let mut levels: Vec<f32> = Vec::new();
+    let mut speech = 0usize;
+    let mut pcm: Vec<i16> = Vec::new();
+    let started = std::time::Instant::now();
+    while started.elapsed() < std::time::Duration::from_secs(6) && !stop.load(Ordering::SeqCst) {
+        let frame =
+            match tokio::time::timeout(std::time::Duration::from_millis(200), rx.recv()).await {
+                Ok(Some(f)) => f,
+                Ok(None) => break,
+                Err(_) => continue,
+            };
+        let level = vad::rms(&frame);
+        if gate.open(&frame) {
+            speech += 1;
+        }
+        levels.push(level);
+        pcm.extend_from_slice(&frame);
+        if levels.len().is_multiple_of(5) {
+            let n = (((level.max(1.0).log10() - 2.0) / 2.5) * 20.0).clamp(0.0, 20.0) as usize;
+            talk_live(
+                st,
+                format!(
+                    "[talk] 🎙 {}{} {:>5.0}{}",
+                    "█".repeat(n),
+                    "·".repeat(20 - n),
+                    level,
+                    if speech > 0 { " · speech heard" } else { "" }
+                ),
+            );
+        }
+    }
+    drop(io);
+    if levels.is_empty() {
+        talk_say(
+            st,
+            format!(
+                "[talk] ✗ no sound arrived from the microphone ({backend}). On WSL: Windows 11 with WSLg, and the microphone allowed for desktop apps in Windows privacy settings."
+            ),
+        );
+        return;
+    }
+    let mut sorted = levels.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let floor = sorted[sorted.len() / 5];
+    let peak = sorted[sorted.len() - 1];
+    talk_say(
+        st,
+        format!(
+            "[talk] {backend} · {:.1}s · background {floor:.0} · loudest {peak:.0} · speech {:.1}s",
+            levels.len() as f32 * 0.02,
+            speech as f32 * 0.02
+        ),
+    );
+    if peak < 300.0 {
+        talk_say(
+            st,
+            "[talk] ✗ almost silent — the microphone may be muted or the wrong input is selected"
+                .into(),
+        );
+        return;
+    }
+    if floor > 900.0 {
+        talk_say(
+            st,
+            "[talk] ⚠ noisy background — pauses may be missed; press Esc when you're done talking"
+                .into(),
+        );
+    }
+    if speech == 0 {
+        talk_say(
+            st,
+            "[talk] ⚠ no speech detected — speak louder or closer".into(),
+        );
+        return;
+    }
+    stop.store(false, Ordering::SeqCst);
+    talk_live(st, "[talk] ✎ transcribing…".into());
+    match stt::transcribe_pcm(model, pcm, stop.clone()).await {
+        Ok(t) if !t.is_empty() => talk_say(st, format!("[talk] ✓ heard: “{t}” — /talk is ready")),
+        Ok(_) => talk_say(st, "[talk] ⚠ heard sound but no words".into()),
+        Err(e) => talk_say(st, format!("[talk] ✗ {e}")),
+    }
+}
+
 impl Repl {
     #[allow(unused_variables, unused_mut)]
     pub(super) async fn cmd_team(
@@ -320,6 +600,26 @@ impl Repl {
                 }
                 // Listening/transcribing status rewrites one line in place
                 // (instead of a new line every second).
+                // In the TUI, talking runs in the background: dcode-ai keeps
+                // working, and Esc stops it (listening, the spoken reply, the
+                // hands-free loop).
+                if let ReplOutput::Tui(st) = out
+                    && let Some(tx) = self.self_cmd_tx.clone()
+                {
+                    if st.lock().is_ok_and(|g| g.talk_stop.is_some()) {
+                        out.println("[talk] already on — Esc stops it");
+                        return Ok(true);
+                    }
+                    let mode = match (command, sub) {
+                        ("/standup", _) => TalkMode::Standup,
+                        (_, "loop") => TalkMode::Loop,
+                        (_, "send") => TalkMode::Send,
+                        (_, "test") => TalkMode::Test,
+                        _ => TalkMode::Prompt,
+                    };
+                    tokio::spawn(talk_session(Arc::clone(st), tx, model, mode));
+                    return Ok(true);
+                }
                 let progress = |s: String| {
                     let line = format!("[talk] {s}");
                     if let ReplOutput::Tui(st) = &out
@@ -1092,6 +1392,81 @@ mod tests {
             PathBuf::from("."),
             false,
         )))
+    }
+
+    fn system_lines(state: &Arc<Mutex<TuiSessionState>>) -> String {
+        state
+            .lock()
+            .map(|g| {
+                g.blocks
+                    .iter()
+                    .filter_map(|b| match b {
+                        crate::tui::state::DisplayBlock::System(t) => Some(t.clone()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default()
+    }
+
+    /// `/talk` in the background with the fake microphone (needs the
+    /// speech model: `cargo test -p dcode-ai-cli -- --ignored talk_session`).
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore]
+    async fn talk_session_test_prompt_and_esc() {
+        // SAFETY: test-only, before any audio starts.
+        unsafe { std::env::set_var("DCODE_AI_FAKE_AUDIO", "tone") };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<TuiCmd>();
+
+        // The microphone check reports the level and what it heard.
+        let state = make_state();
+        talk_session(state.clone(), tx.clone(), "tiny.en".into(), TalkMode::Test).await;
+        let out = system_lines(&state);
+        eprintln!("{out}");
+        assert!(out.contains("fake ·"), "{out}");
+        assert!(out.contains("speech"), "{out}");
+        assert!(state.lock().is_ok_and(|g| g.talk_stop.is_none()));
+
+        // Prompt mode: the tone ends at a pause, the text goes to the prompt.
+        let state = make_state();
+        talk_session(
+            state.clone(),
+            tx.clone(),
+            "tiny.en".into(),
+            TalkMode::Prompt,
+        )
+        .await;
+        let out = system_lines(&state);
+        assert!(!out.contains("stopped"), "{out}");
+        assert!(state.lock().is_ok_and(|g| g.talk_stop.is_none()));
+
+        // Hands-free: Esc (the flag) ends the loop within moments, nothing sent.
+        let state = make_state();
+        let session = tokio::spawn(talk_session(
+            state.clone(),
+            tx.clone(),
+            "tiny.en".into(),
+            TalkMode::Loop,
+        ));
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        let flag = state
+            .lock()
+            .ok()
+            .and_then(|g| g.talk_stop.clone())
+            .expect("armed");
+        flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        tokio::time::timeout(std::time::Duration::from_secs(20), session)
+            .await
+            .expect("Esc ends the loop")
+            .unwrap();
+        assert!(state.lock().is_ok_and(|g| g.talk_stop.is_none()));
+        let out = system_lines(&state);
+        assert!(
+            out.contains("in the prompt") || out.contains("stopped"),
+            "{out}"
+        );
+        assert!(rx.try_recv().is_err(), "Esc sends nothing");
     }
 
     #[test]

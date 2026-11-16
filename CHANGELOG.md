@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.0.70 — 2026-11-16
+
+### Fixed
+- **dcode-ai froze while `/talk` listened**: talking ran inside the command
+  loop, so nothing else responded until it finished. In the TUI it now runs
+  in the background — keep typing, scrolling and working.
+- **One key stops talking: Esc.** It ends listening (what you said goes
+  into the prompt), cuts off a reply being read aloud, and ends `/talk
+  loop`; Esc again cancels a transcription. While the agent works, Esc also
+  cancels the turn as usual.
+
+### New
+- **`/talk test`**: a microphone check — live level meter, the audio
+  backend, background noise and loudest level, whether speech was
+  detected, and what Whisper heard, with a hint when something is wrong
+  (no sound, muted, noisy room).
+
 ## 1.0.69 — 2026-11-16
 
 ### New — narrated tutorial videos, the vidni way

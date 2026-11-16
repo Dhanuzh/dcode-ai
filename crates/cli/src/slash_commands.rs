@@ -157,7 +157,7 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/side" => "start an ephemeral side conversation (/side end to return)",
         "/btw" => "ask a quick side question without adding it to the conversation",
         "/talk" => {
-            "talk to the agent: /talk (into the prompt) · /talk send · /talk loop (hands-free, it answers aloud; say \"stop\")"
+            "talk to the agent (runs in the background; Esc stops): /talk (into the prompt) · /talk send · /talk loop (hands-free, it answers aloud) · /talk test (check the microphone)"
         }
         "/detach" => {
             "leave this session running in the background (`dcode-ai` in this folder brings it back)"

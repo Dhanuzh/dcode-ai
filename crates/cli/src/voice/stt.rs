@@ -510,7 +510,7 @@ pub async fn listen(
     if !is_downloaded(model) {
         ensure_model(model, &progress).await?;
     }
-    progress("🎙 listening… (stops when you pause · Esc when done)".into());
+    progress("🎙 listening… (stops when you pause · Esc stops)".into());
     let started = std::time::Instant::now();
     let recording = record(max, quiet, stop.clone());
     tokio::pin!(recording);
@@ -519,7 +519,7 @@ pub async fn listen(
             r = &mut recording => break r,
             _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
                 let secs = started.elapsed().as_secs();
-                progress(format!("🎙 listening… {secs}s (stops when you pause · Esc when done)"));
+                progress(format!("🎙 listening… {secs}s (stops when you pause · Esc stops)"));
             }
         }
     };

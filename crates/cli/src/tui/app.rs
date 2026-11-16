@@ -1551,16 +1551,17 @@ pub fn run_blocking(
                         g.last_key_at = Some(std::time::Instant::now());
                         false
                     } => {}
-                // Esc while `/talk` runs: while listening it means "done
-                // talking" (what was said is transcribed); while transcribing
-                // it cancels. `/talk` re-arms the flag in between, and clears
-                // it when it ends, so Esc goes back to normal.
+                // Esc while `/talk` runs stops it: listening ends (what was
+                // said is transcribed; Esc again cancels that), a reply being
+                // read aloud is cut off, the hands-free loop ends. While the
+                // agent works, Esc also does its usual job (cancel the turn).
                 Event::Key(key)
                     if key.code == crossterm::event::KeyCode::Esc
                         && !matches!(key.kind, crossterm::event::KeyEventKind::Release)
                         && g.talk_stop.as_ref().is_some_and(|s| {
                             !s.swap(true, std::sync::atomic::Ordering::SeqCst)
-                        }) => {}
+                        })
+                        && !g.busy => {}
                 Event::Key(key) => {
                     let terminal_size = terminal.size().ok();
                     let flow = handle_key_event(
