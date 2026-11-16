@@ -32,7 +32,9 @@ type Pending = Arc<std::sync::Mutex<HashMap<u64, oneshot::Sender<Result<Value, S
 pub struct Page {
     out: mpsc::UnboundedSender<String>,
     pending: Pending,
-    next_id: AtomicU64,
+    /// CDP command ids; shared with the screencast acker so its acks get
+    /// unique ids too.
+    next_id: Arc<AtomicU64>,
     console: Arc<std::sync::Mutex<VecDeque<String>>>,
     /// Debug port, for status and new tabs.
     pub port: u16,
@@ -51,25 +53,118 @@ type ScreencastSink = Arc<std::sync::Mutex<Option<mpsc::UnboundedSender<Value>>>
 /// after an ack).
 pub struct ScreencastAcker {
     out: mpsc::UnboundedSender<String>,
+    next_id: Arc<AtomicU64>,
+    pending: Pending,
+    /// The page's CSS width, looked up now and then (not every frame).
+    css_w: std::sync::Mutex<(f64, Option<std::time::Instant>)>,
 }
 
 impl ScreencastAcker {
     pub fn ack(&self, session: u64) {
-        // An id no command uses; its reply is ignored.
-        let msg = json!({
-            "id": 9_000_000_000u64 + session,
-            "method": "Page.screencastFrameAck",
-            "params": {"sessionId": session}
-        });
-        let _ = self.out.send(msg.to_string());
+        // Takes the next command id, so it never clashes with a command;
+        // nothing waits on it, so its reply is ignored.
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let _ = self.out.send(screencast_ack_message(id, session));
     }
+
+    /// A CDP call on the recorded page without taking the shared browser
+    /// lock (the agent's own actions hold it while they run).
+    async fn call(&self, method: &str, params: Value) -> Result<Value, String> {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        self.pending
+            .lock()
+            .map_err(|_| "lock".to_string())?
+            .insert(id, tx);
+        let msg = json!({"id": id, "method": method, "params": params}).to_string();
+        self.out
+            .send(msg)
+            .map_err(|_| "the browser connection closed".to_string())?;
+        match tokio::time::timeout(Duration::from_secs(3), rx).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(_)) => Err("the browser connection closed".into()),
+            Err(_) => {
+                if let Ok(mut p) = self.pending.lock() {
+                    p.remove(&id);
+                }
+                Err(format!("the browser did not answer {method}"))
+            }
+        }
+    }
+
+    /// One frame of the page as JPEG, and the page's width in CSS pixels —
+    /// for when the screencast goes quiet (Chrome sends no screencast frames
+    /// for a tab it thinks is hidden, e.g. a window Windows counts as
+    /// covered).
+    pub async fn capture(&self) -> Result<(Vec<u8>, f64), String> {
+        let shot = self
+            .call(
+                "Page.captureScreenshot",
+                json!({"format": "jpeg", "quality": 80}),
+            )
+            .await?;
+        let data = shot["data"].as_str().ok_or("no screenshot data")?;
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|e| e.to_string())?;
+        let cached = self.css_w.lock().map(|c| *c).unwrap_or((0.0, None));
+        let css_w = match cached {
+            (w, Some(at)) if at.elapsed() < Duration::from_secs(3) => w,
+            (old, _) => {
+                let w = self
+                    .call("Page.getLayoutMetrics", json!({}))
+                    .await
+                    .ok()
+                    .and_then(|m| {
+                        m["cssVisualViewport"]["clientWidth"]
+                            .as_f64()
+                            .or_else(|| m["layoutViewport"]["clientWidth"].as_f64())
+                    })
+                    .unwrap_or(old);
+                if let Ok(mut c) = self.css_w.lock() {
+                    *c = (w, Some(std::time::Instant::now()));
+                }
+                w
+            }
+        };
+        Ok((bytes, css_w))
+    }
+}
+
+/// The `Page.screencastFrameAck` message. CDP message ids must fit in a
+/// 32-bit int: Chrome drops a message with a bigger id, and an unacked
+/// screencast stops after two frames.
+fn screencast_ack_message(id: u64, session: u64) -> String {
+    json!({
+        "id": id,
+        "method": "Page.screencastFrameAck",
+        "params": {"sessionId": session}
+    })
+    .to_string()
 }
 
 /// Starts the screencast of the page the agent drives (launching the
 /// browser if needed); frames go to `tx`.
-pub async fn start_screencast(tx: mpsc::UnboundedSender<Value>) -> Result<ScreencastAcker, String> {
+pub async fn start_screencast(
+    tx: mpsc::UnboundedSender<Value>,
+) -> Result<(ScreencastAcker, bool), String> {
     let mut slot = shared().lock().await;
     let (page, _) = ensure_page(&mut slot, true).await?;
+    // Bring the tab forward and keep it "focused": Chrome only paints (and
+    // screencasts) a tab it considers visible.
+    let _ = page.call("Page.bringToFront", json!({})).await;
+    let _ = page
+        .call(
+            "Emulation.setFocusEmulationEnabled",
+            json!({"enabled": true}),
+        )
+        .await;
+    let visible = page
+        .eval("document.visibilityState")
+        .await
+        .map(|v| v.as_str() != Some("hidden"))
+        .unwrap_or(true);
     if let Ok(mut s) = page.screencast.lock() {
         *s = Some(tx);
     }
@@ -78,9 +173,15 @@ pub async fn start_screencast(tx: mpsc::UnboundedSender<Value>) -> Result<Screen
         json!({"format": "jpeg", "quality": 80, "maxWidth": 1920, "maxHeight": 1080, "everyNthFrame": 1}),
     )
     .await?;
-    Ok(ScreencastAcker {
-        out: page.out.clone(),
-    })
+    Ok((
+        ScreencastAcker {
+            out: page.out.clone(),
+            next_id: page.next_id.clone(),
+            pending: page.pending.clone(),
+            css_w: std::sync::Mutex::new((0.0, None)),
+        },
+        visible,
+    ))
 }
 
 /// Stops the screencast.
@@ -167,7 +268,7 @@ impl Page {
         let page = Self {
             out,
             pending,
-            next_id: AtomicU64::new(1),
+            next_id: Arc::new(AtomicU64::new(1)),
             console,
             port,
             target_id: ws_url.rsplit('/').next().unwrap_or_default().to_string(),
@@ -431,6 +532,18 @@ pub async fn launch(port: u16, url: Option<&str>) -> Result<String, String> {
     cmd.arg(format!("--remote-debugging-port={port}"))
         .arg(format!("--user-data-dir={profile}"))
         .args(["--no-first-run", "--no-default-browser-check"])
+        // Keep painting when the window is covered or in the background:
+        // otherwise Windows' occlusion tracking hides the tab and screen
+        // recordings get no frames.
+        .args([
+            "--disable-features=CalculateNativeWinOcclusion",
+            // Screenshots from a fresh surface: they work even while the
+            // window is covered (the recorder's fallback uses them).
+            "--enable-features=CDPScreenshotNewSurface",
+            "--disable-backgrounding-occluded-windows",
+            "--disable-renderer-backgrounding",
+            "--disable-background-timer-throttling",
+        ])
         .arg(url.unwrap_or("about:blank"))
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
@@ -1594,6 +1707,17 @@ pub async fn close() -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screencast_ack_uses_a_32_bit_id() {
+        // Chrome drops messages whose id doesn't fit in an i32; the
+        // screencast then stalls after two frames.
+        let v: Value = serde_json::from_str(&screencast_ack_message(42, 7)).unwrap();
+        assert_eq!(v["id"], 42);
+        assert!(v["id"].as_u64().unwrap() <= i32::MAX as u64);
+        assert_eq!(v["method"], "Page.screencastFrameAck");
+        assert_eq!(v["params"]["sessionId"], 7);
+    }
 
     #[test]
     fn find_lists_only_matching_elements_and_text() {

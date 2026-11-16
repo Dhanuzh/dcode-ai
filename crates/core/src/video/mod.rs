@@ -575,7 +575,10 @@ mod live {
         act(serde_json::json!({"action": "navigate", "url": page}))
             .await
             .unwrap();
-        let id = super::record::start(w, "Creating a project").await.unwrap();
+        let id = super::record::start(w, "Creating a project")
+            .await
+            .unwrap()
+            .id;
         tokio::time::sleep(std::time::Duration::from_millis(800)).await;
         let snap = act(serde_json::json!({"action": "snapshot"}))
             .await
@@ -650,5 +653,62 @@ mod live {
                 let _ = std::fs::copy(s.dir.join(f), format!("{out}/{f}"));
             }
         }
+    }
+}
+
+/// A tab covered by another one sends no screencast frames; the recorder
+/// falls back to screenshots. `DCODE_AI_TEST_CDP_PORT=<port>`,
+/// `cargo test -- --ignored record_a_hidden`.
+#[cfg(test)]
+mod live_hidden {
+    #[tokio::test]
+    #[ignore]
+    async fn record_a_hidden_tab() {
+        let Ok(port) = std::env::var("DCODE_AI_TEST_CDP_PORT") else {
+            return;
+        };
+        let port: u16 = port.parse().unwrap();
+        crate::browser::connect(port).await.unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let w = ws.path().to_path_buf();
+        let act = |v: serde_json::Value| {
+            let w = w.clone();
+            async move { crate::browser::run_action(&v, &w).await }
+        };
+        act(serde_json::json!({"action": "navigate", "url": "data:text/html,<body><h1 id=c>0</h1><script>setInterval(()=>c.textContent=Date.now(),100)</script></body>"}))
+            .await
+            .unwrap();
+        // Cover it: open another tab in front (over HTTP, so the tool
+        // stays on the first one).
+        let _ = reqwest::Client::new()
+            .put(format!("http://127.0.0.1:{port}/json/new?about:blank"))
+            .send()
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        let vis =
+            act(serde_json::json!({"action": "eval", "expression": "document.visibilityState"}))
+                .await
+                .unwrap();
+        eprintln!("visibility before: {vis}");
+        let started = super::record::start(&w, "Hidden").await.unwrap();
+        eprintln!("visible at start: {}", started.visible);
+        // Covered again while recording: the screencast goes quiet.
+        let _ = reqwest::Client::new()
+            .put(format!("http://127.0.0.1:{port}/json/new?about:blank"))
+            .send()
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        let vis =
+            act(serde_json::json!({"action": "eval", "expression": "document.visibilityState"}))
+                .await
+                .unwrap();
+        eprintln!("visibility while recording: {vis}");
+        // However hidden the page gets, frames must keep coming: silence
+        // the screencast as Chrome does for a covered window.
+        crate::browser::stop_screencast().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        let s = super::record::stop().await.unwrap();
+        eprintln!("{} frames in {:.1}s", s.frames, s.duration);
+        assert!(s.frames >= 8, "frames keep coming: {}", s.frames);
     }
 }

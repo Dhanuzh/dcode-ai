@@ -54,9 +54,19 @@ when — and call `record_stop`. Move deliberately: one action at a time, no aim
     async fn execute(&self, call: &ToolCall) -> ToolResult {
         let goal = call.input["goal"].as_str().unwrap_or("").trim();
         match video::record::start(&self.workspace_root, goal).await {
-            Ok(id) => ok(
+            Ok(started) => ok(
                 call,
-                format!("Recording {id}. Do the task with `browser` now, then call record_stop."),
+                format!(
+                    "Recording {}. Do the task with `browser` now, then call record_stop.{}",
+                    started.id,
+                    if started.visible {
+                        ""
+                    } else {
+                        " Note: the page reports itself hidden (its window is covered or in the \
+background), so it is recorded by screenshots — about 4 a second, enough for a demo. For smooth \
+video, ask the user to bring the browser window to the front."
+                    }
+                ),
             ),
             Err(e) => fail(call, e),
         }

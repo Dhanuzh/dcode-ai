@@ -22,6 +22,44 @@ struct Active {
     events: Arc<Mutex<Vec<Event>>>,
     frames: Arc<Mutex<Vec<FrameInfo>>>,
     task: tokio::task::JoinHandle<()>,
+    /// Screenshots while the screencast is quiet.
+    fallback: tokio::task::JoinHandle<()>,
+}
+
+/// Writes frames (from the screencast or a screenshot) into `raw/`.
+struct Writer {
+    raw: PathBuf,
+    start: f64,
+    n: std::sync::atomic::AtomicUsize,
+    frames: Arc<Mutex<Vec<FrameInfo>>>,
+    /// When the last screencast frame arrived (wall clock).
+    last: Mutex<f64>,
+}
+
+impl Writer {
+    /// `screencast`: from the live stream (resets the quiet timer), else a
+    /// fallback screenshot.
+    fn write(&self, at: f64, bytes: &[u8], css_w: f64, screencast: bool) {
+        let t = (at - self.start).max(0.0);
+        if t > MAX_SECONDS {
+            return;
+        }
+        let n = self.n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let file = format!("f{n:06}.jpg");
+        if std::fs::write(self.raw.join(&file), bytes).is_err() {
+            return;
+        }
+        if screencast && let Ok(mut l) = self.last.lock() {
+            *l = now();
+        }
+        if let Ok(mut f) = self.frames.lock() {
+            f.push(FrameInfo { t, file, css_w });
+        }
+    }
+
+    fn quiet_for(&self) -> f64 {
+        self.last.lock().map(|l| now() - *l).unwrap_or(0.0)
+    }
 }
 
 static ACTIVE: Mutex<Option<Active>> = Mutex::new(None);
@@ -55,7 +93,7 @@ pub fn note(kind: &str, xy: Option<(f64, f64)>, label: &str) {
 }
 
 /// Starts recording the browser (or the page the agent drives).
-pub async fn start(workspace: &Path, goal: &str) -> Result<String, String> {
+pub async fn start(workspace: &Path, goal: &str) -> Result<Started, String> {
     if is_recording() {
         return Err("already recording — record_stop first".into());
     }
@@ -63,45 +101,61 @@ pub async fn start(workspace: &Path, goal: &str) -> Result<String, String> {
     let dir = super::videos_dir(workspace).join(&id);
     std::fs::create_dir_all(dir.join("raw")).map_err(|e| e.to_string())?;
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-    let acker = crate::browser::start_screencast(tx).await?;
+    let (acker, visible) = crate::browser::start_screencast(tx).await?;
+    let acker = Arc::new(acker);
     let start = now();
     let frames: Arc<Mutex<Vec<FrameInfo>>> = Default::default();
-    let raw = dir.join("raw");
+    let writer = Arc::new(Writer {
+        raw: dir.join("raw"),
+        start,
+        n: Default::default(),
+        frames: frames.clone(),
+        last: Mutex::new(start),
+    });
     let task = {
-        let frames = frames.clone();
+        let (writer, acker) = (writer.clone(), acker.clone());
         tokio::spawn(async move {
-            let mut n = 0usize;
             while let Some(v) = rx.recv().await {
                 let p = &v["params"];
                 if let Some(session) = p["sessionId"].as_u64() {
                     acker.ack(session);
                 }
                 let at = p["metadata"]["timestamp"].as_f64().unwrap_or_else(now);
-                let t = (at - start).max(0.0);
-                if t > MAX_SECONDS {
-                    continue;
-                }
                 let Some(Ok(bytes)) = p["data"]
                     .as_str()
                     .map(|d| base64::engine::general_purpose::STANDARD.decode(d))
                 else {
                     continue;
                 };
-                n += 1;
-                let file = format!("f{n:06}.jpg");
-                if std::fs::write(raw.join(&file), bytes).is_err() {
+                writer.write(
+                    at,
+                    &bytes,
+                    p["metadata"]["deviceWidth"].as_f64().unwrap_or(0.0),
+                    true,
+                );
+            }
+        })
+    };
+    // Chrome sends no screencast frames for a tab it thinks is hidden (a
+    // covered window on Windows, a background tab): then take screenshots,
+    // about four a second, so the video still moves.
+    let fallback = {
+        let (writer, acker) = (writer.clone(), acker.clone());
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                if writer.quiet_for() < 0.8 {
                     continue;
                 }
-                if let Ok(mut f) = frames.lock() {
-                    f.push(FrameInfo {
-                        t,
-                        file,
-                        css_w: p["metadata"]["deviceWidth"].as_f64().unwrap_or(0.0),
-                    });
+                if let Ok((bytes, css_w)) = acker.capture().await {
+                    writer.write(now(), &bytes, css_w, false);
                 }
             }
         })
     };
+    let _ = visible;
     if let Ok(mut g) = ACTIVE.lock() {
         *g = Some(Active {
             id: id.clone(),
@@ -111,9 +165,17 @@ pub async fn start(workspace: &Path, goal: &str) -> Result<String, String> {
             events: Default::default(),
             frames,
             task,
+            fallback,
         });
     }
-    Ok(id)
+    Ok(Started { id, visible })
+}
+
+/// A recording that started: its id, and whether the page was visible
+/// (a hidden one is recorded by screenshots, more slowly).
+pub struct Started {
+    pub id: String,
+    pub visible: bool,
 }
 
 /// What a finished recording holds.
@@ -134,11 +196,14 @@ pub async fn stop() -> Result<Stopped, String> {
         .map_err(|_| "lock".to_string())?
         .take()
         .ok_or("not recording")?;
+    active.fallback.abort();
     let _ = crate::browser::stop_screencast().await;
     // The frame task ends once the page stops sending.
     let _ = tokio::time::timeout(std::time::Duration::from_secs(3), active.task).await;
     let duration = (now() - active.start).clamp(0.0, MAX_SECONDS);
-    let frames = active.frames.lock().map(|f| f.clone()).unwrap_or_default();
+    let mut frames = active.frames.lock().map(|f| f.clone()).unwrap_or_default();
+    // Screencast frames and screenshots interleave; keep them in time order.
+    frames.sort_by(|a, b| a.t.total_cmp(&b.t));
     let events = active.events.lock().map(|e| e.clone()).unwrap_or_default();
     if frames.is_empty() {
         return Err("no frames were captured — is the page visible in the browser?".into());
