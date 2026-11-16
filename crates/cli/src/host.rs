@@ -15,6 +15,9 @@
 //!   approvals notify you (desktop / `[ui] push_url`).
 //! - Unix (Linux, macOS, WSL) for now.
 
+// The host is Unix-only for now; on Windows its shared pieces go unused.
+#![cfg_attr(not(unix), allow(dead_code, unused_imports))]
+
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
