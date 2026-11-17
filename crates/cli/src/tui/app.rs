@@ -1555,6 +1555,17 @@ pub fn run_blocking(
                 // said is transcribed; Esc again cancels that), a reply being
                 // read aloud is cut off, the hands-free loop ends. While the
                 // agent works, Esc also does its usual job (cancel the turn).
+                // `/talk ptt`: Enter ends the take and sends it.
+                Event::Key(key)
+                    if key.code == crossterm::event::KeyCode::Enter
+                        && !matches!(key.kind, crossterm::event::KeyEventKind::Release)
+                        && g.talk_ptt == Some(false)
+                        && g.talk_stop.as_ref().is_some_and(|s| {
+                            !s.swap(true, std::sync::atomic::Ordering::SeqCst)
+                        }) =>
+                {
+                    g.talk_ptt = Some(true);
+                }
                 Event::Key(key)
                     if key.code == crossterm::event::KeyCode::Esc
                         && !matches!(key.kind, crossterm::event::KeyEventKind::Release)

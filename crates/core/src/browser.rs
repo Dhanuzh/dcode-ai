@@ -234,6 +234,63 @@ const PRIVATE_JS: &str = r#"((extra) => {
   return out;
 })"#;
 
+/// Where the page's main content is (CSS pixels of the viewport: x, y, w,
+/// h): the area-weighted 3–97 % extent of visible text and images, leaving
+/// out fixed and sticky bars, navigation, headers and footers — so a page
+/// with wide empty margins can be framed on what matters.
+const FOCUS_JS: &str = r#"(() => {
+  const vw = innerWidth, vh = innerHeight, B = 8;
+  const nx = Math.ceil(vw / B) + 1, ny = Math.ceil(vh / B) + 1;
+  const cx = new Float64Array(nx), cy = new Float64Array(ny);
+  let total = 0;
+  const chrome = new Map();
+  const isChrome = el => {
+    const path = [];
+    for (let e = el; e && e !== document.body && e !== document.documentElement; e = e.parentElement) {
+      if (chrome.has(e)) { const v = chrome.get(e); path.forEach(p => chrome.set(p, v)); return v; }
+      path.push(e);
+      const s = getComputedStyle(e), t = e.tagName, r = e.getAttribute('role');
+      if (s.position === 'fixed' || s.position === 'sticky' || t === 'NAV' || t === 'HEADER' ||
+          t === 'FOOTER' || t === 'ASIDE' || r === 'navigation' || r === 'banner' || r === 'contentinfo') {
+        path.forEach(p => chrome.set(p, true)); return true; }
+    }
+    path.forEach(p => chrome.set(p, false)); return false;
+  };
+  const add = r => {
+    const l = Math.max(0, r.left), t = Math.max(0, r.top), rr = Math.min(vw, r.right), b = Math.min(vh, r.bottom);
+    if (rr - l < 2 || b - t < 2) return;
+    const a = (rr - l) * (b - t); total += a;
+    const h = b - t, w = rr - l;
+    for (let i = Math.floor(l / B); i <= Math.floor(rr / B); i++) cx[i] += h * B;
+    for (let j = Math.floor(t / B); j <= Math.floor(b / B); j++) cy[j] += w * B;
+  };
+  if (!document.body) return null;
+  const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n, seen = 0;
+  while ((n = tw.nextNode()) && seen < 4000) {
+    if (!n.nodeValue || n.nodeValue.trim().length < 2 || !n.parentElement) continue;
+    seen++;
+    if (isChrome(n.parentElement)) continue;
+    const rg = document.createRange(); rg.selectNodeContents(n);
+    for (const r of rg.getClientRects()) add(r);
+  }
+  for (const el of document.querySelectorAll('img,svg,canvas,video')) {
+    const r = el.getBoundingClientRect();
+    if (r.width < 24 || r.height < 24 || isChrome(el)) continue;
+    add(r);
+  }
+  if (total < vw * vh * 0.01) return null;
+  const span = (arr, B) => {
+    const sum = arr.reduce((a, b) => a + b, 0); let acc = 0, lo = 0, hi = arr.length - 1;
+    for (let i = 0; i < arr.length; i++) { acc += arr[i]; if (acc >= sum * 0.03) { lo = i; break; } }
+    acc = 0;
+    for (let i = arr.length - 1; i >= 0; i--) { acc += arr[i]; if (acc >= sum * 0.03) { hi = i; break; } }
+    return [lo * B, (hi + 1) * B];
+  };
+  const [x0, x1] = span(cx, B), [y0, y1] = span(cy, B);
+  return [x0, y0, Math.min(vw, x1) - x0, Math.min(vh, y1) - y0];
+})()"#;
+
 /// Waits until the page has settled after an action: loaded, then two
 /// screenshots a quarter second apart identical (at most `max`).
 async fn settle(page: &Page, max: Duration) {
@@ -261,9 +318,28 @@ async fn settle(page: &Page, max: Duration) {
 /// What a recording needs from the page after an action: it settles, its
 /// private parts are found, and in stills mode a still is taken.
 async fn observe_for_recording(page: &Page) {
+    observe_settled(page, Duration::from_secs(4)).await;
+}
+
+/// Stills mode, just before a click or typing (after the element was
+/// scrolled into view): a still of the page as it is, so the marker and the
+/// zoom land on the element — not on the page the click opens.
+async fn still_before_action(page: &Page) {
+    if crate::video::record::mode() == Some(crate::video::record::Mode::Stills) {
+        observe_settled(page, Duration::from_millis(1500)).await;
+    }
+}
+
+async fn observe_settled(page: &Page, max: Duration) {
     use crate::video::record;
     let Some(mode) = record::mode() else { return };
-    settle(page, Duration::from_secs(4)).await;
+    settle(page, max).await;
+    if let Ok(Value::Array(b)) = page.eval(FOCUS_JS).await
+        && let [Some(x), Some(y), Some(w), Some(h)] =
+            [0, 1, 2, 3].map(|i| b.get(i).and_then(Value::as_f64))
+    {
+        record::add_focus([x, y, w, h]);
+    }
     let words = serde_json::to_string(&record::redact_words()).unwrap_or("[]".into());
     if let Ok(Value::Array(boxes)) = page.eval(&format!("{PRIVATE_JS}({words})")).await {
         let boxes: Vec<[f64; 4]> = boxes
@@ -299,6 +375,49 @@ async fn observe_for_recording(page: &Page) {
                 .unwrap_or(0.0);
             record::add_still(&bytes, css_w);
         }
+    }
+}
+
+/// The viewport a recording is made at: 1440×810 CSS pixels drawn at
+/// 1920×1080, whatever the window size or browser zoom — so a page in a
+/// wide or zoomed-out window does not come out as a small strip of tiny
+/// text in the middle of the frame.
+const RECORD_CSS: (f64, f64) = (1440.0, 810.0);
+const RECORD_PX: f64 = 1920.0;
+
+/// Sets the recording viewport on the page the agent drives.
+pub async fn fit_recording_viewport() -> Result<(), String> {
+    let mut slot = shared().lock().await;
+    let (page, _) = ensure_page(&mut slot, true).await?;
+    let set = |w: f64, h: f64| {
+        page.call(
+            "Emulation.setDeviceMetricsOverride",
+            json!({"width": w.round() as u64, "height": h.round() as u64,
+                   "deviceScaleFactor": RECORD_PX / w, "mobile": false}),
+        )
+    };
+    let (cw, ch) = RECORD_CSS;
+    set(cw, ch).await?;
+    // Browser zoom makes CSS pixels differ from window pixels: measure and
+    // correct once.
+    if let Some(iw) = page.eval("innerWidth").await.ok().and_then(|v| v.as_f64())
+        && iw > 0.0
+        && (iw - cw).abs() > 2.0
+    {
+        let k = cw / iw;
+        set(cw * k, ch * k).await?;
+    }
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    Ok(())
+}
+
+/// Back to the window's own viewport after a recording.
+pub async fn restore_viewport() {
+    let slot = shared().lock().await;
+    if let Some(page) = slot.as_ref() {
+        let _ = page
+            .call("Emulation.clearDeviceMetricsOverride", json!({}))
+            .await;
     }
 }
 
@@ -1083,12 +1202,17 @@ async fn locate(page: &Page, r: u64) -> Result<(f64, f64, bool), String> {
     let js = format!(
         r#"(() => {{ const el = document.querySelector('[data-dcode-ref="{r}"]');
   if (!el) return null;
-  el.scrollIntoView({{block: 'center', inline: 'center'}});
+  el.scrollIntoView({{block: 'center', inline: 'center', behavior: 'instant'}});
   const b = el.getBoundingClientRect();
   return [b.left + b.width / 2, b.top + b.height / 2, el.type === 'password', b.width, b.height];
 }})()"#
     );
-    match page.eval(&js).await? {
+    let found = page.eval(&js).await?;
+    if matches!(&found, Value::Array(a) if a.len() >= 3) {
+        still_before_action(page).await;
+        crate::video::record::mark_action(true);
+    }
+    match found {
         Value::Array(a) if a.len() >= 3 => {
             if let (Some(w), Some(h)) = (
                 a.get(3).and_then(Value::as_f64),
@@ -1307,6 +1431,7 @@ async fn run_on(
     if let Ok(mut l) = LAST_BOX.lock() {
         *l = None;
     }
+    crate::video::record::mark_action(false);
     let result = run_page_action(action, input, page, workspace_root).await;
     if result.is_ok() && crate::video::record::is_recording() {
         // The event track of a screen recording.

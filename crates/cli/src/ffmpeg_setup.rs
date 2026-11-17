@@ -119,10 +119,75 @@ fn piper_source() -> Option<String> {
     Some(format!("{BASE}{file}"))
 }
 
-/// The voice: Lessac, medium quality (US English, clear and calm).
-const VOICE: &str = "en_US-lessac-medium";
-const VOICE_BASE: &str =
-    "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/";
+/// The default voice: Lessac, medium quality (US English, clear and calm).
+pub const VOICE: &str = "en_US-lessac-medium";
+
+/// Piper voices worth knowing about: (name, what it sounds like). Any other
+/// name from the Piper voice list works too.
+pub const VOICES: &[(&str, &str)] = &[
+    (
+        "en_US-lessac-medium",
+        "US English, clear and calm (default)",
+    ),
+    ("en_US-amy-medium", "US English, bright, female"),
+    ("en_US-ryan-high", "US English, warm, male, high quality"),
+    ("en_US-joe-medium", "US English, relaxed, male"),
+    ("en_US-kristin-medium", "US English, friendly, female"),
+    ("en_GB-alba-medium", "British English, female"),
+    ("en_GB-alan-medium", "British English, male"),
+    (
+        "en_GB-northern_english_male-medium",
+        "Northern English, male",
+    ),
+    ("de_DE-thorsten-medium", "German, male"),
+    ("fr_FR-siwis-medium", "French, female"),
+    ("es_ES-davefx-medium", "Spanish, male"),
+    ("it_IT-paola-medium", "Italian, female"),
+    ("pt_BR-faber-medium", "Brazilian Portuguese, male"),
+    ("nl_NL-mls-medium", "Dutch"),
+    ("hi_IN-pratham-medium", "Hindi, male"),
+];
+
+/// Where a voice's files are: `en_US-lessac-medium` →
+/// `…/en/en_US/lessac/medium/`.
+fn voice_base(name: &str) -> Result<String, String> {
+    let mut parts = name.splitn(2, '-');
+    let locale = parts.next().unwrap_or("");
+    let rest = parts.next().ok_or_else(|| bad_voice(name))?;
+    let (speaker, quality) = rest.rsplit_once('-').ok_or_else(|| bad_voice(name))?;
+    let lang = locale.split('_').next().unwrap_or("");
+    let ok = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !(ok(locale) && locale.contains('_') && ok(speaker) && ok(quality)) {
+        return Err(bad_voice(name));
+    }
+    Ok(format!(
+        "https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{locale}/{speaker}/{quality}/"
+    ))
+}
+
+fn bad_voice(name: &str) -> String {
+    format!("`{name}` isn't a Piper voice name — like en_US-amy-medium (/video voices lists some)")
+}
+
+/// The Piper voices installed in `~/.dcode-ai/voices`.
+pub fn installed_voices() -> Vec<String> {
+    let Some(home) = dcode_ai_common::config::home_dir() else {
+        return Vec::new();
+    };
+    let mut v: Vec<String> = std::fs::read_dir(home.join(".dcode-ai/voices"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_suffix(".onnx")
+                .map(str::to_string)
+        })
+        .collect();
+    v.sort();
+    v
+}
 
 async fn fetch(url: &str) -> Result<Vec<u8>, String> {
     Ok(reqwest::Client::new()
@@ -141,6 +206,15 @@ async fn fetch(url: &str) -> Result<Vec<u8>, String> {
 /// Downloads Piper into `~/.dcode-ai/bin/piper/` and its voice into
 /// `~/.dcode-ai/voices/`; returns the voice model.
 pub async fn install_piper(progress: impl Fn(String)) -> Result<PathBuf, String> {
+    install_piper_voice(VOICE, progress).await
+}
+
+/// [`install_piper`] with a voice of your choice.
+pub async fn install_piper_voice(
+    voice: &str,
+    progress: impl Fn(String),
+) -> Result<PathBuf, String> {
+    let voice_base = voice_base(voice)?;
     let url = piper_source().ok_or("no Piper download for this platform")?;
     let home = dcode_ai_common::config::home_dir().ok_or("no home folder")?;
     let root = home.join(".dcode-ai");
@@ -182,17 +256,19 @@ pub async fn install_piper(progress: impl Fn(String)) -> Result<PathBuf, String>
             let _ = std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755));
         }
     }
-    let model = voices.join(format!("{VOICE}.onnx"));
+    let model = voices.join(format!("{voice}.onnx"));
     for (name, what) in [
-        (format!("{VOICE}.onnx.json"), "its settings"),
-        (format!("{VOICE}.onnx"), "the voice (~60 MB)"),
+        (format!("{voice}.onnx.json"), "its settings"),
+        (format!("{voice}.onnx"), "the voice (~20–110 MB)"),
     ] {
         let dest = voices.join(&name);
         if dest.is_file() {
             continue;
         }
         progress(format!("downloading {what}…"));
-        let bytes = fetch(&format!("{VOICE_BASE}{name}")).await?;
+        let bytes = fetch(&format!("{voice_base}{name}"))
+            .await
+            .map_err(|e| format!("{e} — is `{voice}` in the Piper voice list?"))?;
         let part = dest.with_extension("part");
         std::fs::write(&part, &bytes).map_err(|e| e.to_string())?;
         std::fs::rename(&part, &dest).map_err(|e| e.to_string())?;
@@ -262,4 +338,25 @@ pub fn open(path: &Path) -> std::io::Result<()> {
         detached(c)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod voice_names {
+    use super::*;
+
+    #[test]
+    fn voice_names_map_to_their_folder() {
+        assert_eq!(
+            voice_base("en_US-lessac-medium").unwrap(),
+            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/"
+        );
+        assert!(
+            voice_base("en_GB-northern_english_male-medium")
+                .unwrap()
+                .ends_with("/en/en_GB/northern_english_male/medium/")
+        );
+        assert!(voice_base("lessac").is_err());
+        assert!(voice_base("../x-y-z").is_err());
+        assert!(VOICES.iter().all(|(v, _)| voice_base(v).is_ok()));
+    }
 }

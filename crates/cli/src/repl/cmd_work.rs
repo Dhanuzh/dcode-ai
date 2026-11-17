@@ -22,6 +22,16 @@ pub(crate) const VIDEO_EDIT_PROMPT: &str = "Re-edit a recorded video. Read its e
 
 ";
 
+/// `/video redo`: re-record one step and splice it in.
+pub(crate) const VIDEO_REDO_PROMPT: &str = "Re-record ONE step of a recorded video, so a bad click is fixed without recording everything again. Load the tools with `tool_search` (browser, browser_task, record_start, record_stop, video_render).
+1. Bring the browser to the state just before that step: open the page the recording started on and repeat the steps before it (a `browser_task` with those steps, or `browser` `replay`) — not recorded.
+2. `record_start` with `redo` {\"id\": <the id>, \"step\": <the step>}, the same `mode` as before (stills or live), and the goal \"redo step N\".
+3. Do ONLY that step, deliberately (one `browser` action, or a tiny `browser_task`), wait for its result.
+4. `record_stop`: the new take replaces the old step in the recording and later times move. Then check the narration line(s) for that step still fit and call `video_render` with the id (an `edl` only if you changed lines).
+Report what was re-recorded and the new length.
+
+";
+
 /// `/video translate`: the narration in another language.
 pub(crate) const VIDEO_TRANSLATE_PROMPT: &str = "Translate a recorded video's narration. Read `.dcode-ai/videos/<id>/edl.json`. Write `translations` for the language below: a short language code as the key (\"de\", \"ta\", \"fr\" …) and, for EVERY narration line, {\"id\": <the same id>, \"text\": <the translation>} — natural spoken language, same meaning, similar length; keep product names and UI labels as they appear on screen. Then call `video_render` (load it with `tool_search`) with the id, `edl` holding only `translations` (all languages already there plus this one), and `lang` set to the code. Report the files it wrote (video.<code>.mp4, captions.<code>.srt). If the draft voice can't speak the language, say so: the user can add a Piper voice for it and set `voices.<code>` to `piper:<path to .onnx>`.
 
@@ -72,21 +82,26 @@ impl Repl {
     ) -> anyhow::Result<bool> {
         match command {
             "/record" => {
-                let stills = rest.split_whitespace().any(|w| w == "--stills");
+                let flag = |f: &str| rest.split_whitespace().any(|w| w == f);
+                let (stills, screen, webcam) = (flag("--stills"), flag("--screen"), flag("--webcam"));
                 let goal: String = rest
                     .split_whitespace()
-                    .filter(|w| *w != "--stills")
+                    .filter(|w| !matches!(*w, "--stills" | "--screen" | "--webcam"))
                     .collect::<Vec<_>>()
                     .join(" ");
                 if goal.is_empty() {
-                    out.println("usage: /record [--stills] <what to show> — the agent does it in the browser while recording, then edits and narrates the video · --stills: one sharp still per step (dashboards, reports)");
+                    out.println("usage: /record [--stills|--screen] [--webcam] <what to show> — the agent does it while recording, then edits and narrates the video · --stills: one sharp still per step (dashboards, reports) · --screen: the whole screen (desktop apps, the terminal) · --webcam: you in a corner bubble");
                     return Ok(true);
                 }
-                let task = if stills {
-                    format!("{goal}\n\n(Use record_start mode \"stills\".)")
-                } else {
-                    goal
-                };
+                let mut task = goal;
+                if screen {
+                    task.push_str("\n\n(Use record_start mode \"screen\": the whole screen is recorded, not just the browser. Do the steps with the tools that fit (the terminal through bash, apps by opening them); after reaching each step call record_note with what it shows, so the narration can be timed.)");
+                } else if stills {
+                    task.push_str("\n\n(Use record_start mode \"stills\".)");
+                }
+                if webcam {
+                    task.push_str("\n\n(Pass webcam: true to record_start — the user's camera goes in a corner bubble.)");
+                }
                 self.run_preset(RECORD_PROMPT, &task, out).await?;
             }
             "/video" => {
@@ -145,14 +160,13 @@ impl Repl {
                         Some((id, dir)) => {
                             out.println(&format!("[video] quick draft of {id} (low resolution, to check timing)…"));
                             let opts = dcode_ai_core::video::render::Options { preview: true, lang: None };
-                            match tokio::task::spawn_blocking(move || dcode_ai_core::video::render::render_with(&dir, &opts, |_| {})).await {
-                                Ok(Ok(r)) => {
+                            match render_live(out, dir, opts).await {
+                                Ok(r) => {
                                     print_rendered(out, &ws, &r);
                                     if let Some(m) = &r.mp4 {
                                         let _ = dcode_ai_cli::ffmpeg_setup::open(m);
                                     }
                                 }
-                                Ok(Err(e)) => out.eprintln(&format!("[video] {e}")),
                                 Err(e) => out.eprintln(&format!("[video] {e}")),
                             }
                         }
@@ -229,9 +243,8 @@ impl Repl {
                     "render" => match pick(words.next()) {
                         Some((id, dir)) => {
                             out.println(&format!("[video] rendering {id}… (voicing the script and every cut can take a minute)"));
-                            match tokio::task::spawn_blocking(move || dcode_ai_core::video::render::render(&dir, |_| {})).await {
-                                Ok(Ok(r)) => print_rendered(out, &ws, &r),
-                                Ok(Err(e)) => out.eprintln(&format!("[video] {e}")),
+                            match render_live(out, dir, Default::default()).await {
+                                Ok(r) => print_rendered(out, &ws, &r),
                                 Err(e) => out.eprintln(&format!("[video] {e}")),
                             }
                         }
@@ -246,9 +259,8 @@ impl Repl {
                                     return Ok(true);
                                 }
                             }
-                            match tokio::task::spawn_blocking(move || dcode_ai_core::video::render::render(&dir, |_| {})).await {
-                                Ok(Ok(r)) => print_rendered(out, &ws, &r),
-                                Ok(Err(e)) => out.eprintln(&format!("[video] {e}")),
+                            match render_live(out, dir, Default::default()).await {
+                                Ok(r) => print_rendered(out, &ws, &r),
                                 Err(e) => out.eprintln(&format!("[video] {e}")),
                             }
                         }
@@ -348,9 +360,197 @@ impl Repl {
                         self.run_preset(VIDEO_EDIT_PROMPT, &format!("Video id: {id}\nChange: {what}"), out).await?;
                     }
                     "setup" if words.clone().next() == Some("voice") => {
+                        let _ = words.next();
+                        let name = words.next().unwrap_or(dcode_ai_cli::ffmpeg_setup::VOICE).to_string();
                         let progress = |s: String| out.println(&format!("[video] {s}"));
-                        match dcode_ai_cli::ffmpeg_setup::install_piper(progress).await {
-                            Ok(p) => out.println(&format!("[video] draft voice installed ({}) — /video render uses it from now on", p.display())),
+                        match dcode_ai_cli::ffmpeg_setup::install_piper_voice(&name, progress).await {
+                            Ok(p) => {
+                                let first = dcode_ai_core::video::voice::default_piper_voice().is_none();
+                                if first {
+                                    let _ = dcode_ai_core::video::voice::set_default_piper_voice(&name);
+                                }
+                                out.println(&format!(
+                                    "[video] voice {name} installed ({}){}",
+                                    p.display(),
+                                    if first { " — the draft voice from now on" } else { " — /video voices use it to make it the draft voice" }
+                                ));
+                            }
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        }
+                    }
+                    "voices" => {
+                        let action = words.next();
+                        match action {
+                            Some("use") => {
+                                let Some(name) = words.next() else {
+                                    out.println("usage: /video voices use <name> [id] — the draft voice from now on (or for one video)");
+                                    return Ok(true);
+                                };
+                                if let Some(vid) = words.next() {
+                                    let Some((id, dir)) = pick(Some(vid)) else {
+                                        out.println("[video] no such recording — /video list");
+                                        return Ok(true);
+                                    };
+                                    match set_edl_field(&dir, "draft_voice", serde_json::json!(format!("piper:{name}"))) {
+                                        Ok(()) => out.println(&format!("[video] {id} will use {name} — /video render {id}")),
+                                        Err(e) => out.eprintln(&format!("[video] {e}")),
+                                    }
+                                } else {
+                                    match dcode_ai_core::video::voice::set_default_piper_voice(name) {
+                                        Ok(()) => out.println(&format!("[video] {name} is the draft voice now — re-render to hear it")),
+                                        Err(e) => out.eprintln(&format!("[video] {e}")),
+                                    }
+                                }
+                            }
+                            Some("try") => {
+                                let Some(name) = words.next() else {
+                                    out.println("usage: /video voices try <name> [text]");
+                                    return Ok(true);
+                                };
+                                let text: String = words.collect::<Vec<_>>().join(" ");
+                                let text = if text.trim().is_empty() {
+                                    "Click Create project, give it a name, and you're ready to go.".to_string()
+                                } else {
+                                    text
+                                };
+                                if !dcode_ai_cli::ffmpeg_setup::installed_voices().iter().any(|v| v == name) {
+                                    let progress = |s: String| out.println(&format!("[video] {s}"));
+                                    if let Err(e) = dcode_ai_cli::ffmpeg_setup::install_piper_voice(name, progress).await {
+                                        out.eprintln(&format!("[video] {e}"));
+                                        return Ok(true);
+                                    }
+                                }
+                                let wav = std::env::temp_dir().join(format!("dcode-ai-voice-{}.wav", std::process::id()));
+                                let (name_c, wav_c) = (name.to_string(), wav.clone());
+                                let r = tokio::task::spawn_blocking(move || {
+                                    dcode_ai_core::video::voice::speak("piper", &name_c, &text, &wav_c)?;
+                                    dcode_ai_core::video::voice::play(&wav_c)
+                                })
+                                .await
+                                .map_err(|e| e.to_string())
+                                .and_then(|r| r);
+                                let _ = std::fs::remove_file(&wav);
+                                match r {
+                                    Ok(()) => out.println(&format!("[video] that was {name} — /video voices use {name} to keep it")),
+                                    Err(e) => out.eprintln(&format!("[video] {e}")),
+                                }
+                            }
+                            _ => {
+                                let installed = dcode_ai_cli::ffmpeg_setup::installed_voices();
+                                let current = dcode_ai_core::video::voice::default_piper_voice()
+                                    .or_else(|| installed.first().cloned());
+                                match dcode_ai_core::video::voice::pick_engine("") {
+                                    Ok((engine, _)) if engine == "piper" => out.println(&format!(
+                                        "[video] draft voice: Piper · {}",
+                                        current.clone().unwrap_or_default()
+                                    )),
+                                    Ok((engine, _)) => out.println(&format!("[video] draft voice: {engine} (/video setup voice installs Piper, more natural)")),
+                                    Err(e) => out.println(&format!("[video] {e}")),
+                                }
+                                for (name, what) in dcode_ai_cli::ffmpeg_setup::VOICES {
+                                    let mark = if current.as_deref() == Some(*name) {
+                                        "●"
+                                    } else if installed.iter().any(|v| v == name) {
+                                        "○"
+                                    } else {
+                                        " "
+                                    };
+                                    out.println(&format!("[video] {mark} {name:<36} {what}"));
+                                }
+                                for v in installed.iter().filter(|v| !dcode_ai_cli::ffmpeg_setup::VOICES.iter().any(|(n, _)| n == *v)) {
+                                    out.println(&format!("[video] ○ {v}"));
+                                }
+                                out.println("[video] ● in use · ○ installed — /video voices try <name> · /video voices use <name> [id] · per video: draft_voice in edl.json (\"piper:<name>\", \"sapi\", \"say\", \"espeak\")");
+                            }
+                        }
+                    }
+                    "steps" => match pick(words.next()) {
+                        Some((id, dir)) => match dcode_ai_core::video::record::load(&dir) {
+                            Ok(saved) => {
+                                out.println(&format!("[video] {id} — /video redo {id} <step> re-records one"));
+                                for (i, e) in dcode_ai_core::video::splice::steps(&saved.events).iter().enumerate() {
+                                    out.println(&format!("[video] {:>3}. {:>6.1}s  {:<8} {}", i + 1, e.t, e.kind, e.label));
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        },
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "redo" => {
+                        let args: Vec<&str> = words.collect();
+                        let (found, step) = match args.as_slice() {
+                            [id, n] => (pick(Some(id)), n.parse::<usize>().ok()),
+                            [n] => (pick(None), n.parse::<usize>().ok()),
+                            _ => (None, None),
+                        };
+                        let (Some((id, dir)), Some(step)) = (found, step) else {
+                            out.println("usage: /video redo [id] <step> — re-record one step (/video steps lists them)");
+                            return Ok(true);
+                        };
+                        let saved = match dcode_ai_core::video::record::load(&dir) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                out.eprintln(&format!("[video] {e}"));
+                                return Ok(true);
+                            }
+                        };
+                        if let Err(e) = dcode_ai_core::video::splice::window(&saved, step) {
+                            out.eprintln(&format!("[video] {e}"));
+                            return Ok(true);
+                        }
+                        let all = dcode_ai_core::video::splice::steps(&saved.events);
+                        let list: Vec<String> = all
+                            .iter()
+                            .enumerate()
+                            .map(|(i, e)| format!("{}. {} {}", i + 1, e.kind, e.label))
+                            .collect();
+                        let mode = serde_json::to_value(saved.mode).ok().and_then(|v| v.as_str().map(str::to_string)).unwrap_or_default();
+                        self.run_preset(
+                            VIDEO_REDO_PROMPT,
+                            &format!("Video id: {id}\nStep to redo: {step}\nMode: {mode}\nAll steps:\n{}", list.join("\n")),
+                            out,
+                        )
+                        .await?;
+                    }
+                    "frames" => match pick(words.next()) {
+                        Some((id, dir)) => match dcode_ai_core::video::record::load(&dir) {
+                            Ok(saved) => {
+                                let n = saved.frames.len();
+                                let every = n.div_ceil(6).max(1);
+                                out.println(&format!("[video] {id}: {n} frames — /video show {id} <frame> for one"));
+                                for (i, f) in saved.frames.iter().enumerate().step_by(every) {
+                                    show_picture(out, &format!("frame {} · {:.1}s", i + 1, f.t), &dir.join("raw").join(&f.file));
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        },
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "show" => {
+                        let args: Vec<&str> = words.collect();
+                        let (found, what) = match args.as_slice() {
+                            [] => (pick(None), None),
+                            [a] if pick(Some(a)).is_some() => (pick(Some(a)), None),
+                            [a] => (pick(None), Some(*a)),
+                            [a, b, ..] => (pick(Some(a)), Some(*b)),
+                        };
+                        let Some((id, dir)) = found else {
+                            out.println("[video] no such recording — /video list");
+                            return Ok(true);
+                        };
+                        let file = match what {
+                            None | Some("contact") => {
+                                let c = dir.join("contact.png");
+                                if c.is_file() { Ok(c) } else { still_file(&dir, 1) }
+                            }
+                            Some("thumbnail") => Ok(dir.join("thumbnail.png")),
+                            Some(n) => match n.parse::<usize>() {
+                                Ok(n) => still_file(&dir, n),
+                                Err(_) => Err("usage: /video show [id] [contact|thumbnail|<frame>]".to_string()),
+                            },
+                        };
+                        match file {
+                            Ok(f) => show_picture(out, &format!("{id} · {}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()), &f),
                             Err(e) => out.eprintln(&format!("[video] {e}")),
                         }
                     }
@@ -365,7 +565,7 @@ impl Repl {
                             Err(e) => out.eprintln(&format!("[video] {e}")),
                         }
                     }
-                    _ => out.println("usage: /video list · open [id] [contact|preview|short] · edit [id] <what to change> · preview [id] · render [id] · short [id] · script [id] · voice [id] [line] (record your narration) · hear [id] · note [id] <line> <text> · notes · apply · translate [id] <language> · status · approve · publish · setup [voice]"),
+                    _ => out.println("usage: /video list · open [id] [contact|preview|short] · show [id] [contact|<frame>] · frames [id] · edit [id] <what to change> · preview [id] · render [id] · short [id] · script [id] · steps [id] · redo [id] <step> · voice [id] [line] (record your narration) · hear [id] · voices [try|use] · note [id] <line> <text> · notes · apply · translate [id] <language> · status · approve · publish · setup [voice [name]]"),
                 }
             }
             "/replay" => {
@@ -1914,6 +2114,136 @@ fn print_rendered(
     if let Some(n) = &r.note {
         out.println(&format!("[video] {n}"));
     }
+}
+
+/// Renders on a worker thread, showing its progress (percent and time left)
+/// on one line that updates in place.
+async fn render_live(
+    out: ReplOutput<'_>,
+    dir: std::path::PathBuf,
+    opts: dcode_ai_core::video::render::Options,
+) -> Result<dcode_ai_core::video::render::Rendered, String> {
+    let (tx, rx) = std::sync::mpsc::channel::<String>();
+    let mut job = tokio::task::spawn_blocking(move || {
+        dcode_ai_core::video::render::render_with(&dir, &opts, |p| {
+            let _ = tx.send(p);
+        })
+    });
+    let show = |line: String| live_line(out, "[video] ⏳", &line);
+    let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
+    let result = loop {
+        tokio::select! {
+            r = &mut job => break r,
+            _ = tick.tick() => {
+                if let Some(last) = rx.try_iter().last() {
+                    show(last);
+                }
+            }
+        }
+    };
+    live_line(out, "[video] ⏳", "");
+    result.map_err(|e| e.to_string())?
+}
+
+/// A status line that rewrites itself in the TUI (a new line elsewhere);
+/// empty text removes it.
+fn live_line(out: ReplOutput<'_>, prefix: &str, text: &str) {
+    if let ReplOutput::Tui(st) = out
+        && let Ok(mut g) = st.lock()
+    {
+        if g.blocks
+            .last()
+            .is_some_and(|b| matches!(b, DisplayBlock::System(t) if t.starts_with(prefix)))
+        {
+            g.blocks.pop();
+        }
+        if !text.is_empty() {
+            g.blocks
+                .push(DisplayBlock::System(format!("{prefix} {text}")));
+        }
+        g.touch_transcript();
+        return;
+    }
+    if !text.is_empty() {
+        out.println(&format!("{prefix} {text}"));
+    }
+}
+
+/// An image drawn with half-block characters, `cols` wide.
+/// Rows of half-block cells: (top colour, bottom colour).
+type Cells = Vec<Vec<([u8; 3], [u8; 3])>>;
+
+fn picture(path: &std::path::Path, cols: u32) -> Option<(u32, Cells)> {
+    let img = image::open(path).ok()?.to_rgb8();
+    let (w, h) = img.dimensions();
+    let cols = cols.clamp(16, 160);
+    // Each cell holds two pixels stacked; cells are about twice as tall as
+    // wide, so pixels come out square.
+    let rows = ((cols as f64 * h as f64 / w as f64 / 2.0).round() as u32).clamp(1, 45);
+    let small =
+        image::imageops::resize(&img, cols, rows * 2, image::imageops::FilterType::Triangle);
+    let grid = (0..rows)
+        .map(|r| {
+            (0..cols)
+                .map(|c| (small.get_pixel(c, r * 2).0, small.get_pixel(c, r * 2 + 1).0))
+                .collect()
+        })
+        .collect();
+    Some((rows, grid))
+}
+
+/// Shows a picture in the transcript (or prints it with colour codes).
+fn show_picture(out: ReplOutput<'_>, title: &str, path: &std::path::Path) {
+    let cols = crossterm::terminal::size()
+        .map(|s| s.0)
+        .unwrap_or(100)
+        .saturating_sub(4) as u32;
+    let Some((_, rows)) = picture(path, cols.min(120)) else {
+        out.eprintln(&format!("[video] couldn't read {}", path.display()));
+        return;
+    };
+    if let ReplOutput::Tui(st) = out
+        && let Ok(mut g) = st.lock()
+    {
+        g.push_block(DisplayBlock::Picture {
+            title: title.to_string(),
+            rows,
+        });
+        return;
+    }
+    println!("{title}");
+    for row in rows {
+        let mut line = String::new();
+        for (t, b) in row {
+            line.push_str(&format!(
+                "\x1b[38;2;{};{};{}m\x1b[48;2;{};{};{}m▀",
+                t[0], t[1], t[2], b[0], b[1], b[2]
+            ));
+        }
+        println!("{line}\x1b[0m");
+    }
+}
+
+/// Renders the recording's preview frame `n` (from 1) to a PNG.
+fn still_file(dir: &std::path::Path, n: usize) -> Result<std::path::PathBuf, String> {
+    let saved = dcode_ai_core::video::record::load(dir)?;
+    let f = saved
+        .frames
+        .get(n.saturating_sub(1))
+        .ok_or_else(|| format!("no frame {n} — the recording has {}", saved.frames.len()))?;
+    Ok(dir.join("raw").join(&f.file))
+}
+
+/// Sets one field of a recording's edit list.
+fn set_edl_field(dir: &std::path::Path, key: &str, v: serde_json::Value) -> Result<(), String> {
+    let p = dir.join("edl.json");
+    let mut edl: serde_json::Value = std::fs::read_to_string(&p)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .ok_or("no edl.json")?;
+    edl[key] = v;
+    std::fs::write(&p, serde_json::to_string_pretty(&edl).unwrap_or_default())
+        .map_err(|e| e.to_string())
 }
 
 /// Adds the 9:16 cut to a recording's edit list.

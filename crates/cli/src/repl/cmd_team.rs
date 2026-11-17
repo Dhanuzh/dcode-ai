@@ -79,6 +79,7 @@ impl Drop for TalkStopGuard {
             && let Ok(mut g) = state.lock()
         {
             g.talk_stop = None;
+            g.talk_ptt = None;
         }
     }
 }
@@ -95,6 +96,8 @@ enum TalkMode {
     Standup,
     /// Microphone check.
     Test,
+    /// Push-to-talk: no pause detection; Enter ends the take and sends it.
+    Ptt,
 }
 
 fn talk_say(st: &Arc<Mutex<TuiSessionState>>, line: String) {
@@ -162,6 +165,20 @@ async fn talk_session(
             std::time::Duration::from_secs(180),
             std::time::Duration::from_secs(3),
         )
+    } else if mode == TalkMode::Ptt {
+        // Pauses don't end it: only Enter (send) or Esc (to the prompt).
+        if let Ok(mut g) = st.lock() {
+            g.talk_ptt = Some(false);
+        }
+        talk_say(
+            &st,
+            "[talk] push-to-talk — speak, then Enter sends it (Esc puts it in the prompt instead)"
+                .into(),
+        );
+        (
+            std::time::Duration::from_secs(180),
+            std::time::Duration::from_secs(180),
+        )
     } else {
         (
             std::time::Duration::from_secs(90),
@@ -203,7 +220,13 @@ async fn talk_session(
                     },
                 );
             } else {
+                let sent_by_enter =
+                    mode == TalkMode::Ptt && st.lock().is_ok_and(|g| g.talk_ptt == Some(true));
                 match mode {
+                    TalkMode::Ptt if sent_by_enter => {
+                        talk_say(&st, format!("[talk] you: {text}"));
+                        let _ = tx.send(TuiCmd::Submit(text));
+                    }
                     TalkMode::Send => {
                         talk_say(&st, format!("[talk] you: {text}"));
                         let _ = tx.send(TuiCmd::Submit(text));
@@ -615,6 +638,7 @@ impl Repl {
                         (_, "loop") => TalkMode::Loop,
                         (_, "send") => TalkMode::Send,
                         (_, "test") => TalkMode::Test,
+                        (_, "ptt") => TalkMode::Ptt,
                         _ => TalkMode::Prompt,
                     };
                     tokio::spawn(talk_session(Arc::clone(st), tx, model, mode));

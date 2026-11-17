@@ -1098,6 +1098,32 @@ fn render_block(
                 );
             }
         }
+        DisplayBlock::Picture { title, rows } => {
+            push_transcript_line(
+                lines,
+                hits,
+                Line::from(Span::styled(
+                    truncate_chars(title, w.saturating_sub(2)),
+                    dim(),
+                )),
+                None,
+            );
+            for row in rows {
+                let spans: Vec<Span> = row
+                    .iter()
+                    .take(w)
+                    .map(|(t, b)| {
+                        Span::styled(
+                            "▀",
+                            Style::default()
+                                .fg(ratatui::style::Color::Rgb(t[0], t[1], t[2]))
+                                .bg(ratatui::style::Color::Rgb(b[0], b[1], b[2])),
+                        )
+                    })
+                    .collect();
+                push_transcript_line(lines, hits, Line::from(spans), None);
+            }
+        }
         DisplayBlock::TurnSummary(text) => {
             push_transcript_line(lines, hits, Line::default(), None);
             push_transcript_line(

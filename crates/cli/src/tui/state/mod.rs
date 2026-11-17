@@ -217,6 +217,7 @@ impl TuiSessionState {
             notifications_enabled: true,
             push_url: None,
             talk_stop: None,
+            talk_ptt: None,
             working_style: "bar".into(),
             shimmer: true,
             sounds: false,

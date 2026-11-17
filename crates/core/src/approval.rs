@@ -268,6 +268,7 @@ impl ApprovalPolicy {
                 // .dcode-ai/videos.
                 | "record_start"
                 | "record_stop"
+                | "record_note"
                 | "video_render"
                 | "invalid_tool_call"
                 | "query_symbols"

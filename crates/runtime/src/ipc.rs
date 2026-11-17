@@ -454,8 +454,12 @@ async fn start_transport_accept_loop(
             let Ok((stream, _)) = listener.accept().await else {
                 break;
             };
-            // Only this user's own programs.
-            if !stream.peer_cred().is_ok_and(|c| c.uid() == me) {
+            // Only this user's own programs. The socket is 0600 in a 0700
+            // folder already; this refuses a known other user. A failed
+            // lookup is not a refusal: on macOS `getpeereid` fails once the
+            // client has closed, which one-shot commands (a guest's hello,
+            // a chat line) do right after writing — they were all dropped.
+            if stream.peer_cred().is_ok_and(|c| c.uid() != me) {
                 tracing::warn!("refused an IPC connection from another user");
                 continue;
             }

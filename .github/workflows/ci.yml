@@ -41,6 +41,33 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+  # Recording and rendering against a real (headless) Chrome, in release
+  # mode: in a debug build the renders are too slow for the test timeouts.
+  video-live:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev pkg-config ffmpeg
+
+      - name: Start headless Chrome (a wide window, like a big monitor)
+        run: |
+          google-chrome --headless=new --no-first-run --remote-debugging-port=9339 \
+            --user-data-dir="$RUNNER_TEMP/chrome" --window-size=2464,1310 about:blank &
+          for i in $(seq 1 30); do curl -sf http://127.0.0.1:9339/json/version && break; sleep 1; done
+
+      - name: Live recording and render tests
+        env:
+          DCODE_AI_TEST_CDP_PORT: "9339"
+        run: cargo test --release -p dcode-ai-core -- --ignored --test-threads=1 video::live
+
   # Windows: clippy + tests on the real target so Unix-isms can't regress.
   check-windows:
     runs-on: windows-latest

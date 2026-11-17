@@ -66,8 +66,9 @@ const MERGE_GAP: f64 = 1.5;
 /// The camera starts moving this long before the action.
 const LEAD: f64 = 0.55;
 
-/// The camera: scale and centre (CSS pixels) over recording time.
-pub fn camera(edl: &Edl, center: (f64, f64), until: f64) -> Track {
+/// The camera: scale and centre (CSS pixels) over recording time. `rest`:
+/// where it sits between zooms (the whole page, or its main content).
+pub fn camera(edl: &Edl, rest: impl Fn(f64) -> [f64; 3], until: f64) -> Track {
     let mut zooms = edl.zooms.clone();
     zooms.sort_by(|a, b| a.at.total_cmp(&b.at));
     // Groups of zooms close in time: one held zoom that pans.
@@ -92,10 +93,10 @@ pub fn camera(edl: &Edl, center: (f64, f64), until: f64) -> Track {
                     .rev()
                     .find(|p| p.0 - LEAD <= t)
                     .unwrap_or(&points[0]);
-                return [*scale, p.1, p.2];
+                return [scale.max(rest(t)[0] * 1.15), p.1, p.2];
             }
         }
-        [1.0, center.0, center.1]
+        rest(t)
     };
     spring(target, until, [1.1, 1.3, 1.3])
 }
@@ -137,7 +138,7 @@ mod tests {
             zooms: vec![zoom(3.0, 200.0), zoom(4.5, 600.0), zoom(12.0, 300.0)],
             ..Default::default()
         };
-        let cam = camera(&edl, (500.0, 300.0), 16.0);
+        let cam = camera(&edl, |_| [1.0, 500.0, 300.0], 16.0);
         // Out at the start.
         assert!((cam.at(0.5)[0] - 1.0).abs() < 1e-3);
         // In by the first action, centred near it.

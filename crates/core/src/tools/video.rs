@@ -51,8 +51,11 @@ best for dashboards and reports, and works even when the browser window is cover
                 "type": "object",
                 "properties": {
                     "goal": {"type": "string", "description": "What the video shows (its working title)"},
-                    "mode": {"type": "string", "enum": ["live", "stills"]},
-                    "redact": {"type": "array", "items": {"type": "string"}, "description": "Words to hide wherever they show: people's names, customer names…"}
+                    "mode": {"type": "string", "enum": ["live", "stills", "screen"], "description": "screen: the whole desktop (apps, the terminal) instead of the browser — then call record_note as you reach each step"},
+                    "webcam": {"type": "boolean", "description": "Also record the webcam for a presenter bubble in the corner"},
+                    "redo": {"type": "object", "properties": {"id": {"type": "string"}, "step": {"type": "integer"}}, "description": "Re-record step N of recording ID: first bring the browser to the state just before that step (browser replay of the earlier steps), then record_start with this, do only that step, record_stop — the new take replaces the old step"},
+                    "redact": {"type": "array", "items": {"type": "string"}, "description": "Words to hide wherever they show: people's names, customer names…"},
+                    "viewport": {"type": "string", "enum": ["standard", "window"], "description": "standard (default): the page is laid out at 1440×810 and recorded at 1920×1080, sharp and readable whatever the window size or zoom; window: record the window as it is"}
                 },
                 "required": ["goal"]
             }),
@@ -62,10 +65,18 @@ best for dashboards and reports, and works even when the browser window is cover
     async fn execute(&self, call: &ToolCall) -> ToolResult {
         let goal = call.input["goal"].as_str().unwrap_or("").trim();
         let opts = video::record::Options {
-            mode: if call.input["mode"].as_str() == Some("stills") {
-                video::record::Mode::Stills
-            } else {
-                video::record::Mode::Live
+            mode: match call.input["mode"].as_str() {
+                Some("stills") => video::record::Mode::Stills,
+                Some("screen") => video::record::Mode::Screen,
+                _ => video::record::Mode::Live,
+            },
+            webcam: call.input["webcam"].as_bool().unwrap_or(false),
+            redo: match (
+                call.input["redo"]["id"].as_str(),
+                call.input["redo"]["step"].as_u64(),
+            ) {
+                (Some(id), Some(n)) => Some((id.to_string(), n as usize)),
+                _ => None,
             },
             redact: call.input["redact"]
                 .as_array()
@@ -75,6 +86,7 @@ best for dashboards and reports, and works even when the browser window is cover
                         .collect()
                 })
                 .unwrap_or_default(),
+            keep_viewport: call.input["viewport"].as_str() == Some("window"),
         };
         match video::record::start(&self.workspace_root, goal, opts).await {
             Ok(started) => ok(
@@ -96,6 +108,35 @@ video, ask the user to bring the browser window to the front."
     }
 }
 
+pub struct RecordNoteTool;
+
+#[async_trait]
+impl ToolExecutor for RecordNoteTool {
+    fn definition(&self) -> ToolDefinition {
+        ToolDefinition {
+            name: "record_note".into(),
+            description: "While recording (above all in screen mode, where there are no browser \
+actions to log): mark that you reached a step, e.g. \"opened the settings window\". It goes on the \
+event track, so narration can be timed to it."
+                .into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"label": {"type": "string"}},
+                "required": ["label"]
+            }),
+        }
+    }
+
+    async fn execute(&self, call: &ToolCall) -> ToolResult {
+        if !video::record::is_recording() {
+            return fail(call, "not recording — record_start first");
+        }
+        let label = call.input["label"].as_str().unwrap_or("").trim();
+        video::record::mark(label);
+        ok(call, format!("noted: {label}"))
+    }
+}
+
 pub struct RecordStopTool;
 
 #[async_trait]
@@ -114,6 +155,17 @@ important clicks — then call `video_render` with it."
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
         match video::record::stop().await {
+            Ok(s) if s.spliced.is_some() => ok(
+                call,
+                format!(
+                    "{} in {}. Its edit list kept the narration and moved later times; check the \
+narration still fits the step, then video_render with id \"{}\".\n\nEvent track now:\n{}",
+                    s.spliced.unwrap_or_default(),
+                    s.id,
+                    s.id,
+                    video::record::describe(&s.events)
+                ),
+            ),
             Ok(s) => {
                 let script: Vec<String> = s
                     .draft

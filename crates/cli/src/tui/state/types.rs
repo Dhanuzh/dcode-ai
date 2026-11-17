@@ -52,6 +52,12 @@ pub enum DisplayBlock {
         text: String,
         ok: bool,
     },
+    /// A small picture drawn with half-block characters (every terminal):
+    /// each cell is (top colour, bottom colour).
+    Picture {
+        title: String,
+        rows: Vec<Vec<([u8; 3], [u8; 3])>>,
+    },
     /// `✻ Crunched for 1m 9s · 1 shell still running` after a turn.
     TurnSummary(String),
 }
@@ -524,6 +530,8 @@ pub struct TuiSessionState {
     pub push_url: Option<String>,
     /// Set while `/talk` listens; Esc sets it to stop.
     pub talk_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// `/talk ptt`: Enter ends the take and sends it (set: Enter was used).
+    pub talk_ptt: Option<bool>,
     /// `[ui] working_style`: `bar`, `dots` or `plain`.
     pub working_style: String,
     /// `[ui] shimmer`.

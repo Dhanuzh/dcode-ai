@@ -1087,6 +1087,8 @@ struct Scene<'a> {
     clicks: Vec<&'a Event>,
     /// Clicks and typing with the element's size, for highlights.
     targets: Vec<&'a Event>,
+    /// When each marked action's page went away: (action time, end).
+    ends: Vec<(f64, f64)>,
     privacy: &'a [Privacy],
     /// Stills mode: the camera drifts over each still, stills dissolve.
     stills: bool,
@@ -1101,9 +1103,141 @@ struct Scene<'a> {
     canvases: std::sync::Mutex<HashMap<(u32, u32), RgbImage>>,
     /// The recording's folder (for a background image).
     dir: &'a Path,
+    /// The presenter's camera frames, if any.
+    webcam: Option<Cam>,
+}
+
+/// Webcam frames extracted from the clip: `cam/000001.jpg`… at [`CAM_FPS`].
+struct Cam {
+    dir: PathBuf,
+    count: usize,
+    offset: f64,
+    corner: String,
+    size: f64,
+    circle: bool,
+}
+
+const CAM_FPS: f64 = 15.0;
+
+/// Extracts the webcam clip's frames once (again when the clip changes).
+fn webcam_frames(dir: &Path, edl: &Edl, notes: &mut Vec<String>) -> Option<Cam> {
+    let cam = edl.webcam.as_ref()?;
+    let clip = if Path::new(&cam.file).is_absolute() {
+        PathBuf::from(&cam.file)
+    } else {
+        dir.join(&cam.file)
+    };
+    if !clip.is_file() {
+        notes.push(format!("webcam clip {} not found", clip.display()));
+        return None;
+    }
+    let out = dir.join("cam");
+    let stamp = out.join(".from");
+    let key = format!(
+        "{}:{:?}",
+        clip.display(),
+        std::fs::metadata(&clip).and_then(|m| m.modified()).ok()
+    );
+    if std::fs::read_to_string(&stamp).ok().as_deref() != Some(key.as_str()) {
+        let Some(bin) = super::ffmpeg() else {
+            notes.push("the webcam needs ffmpeg — /video setup".into());
+            return None;
+        };
+        let _ = std::fs::remove_dir_all(&out);
+        std::fs::create_dir_all(&out).ok()?;
+        let ok = std::process::Command::new(bin)
+            .args(["-loglevel", "error", "-y", "-i"])
+            .arg(&clip)
+            .args(["-vf", &format!("fps={CAM_FPS},scale=-2:360"), "-q:v", "4"])
+            .arg(out.join("%06d.jpg"))
+            .stdin(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if !ok {
+            notes.push("couldn't read the webcam clip".into());
+            return None;
+        }
+        let _ = std::fs::write(&stamp, &key);
+    }
+    let count = std::fs::read_dir(&out)
+        .ok()?
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|x| x == "jpg"))
+        .count();
+    (count > 0).then(|| Cam {
+        dir: out,
+        count,
+        offset: cam.offset,
+        corner: cam.corner.clone(),
+        size: cam.size.clamp(0.1, 0.5),
+        circle: cam.shape != "rounded",
+    })
+}
+
+/// The presenter bubble at recording second `s`, in a corner of `img`.
+fn draw_cam(img: &mut RgbImage, cam: &Cam, s: f64) {
+    let i = ((s - cam.offset) * CAM_FPS).floor();
+    if i < 0.0 {
+        return;
+    }
+    let i = (i as usize).min(cam.count - 1) + 1;
+    let Ok(pic) = image::open(cam.dir.join(format!("{i:06}.jpg"))) else {
+        return;
+    };
+    let pic = pic.to_rgb8();
+    let (w, h) = img.dimensions();
+    let d = ((h as f64 * cam.size) as u32).max(16);
+    // Cover a d×d square from the middle of the clip.
+    let k = (d as f64 / pic.width() as f64).max(d as f64 / pic.height() as f64);
+    let (rw, rh) = (
+        ((pic.width() as f64 * k).ceil() as u32).max(d),
+        ((pic.height() as f64 * k).ceil() as u32).max(d),
+    );
+    let big = imageops::resize(&pic, rw, rh, imageops::FilterType::Triangle);
+    let sq = imageops::crop_imm(&big, (rw - d) / 2, (rh - d) / 2, d, d).to_image();
+    let m = (h as f64 * 0.035) as i64;
+    let (x0, y0) = match cam.corner.as_str() {
+        "top-left" => (m, m),
+        "top-right" => (w as i64 - d as i64 - m, m),
+        "bottom-left" => (m, h as i64 - d as i64 - m),
+        _ => (w as i64 - d as i64 - m, h as i64 - d as i64 - m),
+    };
+    let r = d as f64 / 2.0;
+    let corner_r = if cam.circle { r } else { d as f64 * 0.12 };
+    let ring = (d as f64 * 0.025).max(2.0);
+    for y in 0..d {
+        for x in 0..d {
+            let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
+            // Distance outside the rounded square (a circle when the corner
+            // radius is half the size).
+            let qx = (corner_r - fx).max(fx - (d as f64 - corner_r)).max(0.0);
+            let qy = (corner_r - fy).max(fy - (d as f64 - corner_r)).max(0.0);
+            let out = (qx * qx + qy * qy).sqrt() - corner_r;
+            let cover = (0.5 - out).clamp(0.0, 1.0) as f32;
+            if cover <= 0.0 {
+                continue;
+            }
+            // A thin white ring at the edge.
+            let c = if out > -ring {
+                [255, 255, 255]
+            } else {
+                sq.get_pixel(x, y).0
+            };
+            blend(img, x0 + x as i64, y0 + y as i64, c, cover);
+        }
+    }
 }
 
 impl Scene<'_> {
+    /// When the page an action at `t` happened on went away.
+    fn end_of(&self, t: f64) -> f64 {
+        self.ends
+            .iter()
+            .find(|(at, _)| *at == t)
+            .map(|(_, e)| *e)
+            .unwrap_or(f64::INFINITY)
+    }
+
     /// Boxes to pixelate at second `s` (CSS pixels): what was private just
     /// before and just after (the page changes between the two), and the
     /// edit list's own.
@@ -1239,6 +1373,63 @@ fn compose_portrait(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32, shutter
     out
 }
 
+/// The camera's resting view for a content box (CSS pixels): scale and
+/// centre. Fits the box's width with a margin; may crop some of a tall
+/// box's height; never past 1.6×.
+fn frame_box([x, y, w, h]: [f64; 4], css_w: f64, css_h: f64) -> [f64; 3] {
+    if w <= 0.0 || h <= 0.0 {
+        return [1.0, css_w / 2.0, css_h / 2.0];
+    }
+    let by_w = css_w / (w * 1.08);
+    let by_h = css_h / (h * 1.08) * 1.35;
+    let scale = by_w.min(by_h).clamp(1.0, 1.6);
+    // Small gains aren't worth the crop.
+    if scale < 1.08 {
+        return [1.0, css_w / 2.0, css_h / 2.0];
+    }
+    // Keep the top of the content in view when it is taller than the view.
+    let view_h = css_h / scale;
+    let cy = if h > view_h {
+        y + view_h / 2.0
+    } else {
+        y + h / 2.0
+    };
+    [scale, x + w / 2.0, cy]
+}
+
+/// When the picture changes a lot (more than a third of it, on small
+/// grey thumbnails) within `within` seconds after `t`: another page came
+/// in. The first such frame's time.
+fn change_after(dir: &Path, frames: &[FrameInfo], t: f64, within: f64) -> Option<f64> {
+    let thumb = |f: &FrameInfo| {
+        image::open(dir.join("raw").join(&f.file))
+            .ok()
+            .map(|i| i.thumbnail_exact(48, 27).to_luma8())
+    };
+    let i0 = frames.partition_point(|f| f.t <= t).checked_sub(1)?;
+    let a = thumb(&frames[i0])?;
+    for f in frames[i0 + 1..].iter().take_while(|f| f.t <= t + within) {
+        let Some(b) = thumb(f) else { continue };
+        let changed = a
+            .pixels()
+            .zip(b.pixels())
+            .filter(|(p, q)| (p.0[0] as i32 - q.0[0] as i32).abs() > 40)
+            .count();
+        if changed * 3 > (48 * 27) {
+            return Some(f.t);
+        }
+    }
+    None
+}
+
+/// Stills mode: whether a still was taken shortly before an action at `t`
+/// (within 2 s — the still taken once the element was scrolled into view);
+/// then `Some(time of the next still, if any)`.
+fn still_before(frames: &[FrameInfo], t: f64) -> Option<Option<f64>> {
+    let i = frames.iter().rposition(|f| f.t <= t + 0.05)?;
+    (t - frames[i].t < 2.0).then(|| frames.get(i + 1).map(|f| f.t))
+}
+
 /// The camera's view of the source at second `s`: crop rectangle (source
 /// pixels) for an output of aspect `aspect`.
 fn view_rect(sc: &Scene, fr: &Frames, idx: usize, s: f64, aspect: f64) -> (f64, f64, f64, f64) {
@@ -1329,7 +1520,9 @@ fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32, shutter: f64) ->
     let mut img = crop(x0, y0, cw, ch);
     // Motion blur: while the camera moves, average the view across the
     // frame's shutter.
-    if sc.edl.motion_blur && shutter > 0.0 {
+    // Not on stills: a still is sharp; blurring it while the camera moves
+    // only smears the text.
+    if sc.edl.motion_blur && !sc.stills && shutter > 0.0 {
         // Five looks across the shutter, averaged: a streak, not a double.
         let a = view_rect(sc, fr, idx, s - shutter * 0.5, aspect);
         let b = view_rect(sc, fr, idx, s + shutter * 0.5, aspect);
@@ -1360,6 +1553,9 @@ fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32, shutter: f64) ->
             .iter()
             .filter_map(|e| {
                 let d = s - e.t;
+                if s >= sc.end_of(e.t) {
+                    return None;
+                }
                 let wgt = if (-0.5..0.0).contains(&d) {
                     ease((d + 0.5) / 0.5)
                 } else if (0.0..1.6).contains(&d) {
@@ -1387,7 +1583,7 @@ fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32, shutter: f64) ->
         let mut pressed = 1.0;
         for c in &sc.clicks {
             let p = (s - c.t) / 0.5;
-            if (0.0..1.0).contains(&p) {
+            if (0.0..1.0).contains(&p) && s < sc.end_of(c.t) {
                 let (ox, oy) = to_out(c.x.unwrap_or(0.0), c.y.unwrap_or(0.0));
                 ripple(&mut img, ox, oy, p, 40.0 * unit);
             }
@@ -1549,11 +1745,15 @@ fn frame_at(
         _ => 0.0,
     };
     let footage = |fr: &mut Frames, s: f64, sh: f64| -> RgbImage {
-        if h > w {
+        let mut img = if h > w {
             compose(sc, fr, s, w, h, sh)
         } else {
             on_canvas(sc, |iw, ih| compose(sc, fr, s, iw, ih, sh), w, h)
+        };
+        if let Some(cam) = &sc.webcam {
+            draw_cam(&mut img, cam, s);
         }
+        img
     };
     let first_s = edl.segments.first().map(|s| s.from).unwrap_or(0.0);
     let last_s = edl.segments.last().map(|s| s.to).unwrap_or(0.0);
@@ -1780,6 +1980,7 @@ fn render_cut(
     // GIF frames, with how many times each repeats (unchanged ones merge).
     let mut gif_frames: Vec<(Vec<u8>, u16)> = Vec::new();
     let n = (total * fps).ceil() as usize;
+    let began = std::time::Instant::now();
     let mut last_pct = 0;
     let mut review: Option<RgbImage> = None;
     let mut contact: Vec<RgbImage> = Vec::new();
@@ -1834,9 +2035,23 @@ fn render_cut(
                 }
             }
             let pct = i * 100 / n.max(1);
-            if pct >= last_pct + 25 {
+            if pct >= last_pct + 5 {
                 last_pct = pct;
-                progress(format!("rendering the {cut} cut… {pct}%"));
+                // Time left from the pace so far.
+                let spent = began.elapsed().as_secs_f64();
+                let left = if i > 0 {
+                    spent * (n - i) as f64 / i as f64
+                } else {
+                    0.0
+                };
+                progress(format!(
+                    "rendering the {cut} cut… {pct}% · about {} left",
+                    if left >= 60.0 {
+                        format!("{}m {:02}s", left as u64 / 60, left as u64 % 60)
+                    } else {
+                        format!("{}s", left.ceil() as u64)
+                    }
+                ));
             }
         }
         i0 += BATCH;
@@ -1967,6 +2182,7 @@ pub fn render_with(
         edl,
         mode,
         privacy,
+        focus,
         ..
     } = load(dir)?;
     let mut edl = edl.normalized(duration);
@@ -1992,45 +2208,115 @@ pub fn render_with(
         first: &first,
         cache: Vec::new(),
     };
+    let stills = mode == super::record::Mode::Stills;
+    // Stills: a click is marked only on the still taken just before it (the
+    // element in view, where it was clicked) — never on an older still where
+    // the page sat elsewhere, nor on the page the click opened.
+    let shown = |t: f64| !stills || still_before(&frames, t).is_some();
+    let unmarked = if stills {
+        events
+            .iter()
+            .filter(|e| matches!(e.kind.as_str(), "click" | "type") && e.x.is_some() && !shown(e.t))
+            .count()
+    } else {
+        0
+    };
+    // Any mode: a marker or zoom lets go when the picture changes a lot
+    // (the click opened another page).
+    let page_change = |t: f64| change_after(dir, &frames, t, 2.4);
+    let marked: Vec<&Event> = events
+        .iter()
+        .filter(|e| matches!(e.kind.as_str(), "click" | "type") && e.x.is_some() && shown(e.t))
+        .collect();
+    let ends: Vec<(f64, f64)> = marked
+        .iter()
+        .map(|e| (e.t, page_change(e.t).unwrap_or(f64::INFINITY)))
+        .collect();
+    // The page's size in CSS pixels.
+    let css_w = frames
+        .iter()
+        .map(|f| f.css_w)
+        .find(|w| *w > 0.0)
+        .unwrap_or(first.width() as f64);
+    let css_h = css_w * first.height() as f64 / first.width() as f64;
+    // Where the camera rests: the main content, framed (auto-frame), else
+    // the whole page.
+    let rest = {
+        let boxes: Vec<(f64, [f64; 3])> = if edl.autoframe {
+            focus
+                .iter()
+                .map(|f| (f.t, frame_box(f.b, css_w, css_h)))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        move |t: f64| -> [f64; 3] {
+            boxes
+                .iter()
+                .rev()
+                .find(|(ft, _)| *ft <= t + 0.3)
+                .or(boxes.first())
+                .map(|(_, v)| *v)
+                .unwrap_or([1.0, css_w / 2.0, css_h / 2.0])
+        }
+    };
+    let mut cam_notes = Vec::new();
+    let webcam = webcam_frames(dir, &edl, &mut cam_notes);
     let sc = Scene {
         edl: &edl,
-        clicks: events
+        clicks: marked
             .iter()
-            .filter(|e| e.kind == "click" && e.x.is_some())
+            .copied()
+            .filter(|e| e.kind == "click")
             .collect(),
-        targets: events
+        targets: marked
             .iter()
-            .filter(|e| {
-                matches!(e.kind.as_str(), "click" | "type")
-                    && e.x.is_some()
-                    && e.w.is_some_and(|w| w > 0.0)
-            })
+            .copied()
+            .filter(|e| e.w.is_some_and(|w| w > 0.0))
             .collect(),
+        ends,
         privacy: &privacy,
-        stills: mode == super::record::Mode::Stills,
+        stills,
         duration,
         backdrops: Default::default(),
         camera: {
-            // The page's centre in CSS pixels.
-            let css_w = frames
-                .iter()
-                .map(|f| f.css_w)
-                .find(|w| *w > 0.0)
-                .unwrap_or(first.width() as f64);
-            let css_h = css_w * first.height() as f64 / first.width() as f64;
-            super::motion::camera(&edl, (css_w / 2.0, css_h / 2.0), duration + 1.0)
+            // A zoom holds while its page shows, then lets go as the next
+            // page comes in.
+            let mut e = edl.clone();
+            e.zooms.retain_mut(|z| {
+                if stills {
+                    match still_before(&frames, z.at) {
+                        Some(Some(n)) => z.hold = z.hold.min((n - z.at - 0.3).max(0.4)),
+                        Some(None) => {}
+                        None => return false,
+                    }
+                }
+                if let Some(c) = page_change(z.at) {
+                    z.hold = z.hold.min((c - z.at - 0.3).max(0.4));
+                }
+                true
+            });
+            super::motion::camera(&e, rest, duration + 1.0)
         },
         cursor: super::motion::cursor(
             &events
                 .iter()
+                .filter(|e| shown(e.t))
                 .filter_map(|e| Some((e.t, e.x?, e.y?)))
                 .collect::<Vec<_>>(),
             duration + 1.0,
         ),
         canvases: Default::default(),
         dir,
+        webcam,
     };
-    let mut notes: Vec<String> = Vec::new();
+    let mut notes: Vec<String> = cam_notes;
+    if unmarked > 0 {
+        notes.push(format!(
+            "{unmarked} click(s) have no still just before them (recorded before v1.0.74), so they \
+are not marked or zoomed — /video redo <step> re-records one step"
+        ));
+    }
     let mut spoken: HashMap<String, Spoken> = HashMap::new();
     if !edl.lines.is_empty() && edl.voice != "none" {
         progress(format!("voicing {} lines…", edl.lines.len()));
@@ -2263,14 +2549,16 @@ mod tests {
             edl: &edl,
             clicks: vec![],
             targets: vec![],
+            ends: vec![],
             privacy: &privacy,
             stills: false,
             duration: 10.0,
             backdrops: Default::default(),
-            camera: crate::video::motion::camera(&edl, (0.0, 0.0), 1.0),
+            camera: crate::video::motion::camera(&edl, |_| [1.0, 0.0, 0.0], 1.0),
             cursor: None,
             canvases: Default::default(),
             dir: Path::new("."),
+            webcam: None,
         };
         // Between two looks: both (the page may be changing), plus the manual box.
         assert_eq!(sc.blur_at(1.5).len(), 3);
@@ -2434,5 +2722,18 @@ mod look {
             0.5,
         );
         img.save(format!("{out}/zoom.png")).unwrap();
+    }
+
+    /// Renders the recording in `$DCODE_AI_RENDER_DIR` (a copy of a real
+    /// one), for looking at the result: `cargo test --release -- --ignored
+    /// render_a_folder`.
+    #[test]
+    #[ignore]
+    fn render_a_folder() {
+        let Ok(dir) = std::env::var("DCODE_AI_RENDER_DIR") else {
+            return;
+        };
+        let r = render(Path::new(&dir), |p| eprintln!("{p}")).unwrap();
+        eprintln!("{:?} · {:.1}s · note: {:?}", r.mp4, r.seconds, r.note);
     }
 }

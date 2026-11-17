@@ -48,6 +48,7 @@ fn hint(name: &str) -> Option<&'static str> {
             "record the browser or an app as a demo video (then record_stop, video_render)"
         }
         "record_stop" => "stop a screen recording and get its edit plan",
+        "record_note" => "mark a step reached while recording (screen recordings)",
         "video_render" => {
             "render a recorded demo video: narration, cuts, zooms, cursor, captions, cards, 9:16 short, chapters, thumbnails, music"
         }

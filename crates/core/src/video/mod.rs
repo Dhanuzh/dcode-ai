@@ -10,11 +10,13 @@
 //!   ("under 45 s, bigger captions") without recording again.
 //! - [`render`]: draws the edit frame by frame in Rust.
 
+pub mod capture;
 pub mod motion;
 pub mod music;
 pub mod publish;
 pub mod record;
 pub mod render;
+pub mod splice;
 pub mod timeline;
 pub mod voice;
 
@@ -260,6 +262,46 @@ pub struct Edl {
     /// A soft click sound on each click.
     #[serde(default = "yes")]
     pub click_sounds: bool,
+    /// Frame the page's main content (text and images) instead of the
+    /// whole page, when it has wide empty margins.
+    #[serde(default = "yes")]
+    pub autoframe: bool,
+    /// A presenter's camera in a corner bubble.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub webcam: Option<Webcam>,
+}
+
+/// A webcam (or any) clip shown picture-in-picture, following the edit's
+/// cuts and speed.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Webcam {
+    /// The clip, relative to the recording's folder (`webcam.mp4` when
+    /// recorded with `/record --webcam`).
+    pub file: String,
+    /// Recording second the clip's start lines up with.
+    #[serde(default)]
+    pub offset: f64,
+    /// `bottom-right` (default), `bottom-left`, `top-right`, `top-left`.
+    #[serde(default = "default_corner")]
+    pub corner: String,
+    /// Diameter as a share of the frame height (0.1–0.5).
+    #[serde(default = "default_cam_size")]
+    pub size: f64,
+    /// `circle` (default) or `rounded`.
+    #[serde(default = "default_cam_shape")]
+    pub shape: String,
+}
+
+fn default_corner() -> String {
+    "bottom-right".into()
+}
+
+fn default_cam_size() -> f64 {
+    0.26
+}
+
+fn default_cam_shape() -> String {
+    "circle".into()
 }
 
 fn default_background() -> String {
@@ -584,6 +626,8 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
         padding: default_padding(),
         motion_blur: true,
         click_sounds: true,
+        autoframe: true,
+        webcam: None,
     }
     .normalized(duration)
 }
@@ -955,6 +999,7 @@ mod live_stills {
         let opts = super::record::Options {
             mode: super::record::Mode::Stills,
             redact: vec!["Dana Smith".into()],
+            ..Default::default()
         };
         let started = super::record::start(&w, "Searching tickets", opts)
             .await
@@ -982,6 +1027,29 @@ mod live_stills {
         assert!(s.events.iter().all(|e| e.w.is_some()), "{:?}", s.events);
         let saved = super::record::load(&s.dir).unwrap();
         assert_eq!(saved.mode, super::record::Mode::Stills);
+        // Recorded at the standard viewport: 1440 CSS px drawn 1920 wide.
+        let first = image::open(s.dir.join("raw").join(&saved.frames[0].file)).unwrap();
+        assert_eq!(first.width(), 1920, "{:?}", saved.frames);
+        assert!(
+            (saved.frames[0].css_w - 1440.0).abs() < 3.0,
+            "{:?}",
+            saved.frames
+        );
+        // A still just before each click or typing, so it is marked there.
+        for e in &s.events {
+            let before = saved.frames.iter().rfind(|f| f.t <= e.t).unwrap();
+            assert!(e.t - before.t < 2.0, "{e:?} {:?}", saved.frames);
+        }
+        // The main content was measured at each step, for framing.
+        assert!(!saved.focus.is_empty(), "focus boxes");
+        assert!(
+            saved.focus.iter().all(|f| f.b[2] > 0.0 && f.b[3] > 0.0),
+            "{:?}",
+            saved.focus
+        );
+        // And the window's own viewport is back.
+        let w = act(serde_json::json!({"action": "eval", "expression": "innerWidth"})).await;
+        eprintln!("innerWidth after: {w:?}");
         let boxes = saved.privacy.first().map(|p| p.boxes.len()).unwrap_or(0);
         assert!(
             boxes >= 3,

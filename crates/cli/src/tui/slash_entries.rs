@@ -60,17 +60,40 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
             (
                 "setup voice",
                 false,
-                "download Piper, a natural draft voice",
+                "download Piper, a natural draft voice (or `setup voice <name>`)",
+            ),
+            (
+                "voices",
+                false,
+                "Piper voices: installed, to download, in use",
+            ),
+            ("voices try", true, "hear a voice: <name> [text]"),
+            ("voices use", true, "draft voice from now on: <name> [id]"),
+            ("steps", false, "the recording's steps, numbered"),
+            ("redo", true, "re-record one step: <step>"),
+            ("frames", false, "the stills, drawn in the terminal"),
+            (
+                "show",
+                false,
+                "the contact sheet (or `show <id> <frame>`) in the terminal",
             ),
         ],
     ),
     (
         "/record",
-        &[(
-            "--stills",
-            true,
-            "one sharp still per step (dashboards, reports)",
-        )],
+        &[
+            (
+                "--stills",
+                true,
+                "one sharp still per step (dashboards, reports)",
+            ),
+            (
+                "--screen",
+                true,
+                "the whole screen: desktop apps, the terminal",
+            ),
+            ("--webcam", true, "your camera in a corner bubble too"),
+        ],
     ),
     (
         "/talk",
@@ -82,6 +105,11 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
                 "hands-free: it answers aloud, then listens again",
             ),
             ("test", false, "check the microphone"),
+            (
+                "ptt",
+                false,
+                "push-to-talk: speak, then Enter to send (no pause detection)",
+            ),
         ],
     ),
     ("/standup", &[("voice", false, "talk through your day")]),
@@ -727,6 +755,53 @@ pub fn record_recent_command(cmd: &str) {
 
 #[cfg(test)]
 mod tests {
+    /// Every option the `/` menu offers is one its command's handler knows:
+    /// the option's first word appears as a string the handlers match on.
+    /// (A renamed or removed subcommand fails here, not in front of a user.)
+    #[test]
+    fn every_menu_option_is_handled() {
+        let handlers = [
+            include_str!("../repl.rs"),
+            include_str!("../repl_helpers.rs"),
+            include_str!("../repl/cmd_choice.rs"),
+            include_str!("../repl/cmd_doctor.rs"),
+            include_str!("../repl/cmd_ext.rs"),
+            include_str!("../repl/cmd_info.rs"),
+            include_str!("../repl/cmd_mcp.rs"),
+            include_str!("../repl/cmd_session.rs"),
+            include_str!("../repl/cmd_settings.rs"),
+            include_str!("../repl/cmd_team.rs"),
+            include_str!("../repl/cmd_work.rs"),
+            include_str!("app.rs"),
+            include_str!("app/keys.rs"),
+        ]
+        .concat();
+        let mut missing = Vec::new();
+        for (command, options) in SUBCOMMANDS {
+            for (option, _, _) in options.iter() {
+                // Placeholders (`<n>`) and free-text examples aren't words
+                // a handler matches.
+                let word = option.split_whitespace().next().unwrap_or("");
+                if word.starts_with('<') || word.is_empty() {
+                    continue;
+                }
+                let quoted = format!("\"{word}\"");
+                let in_pattern = format!("\"{word}\" |");
+                let in_list = format!("| \"{word}\"");
+                if !(handlers.contains(&quoted)
+                    || handlers.contains(&in_pattern)
+                    || handlers.contains(&in_list))
+                {
+                    missing.push(format!("{command} {option}"));
+                }
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "menu options no handler knows: {missing:?}"
+        );
+    }
+
     use super::*;
 
     fn cmds(list: &[&'static str]) -> Vec<SlashEntry> {

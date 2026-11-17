@@ -1,5 +1,76 @@
 # Changelog
 
+## 1.0.74 — 2026-11-17
+
+### Fixed — recordings
+- **Small, hard-to-read footage**: a page in a wide or zoomed-out browser
+  window was recorded as a narrow strip of tiny text. Recordings now lay the
+  page out at a standard 1440×810 viewport and capture it at 1920×1080,
+  whatever the window size or browser zoom; the window's own viewport comes
+  back when the recording stops (`viewport: "window"` keeps it as it is).
+- **The marker landed in the wrong place**: in stills mode the only still
+  was taken after a click, often on the page the click opened, and the
+  element had been scrolled since the previous still. Now a still is taken
+  just before each click or typing, with the element in view, and the
+  highlight, click ripple and zoom show only on that still, letting go when
+  the next page comes in. Steps are timed at the click, not after the page
+  it opens has loaded.
+- **Smeared stills**: no motion blur on stills while the camera moves.
+- Elements are scrolled into view instantly, so smooth-scrolling pages no
+  longer click at a stale position.
+- **Markers end when the page changes**, in live recordings too: a click
+  that opens another page no longer leaves its highlight, ripple or zoom on
+  the new page (the picture changing by more than a third ends them).
+- Rendering an older stills recording says how many clicks have no still
+  before them (so aren't marked) and points at `/video redo`.
+
+### New — recording
+- **Re-record one step**: `/video steps` numbers a recording's steps;
+  `/video redo [id] <step>` has the agent bring the browser to just before
+  that step, record only it, and splice the new take in — frames, events,
+  private and content boxes, zooms, narration times and cuts after it move
+  by the difference in length.
+- **Auto-frame**: after each step the recorder measures where the page's
+  main content is (text and images, leaving out fixed bars, navigation,
+  headers and footers); the camera rests framed on it (up to 1.6×) instead
+  of on wide empty margins. `autoframe: false` in edl.json turns it off.
+- **Whole-screen recording**: `/record --screen` records the desktop —
+  apps, the terminal — with ffmpeg (gdigrab on Windows, avfoundation on
+  macOS, x11grab on Linux; on WSL the Windows desktop through PowerShell).
+  The agent marks each step with the new `record_note` tool.
+- **Webcam picture-in-picture**: `/record --webcam` records your camera
+  alongside; the render puts it in a round bubble in a corner that follows
+  the edit's cuts and speed. Any clip works via `webcam` in edl.json
+  (`file`, `offset`, `corner`, `size`, `shape`).
+- **Pictures in the terminal**: `/video show [id] [contact|thumbnail|<frame>]`
+  and `/video frames [id]` draw the contact sheet and stills in the
+  transcript with half-block characters (any terminal with colour).
+- **Render progress**: `/video render`, `preview` and `short` show the
+  percent done and the time left on one line that updates in place.
+
+### New — voice
+- **Pick a Piper voice**: `/video voices` lists voices (installed, in use,
+  more to download); `/video setup voice <name>` downloads one;
+  `/video voices try <name> [text]` plays a sample first;
+  `/video voices use <name> [id]` makes it the draft voice (or one video's
+  `draft_voice`). Changing the voice re-voices the draft lines.
+
+### New — talk
+- **Push-to-talk**: `/talk ptt` — pauses don't end it; Enter sends what you
+  said, Esc puts it in the prompt instead.
+
+### Fixed — reliability
+- **Guests joining a session on macOS** never showed up for the host, and
+  their messages were lost (the macOS CI join tests, failing since 1.0.64):
+  a one-shot IPC command closes right after writing, and macOS can't look
+  up the sender of a closed socket, so it was refused as "another user".
+  The socket is private to you already (0600 in a 0700 folder); only a
+  known other user is refused now.
+- CI runs the live recording and render tests in release mode against a
+  headless Chrome.
+- A test checks that every option in the `/` menu is one its command's
+  handler knows, so the dropdowns can't drift from the commands.
+
 ## 1.0.73 — 2026-11-17
 
 ### Fixed

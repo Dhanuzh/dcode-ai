@@ -231,10 +231,41 @@ fn piper_bin() -> Option<PathBuf> {
         .or_else(|| on_path(name))
 }
 
+/// The Piper voice used when none is named (`/video voices use`), kept in
+/// `~/.dcode-ai/voices/default`.
+pub fn default_piper_voice() -> Option<String> {
+    let name = std::fs::read_to_string(dcode_dir("voices")?.join("default")).ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+/// Makes `name` (installed in `~/.dcode-ai/voices`) the default voice.
+pub fn set_default_piper_voice(name: &str) -> Result<(), String> {
+    let dir = dcode_dir("voices").ok_or("no home folder")?;
+    if !dir.join(format!("{name}.onnx")).is_file() {
+        return Err(format!(
+            "{name} isn't installed — /video setup voice {name} downloads it"
+        ));
+    }
+    std::fs::write(dir.join("default"), name).map_err(|e| e.to_string())
+}
+
 fn piper_model(arg: &str) -> Option<PathBuf> {
+    // A path, or a voice name in ~/.dcode-ai/voices.
+    let named = |n: &str| {
+        let p = PathBuf::from(n);
+        if p.is_file() {
+            return Some(p);
+        }
+        dcode_dir("voices")
+            .map(|d| d.join(format!("{}.onnx", n.trim_end_matches(".onnx"))))
+            .filter(|p| p.is_file())
+    };
     if !arg.is_empty() {
-        let p = PathBuf::from(arg);
-        return p.is_file().then_some(p);
+        return named(arg);
+    }
+    if let Some(p) = default_piper_voice().and_then(|n| named(&n)) {
+        return Some(p);
     }
     let mut models: Vec<PathBuf> = std::fs::read_dir(dcode_dir("voices")?)
         .ok()?
@@ -426,7 +457,13 @@ pub fn draft(dir: &Path, line: &Line, spec: &str) -> Result<PathBuf, String> {
     let (engine, arg) = pick_engine(spec)?;
     let out = draft_path(dir, &line.id);
     let key_path = out.with_extension("key");
-    let key = format!("{engine}:{arg}\n{}", line.text.trim());
+    // The default Piper voice is part of the key: changing it re-voices.
+    let voice = if engine == "piper" && arg.is_empty() {
+        default_piper_voice().unwrap_or_default()
+    } else {
+        arg.clone()
+    };
+    let key = format!("{engine}:{voice}\n{}", line.text.trim());
     if out.is_file() && std::fs::read_to_string(&key_path).is_ok_and(|k| k == key) {
         return Ok(out);
     }
