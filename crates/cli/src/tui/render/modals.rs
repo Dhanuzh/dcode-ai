@@ -168,7 +168,7 @@ pub(crate) fn render_command_palette(
     area: Rect,
     g: &TuiSessionState,
 ) {
-    let filtered = filter_palette_rows(&g.command_palette_query);
+    let filtered = filter_palette_rows(&g.command_palette_query, &g.palette_sources);
     let selectable = palette_selectable_indices(&filtered);
     let pick_abs = selectable
         .get(g.palette_index.min(selectable.len().saturating_sub(1)))
@@ -205,6 +205,34 @@ pub(crate) fn render_command_palette(
                 if !shortcut.is_empty() {
                     spans.push(Span::styled(
                         format!("   {shortcut}"),
+                        if sel {
+                            style
+                        } else {
+                            Style::default().fg(theme::muted())
+                        },
+                    ));
+                }
+                body.push(Line::from(spans));
+            }
+            PaletteRow::Found { label, detail, .. } => {
+                let sel = abs_idx == pick_abs;
+                if sel {
+                    sel_line = body.len();
+                }
+                let style = if sel {
+                    Style::default()
+                        .fg(theme::on_accent())
+                        .bg(theme::accent())
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(theme::text())
+                };
+                let marker = if sel { "› " } else { "  " };
+                let mut spans = vec![Span::styled(format!("{marker}{label}"), style)];
+                if !detail.is_empty() {
+                    let d: String = detail.chars().take(60).collect();
+                    spans.push(Span::styled(
+                        format!("   {d}"),
                         if sel {
                             style
                         } else {

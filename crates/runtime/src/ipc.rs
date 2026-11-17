@@ -845,3 +845,101 @@ mod tests {
         let _ = std::fs::remove_file(handle.socket_path());
     }
 }
+
+/// Fuzzing the IPC frame reader: frames come back intact however the bytes
+/// are split, and garbage ends in an error or EOF — never a panic or hang.
+#[cfg(test)]
+mod frame_fuzz {
+    use super::*;
+    use proptest::prelude::*;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+    use tokio::io::ReadBuf;
+
+    /// Hands out the bytes a few at a time, as a socket might.
+    struct Trickle {
+        data: Vec<u8>,
+        at: usize,
+        sizes: Vec<usize>,
+        turn: usize,
+    }
+
+    impl AsyncRead for Trickle {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<std::io::Result<()>> {
+            let step = self.sizes[self.turn % self.sizes.len()].max(1);
+            self.turn += 1;
+            let n = step.min(buf.remaining()).min(self.data.len() - self.at);
+            let at = self.at;
+            buf.put_slice(&self.data[at..at + n]);
+            self.at += n;
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    fn read_all(data: Vec<u8>, sizes: Vec<usize>) -> (Vec<String>, bool) {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        rt.block_on(async move {
+            let limit = data.len() + 2;
+            let mut r = MessageReader::new(Trickle {
+                data,
+                at: 0,
+                sizes,
+                turn: 0,
+            });
+            let mut out = Vec::new();
+            for _ in 0..limit {
+                match r.next_message().await {
+                    Ok(Some(m)) => out.push(m),
+                    Ok(None) => return (out, true),
+                    Err(_) => return (out, false),
+                }
+            }
+            (out, true)
+        })
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(300))]
+
+        #[test]
+        fn frames_survive_any_split(
+            msgs in proptest::collection::vec(".{0,80}", 1..8),
+            sizes in proptest::collection::vec(1usize..17, 1..6),
+        ) {
+            let mut data = Vec::new();
+            for m in &msgs {
+                data.extend_from_slice(&(m.len() as u32).to_be_bytes());
+                data.extend_from_slice(m.as_bytes());
+            }
+            // A frame's first byte is 0 (lengths under 16 MiB): framed mode.
+            let (got, clean) = read_all(data, sizes);
+            prop_assert!(clean);
+            prop_assert_eq!(got, msgs);
+        }
+
+        #[test]
+        fn garbage_never_panics_or_hangs(
+            data in proptest::collection::vec(any::<u8>(), 0..300),
+            sizes in proptest::collection::vec(1usize..64, 1..4),
+        ) {
+            let _ = read_all(data, sizes);
+        }
+
+        #[test]
+        fn a_huge_length_is_refused_not_allocated(len in (MAX_FRAME_BYTES + 1)..u32::MAX) {
+            // A good frame (framed mode), then a length over the cap.
+            let mut data = 1u32.to_be_bytes().to_vec();
+            data.push(b'a');
+            data.extend_from_slice(&len.to_be_bytes());
+            let (got, clean) = read_all(data, vec![3]);
+            prop_assert_eq!(got, vec!["a".to_string()]);
+            prop_assert!(!clean, "refused with an error");
+        }
+    }
+}

@@ -34,7 +34,9 @@ const LINE_GAP: f64 = 0.35;
 static FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf");
 
 fn font() -> FontRef<'static> {
-    FontRef::try_from_slice(FONT_BYTES).expect("bundled font")
+    super::brand::font_bytes()
+        .and_then(|b| FontRef::try_from_slice(b).ok())
+        .unwrap_or_else(|| FontRef::try_from_slice(FONT_BYTES).expect("bundled font"))
 }
 
 /// Adwaita Mono (OFL), for code and terminal scenes.
@@ -177,6 +179,15 @@ fn card_px(w: u32, h: u32) -> f32 {
 }
 
 fn background(w: u32, h: u32) -> RgbImage {
+    if let Some((a, b)) = super::brand::current().and_then(|b| b.gradient()) {
+        // The brand's colours, darkened a little so text stays readable.
+        return RgbImage::from_fn(w, h, |x, y| {
+            let k = (x as f32 / w as f32 * 0.4 + y as f32 / h as f32 * 0.6).clamp(0.0, 1.0);
+            image::Rgb(
+                [0, 1, 2].map(|i| ((a[i] as f32 + (b[i] as f32 - a[i] as f32) * k) * 0.8) as u8),
+            )
+        });
+    }
     let mut img = RgbImage::new(w, h);
     for y in 0..h {
         let k = y as f32 / h as f32;
@@ -215,6 +226,73 @@ fn centered(img: &mut RgbImage, f: &FontRef, px: f32, y: f32, text: &str, c: [u8
     y
 }
 
+/// A recap card (`/recap`): a title, a date line, big numbers with their
+/// labels in a grid, and badges along the bottom. 1200×675.
+pub fn recap_card(
+    title: &str,
+    date: &str,
+    stats: &[(String, String)],
+    badges: &[String],
+) -> RgbImage {
+    let (w, h) = (1200u32, 675u32);
+    let f = font();
+    let mut img = RgbImage::from_fn(w, h, |x, y| {
+        let k = (x as f32 / w as f32 * 0.5 + y as f32 / h as f32 * 0.5).clamp(0.0, 1.0);
+        let (a, b) = ([58.0, 40.0, 120.0], [16.0, 22.0, 54.0]);
+        image::Rgb([0, 1, 2].map(|i| (a[i] + (b[i] - a[i]) * k) as u8))
+    });
+    draw_text(&mut img, &f, 46.0, 64.0, 96.0, title, [245, 243, 255], 1.0);
+    draw_text(&mut img, &f, 24.0, 66.0, 134.0, date, [190, 180, 230], 1.0);
+    // Up to 6 numbers, 3 a row.
+    let (cw, ch) = (340.0f32, 150.0f32);
+    for (i, (value, label)) in stats.iter().take(6).enumerate() {
+        let (cx, cy) = (
+            64.0 + (i % 3) as f32 * (cw + 26.0),
+            180.0 + (i / 3) as f32 * (ch + 24.0),
+        );
+        fill_round_rect(&mut img, (cx, cy, cw, ch), 18.0, [255, 255, 255], 0.08);
+        draw_text(
+            &mut img,
+            &f,
+            58.0,
+            cx + 26.0,
+            cy + 78.0,
+            value,
+            [255, 209, 102],
+            1.0,
+        );
+        draw_text(
+            &mut img,
+            &f,
+            22.0,
+            cx + 28.0,
+            cy + 120.0,
+            label,
+            [220, 214, 240],
+            1.0,
+        );
+    }
+    // Badges.
+    let mut x = 64.0f32;
+    let y = h as f32 - 52.0;
+    for b in badges.iter().take(5) {
+        let tw = text_width(&f, 20.0, b) + 32.0;
+        if x + tw > w as f32 - 40.0 {
+            break;
+        }
+        fill_round_rect(
+            &mut img,
+            (x, y - 30.0, tw, 42.0),
+            21.0,
+            [255, 209, 102],
+            0.9,
+        );
+        draw_text(&mut img, &f, 20.0, x + 16.0, y - 2.0, b, [40, 28, 70], 1.0);
+        x += tw + 12.0;
+    }
+    img
+}
+
 /// A title or end card.
 fn card(w: u32, h: u32, f: &FontRef, title: &str, sub: &str, fade: f32) -> RgbImage {
     let mut img = background(w, h);
@@ -232,6 +310,7 @@ fn card(w: u32, h: u32, f: &FontRef, title: &str, sub: &str, fade: f32) -> RgbIm
     if !sub.trim().is_empty() {
         centered(&mut img, f, px * 0.5, y + px * 0.2, sub, [190, 180, 230]);
     }
+    super::brand::stamp(&mut img, 0.08, 1.0);
     fade_all(&mut img, fade);
     img
 }
@@ -370,7 +449,9 @@ fn caption(img: &mut RgbImage, f: &FontRef, text: &str, portrait: bool, progress
         for word in l.split(' ') {
             let n = word.chars().count();
             let color = if seen + n / 2 <= said {
-                [255, 255, 255]
+                super::brand::current()
+                    .and_then(|b| b.accent())
+                    .unwrap_or([255, 255, 255])
             } else {
                 [196, 192, 212]
             };
@@ -803,6 +884,41 @@ pub fn chapters_text(ch: &[(f64, String)]) -> String {
         .collect()
 }
 
+/// Whether YouTube turns these into chapters: at least three, the first at
+/// 0:00, each at least ten seconds long.
+pub fn youtube_chapters_ok(ch: &[(f64, String)]) -> bool {
+    ch.len() >= 3
+        && ch.first().is_some_and(|c| c.0 == 0.0)
+        && ch.windows(2).all(|w| w[1].0 - w[0].0 >= 10.0)
+}
+
+/// A ready-to-paste video description: title, what it shows, chapters as
+/// YouTube timestamps.
+pub fn description(edl: &Edl, ch: &[(f64, String)]) -> String {
+    let mut out = String::new();
+    let title = edl.title.trim();
+    if !title.is_empty() {
+        out.push_str(title);
+        out.push_str("\n\n");
+    }
+    for part in [edl.subtitle.trim(), edl.end_text.trim()] {
+        if !part.is_empty() {
+            out.push_str(part);
+            out.push_str("\n\n");
+        }
+    }
+    if youtube_chapters_ok(ch) {
+        out.push_str("Chapters:\n");
+        out.push_str(&chapters_text(ch));
+    } else if !ch.is_empty() {
+        out.push_str("In this video:\n");
+        for (_, name) in ch {
+            out.push_str(&format!("- {name}\n"));
+        }
+    }
+    out
+}
+
 /// Narration over the music, which ducks while a line is said.
 /// A soft click: a short, quickly fading tick.
 fn click_sound() -> Vec<f32> {
@@ -889,6 +1005,80 @@ fn mix_audio(
 
 /// An ffmpeg process taking raw RGB frames on stdin, with `audio` (our
 /// mix) and/or a music file mixed in.
+/// H.264 encoders to try, best first: (ffmpeg name, its settings).
+const HW_CODECS: &[(&str, &[&str])] = &[
+    (
+        "h264_videotoolbox",
+        &["-c:v", "h264_videotoolbox", "-b:v", "12M", "-allow_sw", "1"],
+    ),
+    (
+        "h264_nvenc",
+        &[
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p5",
+            "-rc",
+            "vbr",
+            "-cq",
+            "21",
+            "-b:v",
+            "0",
+        ],
+    ),
+    ("h264_qsv", &["-c:v", "h264_qsv", "-global_quality", "22"]),
+    (
+        "h264_amf",
+        &[
+            "-c:v", "h264_amf", "-quality", "quality", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22",
+        ],
+    ),
+];
+
+const SOFTWARE_CODEC: (&str, &[&str]) = (
+    "libx264",
+    &["-c:v", "libx264", "-preset", "veryfast", "-crf", "20"],
+);
+
+/// The H.264 encoder for this machine: a hardware one (NVENC, QuickSync,
+/// VideoToolbox, AMF) when ffmpeg has it and a short test encode works,
+/// else libx264. `DCODE_AI_ENCODER=libx264` (or a name) picks one. Found
+/// once per run.
+fn video_codec(bin: &Path) -> (&'static str, &'static [&'static str]) {
+    static PICKED: std::sync::OnceLock<(&'static str, &'static [&'static str])> =
+        std::sync::OnceLock::new();
+    *PICKED.get_or_init(|| {
+        let wanted = std::env::var("DCODE_AI_ENCODER").unwrap_or_default();
+        if matches!(wanted.as_str(), "libx264" | "software" | "cpu") {
+            return SOFTWARE_CODEC;
+        }
+        let listed = Command::new(bin)
+            .args(["-hide_banner", "-encoders"])
+            .stdin(Stdio::null())
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+            .unwrap_or_default();
+        let works = |args: &[&str]| {
+            Command::new(bin)
+                .args(["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i"])
+                .arg("testsrc2=s=640x360:r=30:d=0.5")
+                .args(args)
+                .args(["-pix_fmt", "yuv420p", "-f", "null", "-"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .is_ok_and(|s| s.success())
+        };
+        HW_CODECS
+            .iter()
+            .filter(|(name, _)| wanted.is_empty() || wanted == *name)
+            .find(|(name, args)| listed.contains(name) && works(args))
+            .copied()
+            .unwrap_or(SOFTWARE_CODEC)
+    })
+}
+
 fn encoder(
     bin: &Path,
     (w, h): (u32, u32),
@@ -956,18 +1146,8 @@ fn encoder(
         (false, false) => {}
     }
     cmd.args(["-t", &format!("{total:.3}")])
-        .args([
-            "-c:v",
-            "libx264",
-            "-preset",
-            "veryfast",
-            "-crf",
-            "20",
-            "-pix_fmt",
-            "yuv420p",
-            "-movflags",
-            "+faststart",
-        ])
+        .args(video_codec(bin).1)
+        .args(["-pix_fmt", "yuv420p", "-movflags", "+faststart"])
         .arg(out)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -1678,8 +1858,10 @@ fn canvas(
             let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
             let d = (u * 0.6 + v * 0.4).clamp(0.0, 1.0);
             let glow = (1.0 - ((u - 0.3).powi(2) + (v - 0.2).powi(2)).sqrt() * 1.6).max(0.0);
-            let c0 = [76.0, 52.0, 140.0];
-            let c1 = [24.0, 34.0, 82.0];
+            let (c0, c1) = match super::brand::current().and_then(|b| b.gradient()) {
+                Some((a, b)) => (a.map(|v| v as f32), b.map(|v| v as f32)),
+                None => ([76.0, 52.0, 140.0], [24.0, 34.0, 82.0]),
+            };
             image::Rgb(
                 [0, 1, 2]
                     .map(|i| (c0[i] + (c1[i] - c0[i]) * d + glow * 40.0).clamp(0.0, 255.0) as u8),
@@ -1753,6 +1935,7 @@ fn frame_at(
         if let Some(cam) = &sc.webcam {
             draw_cam(&mut img, cam, s);
         }
+        super::brand::stamp(&mut img, 0.055, 0.85);
         img
     };
     let first_s = edl.segments.first().map(|s| s.from).unwrap_or(0.0);
@@ -1972,6 +2155,14 @@ fn render_cut(
     if ffmpeg.is_some() && captioned.is_none() {
         notes.push("ffmpeg couldn't start".into());
     }
+    if let Some(bin) = ffmpeg.as_ref()
+        && captioned.is_some()
+    {
+        let (name, _) = video_codec(bin);
+        if name != SOFTWARE_CODEC.0 {
+            notes.push(format!("encoded on the GPU ({name})"));
+        }
+    }
 
     let make_gif = names.gif;
     let gif_every = (fps / 10.0).round().max(1.0) as usize;
@@ -2112,6 +2303,11 @@ fn render_cut(
         std::fs::write(&p, chapters_text(&ch)).map_err(|e| e.to_string())?;
         files.push(p);
     }
+    if !portrait && names.extras {
+        let p = dir.join("description.txt");
+        std::fs::write(&p, description(edl, &ch)).map_err(|e| e.to_string())?;
+        files.push(p);
+    }
     if let Some(sheet) = contact_sheet(&contact) {
         let p = dir.join(if portrait {
             "short-contact.png"
@@ -2186,6 +2382,24 @@ pub fn render_with(
         ..
     } = load(dir)?;
     let mut edl = edl.normalized(duration);
+    // The brand kit, for this render.
+    let brand = super::brand::file_for(dir).and_then(|f| super::brand::load(&f).ok());
+    if let Some(b) = &brand {
+        if edl.subtitle.trim().is_empty() && !b.intro.trim().is_empty() {
+            edl.subtitle = b.intro.clone();
+        }
+        if edl.end_text.trim().is_empty() && !b.outro.trim().is_empty() {
+            edl.end_text = b.outro.clone();
+        }
+    }
+    struct Unset;
+    impl Drop for Unset {
+        fn drop(&mut self) {
+            super::brand::set(None);
+        }
+    }
+    super::brand::set(brand);
+    let _unset = Unset;
     if let Some(lang) = &opts.lang {
         edl = edl.in_language(lang).ok_or_else(|| {
             format!("no `{lang}` translation in the edit list — /video translate {lang}")
@@ -2386,7 +2600,11 @@ are not marked or zoomed — /video redo <step> re-records one step"
         gif: main.gif.unwrap_or_else(|| dir.join("video.gif")),
         srt: main.srt,
         seconds: main.seconds,
-        note: (!notes.is_empty()).then(|| notes.join("; ")),
+        note: (!notes.is_empty()).then(|| {
+            let mut seen = std::collections::HashSet::new();
+            notes.retain(|n| seen.insert(n.clone()));
+            notes.join("; ")
+        }),
         files,
     })
 }
@@ -2511,6 +2729,7 @@ mod tests {
             "captions.vtt",
             "short.srt",
             "chapters.txt",
+            "description.txt",
         ] {
             assert!(dir.path().join(f).is_file(), "{f}");
         }
@@ -2633,6 +2852,20 @@ mod tests {
         assert_eq!(holds.last().unwrap().at, 10.0);
         let ch = chapters(&[&a, &b], &[1.0, 6.35]);
         assert_eq!(chapters_text(&ch), "0:00 Intro\n0:06 Main\n");
+        // Too few and too short for YouTube: listed, not timestamped.
+        let edl = Edl {
+            title: "Make a project".into(),
+            ..Default::default()
+        };
+        let d = description(&edl, &ch);
+        assert!(d.starts_with("Make a project\n\n"), "{d}");
+        assert!(d.contains("- Intro") && !d.contains("0:00"), "{d}");
+        let ok = vec![
+            (0.0, "Intro".to_string()),
+            (12.0, "Main".to_string()),
+            (30.0, "Wrap".to_string()),
+        ];
+        assert!(description(&edl, &ok).contains("Chapters:\n0:00 Intro\n0:12 Main\n0:30 Wrap\n"));
     }
 
     #[test]

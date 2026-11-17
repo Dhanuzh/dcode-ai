@@ -43,6 +43,25 @@ fn spec(name: &str) -> Spec {
             ],
             quantized: false,
         },
+        // Multilingual: hears ~99 languages and says which it heard.
+        "tiny" => Spec {
+            dir: "whisper-tiny",
+            files: [
+                (
+                    "model.gguf",
+                    "https://huggingface.co/lmz/candle-whisper/resolve/main/model-tiny-q80.gguf",
+                ),
+                (
+                    "config.json",
+                    "https://huggingface.co/lmz/candle-whisper/resolve/main/config-tiny.json",
+                ),
+                (
+                    "tokenizer.json",
+                    "https://huggingface.co/lmz/candle-whisper/resolve/main/tokenizer-tiny.json",
+                ),
+            ],
+            quantized: true,
+        },
         _ => Spec {
             dir: "whisper-tiny.en",
             files: [
@@ -225,6 +244,69 @@ pub struct Transcriber {
     eot: u32,
     no_timestamps: u32,
     device: Device,
+    /// A multilingual model: its language tokens, and `<|transcribe|>`.
+    languages: Vec<(&'static str, u32)>,
+    transcribe_token: Option<u32>,
+    /// The language heard last (multilingual models).
+    pub language: Option<String>,
+}
+
+/// Whisper's languages, in its token order (the codes).
+pub const LANGUAGES: &[&str] = &[
+    "en", "zh", "de", "es", "ru", "ko", "fr", "ja", "pt", "tr", "pl", "ca", "nl", "ar", "sv", "it",
+    "id", "hi", "fi", "vi", "he", "uk", "el", "ms", "cs", "ro", "da", "hu", "ta", "no", "th", "ur",
+    "hr", "bg", "lt", "la", "mi", "ml", "cy", "sk", "te", "fa", "lv", "bn", "sr", "az", "sl", "kn",
+    "et", "mk", "br", "eu", "is", "hy", "ne", "mn", "bs", "kk", "sq", "sw", "gl", "mr", "pa", "si",
+    "km", "sn", "yo", "so", "af", "oc", "ka", "be", "tg", "sd", "gu", "am", "yi", "lo", "uz", "fo",
+    "ht", "ps", "tk", "nn", "mt", "sa", "lb", "my", "bo", "tl", "mg", "as", "tt", "haw", "ln",
+    "ha", "ba", "jw", "su",
+];
+
+/// A language code's English name, for asking the agent to answer in it.
+pub fn language_name(code: &str) -> &str {
+    match code {
+        "en" => "English",
+        "zh" => "Chinese",
+        "de" => "German",
+        "es" => "Spanish",
+        "ru" => "Russian",
+        "ko" => "Korean",
+        "fr" => "French",
+        "ja" => "Japanese",
+        "pt" => "Portuguese",
+        "tr" => "Turkish",
+        "pl" => "Polish",
+        "nl" => "Dutch",
+        "ar" => "Arabic",
+        "sv" => "Swedish",
+        "it" => "Italian",
+        "id" => "Indonesian",
+        "hi" => "Hindi",
+        "fi" => "Finnish",
+        "vi" => "Vietnamese",
+        "he" => "Hebrew",
+        "uk" => "Ukrainian",
+        "el" => "Greek",
+        "cs" => "Czech",
+        "ro" => "Romanian",
+        "da" => "Danish",
+        "hu" => "Hungarian",
+        "ta" => "Tamil",
+        "no" => "Norwegian",
+        "th" => "Thai",
+        "ur" => "Urdu",
+        "te" => "Telugu",
+        "ml" => "Malayalam",
+        "kn" => "Kannada",
+        "mr" => "Marathi",
+        "bn" => "Bengali",
+        "gu" => "Gujarati",
+        "pa" => "Punjabi",
+        "fa" => "Persian",
+        "ms" => "Malay",
+        "tl" => "Tagalog",
+        other => other,
+    }
 }
 
 impl Transcriber {
@@ -279,6 +361,13 @@ impl Transcriber {
             })
             .collect();
         let suppress = Tensor::new(suppress.as_slice(), &device).map_err(|e| e.to_string())?;
+        let languages: Vec<(&'static str, u32)> = LANGUAGES
+            .iter()
+            .filter_map(|l| tokens.id(&format!("<|{l}|>")).ok().map(|id| (*l, id)))
+            .collect();
+        let transcribe_token = tokens.id("<|transcribe|>").ok();
+        // English-only models have no language tokens to choose from.
+        let multilingual = !name.ends_with(".en") && languages.len() > 50;
         let mel_filters: Vec<f32> = MEL_80
             .as_chunks::<4>()
             .0
@@ -295,7 +384,39 @@ impl Transcriber {
             eot,
             no_timestamps,
             device,
+            languages: if multilingual { languages } else { Vec::new() },
+            transcribe_token,
+            language: None,
         })
+    }
+
+    /// The most likely language of the audio (multilingual models).
+    fn detect_language(&mut self, audio: &Tensor) -> Result<Option<(&'static str, u32)>, String> {
+        if self.languages.is_empty() {
+            return Ok(None);
+        }
+        let t = Tensor::new(&[self.sot][..], audio.device())
+            .map_err(|e| e.to_string())?
+            .unsqueeze(0)
+            .map_err(|e| e.to_string())?;
+        let ys = self
+            .model
+            .decode(&t, audio, true)
+            .map_err(|e| e.to_string())?;
+        let logits = self
+            .model
+            .logits(&ys.i((..1, ..1)).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?
+            .i(0)
+            .map_err(|e| e.to_string())?
+            .i(0)
+            .map_err(|e| e.to_string())?;
+        let v: Vec<f32> = logits.to_vec1().map_err(|e| e.to_string())?;
+        Ok(self
+            .languages
+            .iter()
+            .copied()
+            .max_by(|a, b| v[a.1 as usize].total_cmp(&v[b.1 as usize])))
     }
 
     /// Text for 16 kHz mono samples (any length; 30 s at a time).
@@ -334,7 +455,18 @@ impl Transcriber {
 
     fn segment(&mut self, mel: &Tensor, stop: Option<&AtomicBool>) -> Result<String, String> {
         let audio = self.model.encode(mel).map_err(|e| e.to_string())?;
-        let mut tokens = vec![self.sot, self.no_timestamps];
+        let mut tokens = vec![self.sot];
+        // A multilingual model: which language, then "transcribe" (not
+        // translate) in it.
+        if let Some((code, id)) = self.detect_language(&audio)? {
+            self.language = Some(code.to_string());
+            tokens.push(id);
+            if let Some(t) = self.transcribe_token {
+                tokens.push(t);
+            }
+        }
+        tokens.push(self.no_timestamps);
+        let prompt_len = tokens.len();
         let limit = self.config.max_target_positions / 2;
         for i in 0..limit {
             if stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
@@ -371,7 +503,7 @@ impl Transcriber {
                 break;
             }
             tokens.push(next);
-            if repeating(&tokens[2..]) {
+            if repeating(&tokens[prompt_len..]) {
                 break;
             }
         }
@@ -491,6 +623,8 @@ pub async fn transcribe_pcm(
 /// What [`listen`] heard.
 pub struct Heard {
     pub text: String,
+    /// The language heard (a multilingual model), e.g. `de`.
+    pub language: Option<String>,
     /// Listening was ended with Esc ("done talking") rather than a pause.
     pub by_esc: bool,
 }
@@ -542,14 +676,16 @@ pub async fn listen(
             *slot = Some((name.clone(), Transcriber::load(&name)?));
         }
         let (_, t) = slot.as_mut().ok_or("no model")?;
-        t.transcribe_with_stop(&pcm, Some(stop_for_transcribe.as_ref()))
+        t.language = None;
+        let text = t.transcribe_with_stop(&pcm, Some(stop_for_transcribe.as_ref()))?;
+        Ok::<_, String>((text, t.language.clone()))
     });
     let started = std::time::Instant::now();
     loop {
         tokio::select! {
             out = &mut transcribe => {
-                let text = out.map_err(|e| e.to_string())??;
-                return Ok(Heard { text: clean(&text), by_esc });
+                let (text, language) = out.map_err(|e| e.to_string())??;
+                return Ok(Heard { text: clean(&text), by_esc, language });
             }
             _ = tokio::time::sleep(std::time::Duration::from_secs(1)) => {
                 if stop.load(Ordering::SeqCst) {
@@ -698,6 +834,29 @@ mod tests {
 
     /// Downloads tiny.en and transcribes a generated tone (no words): runs
     /// end to end without failing. `cargo test -- --ignored stt`.
+    #[tokio::test]
+    #[ignore]
+    async fn the_multilingual_model_hears_the_language() {
+        // A 16 kHz mono WAV of someone speaking German.
+        let Ok(path) = std::env::var("DCODE_AI_TEST_WAV_DE") else {
+            return;
+        };
+        ensure_model("tiny", |s| eprintln!("{s}")).await.unwrap();
+        let mut t = Transcriber::load("tiny").unwrap();
+        let raw = std::fs::read(path).unwrap();
+        let data = raw.windows(4).position(|w| w == b"data").unwrap() + 8;
+        let pcm: Vec<i16> = raw[data..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|c| i16::from_le_bytes(*c))
+            .collect();
+        let text = t.transcribe(&pcm).unwrap();
+        eprintln!("{:?} → {text:?}", t.language);
+        assert_eq!(t.language.as_deref(), Some("de"));
+        assert!(text.to_lowercase().contains("berlin"), "{text}");
+    }
+
     #[tokio::test]
     #[ignore]
     async fn real_model_runs() {

@@ -161,7 +161,9 @@ fn voice_base(name: &str) -> Result<String, String> {
         return Err(bad_voice(name));
     }
     Ok(format!(
-        "https://huggingface.co/rhasspy/piper-voices/resolve/main/{lang}/{locale}/{speaker}/{quality}/"
+        // Pinned to v1.0.0: newer voice files need a newer Piper than the
+        // one installed ("Phonemes must be one codepoint").
+        "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/{lang}/{locale}/{speaker}/{quality}/"
     ))
 }
 
@@ -279,7 +281,15 @@ pub async fn install_piper_voice(
     let r =
         dcode_ai_core::video::voice::speak("piper", &model.display().to_string(), "Hello.", &probe);
     let _ = std::fs::remove_file(&probe);
-    r.map_err(|e| format!("Piper is installed but didn't run here: {e}"))?;
+    if let Err(e) = r {
+        // A voice that doesn't run here: remove it, so trying again
+        // downloads it again.
+        let _ = std::fs::remove_file(&model);
+        let _ = std::fs::remove_file(model.with_extension("onnx.json"));
+        return Err(format!(
+            "Piper is installed but didn't run `{voice}` here: {e}"
+        ));
+    }
     Ok(model)
 }
 
@@ -344,11 +354,32 @@ pub fn open(path: &Path) -> std::io::Result<()> {
 mod voice_names {
     use super::*;
 
+    /// Downloads a named voice and speaks with it:
+    /// `cargo test -- --ignored a_named_voice_installs`.
+    #[tokio::test]
+    #[ignore]
+    async fn a_named_voice_installs_and_speaks() {
+        let model = install_piper_voice("de_DE-thorsten-medium", |s| eprintln!("{s}"))
+            .await
+            .unwrap();
+        assert!(model.ends_with("de_DE-thorsten-medium.onnx"));
+        let out = std::env::temp_dir().join("dcode-ai-de.wav");
+        dcode_ai_core::video::voice::speak(
+            "piper",
+            "de_DE-thorsten-medium",
+            "Wie spät ist es heute in Berlin?",
+            &out,
+        )
+        .unwrap();
+        assert!(std::fs::metadata(&out).unwrap().len() > 10_000);
+        eprintln!("spoken: {}", out.display());
+    }
+
     #[test]
     fn voice_names_map_to_their_folder() {
         assert_eq!(
             voice_base("en_US-lessac-medium").unwrap(),
-            "https://huggingface.co/rhasspy/piper-voices/resolve/main/en/en_US/lessac/medium/"
+            "https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/en/en_US/lessac/medium/"
         );
         assert!(
             voice_base("en_GB-northern_english_male-medium")

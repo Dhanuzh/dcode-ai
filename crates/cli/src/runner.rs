@@ -398,6 +398,22 @@ impl SessionRuntime {
         self.supervisor.usage_breakdown()
     }
 
+    pub fn pins(&self) -> Vec<String> {
+        self.supervisor.pins()
+    }
+
+    pub fn set_pins(&mut self, pins: &[String]) {
+        self.supervisor.set_pins(pins);
+    }
+
+    pub fn cost_budget(&self) -> f64 {
+        self.supervisor.cost_budget()
+    }
+
+    pub fn set_cost_budget(&self, usd: f64) {
+        self.supervisor.set_cost_budget(usd);
+    }
+
     pub fn cold_requests(&self) -> (u64, u64) {
         self.supervisor.cold_requests()
     }

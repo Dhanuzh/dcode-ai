@@ -1,5 +1,74 @@
 # Changelog
 
+## 1.0.75 — 2026-11-17
+
+### New — sessions
+- **`/checkpoint [name]`**: a snapshot of the whole working tree (untracked
+  files too) without touching your branch, index or files;
+  `/checkpoint list`, `restore <n>` (the state before is saved first, so a
+  restore can be undone), `drop <n>`. Per-turn `/undo` and `/rewind` stay.
+- **`/move [file]`**: carry a session to another computer in one file
+  (secrets masked); `/move import <file>` there, then `/resume`.
+- **`/budget <usd>`**: a cost budget for the session — a heads-up at 80 %,
+  and at 100 % it asks to go on with the budget raised (or stops) instead
+  of stopping cold. `[session] max_cost_usd` is the default; runs with
+  nobody to ask still stop.
+- **`/pin <fact>`** keeps a fact word for word through every compaction
+  (`/pins`, `/unpin <n>`); `/compact` now says what went into the summary
+  (messages, tool calls, files).
+
+### New — browser and recording
+- **Smoke tests from browser flows**: `/browser test save <name>` replays
+  the saved steps and keeps a screenshot per step as the baseline;
+  `/browser test run [name|all]` replays and reports steps that look
+  different or fail.
+- **Sign-in reuse**: `/browser remember [site]` keeps a site's sign-in
+  (its cookies and the sign-in service's, session ones too) and puts it
+  back whenever the browser opens that site; `/browser forget <site>`.
+- **Multi-tab recordings**: a click that opens a new tab while recording is
+  followed in the recorded tab.
+
+### New — video
+- `description.txt`: a ready-to-paste description with YouTube chapter
+  timestamps (when there are three or more chapters of 10 s or longer);
+  `/video publish` uses it.
+- **Brand kit**: `.dcode-ai/brand.json` (or `~/.dcode-ai/brand.json`) —
+  logo, colours, font, intro and outro — on every render; `/video brand`
+  shows it, `/video brand init` starts one.
+- `/video render all` re-renders every recording.
+- `/video doc`: a step-by-step how-to guide (Markdown + self-contained
+  HTML) from the stills and narration, the clicked element outlined.
+- **GPU encoding** with NVENC, QuickSync, VideoToolbox or AMF when ffmpeg
+  has one that works here (`DCODE_AI_ENCODER=libx264` forces software).
+
+### New — TUI
+- **Ctrl+P** also searches slash commands, recent prompts and files.
+- A desktop notification when a long render or a background sub-agent
+  finishes while you're elsewhere.
+- Pictures (`/video show`, `/recap`) are real images in kitty, WezTerm,
+  Ghostty and iTerm2 outside the full-screen view.
+- **`/recap`**: today in a card and a 6-second video — commits, lines,
+  files, sessions, tokens, day streak — with achievements (streaks,
+  commits, bugs closed, days); new ones show as a toast.
+
+### New — talk
+- `/talk wake`: say "hey dcode" and then what you need, hands-free.
+- `/talk lang`: the multilingual speech model; the agent answers in the
+  language you spoke, read by a voice for it when one is installed.
+- `/talk persona calm|brief|cheerful`: how spoken replies sound.
+
+### Fixed
+- Piper voices downloaded by name didn't run ("Phonemes must be one
+  codepoint"): voices now come from the voice set that matches the
+  installed Piper, and a voice that fails its test is removed so it can be
+  downloaded again.
+- `/bugreport` writes one file for an issue: version, system, the newest
+  crash (panics are now saved), the log, config and recent events, with
+  secrets masked.
+- Fuzz tests for the `<tool_call>` text protocol and the IPC frame reader.
+- The `chrono` "unmaintained" advisory no longer fails the supply-chain
+  check (no vulnerability; it stays until the dependencies move on).
+
 ## 1.0.74 — 2026-11-17
 
 ### Fixed — recordings

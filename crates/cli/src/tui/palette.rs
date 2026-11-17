@@ -10,6 +10,28 @@ pub(crate) enum PaletteRow {
         label: &'static str,
         shortcut: &'static str,
     },
+    /// A search hit: a slash command, a recent prompt or a file. Picking it
+    /// puts `insert` in the prompt.
+    Found {
+        label: String,
+        detail: String,
+        insert: String,
+    },
+}
+
+/// What the palette searches besides its own entries.
+#[derive(Default, Clone)]
+pub(crate) struct PaletteSources {
+    /// Recent prompts, newest last.
+    pub prompts: Vec<String>,
+    /// Project files (relative paths).
+    pub files: Vec<String>,
+}
+
+/// Every character of `needle` in order in `hay` (both lower-case).
+fn subsequence(needle: &str, hay: &str) -> bool {
+    let mut it = hay.chars();
+    needle.chars().all(|c| it.any(|h| h == c))
 }
 
 pub(crate) const PALETTE_CATALOG: &[PaletteRow] = &[
@@ -197,12 +219,12 @@ pub(crate) fn palette_command_for_label(label: &str) -> &'static str {
     }
 }
 
-pub(crate) fn filter_palette_rows(query: &str) -> Vec<&'static PaletteRow> {
+pub(crate) fn filter_palette_rows(query: &str, src: &PaletteSources) -> Vec<PaletteRow> {
     let needle = query.trim().to_ascii_lowercase();
     if needle.is_empty() {
-        return PALETTE_CATALOG.iter().collect();
+        return PALETTE_CATALOG.to_vec();
     }
-    let mut result: Vec<&'static PaletteRow> = Vec::new();
+    let mut result: Vec<PaletteRow> = Vec::new();
     let mut pending_section: Option<&'static PaletteRow> = None;
     for row in PALETTE_CATALOG {
         match row {
@@ -215,19 +237,107 @@ pub(crate) fn filter_palette_rows(query: &str) -> Vec<&'static PaletteRow> {
                     || palette_command_for_label(label).contains(&needle)
                 {
                     if let Some(s) = pending_section.take() {
-                        result.push(s);
+                        result.push(s.clone());
                     }
-                    result.push(row);
+                    result.push(row.clone());
                 }
             }
+            PaletteRow::Found { .. } => {}
         }
+    }
+    // Slash commands by name or what they do.
+    let commands: Vec<PaletteRow> = crate::slash_commands::SLASH_COMMANDS
+        .iter()
+        .filter(|c| {
+            c.contains(&needle)
+                || crate::slash_commands::slash_command_description(c)
+                    .to_ascii_lowercase()
+                    .contains(&needle)
+        })
+        .take(8)
+        .map(|c| PaletteRow::Found {
+            label: c.to_string(),
+            detail: crate::slash_commands::slash_command_description(c).to_string(),
+            insert: format!("{c} "),
+        })
+        .collect();
+    if !commands.is_empty() {
+        result.push(PaletteRow::Section("Commands"));
+        result.extend(commands);
+    }
+    // Recent prompts, newest first, each once.
+    let mut seen = std::collections::HashSet::new();
+    let prompts: Vec<PaletteRow> = src
+        .prompts
+        .iter()
+        .rev()
+        .filter(|p| !p.trim().is_empty() && p.to_ascii_lowercase().contains(&needle))
+        .filter(|p| seen.insert(p.trim().to_string()))
+        .take(5)
+        .map(|p| PaletteRow::Found {
+            label: p.lines().next().unwrap_or("").chars().take(70).collect(),
+            detail: String::new(),
+            insert: p.clone(),
+        })
+        .collect();
+    if !prompts.is_empty() {
+        result.push(PaletteRow::Section("Recent prompts"));
+        result.extend(prompts);
+    }
+    // Files, by their path's letters in order (shortest paths first).
+    let mut files: Vec<&String> = src
+        .files
+        .iter()
+        .filter(|f| subsequence(&needle.replace(' ', ""), &f.to_ascii_lowercase()))
+        .collect();
+    files.sort_by_key(|f| (!f.to_ascii_lowercase().contains(&needle), f.len()));
+    let files: Vec<PaletteRow> = files
+        .into_iter()
+        .take(8)
+        .map(|f| PaletteRow::Found {
+            label: f.clone(),
+            detail: String::new(),
+            insert: format!("@{f} "),
+        })
+        .collect();
+    if !files.is_empty() {
+        result.push(PaletteRow::Section("Files"));
+        result.extend(files);
     }
     result
 }
 
-pub(crate) fn palette_selectable_indices(rows: &[&PaletteRow]) -> Vec<usize> {
+pub(crate) fn palette_selectable_indices(rows: &[PaletteRow]) -> Vec<usize> {
     rows.iter()
         .enumerate()
-        .filter_map(|(i, r)| matches!(r, PaletteRow::Entry { .. }).then_some(i))
+        .filter_map(|(i, r)| {
+            matches!(r, PaletteRow::Entry { .. } | PaletteRow::Found { .. }).then_some(i)
+        })
         .collect()
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::*;
+
+    #[test]
+    fn the_palette_finds_commands_prompts_and_files() {
+        let src = PaletteSources {
+            prompts: vec!["fix the login bug".into(), "add tests".into()],
+            files: vec!["crates/cli/src/tui/palette.rs".into(), "README.md".into()],
+        };
+        let rows = filter_palette_rows("login", &src);
+        assert!(rows.iter().any(
+            |r| matches!(r, PaletteRow::Found { insert, .. } if insert == "fix the login bug")
+        ));
+        let rows = filter_palette_rows("pal", &src);
+        assert!(rows.iter().any(|r| matches!(r, PaletteRow::Found { insert, .. } if insert == "@crates/cli/src/tui/palette.rs ")));
+        let rows = filter_palette_rows("checkpoint", &src);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, PaletteRow::Found { label, .. } if label == "/checkpoint"))
+        );
+        // Nothing typed: just the palette's own entries.
+        assert_eq!(filter_palette_rows("", &src).len(), PALETTE_CATALOG.len());
+    }
 }

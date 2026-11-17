@@ -1550,3 +1550,98 @@ mod tests {
         assert!(prompt.contains("### read_file"));
     }
 }
+
+/// Fuzzing the `<tool_call>` text protocol: whatever the model writes and
+/// however the stream is cut into deltas, the splitter never panics, and
+/// the result doesn't depend on where the cuts fell.
+#[cfg(test)]
+mod protocol_fuzz {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Pieces the model's text is made of: prose, markers (whole and
+    /// broken), JSON, fences, backticks.
+    fn piece() -> impl Strategy<Value = String> {
+        prop_oneof![
+            "[a-zA-Z .,\n]{0,12}",
+            Just("<tool_call>".to_string()),
+            Just("</tool_call>".to_string()),
+            Just(
+                "<tool_call>{\"name\":\"read_file\",\"input\":{\"path\":\"a\"}}</tool_call>"
+                    .to_string()
+            ),
+            Just("<tool_result>".to_string()),
+            Just("<invoke name=\"bash\">".to_string()),
+            Just("</invoke>".to_string()),
+            Just("<tool_".to_string()),
+            Just("{\"name\":\"x\"}".to_string()),
+            Just("```".to_string()),
+            Just("`".to_string()),
+            Just("é✓".to_string()),
+        ]
+    }
+
+    fn run(chunks: &[&str]) -> (Vec<Segment>, Result<Option<String>, String>) {
+        let mut s = ToolCallSplitter::default();
+        let mut out: Vec<Segment> = Vec::new();
+        for c in chunks {
+            for seg in s.feed(c) {
+                // Text may come in any number of pieces: join it.
+                match (out.last_mut(), seg) {
+                    (Some(Segment::Text(a)), Segment::Text(b)) => a.push_str(&b),
+                    (_, Segment::Text(b)) if b.is_empty() => {}
+                    (_, seg) => out.push(seg),
+                }
+            }
+        }
+        let end = s.finish();
+        // Leftover text belongs to the text too.
+        let end = match end {
+            Ok(Some(t)) => {
+                match out.last_mut() {
+                    Some(Segment::Text(a)) => a.push_str(&t),
+                    _ => out.push(Segment::Text(t)),
+                }
+                Ok(None)
+            }
+            other => other,
+        };
+        (out, end)
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(400))]
+
+        #[test]
+        fn cutting_the_stream_anywhere_changes_nothing(
+            pieces in proptest::collection::vec(piece(), 0..14),
+            cuts in proptest::collection::vec(any::<usize>(), 0..8),
+        ) {
+            let text: String = pieces.concat();
+            let whole = run(&[text.as_str()]);
+            // The same text cut at char boundaries.
+            let bounds: Vec<usize> = text.char_indices().map(|(i, _)| i).collect();
+            let mut at: Vec<usize> = cuts
+                .iter()
+                .filter(|_| !bounds.is_empty())
+                .map(|c| bounds[c % bounds.len()])
+                .collect();
+            at.sort();
+            at.dedup();
+            let mut chunks = Vec::new();
+            let mut from = 0;
+            for a in at {
+                chunks.push(&text[from..a]);
+                from = a;
+            }
+            chunks.push(&text[from..]);
+            prop_assert_eq!(run(&chunks), whole);
+        }
+
+        #[test]
+        fn any_call_body_parses_or_errors_without_panicking(body in ".{0,200}") {
+            let _ = parse_tool_call(&body);
+            let _ = parse_invoke(&body);
+        }
+    }
+}

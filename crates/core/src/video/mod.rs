@@ -10,7 +10,9 @@
 //!   ("under 45 s, bigger captions") without recording again.
 //! - [`render`]: draws the edit frame by frame in Rust.
 
+pub mod brand;
 pub mod capture;
+pub mod guide;
 pub mod motion;
 pub mod music;
 pub mod publish;
@@ -1110,5 +1112,104 @@ mod live_stills {
                 let _ = std::fs::copy(s.dir.join(f), format!("{out}/stills-{f}"));
             }
         }
+    }
+}
+
+/// Live: a click that opens a new tab while recording is followed in the
+/// recorded tab; the steps then make a smoke test that passes against its
+/// baseline. `DCODE_AI_TEST_CDP_PORT=<port>`, `cargo test -- --ignored
+/// video::live_tabs`.
+#[cfg(test)]
+mod live_tabs {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn serve() -> u16 {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = l.accept().await {
+                tokio::spawn(async move {
+                    let mut buf = [0u8; 2048];
+                    let n = s.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let body = if req.starts_with("GET /two") {
+                        "<h1>Second page</h1>"
+                    } else {
+                        "<h1>First</h1><a href='/two' target='_blank' style='font-size:30px'>Open two</a>"
+                    };
+                    let _ = s
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await;
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn a_new_tab_is_followed_and_steps_become_a_smoke_test() {
+        let Ok(cdp) = std::env::var("DCODE_AI_TEST_CDP_PORT") else {
+            return;
+        };
+        crate::browser::connect(cdp.parse().unwrap()).await.unwrap();
+        let port = serve().await;
+        let ws = tempfile::tempdir().unwrap();
+        let w = ws.path().to_path_buf();
+        let act = |v: serde_json::Value| {
+            let w = w.clone();
+            async move { crate::browser::run_action(&v, &w).await }
+        };
+        act(serde_json::json!({"action": "navigate", "url": format!("http://127.0.0.1:{port}/")}))
+            .await
+            .unwrap();
+        let tabs = crate::browser::list_tabs(cdp.parse().unwrap())
+            .await
+            .unwrap()
+            .len();
+        let opts = super::record::Options {
+            mode: super::record::Mode::Stills,
+            keep_viewport: true,
+            ..Default::default()
+        };
+        super::record::start(&w, "Tabs", opts).await.unwrap();
+        let snap = act(serde_json::json!({"action": "snapshot"}))
+            .await
+            .unwrap();
+        let r: u64 = snap
+            .lines()
+            .find(|l| l.contains("Open two"))
+            .and_then(|l| l.split(['[', ']']).nth(1))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("{snap}"));
+        let clicked = act(serde_json::json!({"action": "click", "ref": r}))
+            .await
+            .unwrap();
+        assert!(clicked.contains("recording follows it"), "{clicked}");
+        let here = act(serde_json::json!({"action": "eval", "expression": "location.pathname"}))
+            .await
+            .unwrap();
+        assert!(here.contains("/two"), "{here}");
+        let after = crate::browser::list_tabs(cdp.parse().unwrap())
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(after, tabs, "the extra tab was closed");
+        let s = super::record::stop().await.unwrap();
+        assert!(s.frames >= 2);
+        // The steps as a smoke test: a baseline, then a passing run.
+        act(serde_json::json!({"action": "navigate", "url": format!("http://127.0.0.1:{port}/")}))
+            .await
+            .unwrap();
+        let saved = crate::browser::smoke_test(&w, "tabs", true).await.unwrap();
+        assert!(saved.starts_with("baseline saved"), "{saved}");
+        let ran = crate::browser::smoke_test(&w, "tabs", false).await.unwrap();
+        assert!(ran.starts_with("passed"), "{ran}");
     }
 }

@@ -394,6 +394,8 @@ pub struct TuiSessionState {
     pub slash_menu_index: usize,
     /// Centered command palette opened via Ctrl+P.
     pub command_palette_open: bool,
+    /// What the palette searches besides its entries (set when it opens).
+    pub(crate) palette_sources: crate::tui::palette::PaletteSources,
     /// Filter text for the command palette.
     pub command_palette_query: String,
     /// Approval request currently waiting for a local TUI answer.
@@ -530,6 +532,9 @@ pub struct TuiSessionState {
     pub push_url: Option<String>,
     /// Set while `/talk` listens; Esc sets it to stop.
     pub talk_stop: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// Long jobs that finished (a render, a background sub-agent): a
+    /// desktop notification goes out for each when you're not looking.
+    pub finished_jobs: Vec<String>,
     /// `/talk ptt`: Enter ends the take and sends it (set: Enter was used).
     pub talk_ptt: Option<bool>,
     /// `[ui] working_style`: `bar`, `dots` or `plain`.

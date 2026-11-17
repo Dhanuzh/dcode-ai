@@ -102,12 +102,61 @@ pub fn speak_until(text: &str, stop: &std::sync::atomic::AtomicBool) -> Result<b
     }
 }
 
+/// How spoken replies sound: the language to pick a voice for (`de`…;
+/// `None`: the system's default voice) and the speed (−3 slower … +3 faster).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Speech {
+    pub lang: Option<String>,
+    pub rate: i32,
+}
+
+static SPEECH: std::sync::Mutex<Speech> = std::sync::Mutex::new(Speech {
+    lang: None,
+    rate: 0,
+});
+
+/// Sets how [`speak`] and friends sound from now on.
+pub fn set_speech(s: Speech) {
+    if let Ok(mut g) = SPEECH.lock() {
+        *g = s;
+    }
+}
+
+pub fn speech() -> Speech {
+    SPEECH.lock().map(|g| g.clone()).unwrap_or_default()
+}
+
+/// A macOS voice for a language (`say -v ?` lists `Name  de_DE  # …`).
+fn mac_voice(lang: &str) -> Option<String> {
+    let o = Command::new("say").args(["-v", "?"]).output().ok()?;
+    String::from_utf8_lossy(&o.stdout).lines().find_map(|l| {
+        let mut parts = l.split_whitespace();
+        let mut name = Vec::new();
+        for p in parts.by_ref() {
+            if p.len() >= 5
+                && p.as_bytes()[2] == b'_'
+                && p[..2].chars().all(|c| c.is_ascii_lowercase())
+            {
+                return p.starts_with(lang).then(|| name.join(" "));
+            }
+            name.push(p);
+        }
+        None
+    })
+}
+
 fn speak_child(text: &str) -> Result<std::process::Child, String> {
     use std::io::Write;
     let text = speakable(text);
     if text.is_empty() {
         return Err("nothing to read aloud".into());
     }
+    let sp = speech();
+    // Only a plain language code reaches a command line.
+    let lang = sp
+        .lang
+        .filter(|l| (2..=3).contains(&l.len()) && l.chars().all(|c| c.is_ascii_lowercase()));
+    let rate = sp.rate.clamp(-3, 3);
     let mut cmd = if cfg!(windows) || (is_wsl() && on_path("powershell.exe")) {
         let mut c = Command::new(if cfg!(windows) {
             "powershell"
@@ -118,21 +167,37 @@ fn speak_child(text: &str) -> Result<std::process::Child, String> {
             "-NoProfile",
             "-NonInteractive",
             "-Command",
-            "Add-Type -AssemblyName System.Speech; \
-             (New-Object System.Speech.Synthesis.SpeechSynthesizer).Speak([Console]::In.ReadToEnd())",
+            &format!(
+                "Add-Type -AssemblyName System.Speech; \
+                 $s = New-Object System.Speech.Synthesis.SpeechSynthesizer; \
+                 $l = '{}'; if ($l) {{ $v = $s.GetInstalledVoices() | Where-Object {{ $_.VoiceInfo.Culture.TwoLetterISOLanguageName -eq $l }} | Select-Object -First 1; \
+                 if ($v) {{ $s.SelectVoice($v.VoiceInfo.Name) }} }}; \
+                 $s.Rate = {}; $s.Speak([Console]::In.ReadToEnd())",
+                lang.clone().unwrap_or_default(),
+                rate * 2
+            ),
         ]);
         c
     } else if cfg!(target_os = "macos") {
         let mut c = Command::new("say");
-        c.args(["-f", "-"]);
+        c.args(["-f", "-", "-r", &(175 + rate * 20).to_string()]);
+        if let Some(v) = lang.as_deref().and_then(mac_voice) {
+            c.args(["-v", &v]);
+        }
         c
     } else if on_path("spd-say") {
         let mut c = Command::new("spd-say");
-        c.args(["-e"]);
+        c.args(["-e", "-r", &(rate * 15).to_string()]);
+        if let Some(l) = &lang {
+            c.args(["-l", l]);
+        }
         c
     } else if on_path("espeak") {
         let mut c = Command::new("espeak");
-        c.args(["--stdin"]);
+        c.args(["--stdin", "-s", &(175 + rate * 20).to_string()]);
+        if let Some(l) = &lang {
+            c.args(["-v", l]);
+        }
         c
     } else {
         return Err("no voice found (install spd-say or espeak)".into());

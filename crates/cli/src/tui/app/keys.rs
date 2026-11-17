@@ -1258,6 +1258,11 @@ pub(super) fn handle_key_event(
             g.command_palette_open = true;
             g.command_palette_query.clear();
             g.palette_index = 0;
+            // It searches slash commands, recent prompts and files too.
+            g.palette_sources = crate::tui::palette::PaletteSources {
+                prompts: composer_history.clone(),
+                files: workspace_files.to_vec(),
+            };
         }
         // Ctrl+] (some terminals send it as Ctrl+5): the diagram viewer.
         (KeyCode::Char(']') | KeyCode::Char('5'), KeyModifiers::CONTROL) => {

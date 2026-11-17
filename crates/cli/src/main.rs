@@ -688,6 +688,7 @@ fn main() -> ExitCode {
     // configured via environment variables are available without requiring
     // users to `source` the file manually.
     load_dotenv();
+    dcode_ai_cli::bugreport::install_crash_hook();
 
     // Run on a thread with an enlarged stack (32 MiB) to avoid stack overflows
     // in debug builds on Windows where the default stack is only 1 MiB.

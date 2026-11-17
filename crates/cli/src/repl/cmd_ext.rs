@@ -137,6 +137,83 @@ impl Repl {
                     Err(e) => out.eprintln(&format!("[app] {e}")),
                 }
             }
+            "/move" => {
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let mut words = rest.split_whitespace();
+                match words.next() {
+                    Some("import") => match words.next() {
+                        Some(f) => {
+                            match dcode_ai_cli::handoff::import(&ws, std::path::Path::new(f)) {
+                                Ok(id) => out.println(&format!(
+                                    "[move] {id} is in this project now — /resume {id} continues it"
+                                )),
+                                Err(e) => out.eprintln(&format!("[move] {e}")),
+                            }
+                        }
+                        None => out.println("usage: /move import <file>"),
+                    },
+                    file => {
+                        let id = self.runtime.session_id().to_string();
+                        let path = file
+                            .map(std::path::PathBuf::from)
+                            .unwrap_or_else(|| ws.join(format!("{id}.dcode-session")));
+                        match dcode_ai_cli::handoff::export(&ws, &id, &path) {
+                            Ok(n) => {
+                                out.println(&format!(
+                                    "[move] {} ({n} events, secrets masked)",
+                                    path.display()
+                                ));
+                                out.println("[move] on the other computer, in the same project: /move import <file>, then /resume");
+                            }
+                            Err(e) => out.eprintln(&format!("[move] {e}")),
+                        }
+                    }
+                }
+            }
+            "/checkpoint" => {
+                use dcode_ai_cli::checkpoints;
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let mut words = rest.split_whitespace();
+                let first = words.next();
+                let r: Result<Vec<String>, String> = match first {
+                    Some("list") | Some("ls") => checkpoints::list(&ws).map(|v| {
+                        if v.is_empty() {
+                            vec!["no checkpoints yet — /checkpoint [name] takes one".into()]
+                        } else {
+                            v.iter()
+                                .map(|c| format!("{:>3}. {}  ({})", c.n, c.name, c.when))
+                                .collect()
+                        }
+                    }),
+                    Some("restore") => match words.next().and_then(|n| n.parse().ok()) {
+                        Some(n) => checkpoints::restore(&ws, n).map(|(changed, removed, before)| {
+                            vec![format!(
+                                "restored checkpoint {n}: {changed} file(s) put back, {removed} removed — the state before is checkpoint {} (/checkpoint restore {} undoes this)",
+                                before.n, before.n
+                            )]
+                        }),
+                        None => Err("usage: /checkpoint restore <n> (/checkpoint list)".into()),
+                    },
+                    Some("drop") => match words.next().and_then(|n| n.parse().ok()) {
+                        Some(n) => checkpoints::drop(&ws, n).map(|()| vec![format!("dropped checkpoint {n}")]),
+                        None => Err("usage: /checkpoint drop <n>".into()),
+                    },
+                    _ => checkpoints::take(&ws, rest.trim()).map(|c| {
+                        vec![format!(
+                            "checkpoint {}: {} — your files and branch are untouched; /checkpoint restore {} brings this back",
+                            c.n, c.name, c.n
+                        )]
+                    }),
+                };
+                match r {
+                    Ok(lines) => {
+                        for l in lines {
+                            out.println(&format!("[checkpoint] {l}"));
+                        }
+                    }
+                    Err(e) => out.eprintln(&format!("[checkpoint] {e}")),
+                }
+            }
             "/browser" => {
                 use dcode_ai_core::browser;
                 let mut words = rest.split_whitespace();
@@ -148,6 +225,49 @@ impl Repl {
                         None => Err("usage: /browser connect <port> — start your browser with --remote-debugging-port=<port>".into()),
                     },
                     Some("close") => browser::close().await,
+                    Some("remember") => browser::remember_site(words.next()).await,
+                    Some("test") => {
+                        let ws = self.runtime.workspace_root().to_path_buf();
+                        match (words.next(), words.next()) {
+                            (Some("save"), Some(name)) => browser::smoke_test(&ws, name, true).await,
+                            (Some("run"), Some("all")) | (Some("run"), None) => {
+                                let dir = ws.join(".dcode-ai/browser-tests");
+                                let mut names: Vec<String> = std::fs::read_dir(&dir)
+                                    .into_iter()
+                                    .flatten()
+                                    .flatten()
+                                    .filter(|e| e.path().join("steps.json").is_file())
+                                    .filter_map(|e| e.file_name().to_str().map(str::to_string))
+                                    .collect();
+                                names.sort();
+                                if names.is_empty() {
+                                    Err("no browser tests yet — /browser test save <name>".into())
+                                } else {
+                                    let mut all = Vec::new();
+                                    for n in names {
+                                        match browser::smoke_test(&ws, &n, false).await {
+                                            Ok(r) => all.push(format!("── {n}: {r}")),
+                                            Err(e) => all.push(format!("── {n}: {e}")),
+                                        }
+                                    }
+                                    Ok(all.join("\n"))
+                                }
+                            }
+                            (Some("run"), Some(name)) => browser::smoke_test(&ws, name, false).await,
+                            _ => Err("usage: /browser test save <name> (baseline from the saved steps) · /browser test run [name|all]".into()),
+                        }
+                    }
+                    Some("forget") => match words.next() {
+                        Some(site) => browser::forget_site(site),
+                        None => {
+                            let sites = browser::remembered_sites();
+                            Err(if sites.is_empty() {
+                                "usage: /browser forget <site> (nothing remembered yet)".into()
+                            } else {
+                                format!("usage: /browser forget <site> — remembered: {}", sites.join(", "))
+                            })
+                        }
+                    },
                     Some("save") => {
                         let steps = browser::recorded_steps();
                         let name = words
@@ -176,7 +296,7 @@ impl Repl {
                         }
                     }
                     Some(other) => Err(format!(
-                        "unknown `/browser {other}` — /browser [status|open [url]|connect <port>|save [name]|close]"
+                        "unknown `/browser {other}` — /browser [status|open [url]|connect <port>|save [name]|remember [site]|forget <site>|test …|close]"
                     )),
                 };
                 match msg {

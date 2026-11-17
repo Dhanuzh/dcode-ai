@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-autoresearch"
-version = "1.0.74"
+version = "1.0.75"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-cli"
-version = "1.0.74"
+version = "1.0.75"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -1720,6 +1720,7 @@ dependencies = [
  "dcode-ai-common",
  "dcode-ai-core",
  "dcode-ai-runtime",
+ "flate2",
  "futures",
  "ignore",
  "image",
@@ -1760,7 +1761,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-common"
-version = "1.0.74"
+version = "1.0.75"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1777,7 +1778,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-core"
-version = "1.0.74"
+version = "1.0.75"
 dependencies = [
  "ab_glyph",
  "async-trait",
@@ -1814,7 +1815,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-runtime"
-version = "1.0.74"
+version = "1.0.75"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1827,6 +1828,7 @@ dependencies = [
  "landlock",
  "libc",
  "portable-pty",
+ "proptest",
  "reqwest 0.12.28",
  "serde",
  "serde_json",

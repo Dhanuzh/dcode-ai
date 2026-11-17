@@ -240,6 +240,25 @@ impl Repl {
                         }
                         None => out.println("[video] no recordings yet — /record <what to show>"),
                     },
+                    "render" if words.clone().next() == Some("all") => {
+                        // Every recording again (after a style or voice change).
+                        let total = videos.len();
+                        if total == 0 {
+                            out.println("[video] no recordings yet — /record <what to show>");
+                        }
+                        let (mut ok, mut failed) = (0, Vec::new());
+                        for (i, (id, dir)) in videos.iter().enumerate() {
+                            out.println(&format!("[video] {}/{total}: {id}", i + 1));
+                            match render_live(out, dir.clone(), Default::default()).await {
+                                Ok(_) => ok += 1,
+                                Err(e) => failed.push(format!("{id}: {e}")),
+                            }
+                        }
+                        out.println(&format!("[video] re-rendered {ok} of {total}"));
+                        for f in failed {
+                            out.eprintln(&format!("[video] {f}"));
+                        }
+                    }
                     "render" => match pick(words.next()) {
                         Some((id, dir)) => {
                             out.println(&format!("[video] rendering {id}… (voicing the script and every cut can take a minute)"));
@@ -464,6 +483,64 @@ impl Repl {
                             }
                         }
                     }
+                    "brand" => {
+                        let project = ws.join(".dcode-ai/brand.json");
+                        if words.next() == Some("init") {
+                            if project.is_file() {
+                                out.println(&format!("[video] already there: {}", project.display()));
+                                return Ok(true);
+                            }
+                            let template = serde_json::json!({
+                                "name": "",
+                                "logo": "",
+                                "logo_corner": "top-right",
+                                "colors": {"from": "#4c348c", "to": "#182252", "accent": "#ffd166"},
+                                "font": "",
+                                "intro": "",
+                                "outro": ""
+                            });
+                            match std::fs::write(&project, serde_json::to_string_pretty(&template).unwrap_or_default()) {
+                                Ok(()) => out.println(&format!("[video] brand kit started: {} — set a logo (PNG), colours, font (.ttf), intro and outro; every render uses it", project.display())),
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            }
+                            return Ok(true);
+                        }
+                        let probe = ws.join(".dcode-ai/videos/x");
+                        match dcode_ai_core::video::brand::file_for(&probe) {
+                            Some(f) => match dcode_ai_core::video::brand::load(&f) {
+                                Ok(b) => {
+                                    out.println(&format!("[video] brand kit: {}", f.display()));
+                                    out.println(&format!(
+                                        "[video]   {} · logo {} · colours {} → {} (accent {}) · font {}",
+                                        if b.name.is_empty() { "(no name)" } else { &b.name },
+                                        if b.logo.is_empty() { "none" } else { &b.logo },
+                                        or_dash(&b.colors.from), or_dash(&b.colors.to), or_dash(&b.colors.accent),
+                                        if b.font.is_empty() { "default" } else { &b.font },
+                                    ));
+                                    for p in dcode_ai_core::video::brand::check(&b) {
+                                        out.eprintln(&format!("[video]   ⚠ {p}"));
+                                    }
+                                }
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            },
+                            None => out.println("[video] no brand kit — /video brand init starts one in .dcode-ai/brand.json (or put brand.json in ~/.dcode-ai for every project)"),
+                        }
+                    }
+                    "doc" => match pick(words.next()) {
+                        Some((id, dir)) => match dcode_ai_core::video::guide::write(&dir) {
+                            Ok(files) => {
+                                out.println(&format!("[video] how-to guide for {id}: {} steps", files.len().saturating_sub(2)));
+                                for f in files.iter().take(2) {
+                                    out.println(&format!("[video]   {}", f.strip_prefix(&ws).unwrap_or(f).display()));
+                                }
+                                if let Some(html) = files.get(1) {
+                                    let _ = dcode_ai_cli::ffmpeg_setup::open(html);
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        },
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
                     "steps" => match pick(words.next()) {
                         Some((id, dir)) => match dcode_ai_core::video::record::load(&dir) {
                             Ok(saved) => {
@@ -2129,6 +2206,7 @@ async fn render_live(
             let _ = tx.send(p);
         })
     });
+    let began = std::time::Instant::now();
     let show = |line: String| live_line(out, "[video] ⏳", &line);
     let mut tick = tokio::time::interval(std::time::Duration::from_millis(250));
     let result = loop {
@@ -2142,6 +2220,16 @@ async fn render_live(
         }
     };
     live_line(out, "[video] ⏳", "");
+    // A long render: say so when it's done, in case you looked away.
+    if began.elapsed() > std::time::Duration::from_secs(30)
+        && let ReplOutput::Tui(st) = out
+        && let Ok(mut g) = st.lock()
+    {
+        g.finished_jobs.push(match &result {
+            Ok(Ok(r)) => format!("Video rendered · {:.0}s", r.seconds),
+            _ => "Video render failed".into(),
+        });
+    }
     result.map_err(|e| e.to_string())?
 }
 
@@ -2192,6 +2280,11 @@ fn picture(path: &std::path::Path, cols: u32) -> Option<(u32, Cells)> {
     Some((rows, grid))
 }
 
+/// Half-block rows of an image, `cols` wide.
+pub(super) fn picture_rows(path: &std::path::Path, cols: u32) -> Option<Cells> {
+    picture(path, cols).map(|(_, rows)| rows)
+}
+
 /// Shows a picture in the transcript (or prints it with colour codes).
 fn show_picture(out: ReplOutput<'_>, title: &str, path: &std::path::Path) {
     let cols = crossterm::terminal::size()
@@ -2212,6 +2305,40 @@ fn show_picture(out: ReplOutput<'_>, title: &str, path: &std::path::Path) {
         return;
     }
     println!("{title}");
+    // Terminals that draw real images: kitty's graphics protocol (kitty,
+    // WezTerm, Ghostty) or iTerm2's inline images.
+    if let Some(proto) = image_protocol()
+        && let Ok(bytes) = std::fs::read(path)
+    {
+        use base64::Engine;
+        let png = image::load_from_memory(&bytes).ok().and_then(|i| {
+            let mut out = Vec::new();
+            i.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+                .ok()
+                .map(|_| out)
+        });
+        if let Some(png) = png {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&png);
+            match proto {
+                "kitty" => {
+                    // Sent in 4096-byte chunks, scaled to the terminal width.
+                    let chunks: Vec<&[u8]> = b64.as_bytes().chunks(4096).collect();
+                    for (i, c) in chunks.iter().enumerate() {
+                        let more = u8::from(i + 1 < chunks.len());
+                        let head = if i == 0 {
+                            format!("a=T,f=100,c={cols},m={more}")
+                        } else {
+                            format!("m={more}")
+                        };
+                        print!("\x1b_G{head};{}\x1b\\", String::from_utf8_lossy(c));
+                    }
+                }
+                _ => print!("\x1b]1337;File=inline=1;width={cols};preserveAspectRatio=1:{b64}\x07"),
+            }
+            println!();
+            return;
+        }
+    }
     for row in rows {
         let mut line = String::new();
         for (t, b) in row {
@@ -2224,6 +2351,19 @@ fn show_picture(out: ReplOutput<'_>, title: &str, path: &std::path::Path) {
     }
 }
 
+/// The terminal's image protocol, if it has one: `kitty` or `iterm`.
+fn image_protocol() -> Option<&'static str> {
+    let var = |k: &str| std::env::var(k).unwrap_or_default().to_ascii_lowercase();
+    let (term, program) = (var("TERM"), var("TERM_PROGRAM"));
+    if term.contains("kitty") || program == "ghostty" || program == "wezterm" {
+        Some("kitty")
+    } else if program == "iterm.app" {
+        Some("iterm")
+    } else {
+        None
+    }
+}
+
 /// Renders the recording's preview frame `n` (from 1) to a PNG.
 fn still_file(dir: &std::path::Path, n: usize) -> Result<std::path::PathBuf, String> {
     let saved = dcode_ai_core::video::record::load(dir)?;
@@ -2232,6 +2372,10 @@ fn still_file(dir: &std::path::Path, n: usize) -> Result<std::path::PathBuf, Str
         .get(n.saturating_sub(1))
         .ok_or_else(|| format!("no frame {n} — the recording has {}", saved.frames.len()))?;
     Ok(dir.join("raw").join(&f.file))
+}
+
+fn or_dash(s: &str) -> &str {
+    if s.is_empty() { "—" } else { s }
 }
 
 /// Sets one field of a recording's edit list.

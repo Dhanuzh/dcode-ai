@@ -98,6 +98,8 @@ enum TalkMode {
     Test,
     /// Push-to-talk: no pause detection; Enter ends the take and sends it.
     Ptt,
+    /// Waits for "hey dcode", then takes the request (hands-free).
+    Wake,
 }
 
 fn talk_say(st: &Arc<Mutex<TuiSessionState>>, line: String) {
@@ -158,6 +160,10 @@ async fn talk_session(
     let _armed = run_talk_stop_guard_with_state(Some(Arc::clone(&st)), stop.clone());
     if mode == TalkMode::Test {
         talk_mic_test(&st, &model, &stop).await;
+        return;
+    }
+    if mode == TalkMode::Wake {
+        talk_wake(&st, &tx, &model, &stop).await;
         return;
     }
     let (max, quiet) = if mode == TalkMode::Standup {
@@ -254,7 +260,10 @@ async fn talk_session(
             break;
         }
         talk_say(&st, format!("[talk] you: {text}"));
-        let _ = tx.send(TuiCmd::Submit(text));
+        let _ = tx.send(TuiCmd::Submit(spoken_request(
+            &text,
+            heard.language.as_deref(),
+        )));
         if !talk_wait_for_reply(&st, &stop).await {
             talk_say(&st, "[talk] stopped".into());
             break;
@@ -277,6 +286,185 @@ async fn talk_session(
             break;
         }
     }
+}
+
+/// The voice persona (`/talk persona`): how spoken replies sound.
+fn voice_persona() -> String {
+    dcode_ai_common::config::dcode_ai_home_dir()
+        .and_then(|d| std::fs::read_to_string(d.join("voice-persona")).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// (tone asked of the agent, speech speed) for a persona.
+fn persona_style(p: &str) -> Option<(&'static str, i32)> {
+    match p {
+        "calm" => Some(("calmly and warmly, in plain, unhurried sentences", -1)),
+        "brief" => Some(("in one or two short sentences, no lists", 1)),
+        "cheerful" => Some(("in an upbeat, friendly way", 1)),
+        _ => None,
+    }
+}
+
+/// What is sent for something said in a spoken conversation: the words,
+/// plus how to answer — in the language it was said in, in the persona's
+/// tone. Also sets the voice that reads the answer.
+fn spoken_request(text: &str, language: Option<&str>) -> String {
+    use dcode_ai_cli::voice::stt;
+    let lang = language.filter(|l| *l != "en");
+    let persona = voice_persona();
+    let style = persona_style(&persona);
+    crate::tui::notify::set_speech(crate::tui::notify::Speech {
+        lang: lang.map(str::to_string),
+        rate: style.map(|s| s.1).unwrap_or(0),
+    });
+    let mut asks = Vec::new();
+    if let Some(l) = lang {
+        asks.push(format!("answer in {}", stt::language_name(l)));
+    }
+    if let Some((tone, _)) = style {
+        asks.push(format!("it will be read aloud: answer {tone}"));
+    }
+    if asks.is_empty() {
+        text.to_string()
+    } else {
+        format!("{text}\n\n({}.)", asks.join("; "))
+    }
+}
+
+/// The wake phrase in what was heard: what came after it (maybe empty), or
+/// `None` when it wasn't said. Whisper writes "hey dcode" many ways.
+fn after_wake_word(heard: &str) -> Option<String> {
+    let lower = heard.to_lowercase();
+    let words: Vec<String> = lower
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|w| !w.is_empty())
+        .map(str::to_string)
+        .collect();
+    let joined = words.join(" ");
+    for wake in [
+        "hey dcode",
+        "hey d code",
+        "hey decode",
+        "hey dee code",
+        "hey the code",
+        "hey decoder",
+        "hi dcode",
+        "hi decode",
+        "okay dcode",
+        "ok dcode",
+        "a decode",
+        "hey d c o d e",
+    ] {
+        if let Some(pos) = joined.find(wake) {
+            let rest = joined[pos + wake.len()..].trim();
+            // Back to the original casing and punctuation for the request.
+            let n = rest.split_whitespace().count();
+            let original: Vec<&str> = heard.split_whitespace().collect();
+            let tail = original[original.len().saturating_sub(n)..].join(" ");
+            return Some(
+                tail.trim_matches(|c: char| c == ',' || c == '.')
+                    .trim()
+                    .to_string(),
+            );
+        }
+    }
+    None
+}
+
+/// `/talk wake`: listens in short stretches for "hey dcode"; then takes the
+/// request (what followed, or the next thing said), answers aloud, and
+/// waits again. Esc stops.
+async fn talk_wake(
+    st: &Arc<Mutex<TuiSessionState>>,
+    tx: &tokio::sync::mpsc::UnboundedSender<TuiCmd>,
+    model: &str,
+    stop: &Arc<std::sync::atomic::AtomicBool>,
+) {
+    use dcode_ai_cli::voice::stt;
+    use std::sync::atomic::Ordering;
+    talk_say(
+        st,
+        "[talk] 👂 say \"hey dcode\" and then what you need — Esc stops listening".into(),
+    );
+    let quiet = |_: String| {};
+    loop {
+        if stop.load(Ordering::SeqCst) {
+            break;
+        }
+        let heard = match stt::listen(
+            model,
+            std::time::Duration::from_secs(8),
+            std::time::Duration::from_millis(900),
+            stop.clone(),
+            &quiet,
+        )
+        .await
+        {
+            Ok(h) => h,
+            Err(e) if e == "stopped" => break,
+            Err(e) => {
+                talk_say(st, format!("[talk] {e}"));
+                break;
+            }
+        };
+        if heard.by_esc {
+            break;
+        }
+        let Some(mut request) = after_wake_word(&heard.text) else {
+            continue;
+        };
+        let mut language = heard.language.clone();
+        if request.is_empty() {
+            let _ = crate::tui::notify::speak("Yes?");
+            talk_say(st, "[talk] 🎙 yes? (listening)".into());
+            match stt::listen(
+                model,
+                std::time::Duration::from_secs(60),
+                std::time::Duration::from_millis(1500),
+                stop.clone(),
+                &quiet,
+            )
+            .await
+            {
+                Ok(h) if !h.by_esc && !h.text.is_empty() => {
+                    request = h.text;
+                    language = h.language;
+                }
+                Ok(h) if h.by_esc => break,
+                _ => continue,
+            }
+        }
+        if stt::is_stop(&request) {
+            break;
+        }
+        talk_say(st, format!("[talk] you: {request}"));
+        let _ = tx.send(TuiCmd::Submit(spoken_request(
+            &request,
+            language.as_deref(),
+        )));
+        if !talk_wait_for_reply(st, stop).await {
+            break;
+        }
+        let reply = st
+            .lock()
+            .ok()
+            .and_then(|g| {
+                g.blocks.iter().rev().find_map(|b| match b {
+                    crate::tui::state::DisplayBlock::Assistant(t) => Some(t.clone()),
+                    _ => None,
+                })
+            })
+            .unwrap_or_default();
+        let s2 = stop.clone();
+        let cut =
+            tokio::task::spawn_blocking(move || crate::tui::notify::speak_until(&reply, &s2)).await;
+        if matches!(cut, Ok(Ok(true))) {
+            break;
+        }
+        talk_say(st, "[talk] 👂 waiting for \"hey dcode\"…".into());
+    }
+    talk_say(st, "[talk] stopped listening for \"hey dcode\"".into());
 }
 
 /// `/talk test`: listens for a few seconds and shows the level live, then
@@ -603,7 +791,7 @@ impl Repl {
                 _ => out.println("usage: /teams on|off — set up once with `dcode-ai teams setup`"),
             },
             "/talk" | "/standup" => {
-                let model = self
+                let mut model = self
                     .runtime
                     .config()
                     .ui
@@ -611,6 +799,52 @@ impl Repl {
                     .clone()
                     .unwrap_or_else(|| "tiny.en".into());
                 let sub = rest.trim();
+                if command == "/talk" && (sub == "persona" || sub.starts_with("persona ")) {
+                    let want = sub.trim_start_matches("persona").trim();
+                    let file = dcode_ai_common::config::dcode_ai_home_dir()
+                        .map(|d| d.join("voice-persona"));
+                    match (want, file) {
+                        ("", _) => {
+                            let p = voice_persona();
+                            out.println(&format!(
+                                "[talk] voice persona: {} — /talk persona calm|brief|cheerful|off",
+                                if p.is_empty() {
+                                    "none (plain)"
+                                } else {
+                                    p.as_str()
+                                }
+                            ));
+                        }
+                        ("off" | "none", Some(f)) => {
+                            let _ = std::fs::remove_file(f);
+                            out.println("[talk] voice persona off");
+                        }
+                        (p, Some(f)) if persona_style(p).is_some() => {
+                            let _ = std::fs::create_dir_all(
+                                f.parent().unwrap_or(std::path::Path::new(".")),
+                            );
+                            match std::fs::write(&f, p) {
+                                Ok(()) => out.println(&format!(
+                                    "[talk] spoken replies will be {p} from now on"
+                                )),
+                                Err(e) => out.eprintln(&format!("[talk] {e}")),
+                            }
+                        }
+                        _ => out.println("usage: /talk persona calm|brief|cheerful|off"),
+                    }
+                    return Ok(true);
+                }
+                // Any language: the multilingual model, answers in the
+                // language you spoke.
+                if command == "/talk" && sub == "lang" && model.ends_with(".en") {
+                    model = model.trim_end_matches(".en").to_string();
+                    if model != "tiny" && model != "base" {
+                        model = "tiny".into();
+                    }
+                    if model == "base" {
+                        model = "tiny".into();
+                    }
+                }
                 if command == "/standup" && sub != "voice" {
                     if sub.is_empty() {
                         out.println(
@@ -639,6 +873,8 @@ impl Repl {
                         (_, "send") => TalkMode::Send,
                         (_, "test") => TalkMode::Test,
                         (_, "ptt") => TalkMode::Ptt,
+                        (_, "wake") => TalkMode::Wake,
+                        (_, "lang") => TalkMode::Loop,
                         _ => TalkMode::Prompt,
                     };
                     tokio::spawn(talk_session(Arc::clone(st), tx, model, mode));
@@ -1531,5 +1767,33 @@ mod tests {
         }
 
         assert!(state.lock().is_ok_and(|g| g.talk_stop.is_none()));
+    }
+}
+
+#[cfg(test)]
+mod wake_tests {
+    use super::*;
+
+    #[test]
+    fn the_wake_word_is_found_however_whisper_spells_it() {
+        assert_eq!(
+            after_wake_word("Hey, DCode, run the tests.").as_deref(),
+            Some("run the tests")
+        );
+        assert_eq!(after_wake_word("hey decode").as_deref(), Some(""));
+        assert_eq!(
+            after_wake_word("Hey D-code what changed today?").as_deref(),
+            Some("what changed today?")
+        );
+        assert_eq!(after_wake_word("let's decode this file"), None);
+        assert_eq!(after_wake_word("hello there"), None);
+    }
+
+    #[test]
+    fn spoken_requests_ask_for_the_language() {
+        let r = spoken_request("wie spät ist es", Some("de"));
+        assert!(r.contains("answer in German"), "{r}");
+        let r = spoken_request("hi", Some("en"));
+        assert!(!r.contains("answer in"), "{r}");
     }
 }

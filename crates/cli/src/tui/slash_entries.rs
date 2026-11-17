@@ -33,6 +33,11 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
             ),
             ("render", false, "render again from the edit list"),
             (
+                "render all",
+                false,
+                "re-render every recording (after a style change)",
+            ),
+            (
                 "edit",
                 true,
                 "change it in plain words — \"under 30 s, no music\"",
@@ -70,6 +75,16 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
             ("voices try", true, "hear a voice: <name> [text]"),
             ("voices use", true, "draft voice from now on: <name> [id]"),
             ("steps", false, "the recording's steps, numbered"),
+            (
+                "doc",
+                false,
+                "a step-by-step how-to guide (Markdown + HTML)",
+            ),
+            (
+                "brand",
+                false,
+                "the brand kit: logo, colours, font, intro/outro (`brand init`)",
+            ),
             ("redo", true, "re-record one step: <step>"),
             ("frames", false, "the stills, drawn in the terminal"),
             (
@@ -110,6 +125,17 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
                 false,
                 "push-to-talk: speak, then Enter to send (no pause detection)",
             ),
+            (
+                "wake",
+                false,
+                "hands-free: say \"hey dcode\", then what you need",
+            ),
+            (
+                "lang",
+                false,
+                "any language: answers in the language you speak",
+            ),
+            ("persona", false, "how replies sound: calm, brief, cheerful"),
         ],
     ),
     ("/standup", &[("voice", false, "talk through your day")]),
@@ -178,7 +204,32 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
             ("open", false, "open it (optionally a url)"),
             ("connect", true, "<port>"),
             ("save", false, "save the recorded steps"),
+            ("remember", false, "keep this site's sign-in for next time"),
+            ("forget", true, "<site>: drop a remembered sign-in"),
+            (
+                "test save",
+                true,
+                "<name>: the saved steps as a smoke test, with a baseline",
+            ),
+            (
+                "test run",
+                false,
+                "replay the smoke tests and compare screenshots",
+            ),
             ("close", false, "close it"),
+        ],
+    ),
+    (
+        "/move",
+        &[("import", true, "<file>: a session from another computer")],
+    ),
+    ("/budget", &[("off", false, "no budget (or /budget <usd>)")]),
+    (
+        "/checkpoint",
+        &[
+            ("list", false, "the saved checkpoints"),
+            ("restore", true, "<n>: put the working tree back"),
+            ("drop", true, "<n>: delete one"),
         ],
     ),
     (

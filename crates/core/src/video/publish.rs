@@ -258,6 +258,14 @@ pub fn publish(dir: &Path) -> Result<Vec<String>, String> {
             desc.push_str("Chapters\n");
             desc.push_str(&chapters);
         }
+        // The render's own description (chapters checked against YouTube's
+        // rules) when there is one.
+        if cut == "long"
+            && let Ok(d) = std::fs::read_to_string(dir.join("description.txt"))
+            && !d.trim().is_empty()
+        {
+            desc = d;
+        }
         std::fs::write(out.join("title.txt"), format!("{}\n", edl.title.trim()))
             .map_err(|e| e.to_string())?;
         std::fs::write(out.join("description.txt"), desc).map_err(|e| e.to_string())?;

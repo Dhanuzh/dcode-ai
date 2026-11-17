@@ -1021,7 +1021,8 @@ impl Repl {
             }
             "/help" | "/keymaps" | "/status" | "/context" | "/diff" | "/copy" | "/dashboard"
             | "/dash" | "/transcript" | "/cost" | "/usage" | "/release-notes" | "/goals"
-            | "/todos" | "/stats" | "/doctor" | "/map" | "/feedback" => {
+            | "/todos" | "/stats" | "/doctor" | "/map" | "/feedback" | "/bugreport" | "/budget"
+            | "/pin" | "/pins" | "/unpin" | "/recap" => {
                 return self.cmd_info(input, command, rest, parts, out).await;
             }
             "/agent" | "/update" | "/vim" | "/permissions" | "/permission-bypass" | "/models"
@@ -1032,8 +1033,9 @@ impl Repl {
             | "/terminal-setup" | "/project-config" => {
                 return self.cmd_settings(input, command, rest, parts, out).await;
             }
-            "/reload" | "/add-dir" | "/skills" | "/memory" | "/browser" | "/app" | "/setup"
-            | "/plugins" | "/plugin" | "/mcp" | "/agents" | "/hooks" | "/init" | "/ide" => {
+            "/reload" | "/add-dir" | "/skills" | "/memory" | "/browser" | "/checkpoint"
+            | "/move" | "/app" | "/setup" | "/plugins" | "/plugin" | "/mcp" | "/agents"
+            | "/hooks" | "/init" | "/ide" => {
                 return self.cmd_ext(input, command, rest, parts, out).await;
             }
             "/office" | "/timeline" | "/diagram" | "/talk" | "/standup" | "/slack" | "/teams"
@@ -1419,6 +1421,27 @@ impl Repl {
         // `dcode-ai join <id>` on this machine: a private local invite (full
         // interface, calls; no knock — only this user can read its key).
         self.start_local_invite().await;
+        // Achievements earned since last time: a quiet toast, once each.
+        {
+            let (ws, st) = (
+                self.runtime.workspace_root().to_path_buf(),
+                tui_state.clone(),
+            );
+            tokio::spawn(async move {
+                let fresh =
+                    tokio::task::spawn_blocking(move || dcode_ai_cli::recap::new_achievements(&ws))
+                        .await
+                        .unwrap_or_default();
+                if !fresh.is_empty()
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.show_toast(
+                        format!("Achievement: {} (/recap)", fresh.join(" · ")),
+                        crate::tui::state::ToastKind::Success,
+                    );
+                }
+            });
+        }
         // The team chat box sends straight away, even mid-turn.
         if let (Some(tx), Ok(mut g)) = (self.runtime.event_tx(), tui_state.lock()) {
             let name = dcode_ai_cli::people::my_name(self.runtime.workspace_root());

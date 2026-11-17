@@ -218,6 +218,8 @@ impl TuiSessionState {
             push_url: None,
             talk_stop: None,
             talk_ptt: None,
+            finished_jobs: Vec::new(),
+            palette_sources: Default::default(),
             working_style: "bar".into(),
             shimmer: true,
             sounds: false,
@@ -617,7 +619,7 @@ impl TuiSessionState {
     }
 
     fn clamp_palette_index(&mut self) {
-        let filtered = filter_palette_rows(&self.command_palette_query);
+        let filtered = filter_palette_rows(&self.command_palette_query, &self.palette_sources);
         let selectable = palette_selectable_indices(&filtered);
         self.palette_index = self.palette_index.min(selectable.len().saturating_sub(1));
     }
@@ -1045,7 +1047,8 @@ impl TuiSessionState {
                 }
             }
             CommandPaletteKey::Down => {
-                let filtered = filter_palette_rows(&self.command_palette_query);
+                let filtered =
+                    filter_palette_rows(&self.command_palette_query, &self.palette_sources);
                 let selectable = palette_selectable_indices(&filtered);
                 if !selectable.is_empty() {
                     self.palette_index =
@@ -1053,14 +1056,19 @@ impl TuiSessionState {
                 }
             }
             CommandPaletteKey::Accept => {
-                let filtered = filter_palette_rows(&self.command_palette_query);
+                let filtered =
+                    filter_palette_rows(&self.command_palette_query, &self.palette_sources);
                 let selectable = palette_selectable_indices(&filtered);
                 let pick = self.palette_index.min(selectable.len().saturating_sub(1));
-                if let Some(&abs_idx) = selectable.get(pick)
-                    && let PaletteRow::Entry { label, .. } = filtered[abs_idx]
-                {
-                    let cmd = palette_command_for_label(label);
-                    self.set_input_text(cmd.to_string());
+                if let Some(&abs_idx) = selectable.get(pick) {
+                    match &filtered[abs_idx] {
+                        PaletteRow::Entry { label, .. } => {
+                            let cmd = palette_command_for_label(label);
+                            self.set_input_text(cmd.to_string());
+                        }
+                        PaletteRow::Found { insert, .. } => self.set_input_text(insert.clone()),
+                        PaletteRow::Section(_) => {}
+                    }
                 }
                 self.close_command_palette();
             }
@@ -2527,6 +2535,8 @@ impl TuiSessionState {
                 self.push_block(DisplayBlock::System(format!(
                     "Sub-agent {short}… done: {status}"
                 )));
+                self.finished_jobs
+                    .push(format!("Sub-agent {short}… done: {status}"));
                 transcript_dirty = true;
             }
             AgentEvent::BusyStateChanged { state } => {

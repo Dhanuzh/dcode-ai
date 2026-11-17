@@ -1123,6 +1123,11 @@ pub fn run_blocking(
             // (`ESC ] 9 ; <msg> BEL`) shows a desktop notification on supporting
             // terminals; terminals without focus reporting keep focused=true and
             // simply never trigger it.
+            // Long jobs that finished while you were elsewhere.
+            let jobs = std::mem::take(&mut g.finished_jobs);
+            if g.notifications_enabled && !terminal_focused && !jobs.is_empty() {
+                crate::tui::notify::desktop_notify("dcode-ai", &jobs.join(" · "));
+            }
             if g.notifications_enabled && !terminal_focused {
                 let where_ = g
                     .workspace_root

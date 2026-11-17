@@ -95,6 +95,12 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/ide",
     "/import",
     "/feedback",
+    "/bugreport",
+    "/budget",
+    "/pin",
+    "/recap",
+    "/pins",
+    "/unpin",
     "/new",
     "/export",
     "/share",
@@ -110,6 +116,8 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/clear --keep-context",
     "/undo",
     "/rewind",
+    "/checkpoint",
+    "/move",
     "/plugins",
     "/setup",
     "/update",
@@ -271,6 +279,18 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/ide" => "pull editor selection/open files into context",
         "/import" => "import Claude Code CLAUDE.md (or /import chats)",
         "/feedback" => "report a bug or request a feature",
+        "/recap" => {
+            "today in a card (and a short video): commits, lines, sessions, tokens, streaks and achievements"
+        }
+        "/pin" => "keep a fact word for word through every compaction: /pin <fact>",
+        "/pins" => "the pinned facts",
+        "/unpin" => "drop a pinned fact: /unpin <n>",
+        "/budget" => {
+            "a cost budget for this session: /budget <usd> · /budget off — at 80% a heads-up, at 100% it asks before going on"
+        }
+        "/bugreport" => {
+            "one file for a bug report: version, crash, log, config and events (secrets masked)"
+        }
         "/new" => "start a new chat",
         "/export" => "save the conversation as Markdown (secrets masked); /export copy copies it",
         "/share" => "share the conversation as a secret GitHub gist (secrets masked)",
@@ -294,6 +314,12 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/update" => "install the latest dcode-ai release (/update --check to only look)",
         "/setup" => "starter packs: /setup lists them, /setup <id>… installs (roles, languages)",
         "/rewind" => "restore code and/or conversation to an earlier message (Esc Esc)",
+        "/move" => {
+            "carry this session to another computer: /move [file] writes it, /move import <file> there, then /resume"
+        }
+        "/checkpoint" => {
+            "named snapshots of the whole working tree: /checkpoint [name] · list · restore <n> · drop <n>"
+        }
         "/redo" => "redo the last undone turn",
         "/diff" => "show git diff (incl. untracked)",
         "/copy" => "copy the last response as markdown (/copy link: the newest link)",

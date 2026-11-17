@@ -148,7 +148,8 @@ pub struct AgentLoop {
     /// Effective input-token budget for mid-turn trimming. 0 disables it.
     context_token_limit: usize,
     /// Stop once the estimated session cost reaches this (USD). 0 = off.
-    pub max_cost_usd: f64,
+    /// Shared, so `/budget` can change it while the session runs.
+    pub cost_budget: CostBudget,
     /// Auto mode: the model's safe/ask verdict per command, this session.
     auto_verdicts: std::collections::HashMap<String, bool>,
     /// Models to try, in order, when the model is overloaded or unavailable.
@@ -198,7 +199,7 @@ impl AgentLoop {
             hooks,
             undo: UndoManager::default(),
             context_token_limit: 0,
-            max_cost_usd: 0.0,
+            cost_budget: CostBudget::default(),
             auto_verdicts: std::collections::HashMap::new(),
             fallback_models: Vec::new(),
         }
@@ -411,15 +412,58 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                     self.max_turns
                 )));
             }
-            if let Some(msg) =
-                cost_budget_exceeded(self.cost_tracker.estimated_cost_usd(), self.max_cost_usd)
-            {
+            let (spent, limit) = (
+                self.cost_tracker.estimated_cost_usd(),
+                self.cost_budget.get(),
+            );
+            if limit > 0.0 && spent >= limit * 0.8 && self.cost_budget.warn_once(limit) {
                 self.emit(AgentEvent::Error {
-                    message: msg.clone(),
+                    message: format!(
+                        "heads-up: {} of this session's {} budget is spent (/budget raises it)",
+                        usd(spent),
+                        usd(limit)
+                    ),
                 })
                 .await;
-                self.undo.abort_turn();
-                return Err(ProviderError::Configuration(msg));
+            }
+            if let Some(msg) = cost_budget_exceeded(spent, limit) {
+                // Ask before going over (a run with nobody to ask stops).
+                let go_on = if self.approval.should_fail_on_ask() {
+                    false
+                } else {
+                    let raised = (limit * 1.5).max(spent * 1.2);
+                    let call = ToolCall {
+                        id: format!("budget-{}", turn),
+                        name: "cost_budget".into(),
+                        input: json!({"spent_usd": spent, "budget_usd": limit, "raise_to_usd": raised}),
+                    };
+                    let description = format!(
+                        "{msg} — continue with the budget raised to {}? (No stops here.)",
+                        usd(raised)
+                    );
+                    self.emit(AgentEvent::ApprovalRequested {
+                        call_id: call.id.clone(),
+                        tool: call.name.clone(),
+                        description: description.clone(),
+                    })
+                    .await;
+                    let ok = !matches!(
+                        self.approval.resolve(&call, &description).await,
+                        crate::approval::ApprovalVerdict::Denied
+                    );
+                    if ok {
+                        self.cost_budget.set(raised);
+                    }
+                    ok
+                };
+                if !go_on {
+                    self.emit(AgentEvent::Error {
+                        message: msg.clone(),
+                    })
+                    .await;
+                    self.undo.abort_turn();
+                    return Err(ProviderError::Configuration(msg));
+                }
             }
 
             self.emit(AgentEvent::BusyStateChanged {
@@ -1962,15 +2006,43 @@ fn format_tool_result(result: &dcode_ai_common::tool::ToolResult) -> String {
 /// history prefix that produced them; once anything at or before them is
 /// rewritten they must not be sent again.
 /// Error message once `spent` reaches a positive `limit`.
+/// Cents for normal amounts, more digits for tiny ones.
+fn usd(v: f64) -> String {
+    if v < 1.0 {
+        format!("${v:.4}")
+    } else {
+        format!("${v:.2}")
+    }
+}
+
+/// A session's cost budget (USD; 0 = none), shared between the agent and
+/// whoever changes it (`/budget`).
+#[derive(Debug, Clone, Default)]
+pub struct CostBudget {
+    bits: std::sync::Arc<std::sync::atomic::AtomicU64>,
+    /// The budget the 80 % heads-up was given for.
+    warned: std::sync::Arc<std::sync::atomic::AtomicU64>,
+}
+
+impl CostBudget {
+    pub fn get(&self) -> f64 {
+        f64::from_bits(self.bits.load(std::sync::atomic::Ordering::Relaxed))
+    }
+
+    pub fn set(&self, usd: f64) {
+        self.bits
+            .store(usd.max(0.0).to_bits(), std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// True the first time it's asked for this budget.
+    fn warn_once(&self, limit: f64) -> bool {
+        self.warned
+            .swap(limit.to_bits(), std::sync::atomic::Ordering::Relaxed)
+            != limit.to_bits()
+    }
+}
+
 fn cost_budget_exceeded(spent: f64, limit: f64) -> Option<String> {
-    // Cents for normal budgets, more digits for tiny ones.
-    let usd = |v: f64| {
-        if v < 1.0 {
-            format!("${v:.4}")
-        } else {
-            format!("${v:.2}")
-        }
-    };
     (limit > 0.0 && spent >= limit).then(|| {
         format!(
             "session cost budget reached: {} of {} ([session] max_cost_usd)",

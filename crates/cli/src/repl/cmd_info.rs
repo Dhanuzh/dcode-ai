@@ -593,6 +593,128 @@ impl Repl {
             }
 
             // ── /feedback ─────────────────────────────────────────────────────
+            "/recap" => {
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let r = tokio::task::spawn_blocking(move || {
+                    let (d, t) = (
+                        dcode_ai_cli::recap::today(&ws),
+                        dcode_ai_cli::recap::totals(&ws),
+                    );
+                    let files = dcode_ai_cli::recap::write_card(&ws, &d, &t);
+                    (dcode_ai_cli::recap::lines(&d, &t), files)
+                })
+                .await;
+                match r {
+                    Ok((lines, files)) => {
+                        for l in lines {
+                            out.println(&format!("[recap] {l}"));
+                        }
+                        match files {
+                            Ok(files) => {
+                                for f in &files {
+                                    out.println(&format!("[recap] {}", f.display()));
+                                }
+                                if let Some(png) = files.first()
+                                    && let ReplOutput::Tui(st) = out
+                                    && let Some(rows) = super::cmd_work::picture_rows(png, 100)
+                                    && let Ok(mut g) = st.lock()
+                                {
+                                    g.push_block(crate::tui::state::DisplayBlock::Picture {
+                                        title: "today".into(),
+                                        rows,
+                                    });
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[recap] {e}")),
+                        }
+                    }
+                    Err(e) => out.eprintln(&format!("[recap] {e}")),
+                }
+            }
+            "/pin" | "/pins" | "/unpin" => {
+                let mut pins = self.runtime.pins();
+                match command {
+                    "/pin" if !rest.trim().is_empty() => {
+                        pins.push(rest.trim().to_string());
+                        self.runtime.set_pins(&pins);
+                        out.println(&format!(
+                            "[pin] {} — kept word for word through compaction ({} pinned)",
+                            rest.trim(),
+                            pins.len()
+                        ));
+                    }
+                    "/unpin" => match rest.trim().parse::<usize>() {
+                        Ok(n) if (1..=pins.len()).contains(&n) => {
+                            let gone = pins.remove(n - 1);
+                            self.runtime.set_pins(&pins);
+                            out.println(&format!("[pin] unpinned: {gone}"));
+                        }
+                        _ => out.println("usage: /unpin <n> (/pins lists them)"),
+                    },
+                    _ => {
+                        if pins.is_empty() {
+                            out.println("[pin] nothing pinned — /pin <fact> keeps it through every compaction");
+                        }
+                        for (i, p) in pins.iter().enumerate() {
+                            out.println(&format!("[pin] {}. {p}", i + 1));
+                        }
+                    }
+                }
+            }
+            "/budget" => {
+                let (.., spent) = self.runtime.usage_breakdown();
+                let arg = rest.trim().trim_start_matches('$');
+                let fmt = |v: f64| {
+                    if v < 1.0 {
+                        format!("${v:.4}")
+                    } else {
+                        format!("${v:.2}")
+                    }
+                };
+                match arg {
+                    "" => {
+                        let b = self.runtime.cost_budget();
+                        if b > 0.0 {
+                            out.println(&format!(
+                                "[budget] {} of {} spent ({:.0}%) — /budget <usd> changes it, /budget off removes it",
+                                fmt(spent), fmt(b), spent / b * 100.0
+                            ));
+                        } else {
+                            out.println(&format!("[budget] none — {} spent so far; /budget <usd> sets one (it asks before going over)", fmt(spent)));
+                        }
+                    }
+                    "off" | "none" | "0" => {
+                        self.runtime.set_cost_budget(0.0);
+                        out.println("[budget] off for this session");
+                    }
+                    n => match n.parse::<f64>() {
+                        Ok(v) if v > 0.0 => {
+                            self.runtime.set_cost_budget(v);
+                            out.println(&format!(
+                                "[budget] {} for this session ({} spent) — a heads-up at 80%, a question at 100%",
+                                fmt(v), fmt(spent)
+                            ));
+                        }
+                        _ => out.println("usage: /budget [<usd>|off] — e.g. /budget 5"),
+                    },
+                }
+            }
+            "/bugreport" => {
+                let log = self.runtime.event_log_path();
+                let model = self.runtime.model().to_string();
+                match dcode_ai_cli::bugreport::write_report(&dcode_ai_cli::bugreport::Inputs {
+                    workspace: self.runtime.workspace_root(),
+                    session_id: self.runtime.session_id(),
+                    event_log: &log,
+                    model: &model,
+                }) {
+                    Ok(p) => {
+                        out.println(&format!("[bugreport] written: {}", p.display()));
+                        out.println("[bugreport] secrets are masked, but read it before sharing — then attach it to https://github.com/Dhanuzh/dcode-ai/issues/new");
+                    }
+                    Err(e) => out.eprintln(&format!("[bugreport] {e}")),
+                }
+            }
             "/feedback" => {
                 let log = self.runtime.event_log_path();
                 out.println("[feedback] Found a bug or have a request? Open an issue:");

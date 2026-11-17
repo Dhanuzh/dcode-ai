@@ -1432,7 +1432,25 @@ async fn run_on(
         *l = None;
     }
     crate::video::record::mark_action(false);
-    let result = run_page_action(action, input, page, workspace_root).await;
+    // While recording, a click that opens another tab must not lose the
+    // recording: note the tabs before it.
+    let recording = crate::video::record::is_recording();
+    let tabs_before: Vec<String> = if recording && action == "click" {
+        list_tabs(page.port)
+            .await
+            .map(|t| t.into_iter().map(|t| t.id).collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    let mut result = run_page_action(action, input, page, workspace_root).await;
+    if recording
+        && action == "click"
+        && result.is_ok()
+        && let Some(note) = follow_new_tab(page, &tabs_before).await
+    {
+        result = result.map(|r| format!("{note}\n\n{r}"));
+    }
     if result.is_ok() && crate::video::record::is_recording() {
         // The event track of a screen recording.
         let xy = LAST_XY.lock().ok().and_then(|l| *l);
@@ -1570,6 +1588,231 @@ async fn replay(input: &Value, page: &Page, workspace_root: &Path) -> Result<Str
     ))
 }
 
+/// A screenshot of the page once it has settled (JPEG bytes).
+async fn settled_shot(page: &Page) -> Result<Vec<u8>, String> {
+    settle(page, Duration::from_secs(4)).await;
+    let shot = page
+        .call(
+            "Page.captureScreenshot",
+            json!({"format": "jpeg", "quality": 85}),
+        )
+        .await?;
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD
+        .decode(shot["data"].as_str().ok_or("no screenshot")?)
+        .map_err(|e| e.to_string())
+}
+
+/// How much of a picture changed (0–1), on small grey thumbnails.
+pub fn picture_change(a: &[u8], b: &[u8]) -> Option<f64> {
+    let t = |d: &[u8]| {
+        image::load_from_memory(d)
+            .ok()
+            .map(|i| i.thumbnail_exact(96, 54).to_luma8())
+    };
+    let (a, b) = (t(a)?, t(b)?);
+    let changed = a
+        .pixels()
+        .zip(b.pixels())
+        .filter(|(p, q)| (p.0[0] as i32 - q.0[0] as i32).abs() > 32)
+        .count();
+    Some(changed as f64 / (96.0 * 54.0))
+}
+
+/// A share of the picture that may change before a step counts as changed
+/// (clocks, counters, ads).
+const SMOKE_TOLERANCE: f64 = 0.06;
+
+/// `/browser test save <name>` and `/browser test run [name]`: the saved
+/// browser steps as a smoke test. Saving replays them and keeps a
+/// screenshot per step as the baseline; running replays them and compares.
+pub async fn smoke_test(workspace: &Path, name: &str, save: bool) -> Result<String, String> {
+    let safe: String = name
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
+        .collect();
+    if safe.is_empty() {
+        return Err("give the test a name: /browser test save <name>".into());
+    }
+    let dir = workspace.join(".dcode-ai/browser-tests").join(&safe);
+    let steps: Vec<Value> = if save {
+        let from_file = workspace.join(format!(".dcode-ai/browser-steps/{safe}.json"));
+        match std::fs::read_to_string(&from_file) {
+            Ok(t) => serde_json::from_str(&t).map_err(|e| e.to_string())?,
+            Err(_) => recorded_steps(),
+        }
+    } else {
+        let t = std::fs::read_to_string(dir.join("steps.json"))
+            .map_err(|_| format!("no test `{safe}` — /browser test save {safe} first"))?;
+        serde_json::from_str(&t).map_err(|e| e.to_string())?
+    };
+    if steps.is_empty() {
+        return Err(
+            "no browser steps to test — do them with the browser (or /browser save <name>) first"
+                .into(),
+        );
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    if save {
+        std::fs::write(
+            dir.join("steps.json"),
+            serde_json::to_string_pretty(&steps).unwrap_or_default(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    let run_dir = dir.join("last-run");
+    if !save {
+        let _ = std::fs::remove_dir_all(&run_dir);
+        std::fs::create_dir_all(&run_dir).map_err(|e| e.to_string())?;
+    }
+    let mut slot = shared().lock().await;
+    let (page, _) = ensure_page(&mut slot, true).await?;
+    let mut report = Vec::new();
+    let mut changed = 0;
+    for (i, step) in steps.iter().enumerate() {
+        let n = i + 1;
+        let mut step = step.clone();
+        let action = step["action"].as_str().unwrap_or("").to_string();
+        let what = format!(
+            "{action}{}",
+            step["target"]
+                .as_str()
+                .or_else(|| step["url"].as_str())
+                .map(|t| format!(" {t}"))
+                .unwrap_or_default()
+        );
+        if let Some(target) = step["target"].as_str() {
+            match find_ref(page, target).await {
+                Ok(r) => step["ref"] = json!(r),
+                Err(e) => {
+                    report.push(format!("✗ {n}. {what}: {e}"));
+                    return Ok(finish_report(&dir, save, &report, n, steps.len(), changed));
+                }
+            }
+        }
+        if let Err(e) = run_page_action(&action, &step, page, workspace).await {
+            report.push(format!("✗ {n}. {what}: {e}"));
+            return Ok(finish_report(&dir, save, &report, n, steps.len(), changed));
+        }
+        let shot = settled_shot(page).await?;
+        if save {
+            std::fs::write(dir.join(format!("base-{n}.jpg")), &shot).map_err(|e| e.to_string())?;
+            report.push(format!("✓ {n}. {what}"));
+            continue;
+        }
+        std::fs::write(run_dir.join(format!("step-{n}.jpg")), &shot).map_err(|e| e.to_string())?;
+        match std::fs::read(dir.join(format!("base-{n}.jpg")))
+            .ok()
+            .and_then(|b| picture_change(&b, &shot))
+        {
+            Some(c) if c > SMOKE_TOLERANCE => {
+                changed += 1;
+                report.push(format!(
+                    "≠ {n}. {what}: {:.0}% of the page differs from the baseline (last-run/step-{n}.jpg)",
+                    c * 100.0
+                ));
+            }
+            Some(_) => report.push(format!("✓ {n}. {what}")),
+            None => report.push(format!("? {n}. {what}: no baseline picture")),
+        }
+    }
+    Ok(finish_report(
+        &dir,
+        save,
+        &report,
+        steps.len() + 1,
+        steps.len(),
+        changed,
+    ))
+}
+
+/// Writes the run's report next to the test and sums it up. `reached`: the
+/// step it got to (past the end: all ran).
+fn finish_report(
+    dir: &Path,
+    save: bool,
+    lines: &[String],
+    reached: usize,
+    total: usize,
+    changed: usize,
+) -> String {
+    let ok = reached > total;
+    let head = if save {
+        if ok {
+            format!("baseline saved: {total} steps, a screenshot each")
+        } else {
+            format!("couldn't save the baseline: step {reached} failed")
+        }
+    } else if !ok {
+        format!("FAILED at step {reached} of {total}")
+    } else if changed > 0 {
+        format!("ran {total} steps — {changed} look different from the baseline")
+    } else {
+        format!("passed: {total} steps, all match the baseline")
+    };
+    let body = format!("{head}\n{}", lines.join("\n"));
+    let file = if save {
+        "baseline.md"
+    } else {
+        "last-run/report.md"
+    };
+    let _ = std::fs::write(dir.join(file), &body);
+    body
+}
+
+/// While recording: when a click opened a new tab, bring its page into the
+/// recorded tab (and close the new one), so the recording follows it.
+async fn follow_new_tab(page: &Page, before: &[String]) -> Option<String> {
+    if before.is_empty() {
+        return None;
+    }
+    // A new tab can take a moment to appear.
+    let mut fresh = None;
+    for _ in 0..6 {
+        if let Ok(tabs) = list_tabs(page.port).await {
+            fresh = tabs
+                .into_iter()
+                .find(|t| !before.contains(&t.id) && t.id != page.target_id);
+        }
+        if fresh.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    let tab = fresh?;
+    // Its address may still be about:blank while it starts loading.
+    let mut url = tab.url.clone();
+    for _ in 0..8 {
+        if !is_blank(&url) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        url = list_tabs(page.port)
+            .await
+            .ok()?
+            .into_iter()
+            .find(|t| t.id == tab.id)
+            .map(|t| t.url)
+            .unwrap_or(url);
+    }
+    if is_blank(&url) {
+        return None;
+    }
+    let _ = http()
+        .get(format!(
+            "http://127.0.0.1:{}/json/close/{}",
+            page.port, tab.id
+        ))
+        .send()
+        .await;
+    restore_site(page, &url).await;
+    page.call("Page.navigate", json!({"url": url})).await.ok()?;
+    page.wait_loaded().await;
+    Some(format!(
+        "(It opened a new tab; the recording follows it: {url} is now open in the recorded tab.)"
+    ))
+}
+
 /// `switch {tab}` and `new_tab {url}`.
 async fn tab_action(
     action: &str,
@@ -1624,6 +1867,7 @@ async fn run_page_action(
                 return Err("navigate needs `url`".into());
             }
             url = with_scheme(&url);
+            restore_site(page, &url).await;
             let r = page.call("Page.navigate", json!({"url": url})).await?;
             if let Some(err) = r["errorText"].as_str().filter(|e| !e.is_empty()) {
                 return Err(format!("could not open {url}: {err}"));
@@ -1910,16 +2154,211 @@ pub async fn open(url: Option<&str>) -> Result<String, String> {
         Some(launch(DEFAULT_PORT, url).await?)
     };
     let page = attach(DEFAULT_PORT).await?;
-    if launched.is_none()
-        && let Some(u) = url
-    {
-        page.call("Page.navigate", json!({"url": u})).await?;
+    if let Some(u) = url {
+        restore_site(&page, &with_scheme(u)).await;
+        page.call("Page.navigate", json!({"url": with_scheme(u)}))
+            .await?;
     }
     *shared().lock().await = Some(page);
     Ok(match launched {
         Some(exe) => format!("opened {exe} (port {DEFAULT_PORT})"),
         None => format!("connected to the browser on port {DEFAULT_PORT}"),
     })
+}
+
+/// Sign-in services a site may send you through; their cookies are kept
+/// with the site's, or the sign-in would be asked for again.
+const SIGN_IN_DOMAINS: &[&str] = &[
+    "microsoftonline.com",
+    "login.live.com",
+    "microsoft.com",
+    "accounts.google.com",
+    "google.com",
+    "okta.com",
+    "auth0.com",
+    "onelogin.com",
+    "github.com",
+];
+
+fn sites_dir() -> Option<PathBuf> {
+    dcode_ai_common::config::dcode_ai_home_dir().map(|d| d.join("sites"))
+}
+
+/// A URL's host, lower-case (`https://acme.sharepoint.com/x` → `acme.sharepoint.com`).
+pub fn host_of(url: &str) -> Option<String> {
+    let rest = url.split_once("://").map(|(_, r)| r).unwrap_or(url);
+    let host = rest.split(['/', '?', '#']).next()?.rsplit('@').next()?;
+    let host = host.split(':').next()?.trim().to_ascii_lowercase();
+    (!host.is_empty() && host.contains('.')).then_some(host)
+}
+
+/// The part of a host cookies are shared on: `acme.sharepoint.com` →
+/// `sharepoint.com` is too wide, so the full host and its parent are used.
+fn cookie_matches(domain: &str, host: &str) -> bool {
+    let d = domain.trim_start_matches('.').to_ascii_lowercase();
+    host == d
+        || host.ends_with(&format!(".{d}"))
+        || d.ends_with(&format!(".{host}"))
+        || SIGN_IN_DOMAINS
+            .iter()
+            .any(|s| d == *s || d.ends_with(&format!(".{s}")))
+}
+
+fn site_file(host: &str) -> Option<PathBuf> {
+    let safe: String = host
+        .chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-'))
+        .collect();
+    (!safe.is_empty()).then(|| sites_dir().map(|d| d.join(format!("{safe}.json"))))?
+}
+
+/// `/browser remember [site]`: keeps the site's sign-in (its cookies and
+/// those of the sign-in service, session cookies too) in
+/// `~/.dcode-ai/sites/<host>.json`, readable only by you; they are put back
+/// whenever the browser opens that site.
+pub async fn remember_site(site: Option<&str>) -> Result<String, String> {
+    let mut slot = shared().lock().await;
+    let (page, _) = ensure_page(&mut slot, false).await?;
+    let host = match site {
+        Some(s) => host_of(s).or_else(|| host_of(&format!("https://{s}"))),
+        None => page
+            .eval("location.href")
+            .await
+            .ok()
+            .and_then(|v| v.as_str().and_then(host_of)),
+    }
+    .ok_or("which site? open it in the browser first, or /browser remember <site>")?;
+    let all = page.call("Network.getAllCookies", json!({})).await?;
+    let cookies: Vec<Value> = all["cookies"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter(|c| {
+                    c["domain"]
+                        .as_str()
+                        .is_some_and(|d| cookie_matches(d, &host))
+                })
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if cookies.is_empty() {
+        return Err(format!("no cookies for {host} — sign in there first"));
+    }
+    let file = site_file(&host).ok_or("no home folder")?;
+    if let Some(d) = file.parent() {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
+    let text = serde_json::to_string(&json!({"host": host, "cookies": cookies}))
+        .map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&file)
+            .map_err(|e| e.to_string())?;
+        f.write_all(text.as_bytes()).map_err(|e| e.to_string())?;
+    }
+    #[cfg(not(unix))]
+    std::fs::write(&file, text).map_err(|e| e.to_string())?;
+    Ok(format!(
+        "remembered the sign-in for {host} ({} cookies) — recordings there won't ask again; /browser forget {host} removes it",
+        cookies.len()
+    ))
+}
+
+/// `/browser forget <site>`.
+pub fn forget_site(site: &str) -> Result<String, String> {
+    let host = host_of(site)
+        .or_else(|| host_of(&format!("https://{site}")))
+        .ok_or("which site?")?;
+    let file = site_file(&host).ok_or("no home folder")?;
+    std::fs::remove_file(&file).map_err(|_| format!("nothing remembered for {host}"))?;
+    Ok(format!("forgot the sign-in for {host}"))
+}
+
+/// Sites with a remembered sign-in.
+pub fn remembered_sites() -> Vec<String> {
+    let mut v: Vec<String> = sites_dir()
+        .and_then(|d| std::fs::read_dir(d).ok())
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()?
+                .strip_suffix(".json")
+                .map(str::to_string)
+        })
+        .collect();
+    v.sort();
+    v
+}
+
+/// Puts a remembered sign-in back before opening `url`.
+async fn restore_site(page: &Page, url: &str) {
+    let Some(host) = host_of(url) else { return };
+    // The host or a parent domain may have been remembered.
+    let mut h = host.as_str();
+    let file = loop {
+        if let Some(f) = site_file(h).filter(|f| f.is_file()) {
+            break f;
+        }
+        match h.split_once('.') {
+            Some((_, rest)) if rest.contains('.') => h = rest,
+            _ => return,
+        }
+    };
+    let Some(saved) = std::fs::read_to_string(&file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return;
+    };
+    let cookies: Vec<Value> = saved["cookies"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|c| {
+                    let mut c = c.clone();
+                    if let Some(o) = c.as_object_mut() {
+                        // setCookies takes these fields; a session cookie
+                        // has no expiry.
+                        o.retain(|k, _| {
+                            matches!(
+                                k.as_str(),
+                                "name"
+                                    | "value"
+                                    | "domain"
+                                    | "path"
+                                    | "secure"
+                                    | "httpOnly"
+                                    | "sameSite"
+                                    | "expires"
+                            )
+                        });
+                        if o.get("expires")
+                            .and_then(Value::as_f64)
+                            .is_some_and(|e| e <= 0.0)
+                        {
+                            o.remove("expires");
+                        }
+                    }
+                    c
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if !cookies.is_empty() {
+        let _ = page
+            .call("Network.setCookies", json!({"cookies": cookies}))
+            .await;
+    }
 }
 
 /// `/browser close`: disconnect, and close the browser when it is the one
@@ -2071,5 +2510,32 @@ mod tests {
         assert_eq!(key_fields("a")["text"], "a");
         assert_eq!(key_fields("Esc")["key"], "Escape");
         assert!(is_read_only_action("snapshot") && !is_read_only_action("click"));
+    }
+}
+
+#[cfg(test)]
+mod site_tests {
+    use super::*;
+
+    #[test]
+    fn hosts_and_cookie_domains() {
+        assert_eq!(
+            host_of("https://acme.sharepoint.com/sites/x?y=1").as_deref(),
+            Some("acme.sharepoint.com")
+        );
+        assert_eq!(
+            host_of("user@Example.com:8080/a").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(host_of("localhost"), None);
+        let h = "acme.sharepoint.com";
+        assert!(cookie_matches(".acme.sharepoint.com", h));
+        assert!(cookie_matches("login.microsoftonline.com", h));
+        assert!(!cookie_matches("other.sharepoint.com", h));
+        assert!(!cookie_matches("ads.example.net", h));
+        assert_eq!(
+            site_file("a/../b.com").map(|f| f.file_name().unwrap().to_string_lossy().into_owned()),
+            Some("a..b.com.json".into())
+        );
     }
 }

@@ -31,6 +31,7 @@ landlock = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+proptest = "1"
 tokio = { workspace = true, features = ["test-util"] }
 criterion = "0.5"
 

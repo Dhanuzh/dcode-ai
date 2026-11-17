@@ -91,6 +91,8 @@ pub struct Supervisor {
     /// The session's `/goal`, shared with the `update_goal` tool.
     goal: crate::goal::GoalCell,
     background_default: Arc<std::sync::atomic::AtomicBool>,
+    /// The session's cost budget (`/budget`), shared with its agent.
+    cost_budget: dcode_ai_core::agent::CostBudget,
     /// `/context window …` for this session (over the config).
     window_override: Option<dcode_ai_common::config::WindowSetting>,
     /// Tools that became available late (behind `tool_search`), to mention
@@ -342,6 +344,7 @@ impl Supervisor {
         let background_agents: dcode_ai_core::tools::spawn_subagent::BackgroundAgents =
             Default::default();
         let background_default: Arc<std::sync::atomic::AtomicBool> = Default::default();
+        let cost_budget = dcode_ai_core::agent::CostBudget::default();
         let messages_mirror: dcode_ai_core::tools::spawn_subagent::MessagesMirror =
             Default::default();
         if !cfg.safe_mode {
@@ -502,7 +505,8 @@ impl Supervisor {
             config.session.checkpoint_interval,
             hook_runner.clone(),
         );
-        agent.max_cost_usd = config.session.max_cost_usd;
+        agent.cost_budget = cost_budget.clone();
+        agent.cost_budget.set(config.session.max_cost_usd);
         agent.messages_mirror = Some(messages_mirror.clone());
         agent.fallback_models = config.model.fallback_models.clone();
         let mut system_prompt =
@@ -582,6 +586,7 @@ impl Supervisor {
             pending_mcp,
             goal,
             background_default,
+            cost_budget,
             window_override: None,
             late_tools_note: None,
             last_cache_hit: None,
@@ -787,6 +792,16 @@ impl Supervisor {
                 })
                 .await;
         }
+    }
+
+    /// The session's cost budget, USD (0: none).
+    pub fn cost_budget(&self) -> f64 {
+        self.cost_budget.get()
+    }
+
+    /// `/budget`: changes it for the rest of the session.
+    pub fn set_cost_budget(&self, usd: f64) {
+        self.cost_budget.set(usd);
     }
 
     /// Launch sub-agents in the background unless the model asks otherwise.
@@ -1577,6 +1592,50 @@ impl Supervisor {
     /// whole conversation with the model, optionally steered by `focus`, and
     /// replace it with that summary. Returns tokens before and after, and the
     /// summary.
+    /// Facts the user pinned (`/pin`): kept as a system message at the head
+    /// of the history, which every compaction keeps word for word.
+    pub fn pins(&self) -> Vec<String> {
+        use dcode_ai_common::message::MessageContent;
+        self.agent
+            .messages
+            .iter()
+            .find_map(|m| match &m.content {
+                MessageContent::Text(t) if m.role == Role::System && t.starts_with(PINS_HEADER) => {
+                    Some(
+                        t.lines()
+                            .skip(1)
+                            .filter_map(|l| l.strip_prefix("- "))
+                            .map(str::to_string)
+                            .collect(),
+                    )
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
+    }
+
+    /// Replaces the pinned facts.
+    pub fn set_pins(&mut self, pins: &[String]) {
+        use dcode_ai_common::message::{Message, MessageContent};
+        let mut messages = self.agent.messages.clone();
+        messages.retain(|m| {
+            !(m.role == Role::System
+                && matches!(&m.content, MessageContent::Text(t) if t.starts_with(PINS_HEADER)))
+        });
+        if !pins.is_empty() {
+            let text = format!(
+                "{PINS_HEADER}\n{}",
+                pins.iter()
+                    .map(|p| format!("- {}", p.replace('\n', " ")))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            );
+            let at = ContextManager::leading_system_prefix_len(&messages);
+            messages.insert(at, Message::system(text));
+        }
+        self.agent.messages = messages;
+    }
+
     pub async fn compact_now(
         &mut self,
         focus: Option<&str>,
@@ -1607,6 +1666,9 @@ impl Supervisor {
                 "\nThe user asked the summary to focus on: {focus}\nGive that the most detail.\n"
             ));
         }
+        // What goes into the summary (shown after, so nothing vanishes
+        // unnoticed).
+        let dropped = describe_dropped(&conversation);
         let summary = match self.summarize_with_ai(&prompt).await {
             Ok(s) if !s.trim().is_empty() => s,
             Ok(_) => build_compaction_fallback_summary(&conversation),
@@ -1633,7 +1695,13 @@ impl Supervisor {
             let _ = tx
                 .send(AgentEvent::ContextCompaction {
                     phase: "completed".to_string(),
-                    message: format!("Conversation compacted (~{before} → ~{after} tokens)"),
+                    message: format!(
+                        "Conversation compacted (~{before} → ~{after} tokens) — summarized: {dropped}{}",
+                        match self.pins().len() {
+                            0 => " · /pin keeps a fact word for word".to_string(),
+                            n => format!(" · {n} pinned fact(s) kept as they are"),
+                        }
+                    ),
                     context_tokens: after as u64,
                 })
                 .await;
@@ -4145,4 +4213,57 @@ mod model_fit_tests {
         assert!(!model_fits_provider("gpt-5-mini", Anthropic));
         assert!(!model_fits_provider("sonnet", Copilot));
     }
+}
+
+/// The pinned-facts message's first line.
+pub const PINS_HEADER: &str =
+    "Pinned facts — the user asked to keep these exactly; treat them as true:";
+
+/// What a compaction folds into its summary, in a line: messages, tool
+/// calls by tool, files read or changed.
+fn describe_dropped(conversation: &[dcode_ai_common::message::Message]) -> String {
+    let users = conversation.iter().filter(|m| m.role == Role::User).count();
+    let mut tools: std::collections::BTreeMap<String, usize> = Default::default();
+    let mut files: std::collections::BTreeSet<String> = Default::default();
+    for m in conversation {
+        for c in m.tool_calls.iter().flatten() {
+            *tools.entry(c.name.clone()).or_default() += 1;
+            let args = match &c.arguments {
+                serde_json::Value::String(s) => serde_json::from_str(s).unwrap_or_default(),
+                v => v.clone(),
+            };
+            if let Some(p) = args["path"].as_str().or_else(|| args["file_path"].as_str()) {
+                files.insert(p.to_string());
+            }
+        }
+    }
+    let mut parts = vec![format!(
+        "{} message(s), {users} from you",
+        conversation.len()
+    )];
+    if !tools.is_empty() {
+        let mut t: Vec<(String, usize)> = tools.into_iter().collect();
+        t.sort_by_key(|x| std::cmp::Reverse(x.1));
+        parts.push(format!(
+            "tool calls: {}",
+            t.iter()
+                .take(5)
+                .map(|(n, c)| format!("{n} ×{c}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if !files.is_empty() {
+        let shown: Vec<&str> = files.iter().take(6).map(String::as_str).collect();
+        parts.push(format!(
+            "files: {}{}",
+            shown.join(", "),
+            if files.len() > 6 {
+                format!(" +{}", files.len() - 6)
+            } else {
+                String::new()
+            }
+        ));
+    }
+    parts.join(" · ")
 }

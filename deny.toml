@@ -5,6 +5,10 @@
 # RustSec advisory DB: fail the build on known-vulnerable or yanked crates.
 yanked = "deny"
 ignore = [
+    # chrono is unmaintained (advisory of 2026-11-17, no vulnerability); used
+    # for local dates across the workspace and by many dependencies. Move to
+    # jiff when the dependencies do.
+    "RUSTSEC-2026-0543",
     # paste is unmaintained (a compile-time macro, no vulnerability); pulled by
     # netlink-packet-core through iroh's network watcher (p2p invites).
     "RUSTSEC-2024-0436",
