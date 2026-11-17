@@ -68,6 +68,7 @@ pub fn import(ws: &Path, bundle: &Path) -> Result<String, String> {
             let esc = |p: &str| serde_json::to_string(p).unwrap_or_default();
             let (o, n) = (esc(old_ws), esc(&new_ws));
             s.replace(o.trim_matches('"'), n.trim_matches('"'))
+                .replace(old_ws, &new_ws)
         }
     };
     let mut state: Value = serde_json::from_str(&repoint(v["state"].as_str().unwrap_or("{}")))
@@ -115,7 +116,7 @@ mod tests {
         .unwrap();
         std::fs::write(
             dir.join("session-1.events.jsonl"),
-            format!("{{\"path\":\"{ws_a}/src/main.rs\"}}\n"),
+            format!("{}\n", json!({"path": format!("{ws_a}/src/main.rs")})),
         )
         .unwrap();
         let file = a.path().join("s.dcode-session");
@@ -129,7 +130,14 @@ mod tests {
         assert!(!state.contains("ghp_abcdefghij"), "secrets masked: {state}");
         let ev =
             std::fs::read_to_string(sessions_dir(b.path()).join("session-1.events.jsonl")).unwrap();
-        assert!(ev.contains(&b.path().display().to_string()));
+        let ev: Value = serde_json::from_str(ev.trim()).unwrap();
+        assert!(
+            ev["path"]
+                .as_str()
+                .unwrap()
+                .starts_with(&b.path().display().to_string()),
+            "{ev}"
+        );
         assert!(import(b.path(), &file).unwrap_err().contains("already"));
     }
 }
