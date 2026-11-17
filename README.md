@@ -196,6 +196,26 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 
 </td>
 </tr>
+<tr>
+<td valign="top">
+
+#### 🎬 Narrated demo videos
+`/record <what to show>`: the agent does it in the browser (or on the whole screen), then edits it like a pro screen recorder — zooms, cursor, captions, narration, chapters, a 9:16 short and a how-to guide.
+
+</td>
+<td valign="top">
+
+#### 🎙️ Talk to it
+`/talk` turns speech into text on your machine. Say "hey dcode" (`/talk wake`), speak any language (`/talk lang`), or hold a hands-free conversation with spoken replies.
+
+</td>
+<td valign="top">
+
+#### 📊 Your day, recapped
+`/recap` makes a card and a short video of what you and the agent did today — commits, lines, sessions, tokens — with streaks and achievements.
+
+</td>
+</tr>
 </table>
 
 <p align="center">
@@ -292,6 +312,11 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **Idle compaction:** a long conversation left idle after that is compacted once, just before the provider's prompt cache expires, so your next turn starts small.
 - **Small logs:** only what resume needs is stored. `dcode-ai sessions --tidy` shrinks old logs.
 - **`/export` and `/share`** as Markdown with secrets masked, to a file, the clipboard or a secret gist.
+- **Named checkpoints:** `/checkpoint [name]` snapshots the whole working tree (untracked files too) without touching your branch or files; `/checkpoint restore <n>` puts it back exactly, after saving the current state so the restore can be undone.
+- **Move a session to another computer:** `/move [file]` writes it to one file (secrets masked); `/move import <file>` on the other machine, then `/resume`.
+- **A budget that asks:** `/budget <usd>` (or `[session] max_cost_usd`) warns at 80 % and, at 100 %, asks whether to go on with a raised budget instead of stopping cold.
+- **Pins through compaction:** `/pin <fact>` keeps a fact word for word through every compaction; `/compact` says what went into the summary.
+- **`/bugreport`:** one file for an issue — version, the newest crash, the log, config and recent events, secrets masked.
 
 ### 🤖 Agents and automation
 
@@ -311,11 +336,10 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **AI demo videos:** `/record <what to show>` — the agent does it in the browser (through a `browser_task` sub-agent, so it stays cheap) while recording; a covered or background window is still recorded (screenshots when Chrome stops sending frames). It then edits the video itself (speeds up waiting, zooms on clicks, cursor, captions, title and end cards, generated background music) into an MP4 and a GIF. `/video edit "<what to change>"` re-edits in plain words.
 - **Narrated tutorials (the [vidni](https://github.com/dhilipsiva/vidni) way):** the edit list carries a narration script (lines with permanent ids and sections). A draft voice speaks it (Piper, or the system voice: Windows speech, also from WSL; macOS `say`; espeak-ng), and the video waits for each line. `/video voice` records your own voice line by line, checked by Whisper; `/video hear` re-checks every take. One script makes a 16:9 video and a 9:16 short (`/video short`), with captions (SRT/VTT, a clean master too), chapters, thumbnails, and cards (section, bullets, quote). `/video publish` makes upload folders for YouTube, Shorts, Reels and WhatsApp Status with length checks; `/video approve` and `/video status` are your sign-off. Nothing is uploaded.
 - **Video quality:** `/record --stills` takes one sharp, settled still per step with a slow camera move (dashboards, reports; immune to covered windows); every recording waits for the page to settle, outlines what is clicked, and **blurs private data** (emails, ticket ids, tokens, password fields, names you list). `/video setup voice [name]` installs Piper for a natural draft voice and `/video voices` lists, previews (`try`) and picks (`use`) voices, `respell` fixes pronunciation, `/video translate <language>` makes another-language version, `/video preview` is a quick draft, `/video note` / `/video apply` turn review notes into edits, and code and terminal cards show commands and source.
-- **Edited like a pro screen recorder:** the recording sits on a gradient background with padding, rounded corners and a shadow; the camera zooms and pans on a spring (staying in between nearby clicks) with motion blur; a smoothed cursor and click sounds; word-by-word captions in a pill; crossfades between cards and footage; long waits cut, not fast-forwarded. Pages are recorded at a standard 1440×810 viewport in 1920×1080, so text stays sharp and readable however the browser window is sized or zoomed, and each click is marked on a still taken just before it. The camera frames the page's main content, `/video redo <step>` re-records one bad step in place, `/record --screen` records the whole desktop and `--webcam` adds you in a corner bubble; `/video show` draws stills and the contact sheet right in the terminal, and renders show percent done and time left.
-- **Sessions you can trust:** `/checkpoint` snapshots the whole working tree and restores it in one command; `/move` carries a session to another computer; `/budget` pauses and asks before a session costs more than you set; `/pin` keeps facts through every compaction.
+- **Edited like a pro screen recorder:** the recording sits on a gradient background with padding, rounded corners and a shadow; the camera zooms and pans on a spring (staying in between nearby clicks) with motion blur; a smoothed cursor and click sounds; word-by-word captions in a pill; crossfades between cards and footage; long waits cut, not fast-forwarded. Pages are recorded at a standard 1440×810 viewport in 1920×1080, so text stays sharp and readable however the browser window is sized or zoomed, and each click is marked on a still taken just before it. The camera frames the page's main content, `/video redo <step>` re-records one bad step in place, `/record --screen` records the whole desktop (on WSL, the Windows desktop; it checks for a first screenshot before the take starts) and `--webcam` adds you in a corner bubble; `/video show` draws stills and the contact sheet right in the terminal, and renders show percent done and time left.
 - **Browser flows as smoke tests:** `/browser test save` / `run` replays saved steps and compares screenshots to a baseline; `/browser remember` keeps a site's sign-in for recordings; recordings follow links into new tabs.
 - **Video extras:** a brand kit (logo, colours, font, intro/outro), YouTube chapters and a ready description, `/video doc` how-to guides from recordings, `/video render all`, and GPU encoding when available.
-- **Talk extras:** `/talk wake` ("hey dcode"), `/talk lang` (answers in the language you speak), `/talk persona`. `/recap` makes a card and short video of your day, with streaks and achievements; `/bugreport` gathers one file for an issue.
+- **Talk extras:** `/talk wake` ("hey dcode"), `/talk lang` (answers in the language you speak), `/talk persona calm|brief|cheerful`. `/recap` makes a card and short video of your day, with streaks and achievements.
 - **herdr and terminal tabs:** inside [herdr](https://herdr.dev) dcode-ai reports working / idle / needs-you and its session (so herdr's restore reopens it); every terminal's tab title follows its state.
 - **Reviews:** `/verify` (a read-only reviewer over your diff), `/second-opinion` (a model from another family), `/security-review`, `/pr-comments`.
 - **Headless and CI:**
@@ -359,6 +383,9 @@ default = "anthropic"          # anthropic | copilot
 backend = "claude-code"        # your Claude account; "api" = Console OAuth via `ant`
 model = "claude-sonnet-5-5"
 
+[session]
+# max_cost_usd = 5.0           # a cost budget per session: asks before going over (/budget changes it)
+
 [permissions]
 mode = "default"               # plan | default | accept-edits | auto | dont-ask | bypass-permissions
 sandbox_bash = true
@@ -379,11 +406,11 @@ code_mode = true               # offer run_script (chain tool calls in one scrip
 [ui]
 theme = "claude"
 # push_url = "https://ntfy.sh/<your-topic>"   # ping your phone when an approval waits
-# stt_model = "base.en"                       # /talk: bigger, more accurate speech model
+# stt_model = "base.en"                       # /talk: bigger, more accurate speech model ("tiny" = any language)
 working_style = "bar"          # bar | dots | plain
 ```
 
-Every option is documented in [docs/configuration.md](docs/configuration.md).
+Every option is documented in [docs/configuration.md](docs/configuration.md). Videos also read a brand kit from `.dcode-ai/brand.json` (or `~/.dcode-ai/brand.json`): logo, colours, font, intro and outro — `/video brand init` starts one.
 
 ## 📚 Documentation
 
