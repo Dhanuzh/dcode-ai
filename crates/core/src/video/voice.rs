@@ -435,6 +435,40 @@ pub fn draft(dir: &Path, line: &Line, spec: &str) -> Result<PathBuf, String> {
     Ok(out)
 }
 
+/// Plays a WAV and returns when it's done: Windows' player (also from
+/// WSL), `afplay` on macOS, `paplay` or `aplay` on Linux.
+pub fn play(path: &Path) -> Result<(), String> {
+    let c = if cfg!(windows) || sapi_available() {
+        let q = |s: &str| s.replace('\'', "''");
+        let mut c = Command::new(if cfg!(windows) {
+            "powershell"
+        } else {
+            "powershell.exe"
+        });
+        c.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            &format!(
+                "(New-Object Media.SoundPlayer '{}').PlaySync()",
+                q(&native_path(path)?)
+            ),
+        ]);
+        c
+    } else if cfg!(target_os = "macos") {
+        let mut c = Command::new("afplay");
+        c.arg(path);
+        c
+    } else if let Some(p) = on_path("paplay").or_else(|| on_path("aplay")) {
+        let mut c = Command::new(p);
+        c.arg(path);
+        c
+    } else {
+        return Err("no audio player here (paplay or aplay)".into());
+    };
+    run(c, "play")
+}
+
 /// Seconds a line takes to say, guessed from its words (no audio).
 pub fn estimate_seconds(text: &str) -> f64 {
     words(text).len() as f64 * 0.38 + 0.5

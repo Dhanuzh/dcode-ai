@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.0.72 — 2026-11-17
+
+### New — better demo videos
+- **Stills mode** (`/record --stills`, vidni's way): one sharp, settled
+  screenshot per step, with a slow camera push-in over each and a dissolve
+  between them. Best for dashboards and reports, and unaffected by a
+  covered browser window. The agent picks it for pages where nothing
+  animates.
+- **The page settles after every step** while recording (loaded, then two
+  identical screenshots a quarter second apart) — no spinners or
+  half-drawn tables in the video.
+- **Highlight**: the element clicked or typed into gets an outline while
+  the rest dims a little (`highlight`).
+- **Privacy blur**: the recorder finds emails, ticket ids (`ABC-123`),
+  API keys and tokens, password and email fields, and the names you give
+  (`redact`), and the video pixelates them (`privacy`; more boxes with
+  `blur`).
+- **`/video setup voice`**: downloads Piper and a natural English voice;
+  the draft narration uses it from then on.
+- **`respell`**: how the draft voice says words ("UX" → "you ex"); the
+  captions keep the written form.
+- **Hear your take**: `/video voice` plays each take back; Esc within 3 s
+  records it again.
+- **`/video translate [id] <language>`**: the agent translates the script
+  (same line ids) and renders `video.<lang>.mp4` with captions; a voice per
+  language with `voices`.
+- **`/video preview`**: a quick low-resolution draft to check timing.
+- **Review notes**: `/video note [id] <line> <what to change>`,
+  `/video notes`, `/video apply` (the agent applies them).
+- **Code and terminal scenes**: `inserts` of kind `code` or `terminal`,
+  in a bundled monospace font (Adwaita Mono, OFL).
+- **Contact sheet** (`contact.png`, 12 frames) after each render —
+  `/video open contact`.
+
+### Faster and cheaper
+- Frames are drawn on every core.
+- GIFs merge unchanged frames (much smaller for stills and pauses).
+- `record_stop` sends the agent a compact event summary and the draft
+  script, not the whole edit list; `video_render` merges the fields the
+  agent sends onto the saved edit list.
+
 ## 1.0.71 — 2026-11-16
 
 ### Fixed

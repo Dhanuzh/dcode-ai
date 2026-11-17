@@ -5,7 +5,7 @@ use super::*;
 /// `/record <goal>`: the agent records itself doing it, then edits the video.
 pub(crate) const RECORD_PROMPT: &str = "Make a short narrated demo video of the task below, recorded and edited by you.
 1. Load the tools with `tool_search` (record_start, record_stop, video_render, browser_task, browser).
-2. Get the starting page ready first (so loading isn't in the video): a `browser_task` that opens it in a fresh tab (`new_tab`, so it is the visible one) and waits until it has loaded. If it needs a sign-in, ask the user to sign in in the browser window — never type passwords. Then `record_start` with the task as `goal`.
+2. Get the starting page ready first (so loading isn't in the video): a `browser_task` that opens it in a fresh tab (`new_tab`, so it is the visible one) and waits until it has loaded. If it needs a sign-in, ask the user to sign in in the browser window — never type passwords. Then `record_start` with the task as `goal`, `mode` \"stills\" when asked for (or for a dashboard, report or settings page where nothing animates — one sharp still per step, unaffected by a covered window; otherwise \"live\"), and `redact` with any people's or customers' names that should not show (emails, ticket ids and tokens are blurred automatically).
 3. Do the task with ONE `browser_task` while recording — it drives the browser in a sub-agent, so the page snapshots stay out of this conversation (much cheaper); its clicks and typing still go into the recording's event track. Give it the exact steps in order (what to click or type, what result to wait for), and tell it: one deliberate action at a time, wait_for the result of each before the next, no aimless scrolling, stay in the same tab, never type passwords, finish by reporting what each step showed. Use the plain `browser` tool yourself only if the sub-agent gets stuck.
 4. `record_stop`. From its event track, improve the draft edit list:
    - title (≤ 6 words), subtitle, end_text saying what was achieved;
@@ -19,6 +19,16 @@ The task: ";
 
 /// `/video edit`: change a finished video in plain words.
 pub(crate) const VIDEO_EDIT_PROMPT: &str = "Re-edit a recorded video. Read its edit list and event track (`.dcode-ai/videos/<id>/edl.json` and `events.json` — times are recording seconds), change the edit list as asked — narration `lines` (keep each line's `id` when you rewrite it: the user's recorded take is filed under it; a new line gets a new id), sections, `inserts` (section/bullets/quote cards, holds), title, cuts (\"long\", \"short\"), speeds, zooms, music (\"auto\", \"none\" or a file path), voice (\"auto\", \"draft\", \"takes\", \"none\"), width — then call `video_render` with the id and the new edl (load it with `tool_search` first). Don't record again, and never edit or delete files under `voice/` or `approved.json`: takes and approval are the user's. Report the new length and paths.
+
+";
+
+/// `/video translate`: the narration in another language.
+pub(crate) const VIDEO_TRANSLATE_PROMPT: &str = "Translate a recorded video's narration. Read `.dcode-ai/videos/<id>/edl.json`. Write `translations` for the language below: a short language code as the key (\"de\", \"ta\", \"fr\" …) and, for EVERY narration line, {\"id\": <the same id>, \"text\": <the translation>} — natural spoken language, same meaning, similar length; keep product names and UI labels as they appear on screen. Then call `video_render` (load it with `tool_search`) with the id, `edl` holding only `translations` (all languages already there plus this one), and `lang` set to the code. Report the files it wrote (video.<code>.mp4, captions.<code>.srt). If the draft voice can't speak the language, say so: the user can add a Piper voice for it and set `voices.<code>` to `piper:<path to .onnx>`.
+
+";
+
+/// `/video apply`: the person's review notes, applied.
+pub(crate) const VIDEO_APPLY_PROMPT: &str = "Apply the review notes below to a recorded video. Read `.dcode-ai/videos/<id>/edl.json` (and `events.json` if a note is about timing). Each note names a narration line id (or `video` for the whole video). Change the edit list as each note asks — keep line ids when you rewrite a line — then call `video_render` (load it with `tool_search`) with the id and an `edl` holding only the fields you changed. Then rewrite `notes.md` keeping only the notes you could NOT apply (empty it if you applied all). Report what you changed per note. Never touch `voice/` or `approved.json`.
 
 ";
 
@@ -62,12 +72,22 @@ impl Repl {
     ) -> anyhow::Result<bool> {
         match command {
             "/record" => {
-                let goal = rest.trim();
+                let stills = rest.split_whitespace().any(|w| w == "--stills");
+                let goal: String = rest
+                    .split_whitespace()
+                    .filter(|w| *w != "--stills")
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 if goal.is_empty() {
-                    out.println("usage: /record <what to show> — the agent does it in the browser while recording, then edits the video (captions, zooms, music)");
+                    out.println("usage: /record [--stills] <what to show> — the agent does it in the browser while recording, then edits and narrates the video · --stills: one sharp still per step (dashboards, reports)");
                     return Ok(true);
                 }
-                self.run_preset(RECORD_PROMPT, goal, out).await?;
+                let task = if stills {
+                    format!("{goal}\n\n(Use record_start mode \"stills\".)")
+                } else {
+                    goal
+                };
+                self.run_preset(RECORD_PROMPT, &task, out).await?;
             }
             "/video" => {
                 let ws = self.runtime.workspace_root().to_path_buf();
@@ -98,9 +118,18 @@ impl Repl {
                             ));
                         }
                     }
-                    "open" => match pick(words.next()) {
+                    "open" => {
+                        let mut args: Vec<&str> = words.collect();
+                        let what = args.iter().position(|a| matches!(*a, "contact" | "preview" | "short")).map(|i| args.remove(i));
+                        match pick(args.first().copied()) {
                         Some((id, dir)) => {
-                            let file = ["video.mp4", "video.gif"].iter().map(|f| dir.join(f)).find(|p| p.is_file());
+                            let wanted: &[&str] = match what {
+                                Some("contact") => &["contact.png"],
+                                Some("preview") => &["preview.mp4"],
+                                Some("short") => &["short.mp4"],
+                                _ => &["video.mp4", "video.gif"],
+                            };
+                            let file = wanted.iter().map(|f| dir.join(f)).find(|p| p.is_file());
                             match file {
                                 Some(f) => match dcode_ai_cli::ffmpeg_setup::open(&f) {
                                     Ok(()) => out.println(&format!("[video] opening {id}…")),
@@ -110,6 +139,92 @@ impl Repl {
                             }
                         }
                         None => out.println("[video] no such recording — /video list"),
+                    }
+                    }
+                    "preview" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            out.println(&format!("[video] quick draft of {id} (low resolution, to check timing)…"));
+                            let opts = dcode_ai_core::video::render::Options { preview: true, lang: None };
+                            match tokio::task::spawn_blocking(move || dcode_ai_core::video::render::render_with(&dir, &opts, |_| {})).await {
+                                Ok(Ok(r)) => {
+                                    print_rendered(out, &ws, &r);
+                                    if let Some(m) = &r.mp4 {
+                                        let _ = dcode_ai_cli::ffmpeg_setup::open(m);
+                                    }
+                                }
+                                Ok(Err(e)) => out.eprintln(&format!("[video] {e}")),
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            }
+                        }
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "translate" => {
+                        let mut args: Vec<&str> = words.collect();
+                        let found = args.first().and_then(|w| pick(Some(w)));
+                        let found = match found {
+                            Some(f) => {
+                                args.remove(0);
+                                Some(f)
+                            }
+                            None => pick(None),
+                        };
+                        let Some((id, _)) = found else {
+                            out.println("[video] no recordings yet — /record <what to show>");
+                            return Ok(true);
+                        };
+                        let lang = args.join(" ");
+                        if lang.trim().is_empty() {
+                            out.println("usage: /video translate [id] <language> — e.g. /video translate de, or tamil");
+                            return Ok(true);
+                        }
+                        self.run_preset(VIDEO_TRANSLATE_PROMPT, &format!("Video id: {id}\nLanguage: {lang}"), out).await?;
+                    }
+                    "note" => {
+                        let mut args: Vec<&str> = words.collect();
+                        let found = args.first().and_then(|w| pick(Some(w)));
+                        let found = match found {
+                            Some(f) => {
+                                args.remove(0);
+                                Some(f)
+                            }
+                            None => pick(None),
+                        };
+                        let (Some((id, dir)), Some(line)) = (found, (!args.is_empty()).then(|| args.remove(0))) else {
+                            out.println("usage: /video note [id] <line-id> <what to change> — e.g. /video note intro say it shorter");
+                            return Ok(true);
+                        };
+                        let text = args.join(" ");
+                        if text.trim().is_empty() {
+                            out.println("usage: /video note [id] <line-id> <what to change>");
+                            return Ok(true);
+                        }
+                        match add_note(&dir, line, &text) {
+                            Ok(n) => out.println(&format!("[video] noted for {id} ({n} open) — /video apply {id} has the agent apply them")),
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        }
+                    }
+                    "notes" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            let notes = std::fs::read_to_string(dir.join("notes.md")).unwrap_or_default();
+                            if notes.trim().is_empty() {
+                                out.println(&format!("[video] no notes on {id} — /video note [id] <line> <what to change>"));
+                            }
+                            for l in notes.lines().filter(|l| !l.trim().is_empty()) {
+                                out.println(&format!("[video] {l}"));
+                            }
+                        }
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "apply" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            let notes = std::fs::read_to_string(dir.join("notes.md")).unwrap_or_default();
+                            if notes.trim().is_empty() {
+                                out.println(&format!("[video] no notes on {id} to apply"));
+                                return Ok(true);
+                            }
+                            self.run_preset(VIDEO_APPLY_PROMPT, &format!("Video id: {id}\nNotes (.dcode-ai/videos/{id}/notes.md):\n{notes}"), out).await?;
+                        }
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
                     },
                     "render" => match pick(words.next()) {
                         Some((id, dir)) => {
@@ -232,6 +347,13 @@ impl Repl {
                         }
                         self.run_preset(VIDEO_EDIT_PROMPT, &format!("Video id: {id}\nChange: {what}"), out).await?;
                     }
+                    "setup" if words.clone().next() == Some("voice") => {
+                        let progress = |s: String| out.println(&format!("[video] {s}"));
+                        match dcode_ai_cli::ffmpeg_setup::install_piper(progress).await {
+                            Ok(p) => out.println(&format!("[video] draft voice installed ({}) — /video render uses it from now on", p.display())),
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        }
+                    }
                     "setup" => {
                         if let Some(p) = dcode_ai_core::video::ffmpeg() {
                             out.println(&format!("[video] ffmpeg is ready: {}", p.display()));
@@ -243,7 +365,7 @@ impl Repl {
                             Err(e) => out.eprintln(&format!("[video] {e}")),
                         }
                     }
-                    _ => out.println("usage: /video list · open [id] · edit [id] <what to change> · render [id] · short [id] · script [id] · voice [id] [line] (record your narration) · hear [id] · status [id] · approve [id] · publish [id] · setup"),
+                    _ => out.println("usage: /video list · open [id] [contact|preview|short] · edit [id] <what to change> · preview [id] · render [id] · short [id] · script [id] · voice [id] [line] (record your narration) · hear [id] · note [id] <line> <text> · notes · apply · translate [id] <language> · status · approve · publish · setup [voice]"),
                 }
             }
             "/replay" => {
@@ -1859,7 +1981,10 @@ impl Repl {
         ));
         let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let (mut done, mut redo) = (0, Vec::new());
-        for (i, line) in lines.iter().enumerate() {
+        let mut i = 0;
+        let mut again = 0;
+        while i < lines.len() {
+            let line = lines[i];
             out.println(&format!(
                 "[voice] {}/{} {} — “{}”",
                 i + 1,
@@ -1888,6 +2013,7 @@ impl Repl {
                 Err(e) => {
                     out.eprintln(&format!("[voice] {e} — skipped {}", line.id));
                     redo.push(line.id.clone());
+                    i += 1;
                     continue;
                 }
             };
@@ -1931,6 +2057,35 @@ impl Repl {
                     take.seconds()
                 )),
             }
+            // Hear it back; Esc in the next few seconds records it again.
+            let p2 = path.clone();
+            let _ = tokio::task::spawn_blocking(move || voice::play(&p2)).await;
+            if again < 3 {
+                out.println("[voice] ▶ that was your take — Esc within 3 s to record it again");
+                stop.store(false, std::sync::atomic::Ordering::SeqCst);
+                let redo_now = {
+                    let _armed = super::cmd_team::TalkStopGuard::install(out, stop.clone());
+                    let t = std::time::Instant::now();
+                    loop {
+                        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+                            break true;
+                        }
+                        if t.elapsed() > std::time::Duration::from_secs(3) {
+                            break false;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                };
+                if redo_now {
+                    again += 1;
+                    done -= 1;
+                    redo.retain(|r| r != &line.id);
+                    out.println("[voice] once more:");
+                    continue;
+                }
+            }
+            again = 0;
+            i += 1;
         }
         out.println(&format!(
             "[voice] {done} take(s) saved in {}. /video render uses them (the draft voice speaks the rest).",
@@ -2005,4 +2160,21 @@ impl Repl {
             )
         });
     }
+}
+
+/// Adds a review note to a recording's `notes.md`; returns how many are open.
+fn add_note(dir: &std::path::Path, line: &str, text: &str) -> Result<usize, String> {
+    use std::io::Write;
+    let p = dir.join("notes.md");
+    let mut f = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&p)
+        .map_err(|e| e.to_string())?;
+    writeln!(f, "- {line}: {}", text.trim()).map_err(|e| e.to_string())?;
+    Ok(std::fs::read_to_string(&p)
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("- "))
+        .count())
 }

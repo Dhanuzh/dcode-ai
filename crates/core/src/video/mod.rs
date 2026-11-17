@@ -49,6 +49,11 @@ pub struct Event {
     pub x: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y: Option<f64>,
+    /// The element's size (CSS pixels), centred on x, y — for highlights.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub w: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub h: Option<f64>,
     /// What it acted on or a short description ("Create project" button).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub label: String,
@@ -141,6 +146,38 @@ fn hold_kind() -> String {
     "hold".into()
 }
 
+/// A box to pixelate (CSS pixels of the page) from `from` to `to`
+/// (recording seconds).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct BlurBox {
+    #[serde(default)]
+    pub from: f64,
+    #[serde(default = "forever")]
+    pub to: f64,
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+fn forever() -> f64 {
+    f64::MAX
+}
+
+/// How the draft voice says something written otherwise.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Respell {
+    pub text: String,
+    pub say: String,
+}
+
+/// A line of a translation: the same id, other words.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Translated {
+    pub id: String,
+    pub text: String,
+}
+
 /// The edit list.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct Edl {
@@ -189,6 +226,56 @@ pub struct Edl {
     /// Upload folders `/video publish` makes.
     #[serde(default = "default_platforms")]
     pub platforms: Vec<String>,
+    /// Outline what is clicked or typed into, dimming the rest a little.
+    #[serde(default = "yes")]
+    pub highlight: bool,
+    /// Pixelate what the recorder found private (emails, ticket ids,
+    /// tokens, password fields, your `redact` words).
+    #[serde(default = "yes")]
+    pub privacy: bool,
+    /// More boxes to pixelate.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blur: Vec<BlurBox>,
+    /// How the draft voice says words ("UX" → "you ex").
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub respell: Vec<Respell>,
+    /// Other languages: `{"de": [{id, text}, …]}`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub translations: std::collections::BTreeMap<String, Vec<Translated>>,
+    /// The draft voice per language (`{"de": "piper:/path/de.onnx"}`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub voices: std::collections::BTreeMap<String, String>,
+}
+
+impl Edl {
+    /// What the draft voice says for `text` (respellings applied, in order).
+    pub fn spoken(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for r in &self.respell {
+            if !r.text.is_empty() {
+                out = out.replace(&r.text, &r.say);
+            }
+        }
+        out
+    }
+
+    /// This edit list in another language: each line's text from the
+    /// translation (untranslated lines keep theirs), the language's voice.
+    pub fn in_language(&self, lang: &str) -> Option<Edl> {
+        let t = self.translations.get(lang)?;
+        let mut e = self.clone();
+        for l in &mut e.lines {
+            if let Some(x) = t.iter().find(|x| x.id == l.id) {
+                l.text = x.text.clone();
+            }
+        }
+        e.voice = "draft".into();
+        e.respell.clear();
+        if let Some(v) = self.voices.get(lang) {
+            e.draft_voice = v.clone();
+        }
+        Some(e)
+    }
 }
 
 fn default_cuts() -> Vec<String> {
@@ -306,7 +393,10 @@ impl Edl {
                 3.0
             };
             i.kind = i.kind.trim().to_ascii_lowercase();
-            if !matches!(i.kind.as_str(), "section" | "bullets" | "quote" | "hold") {
+            if !matches!(
+                i.kind.as_str(),
+                "section" | "bullets" | "quote" | "hold" | "code" | "terminal"
+            ) {
                 i.kind = "hold".into();
             }
         }
@@ -434,6 +524,12 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
         draft_voice: String::new(),
         clean_master: true,
         platforms: default_platforms(),
+        highlight: true,
+        privacy: true,
+        blur: Vec::new(),
+        respell: Vec::new(),
+        translations: Default::default(),
+        voices: Default::default(),
     }
     .normalized(duration)
 }
@@ -468,6 +564,8 @@ mod tests {
             kind: kind.into(),
             x: xy.map(|p| p.0),
             y: xy.map(|p| p.1),
+            w: None,
+            h: None,
             label: label.into(),
         }
     }
@@ -504,6 +602,66 @@ mod tests {
         // Times map in order.
         assert!(e.output_time(12.0).unwrap() < e.output_time(30.0).unwrap());
         assert_eq!(e.title, "Signing up");
+    }
+
+    #[test]
+    fn respellings_and_translations() {
+        let e = Edl {
+            lines: vec![
+                Line {
+                    id: "a".into(),
+                    at: 0.0,
+                    text: "Open the UX dashboard.".into(),
+                    section: String::new(),
+                    only: Vec::new(),
+                },
+                Line {
+                    id: "b".into(),
+                    at: 1.0,
+                    text: "Done.".into(),
+                    section: String::new(),
+                    only: Vec::new(),
+                },
+            ],
+            respell: vec![Respell {
+                text: "UX".into(),
+                say: "you ex".into(),
+            }],
+            translations: [(
+                "de".to_string(),
+                vec![Translated {
+                    id: "a".into(),
+                    text: "Öffne das UX-Dashboard.".into(),
+                }],
+            )]
+            .into(),
+            voices: [("de".to_string(), "piper:/v/de.onnx".to_string())].into(),
+            ..Default::default()
+        };
+        assert_eq!(
+            e.spoken("Open the UX dashboard."),
+            "Open the you ex dashboard."
+        );
+        let de = e.in_language("de").unwrap();
+        assert_eq!(de.lines[0].text, "Öffne das UX-Dashboard.");
+        assert_eq!(de.lines[1].text, "Done.", "untranslated lines stay");
+        assert_eq!(de.draft_voice, "piper:/v/de.onnx");
+        assert_eq!(de.voice, "draft");
+        assert!(e.in_language("fr").is_none());
+    }
+
+    #[test]
+    fn the_event_summary_is_short() {
+        let mut events: Vec<Event> = (0..5)
+            .map(|i| ev(i as f64, "scroll", None, "down"))
+            .collect();
+        events.extend(
+            (0..100).map(|i| ev(10.0 + i as f64, "click", Some((1.0, 1.0)), &format!("b{i}"))),
+        );
+        let d = record::describe(&events);
+        assert!(d.contains("scroll down ×5"), "{d}");
+        assert!(d.contains("more actions"), "{d}");
+        assert!(d.lines().count() <= 62, "{}", d.lines().count());
     }
 
     #[test]
@@ -575,7 +733,7 @@ mod live {
         act(serde_json::json!({"action": "navigate", "url": page}))
             .await
             .unwrap();
-        let id = super::record::start(w, "Creating a project")
+        let id = super::record::start(w, "Creating a project", Default::default())
             .await
             .unwrap()
             .id;
@@ -690,7 +848,9 @@ mod live_hidden {
                 .await
                 .unwrap();
         eprintln!("visibility before: {vis}");
-        let started = super::record::start(&w, "Hidden").await.unwrap();
+        let started = super::record::start(&w, "Hidden", Default::default())
+            .await
+            .unwrap();
         eprintln!("visible at start: {}", started.visible);
         // Covered again while recording: the screencast goes quiet.
         let _ = reqwest::Client::new()
@@ -710,5 +870,124 @@ mod live_hidden {
         let s = super::record::stop().await.unwrap();
         eprintln!("{} frames in {:.1}s", s.frames, s.duration);
         assert!(s.frames >= 8, "frames keep coming: {}", s.frames);
+    }
+}
+
+/// Stills mode end to end: settled stills per step, private text found and
+/// blurred, highlight, a preview and a translation.
+/// `DCODE_AI_TEST_CDP_PORT=<port>`, `cargo test -- --ignored record_stills`.
+#[cfg(test)]
+mod live_stills {
+    #[tokio::test]
+    #[ignore]
+    async fn record_stills_with_privacy() {
+        let Ok(port) = std::env::var("DCODE_AI_TEST_CDP_PORT") else {
+            return;
+        };
+        let port: u16 = port.parse().unwrap();
+        crate::browser::connect(port).await.unwrap();
+        let ws = tempfile::tempdir().unwrap();
+        let w = ws.path().to_path_buf();
+        let act = |v: serde_json::Value| {
+            let w = w.clone();
+            async move { crate::browser::run_action(&v, &w).await }
+        };
+        let page = "data:text/html,<body style='font:22px sans-serif;padding:50px'><h1>Tickets</h1>\
+<p>Owner: priya.k@example.com · Ticket SUP-4821 · Reviewer Dana Smith</p>\
+<input id=q placeholder='Search tickets' style='font-size:22px'> \
+<button style='font-size:22px' onclick=\"document.querySelector('h1').textContent='Found: '+q.value\">Search</button></body>";
+        act(serde_json::json!({"action": "navigate", "url": page}))
+            .await
+            .unwrap();
+        let opts = super::record::Options {
+            mode: super::record::Mode::Stills,
+            redact: vec!["Dana Smith".into()],
+        };
+        let started = super::record::start(&w, "Searching tickets", opts)
+            .await
+            .unwrap();
+        let snap = act(serde_json::json!({"action": "snapshot"}))
+            .await
+            .unwrap();
+        let refnum = |needle: &str| -> u64 {
+            let line = snap
+                .lines()
+                .find(|l| l.starts_with('[') && l.contains(needle))
+                .unwrap_or_else(|| panic!("{needle} in {snap}"));
+            line.split(['[', ']']).nth(1).unwrap().parse().unwrap()
+        };
+        let (input, button) = (refnum("Search tickets"), refnum("button \"Search\""));
+        act(serde_json::json!({"action": "type", "ref": input, "text": "login"}))
+            .await
+            .unwrap();
+        act(serde_json::json!({"action": "click", "ref": button}))
+            .await
+            .unwrap();
+        let s = super::record::stop().await.unwrap();
+        assert_eq!(s.id, started.id);
+        assert!(s.frames >= 3, "a still per step: {}", s.frames);
+        assert!(s.events.iter().all(|e| e.w.is_some()), "{:?}", s.events);
+        let saved = super::record::load(&s.dir).unwrap();
+        assert_eq!(saved.mode, super::record::Mode::Stills);
+        let boxes = saved.privacy.first().map(|p| p.boxes.len()).unwrap_or(0);
+        assert!(
+            boxes >= 3,
+            "email, ticket id and the name: {:?}",
+            saved.privacy
+        );
+        let mut edl = s.draft.clone();
+        edl.title = "Searching tickets".into();
+        edl.lines[0].text = "Type what you are looking for.".into();
+        edl.translations.insert(
+            "de".into(),
+            vec![super::Translated {
+                id: edl.lines[0].id.clone(),
+                text: "Gib ein, was du suchst.".into(),
+            }],
+        );
+        std::fs::write(s.dir.join("edl.json"), serde_json::to_string(&edl).unwrap()).unwrap();
+        let r = super::render::render(&s.dir, |p| eprintln!("{p}")).unwrap();
+        eprintln!("{r:?}");
+        assert!(s.dir.join("contact.png").is_file());
+        let p = super::render::render_with(
+            &s.dir,
+            &super::render::Options {
+                preview: true,
+                lang: None,
+            },
+            |_| {},
+        )
+        .unwrap();
+        let de = super::render::render_with(
+            &s.dir,
+            &super::render::Options {
+                preview: false,
+                lang: Some("de".into()),
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(
+            std::fs::read_to_string(&de.srt)
+                .unwrap()
+                .contains("Gib ein")
+        );
+        if r.mp4.is_some() {
+            assert!(p.mp4.is_some() && de.mp4.is_some());
+        }
+        if let Ok(out) = std::env::var("DCODE_AI_LOOK") {
+            for f in [
+                "video.mp4",
+                "contact.png",
+                "thumbnail.png",
+                "preview.mp4",
+                "video.de.mp4",
+                "captions.de.srt",
+                "privacy.json",
+                "events.json",
+            ] {
+                let _ = std::fs::copy(s.dir.join(f), format!("{out}/stills-{f}"));
+            }
+        }
     }
 }

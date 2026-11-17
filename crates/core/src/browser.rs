@@ -197,6 +197,120 @@ pub async fn stop_screencast() -> Result<(), String> {
 
 /// Where the last click or typing happened (CSS pixels), for the recording.
 static LAST_XY: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+/// The size of that element (CSS pixels).
+static LAST_BOX: std::sync::Mutex<Option<(f64, f64)>> = std::sync::Mutex::new(None);
+
+/// Finds what must not be shown in a recording: emails, ticket ids
+/// (`ABC-123`), API keys and tokens, password and email fields, and the
+/// `extra` words. Boxes in CSS pixels of the viewport.
+const PRIVATE_JS: &str = r#"((extra) => {
+  const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const pats = [
+    /[\w.+-]+@[\w-]+(\.[\w-]+)+/g,
+    /\b[A-Z][A-Z0-9]{1,9}-\d{1,7}\b/g,
+    /\b(?:sk|pk|rk|ghp|gho|ghs|github_pat|xox[abps]|AKIA)[-_A-Za-z0-9]{12,}\b/g,
+    /\beyJ[\w-]{10,}\.[\w-]{10,}\.[\w-]{5,}/g,
+  ];
+  for (const w of extra) if (w && w.trim()) pats.push(new RegExp(esc(w.trim()), 'gi'));
+  const out = [], vw = innerWidth, vh = innerHeight;
+  const add = r => { if (r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+    r.top < vh && r.left < vw && out.length < 400) out.push([r.left, r.top, r.width, r.height]); };
+  if (!document.body) return out;
+  const tw = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = tw.nextNode()) && out.length < 400) {
+    const t = n.nodeValue; if (!t || t.length < 3) continue;
+    for (const p of pats) { p.lastIndex = 0; let m;
+      while ((m = p.exec(t)) && out.length < 400) {
+        const rg = document.createRange(); rg.setStart(n, m.index); rg.setEnd(n, m.index + m[0].length);
+        for (const r of rg.getClientRects()) add(r);
+        if (!p.global) break; } }
+  }
+  for (const el of document.querySelectorAll('input[type=password],input[type=email],input[autocomplete*=email]'))
+    add(el.getBoundingClientRect());
+  for (const el of document.querySelectorAll('input,textarea')) {
+    const v = el.value || ''; if (v && pats.some(p => { p.lastIndex = 0; return p.test(v); })) add(el.getBoundingClientRect());
+  }
+  return out;
+})"#;
+
+/// Waits until the page has settled after an action: loaded, then two
+/// screenshots a quarter second apart identical (at most `max`).
+async fn settle(page: &Page, max: Duration) {
+    let start = std::time::Instant::now();
+    let shot = || async {
+        page.call(
+            "Page.captureScreenshot",
+            json!({"format": "jpeg", "quality": 30}),
+        )
+        .await
+        .ok()
+        .and_then(|v| v["data"].as_str().map(str::to_string))
+    };
+    let mut last = shot().await;
+    while start.elapsed() < max {
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        let now = shot().await;
+        if now.is_some() && now == last {
+            return;
+        }
+        last = now;
+    }
+}
+
+/// What a recording needs from the page after an action: it settles, its
+/// private parts are found, and in stills mode a still is taken.
+async fn observe_for_recording(page: &Page) {
+    use crate::video::record;
+    let Some(mode) = record::mode() else { return };
+    settle(page, Duration::from_secs(4)).await;
+    let words = serde_json::to_string(&record::redact_words()).unwrap_or("[]".into());
+    if let Ok(Value::Array(boxes)) = page.eval(&format!("{PRIVATE_JS}({words})")).await {
+        let boxes: Vec<[f64; 4]> = boxes
+            .iter()
+            .filter_map(|b| {
+                let a = b.as_array()?;
+                Some([
+                    a.first()?.as_f64()?,
+                    a.get(1)?.as_f64()?,
+                    a.get(2)?.as_f64()?,
+                    a.get(3)?.as_f64()?,
+                ])
+            })
+            .collect();
+        record::add_privacy(boxes);
+    }
+    if mode == record::Mode::Stills
+        && let Ok(shot) = page
+            .call(
+                "Page.captureScreenshot",
+                json!({"format": "jpeg", "quality": 88}),
+            )
+            .await
+        && let Some(data) = shot["data"].as_str()
+    {
+        use base64::Engine;
+        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data) {
+            let css_w = page
+                .eval("innerWidth")
+                .await
+                .ok()
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.0);
+            record::add_still(&bytes, css_w);
+        }
+    }
+}
+
+/// [`observe_for_recording`] on the page the agent drives (at the start of
+/// a recording).
+pub async fn observe_now() -> Result<(), String> {
+    let mut slot = shared().lock().await;
+    let (page, _) = ensure_page(&mut slot, true).await?;
+    let _ = page.call("Page.bringToFront", json!({})).await;
+    observe_for_recording(page).await;
+    Ok(())
+}
 
 impl Page {
     /// Connect to a page's WebSocket debugger URL.
@@ -964,22 +1078,31 @@ fn format_snapshot(v: &Value) -> String {
 }
 
 /// Scroll element `r` into view; returns its centre and whether it is a
-/// password field.
+/// password field (its size goes to [`LAST_BOX`], for recordings).
 async fn locate(page: &Page, r: u64) -> Result<(f64, f64, bool), String> {
     let js = format!(
         r#"(() => {{ const el = document.querySelector('[data-dcode-ref="{r}"]');
   if (!el) return null;
   el.scrollIntoView({{block: 'center', inline: 'center'}});
   const b = el.getBoundingClientRect();
-  return [b.left + b.width / 2, b.top + b.height / 2, el.type === 'password'];
+  return [b.left + b.width / 2, b.top + b.height / 2, el.type === 'password', b.width, b.height];
 }})()"#
     );
     match page.eval(&js).await? {
-        Value::Array(a) if a.len() == 3 => Ok((
-            a[0].as_f64().unwrap_or(0.0),
-            a[1].as_f64().unwrap_or(0.0),
-            a[2].as_bool().unwrap_or(false),
-        )),
+        Value::Array(a) if a.len() >= 3 => {
+            if let (Some(w), Some(h)) = (
+                a.get(3).and_then(Value::as_f64),
+                a.get(4).and_then(Value::as_f64),
+            ) && let Ok(mut b) = LAST_BOX.lock()
+            {
+                *b = Some((w, h));
+            }
+            Ok((
+                a[0].as_f64().unwrap_or(0.0),
+                a[1].as_f64().unwrap_or(0.0),
+                a[2].as_bool().unwrap_or(false),
+            ))
+        }
         _ => Err(format!(
             "no element [{r}] on the page now — take a snapshot to get current numbers"
         )),
@@ -1181,10 +1304,14 @@ async fn run_on(
     if let Ok(mut l) = LAST_XY.lock() {
         *l = None;
     }
+    if let Ok(mut l) = LAST_BOX.lock() {
+        *l = None;
+    }
     let result = run_page_action(action, input, page, workspace_root).await;
     if result.is_ok() && crate::video::record::is_recording() {
         // The event track of a screen recording.
         let xy = LAST_XY.lock().ok().and_then(|l| *l);
+        let size = LAST_BOX.lock().ok().and_then(|l| *l);
         let s = |k: &str| input[k].as_str().unwrap_or("").to_string();
         let (kind, label) = match action {
             "click" => ("click", target.clone().unwrap_or_default()),
@@ -1197,7 +1324,8 @@ async fn run_on(
             _ => ("", String::new()),
         };
         if !kind.is_empty() {
-            crate::video::record::note(kind, xy, &label);
+            crate::video::record::note(kind, xy, size, &label);
+            observe_for_recording(page).await;
         }
     }
     if result.is_ok() {

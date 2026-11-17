@@ -40,12 +40,19 @@ impl ToolExecutor for RecordStartTool {
             description: "Start recording the browser page you drive (for a demo or tutorial video). \
 Then do the task — with one `browser_task` (a sub-agent drives the browser; cheaper, and its \
 clicks are still logged) or the `browser` tool; every click, field and page load is logged with \
-where and when — and call `record_stop`. Move deliberately: one action at a time, no aimless scrolling."
+where and when — and call `record_stop`. Move deliberately: one action at a time, no aimless scrolling. \
+After each action the recorder waits for the page to settle, and finds private things on it \
+(emails, ticket ids, tokens, password fields, plus your `redact` words) to blur in the video. \
+mode \"stills\" (vidni-style): one sharp settled screenshot per step with a slow camera move — \
+best for dashboards and reports, and works even when the browser window is covered; \"live\" \
+(default): a real recording — best for typing, menus and animations."
                 .into(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
-                    "goal": {"type": "string", "description": "What the video shows (its working title)"}
+                    "goal": {"type": "string", "description": "What the video shows (its working title)"},
+                    "mode": {"type": "string", "enum": ["live", "stills"]},
+                    "redact": {"type": "array", "items": {"type": "string"}, "description": "Words to hide wherever they show: people's names, customer names…"}
                 },
                 "required": ["goal"]
             }),
@@ -54,11 +61,26 @@ where and when — and call `record_stop`. Move deliberately: one action at a ti
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
         let goal = call.input["goal"].as_str().unwrap_or("").trim();
-        match video::record::start(&self.workspace_root, goal).await {
+        let opts = video::record::Options {
+            mode: if call.input["mode"].as_str() == Some("stills") {
+                video::record::Mode::Stills
+            } else {
+                video::record::Mode::Live
+            },
+            redact: call.input["redact"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        };
+        match video::record::start(&self.workspace_root, goal, opts).await {
             Ok(started) => ok(
                 call,
                 format!(
-                    "Recording {}. Do the task with `browser` now, then call record_stop.{}",
+                    "Recording {}. Do the task now (one `browser_task`, or `browser`), then call record_stop.{}",
                     started.id,
                     if started.visible {
                         ""
@@ -92,26 +114,38 @@ important clicks — then call `video_render` with it."
 
     async fn execute(&self, call: &ToolCall) -> ToolResult {
         match video::record::stop().await {
-            Ok(s) => ok(
-                call,
-                format!(
-                    "Recorded {id}: {dur:.1}s, {frames} frames.\n\nEvent track (seconds · action · where · what):\n{track}\n\n\
-Draft edit list (times are recording seconds; segments with speed > 1 are sped up; zooms use page \
-CSS pixels; music \"auto\" = generated background music, \"none\", or a file path):\n{edl}\n\n\
-`lines` is the narration script: each {{id, at, text, section}} is spoken from recording second \
-`at` by the draft voice (or the user's own take, recorded later under the same id) and shown as \
-captions; the video waits when a line needs longer. Rewrite them as short, friendly spoken \
-sentences, give each a `section` (chapters), keep ids short and stable. Optional: `inserts` \
-[{{at, seconds, kind: section|bullets|quote, title, items}}] for cards, `cuts` [\"long\",\"short\"] \
-for a 9:16 short too. Set title/subtitle/end_text, adjust segments and zooms if needed, then call \
-video_render with id \"{id}\" and the edl.",
-                    id = s.id,
-                    dur = s.duration,
-                    frames = s.frames,
-                    track = video::record::describe(&s.events),
-                    edl = serde_json::to_string_pretty(&s.draft).unwrap_or_default(),
-                ),
-            ),
+            Ok(s) => {
+                let script: Vec<String> = s
+                    .draft
+                    .lines
+                    .iter()
+                    .map(|l| format!("  {} @{:.1}s: {}", l.id, l.at, l.text))
+                    .collect();
+                ok(
+                    call,
+                    format!(
+                        "Recorded {id}: {dur:.1}s, {frames} frames.\n\nEvent track (seconds · action · where · what):\n{track}\n\n\
+A draft edit list is saved (.dcode-ai/videos/{id}/edl.json): {segs} segments (waiting sped up), \
+{zooms} zooms on clicks, title \"{title}\", and this narration script (id @recording-second: text):\n{script}\n\n\
+Now call video_render with id \"{id}\" and an `edl` holding ONLY the fields you change — they \
+replace the saved draft's, the rest is kept. Usually: title (≤ 6 words), subtitle, end_text, and \
+`lines` [{{id, at, text, section}}]: short, friendly spoken sentences, one or two per step, `at` \
+about a second before the action, a `section` on each (chapters), ids short and stable (the \
+user's own takes are filed under them). Optional: `respell` [{{text, say}}] for words the voice \
+says wrong (\"UX\" → \"you ex\"); `inserts` [{{at, seconds, kind: section|bullets|quote|code|terminal, \
+title, items}}] for cards; `cuts` [\"long\",\"short\"] for a 9:16 short too; `blur` \
+[{{x,y,w,h,from,to}}] for anything private the automatic blur missed.",
+                        id = s.id,
+                        dur = s.duration,
+                        frames = s.frames,
+                        track = video::record::describe(&s.events),
+                        segs = s.draft.segments.len(),
+                        zooms = s.draft.zooms.len(),
+                        title = s.draft.title,
+                        script = script.join("\n"),
+                    ),
+                )
+            }
             Err(e) => fail(call, e),
         }
     }
@@ -137,6 +171,8 @@ recording. Never touch the files in `voice/` (the user's takes) or `approved.jso
                 "type": "object",
                 "properties": {
                     "id": {"type": "string"},
+                    "preview": {"type": "boolean", "description": "A quick low-resolution draft (preview.mp4) to check timing"},
+                    "lang": {"type": "string", "description": "Render a translation from edl.translations.<lang> (e.g. \"de\")"},
                     "edl": {"type": "object", "description": "title, subtitle, end_text, segments[{from,to,speed}], zooms[{at,x,y,scale,hold}], lines[{id,at,text,section,only}] (narration), inserts[{at,seconds,kind,title,items}], cuts[\"long\",\"short\"], voice (auto|draft|takes|none), draft_voice, music, captions[{from,to,text}] (used only without lines), cursor, width, clean_master, platforms"}
                 }
             }),
@@ -158,7 +194,18 @@ recording. Never touch the files in `voice/` (the user's takes) or `approved.jso
             return fail(call, format!("no recording at {}", dir.display()));
         }
         if let Some(v) = call.input.get("edl").filter(|v| v.is_object()) {
-            let edl: Edl = match serde_json::from_value(v.clone()) {
+            // The fields given replace the saved edit list's; the rest stay.
+            let mut merged: serde_json::Value = std::fs::read_to_string(dir.join("edl.json"))
+                .ok()
+                .and_then(|t| serde_json::from_str(&t).ok())
+                .filter(|v: &serde_json::Value| v.is_object())
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let (Some(m), Some(new)) = (merged.as_object_mut(), v.as_object()) {
+                for (k, val) in new {
+                    m.insert(k.clone(), val.clone());
+                }
+            }
+            let edl: Edl = match serde_json::from_value(merged) {
                 Ok(e) => e,
                 Err(e) => return fail(call, format!("edl: {e}")),
             };
@@ -168,7 +215,18 @@ recording. Never touch the files in `voice/` (the user's takes) or `approved.jso
             }
         }
         let d = dir.clone();
-        match tokio::task::spawn_blocking(move || video::render::render(&d, |_| {})).await {
+        let opts = video::render::Options {
+            preview: call.input["preview"].as_bool().unwrap_or(false),
+            lang: call.input["lang"]
+                .as_str()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .filter(|l| {
+                    !l.is_empty() && l.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+                }),
+        };
+        match tokio::task::spawn_blocking(move || video::render::render_with(&d, &opts, |_| {}))
+            .await
+        {
             Ok(Ok(r)) => {
                 let rel = |p: &std::path::Path| {
                     p.strip_prefix(&self.workspace_root)

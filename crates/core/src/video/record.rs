@@ -14,16 +14,38 @@ use super::{Edl, Event, FrameInfo};
 /// Longest recording, seconds.
 pub const MAX_SECONDS: f64 = 600.0;
 
+/// How a recording takes its pictures.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum Mode {
+    /// The page's live screencast (screenshots when it goes quiet).
+    #[default]
+    Live,
+    /// One settled screenshot per step, the camera moving over it.
+    Stills,
+}
+
+/// Private parts of the page found at a moment (CSS pixel boxes).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct Privacy {
+    pub t: f64,
+    pub boxes: Vec<[f64; 4]>,
+}
+
 struct Active {
     id: String,
     dir: PathBuf,
     goal: String,
     start: f64,
+    mode: Mode,
+    redact: Vec<String>,
     events: Arc<Mutex<Vec<Event>>>,
     frames: Arc<Mutex<Vec<FrameInfo>>>,
-    task: tokio::task::JoinHandle<()>,
+    privacy: Arc<Mutex<Vec<Privacy>>>,
+    writer: Arc<Writer>,
+    task: Option<tokio::task::JoinHandle<()>>,
     /// Screenshots while the screencast is quiet.
-    fallback: tokio::task::JoinHandle<()>,
+    fallback: Option<tokio::task::JoinHandle<()>>,
 }
 
 /// Writes frames (from the screencast or a screenshot) into `raw/`.
@@ -76,9 +98,23 @@ pub fn is_recording() -> bool {
     ACTIVE.lock().is_ok_and(|a| a.is_some())
 }
 
-/// Adds to the event track (a no-op when not recording). Coordinates in
-/// CSS pixels.
-pub fn note(kind: &str, xy: Option<(f64, f64)>, label: &str) {
+/// The running recording's mode.
+pub fn mode() -> Option<Mode> {
+    ACTIVE.lock().ok()?.as_ref().map(|a| a.mode)
+}
+
+/// Words the running recording hides (besides emails, ids and tokens).
+pub fn redact_words() -> Vec<String> {
+    ACTIVE
+        .lock()
+        .ok()
+        .and_then(|g| g.as_ref().map(|a| a.redact.clone()))
+        .unwrap_or_default()
+}
+
+/// Adds to the event track (a no-op when not recording). Coordinates and
+/// the element's size in CSS pixels.
+pub fn note(kind: &str, xy: Option<(f64, f64)>, size: Option<(f64, f64)>, label: &str) {
     let Ok(g) = ACTIVE.lock() else { return };
     let Some(a) = g.as_ref() else { return };
     if let Ok(mut ev) = a.events.lock() {
@@ -87,22 +123,50 @@ pub fn note(kind: &str, xy: Option<(f64, f64)>, label: &str) {
             kind: kind.into(),
             x: xy.map(|p| p.0),
             y: xy.map(|p| p.1),
+            w: size.map(|p| p.0),
+            h: size.map(|p| p.1),
             label: label.chars().take(120).collect(),
         });
     }
 }
 
+/// A still for a stills-mode recording (a no-op otherwise).
+pub fn add_still(bytes: &[u8], css_w: f64) {
+    let Ok(g) = ACTIVE.lock() else { return };
+    if let Some(a) = g.as_ref() {
+        a.writer.write(now(), bytes, css_w, false);
+    }
+}
+
+/// The private parts of the page now (a no-op when not recording).
+pub fn add_privacy(boxes: Vec<[f64; 4]>) {
+    let Ok(g) = ACTIVE.lock() else { return };
+    if let Some(a) = g.as_ref()
+        && let Ok(mut p) = a.privacy.lock()
+    {
+        p.push(Privacy {
+            t: (now() - a.start).max(0.0),
+            boxes,
+        });
+    }
+}
+
+/// How to record.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    pub mode: Mode,
+    /// Words to hide wherever they show (names, customers…).
+    pub redact: Vec<String>,
+}
+
 /// Starts recording the browser (or the page the agent drives).
-pub async fn start(workspace: &Path, goal: &str) -> Result<Started, String> {
+pub async fn start(workspace: &Path, goal: &str, opts: Options) -> Result<Started, String> {
     if is_recording() {
         return Err("already recording — record_stop first".into());
     }
     let id = format!("rec-{}", chrono::Local::now().format("%Y%m%d-%H%M%S"));
     let dir = super::videos_dir(workspace).join(&id);
     std::fs::create_dir_all(dir.join("raw")).map_err(|e| e.to_string())?;
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
-    let (acker, visible) = crate::browser::start_screencast(tx).await?;
-    let acker = Arc::new(acker);
     let start = now();
     let frames: Arc<Mutex<Vec<FrameInfo>>> = Default::default();
     let writer = Arc::new(Writer {
@@ -112,6 +176,41 @@ pub async fn start(workspace: &Path, goal: &str) -> Result<Started, String> {
         frames: frames.clone(),
         last: Mutex::new(start),
     });
+    let activate = |task, fallback| {
+        if let Ok(mut g) = ACTIVE.lock() {
+            *g = Some(Active {
+                id: id.clone(),
+                dir: dir.clone(),
+                goal: goal.to_string(),
+                start,
+                mode: opts.mode,
+                redact: opts.redact.clone(),
+                events: Default::default(),
+                frames: frames.clone(),
+                privacy: Default::default(),
+                writer: writer.clone(),
+                task,
+                fallback,
+            });
+        }
+    };
+    if opts.mode == Mode::Stills {
+        // No live recording: a settled still now, then one after each step.
+        activate(None, None);
+        if let Err(e) = crate::browser::observe_now().await {
+            if let Ok(mut g) = ACTIVE.lock() {
+                *g = None;
+            }
+            return Err(e);
+        }
+        return Ok(Started {
+            id: id.clone(),
+            visible: true,
+        });
+    }
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    let (acker, visible) = crate::browser::start_screencast(tx).await?;
+    let acker = Arc::new(acker);
     let task = {
         let (writer, acker) = (writer.clone(), acker.clone());
         tokio::spawn(async move {
@@ -155,20 +254,13 @@ pub async fn start(workspace: &Path, goal: &str) -> Result<Started, String> {
             }
         })
     };
-    let _ = visible;
-    if let Ok(mut g) = ACTIVE.lock() {
-        *g = Some(Active {
-            id: id.clone(),
-            dir,
-            goal: goal.to_string(),
-            start,
-            events: Default::default(),
-            frames,
-            task,
-            fallback,
-        });
-    }
-    Ok(Started { id, visible })
+    activate(Some(task), Some(fallback));
+    // What is private on the page at the start.
+    let _ = crate::browser::observe_now().await;
+    Ok(Started {
+        id: id.clone(),
+        visible,
+    })
 }
 
 /// A recording that started: its id, and whether the page was visible
@@ -196,10 +288,14 @@ pub async fn stop() -> Result<Stopped, String> {
         .map_err(|_| "lock".to_string())?
         .take()
         .ok_or("not recording")?;
-    active.fallback.abort();
-    let _ = crate::browser::stop_screencast().await;
-    // The frame task ends once the page stops sending.
-    let _ = tokio::time::timeout(std::time::Duration::from_secs(3), active.task).await;
+    if let Some(f) = &active.fallback {
+        f.abort();
+    }
+    if let Some(task) = active.task {
+        let _ = crate::browser::stop_screencast().await;
+        // The frame task ends once the page stops sending.
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), task).await;
+    }
     let duration = (now() - active.start).clamp(0.0, MAX_SECONDS);
     let mut frames = active.frames.lock().map(|f| f.clone()).unwrap_or_default();
     // Screencast frames and screenshots interleave; keep them in time order.
@@ -215,9 +311,14 @@ pub async fn stop() -> Result<Stopped, String> {
     write("frames.json", &frames)?;
     write("events.json", &events)?;
     write("edl.json", &draft)?;
+    write(
+        "privacy.json",
+        &active.privacy.lock().map(|p| p.clone()).unwrap_or_default(),
+    )?;
     std::fs::write(
         active.dir.join("meta.json"),
-        serde_json::json!({"goal": active.goal, "duration": duration}).to_string(),
+        serde_json::json!({"goal": active.goal, "duration": duration, "mode": active.mode})
+            .to_string(),
     )
     .map_err(|e| e.to_string())?;
     Ok(Stopped {
@@ -247,6 +348,8 @@ pub struct Saved {
     pub frames: Vec<FrameInfo>,
     pub events: Vec<Event>,
     pub duration: f64,
+    pub mode: Mode,
+    pub privacy: Vec<Privacy>,
     pub edl: Edl,
 }
 
@@ -265,11 +368,18 @@ pub fn load(dir: &Path) -> Result<Saved, String> {
         .unwrap_or_else(|| frames.last().map(|f| f.t + 1.0).unwrap_or(0.0));
     let edl: Edl =
         serde_json::from_str(&read("edl.json")?).map_err(|e| format!("edl.json: {e}"))?;
+    let mode: Mode = serde_json::from_value(meta["mode"].clone()).unwrap_or_default();
+    let privacy: Vec<Privacy> = read("privacy.json")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     Ok(Saved {
         dir: dir.to_path_buf(),
         frames,
         events,
         duration,
+        mode,
+        privacy,
         edl,
     })
 }
@@ -287,17 +397,37 @@ pub fn list(workspace: &Path) -> Vec<(String, PathBuf)> {
     v
 }
 
-/// The event track as lines for the agent ("12.4s click (300,200) "Sign up"").
+/// The event track as lines for the agent ("12.4s click (300,200) "Sign
+/// up""), kept short: repeats of the same action merge ("scroll down ×4"),
+/// and a long track keeps its start and end.
 pub fn describe(events: &[Event]) -> String {
-    events
-        .iter()
-        .map(|e| {
-            let at = match (e.x, e.y) {
-                (Some(x), Some(y)) => format!(" ({x:.0},{y:.0})"),
-                _ => String::new(),
-            };
-            format!("{:>6.1}s {}{at} {}", e.t, e.kind, e.label)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
+    let mut lines: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < events.len() {
+        let e = &events[i];
+        let mut j = i + 1;
+        while j < events.len() && events[j].kind == e.kind && events[j].label == e.label {
+            j += 1;
+        }
+        let at = match (e.x, e.y) {
+            (Some(x), Some(y)) => format!(" ({x:.0},{y:.0})"),
+            _ => String::new(),
+        };
+        let times = if j - i > 1 {
+            format!(" ×{} (to {:.1}s)", j - i, events[j - 1].t)
+        } else {
+            String::new()
+        };
+        lines.push(format!("{:>6.1}s {}{at} {}{times}", e.t, e.kind, e.label));
+        i = j;
+    }
+    const KEEP: usize = 60;
+    if lines.len() > KEEP {
+        let cut = lines.len() - KEEP;
+        let tail = lines.split_off(KEEP / 2 + cut);
+        lines.truncate(KEEP / 2);
+        lines.push(format!("   … {cut} more actions …"));
+        lines.extend(tail);
+    }
+    lines.join("\n")
 }

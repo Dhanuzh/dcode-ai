@@ -19,12 +19,12 @@ use std::process::{Child, Command, Stdio};
 use ab_glyph::{Font, FontRef, PxScale, ScaleFont};
 use image::{RgbImage, imageops};
 
+use super::record::Privacy;
 use super::record::{Saved, load};
 use super::timeline::{Moment, Timeline};
 use super::{Edl, Event, FrameInfo, Insert, Line, voice};
 
 pub const FPS: f64 = 30.0;
-const GIF_EVERY: usize = 3; // 10 fps
 const GIF_WIDTH: u32 = 640;
 const GIF_MAX_SECONDS: f64 = 60.0;
 const RAMP: f64 = 0.6;
@@ -36,6 +36,98 @@ static FONT_BYTES: &[u8] = include_bytes!("../../assets/fonts/Inter-SemiBold.ttf
 
 fn font() -> FontRef<'static> {
     FontRef::try_from_slice(FONT_BYTES).expect("bundled font")
+}
+
+/// Adwaita Mono (OFL), for code and terminal scenes.
+static MONO_BYTES: &[u8] = include_bytes!("../../assets/fonts/AdwaitaMono-Regular.ttf");
+
+fn mono() -> FontRef<'static> {
+    FontRef::try_from_slice(MONO_BYTES).expect("bundled mono font")
+}
+
+/// A code excerpt or a terminal session: a window with its lines in a
+/// monospace font (`$ ` lines of a terminal are commands, in colour).
+fn code_card(w: u32, h: u32, f: &FontRef, ins: &Insert, fade: f32) -> RgbImage {
+    let mut img = background(w, h);
+    let m = mono();
+    let (wf, hf) = (w as f32, h as f32);
+    let terminal = ins.kind == "terminal";
+    let lines: Vec<&str> = ins.items.iter().flat_map(|i| i.lines()).take(30).collect();
+    let longest = lines
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(10)
+        .max(30);
+    // As large as fits: the longest line across, the lines down.
+    let px = (wf * 0.86 / (longest as f32 * 0.6))
+        .min(hf * 0.72 / (lines.len().max(1) as f32 * 1.35))
+        .clamp(10.0, hf * 0.05);
+    let (x0, y0) = (wf * 0.06, hf * 0.14);
+    let (x1, y1) = (
+        wf * 0.94,
+        (y0 + px * 1.35 * lines.len() as f32 + px * 2.6).min(hf * 0.95),
+    );
+    for y in y0 as i64..y1 as i64 {
+        for x in x0 as i64..x1 as i64 {
+            blend(&mut img, x, y, [14, 12, 20], 0.92);
+        }
+    }
+    // Window bar: three dots and the title.
+    let bar = px * 1.6;
+    for (k, c) in [[255u8, 95, 86], [255, 189, 46], [39, 201, 63]]
+        .iter()
+        .enumerate()
+    {
+        let (cx, cy, r) = (x0 + px * (1.0 + k as f32 * 1.2), y0 + bar / 2.0, px * 0.32);
+        for yy in (cy - r) as i64..=(cy + r) as i64 {
+            for xx in (cx - r) as i64..=(cx + r) as i64 {
+                let d = ((xx as f32 - cx).powi(2) + (yy as f32 - cy).powi(2)).sqrt();
+                if d <= r {
+                    blend(&mut img, xx, yy, *c, 1.0);
+                }
+            }
+        }
+    }
+    let title = if ins.title.trim().is_empty() {
+        if terminal { "terminal" } else { "code" }
+    } else {
+        ins.title.trim()
+    };
+    let tpx = px * 0.8;
+    draw_text(
+        &mut img,
+        f,
+        tpx,
+        (wf - text_width(f, tpx, title)) / 2.0,
+        y0 + bar / 2.0 + tpx * 0.35,
+        title,
+        [170, 165, 190],
+        1.0,
+    );
+    let mut y = y0 + bar + px * 1.1;
+    for l in &lines {
+        let (color, text) = match (terminal, l.strip_prefix("$ ")) {
+            (true, Some(cmd)) => {
+                draw_text(&mut img, &m, px, x0 + px, y, "$", [120, 220, 140], 1.0);
+                ([235, 235, 245], cmd)
+            }
+            (true, None) => ([170, 170, 185], *l),
+            _ => ([220, 222, 235], *l),
+        };
+        let x = if terminal && l.starts_with("$ ") {
+            x0 + px * 2.2
+        } else {
+            x0 + px
+        };
+        draw_text(&mut img, &m, px, x, y, text, color, 1.0);
+        y += px * 1.35;
+        if y > y1 - px * 0.5 {
+            break;
+        }
+    }
+    fade_all(&mut img, fade);
+    img
 }
 
 /// What came out.
@@ -149,6 +241,7 @@ fn card(w: u32, h: u32, f: &FontRef, title: &str, sub: &str, fade: f32) -> RgbIm
 fn insert_card(w: u32, h: u32, f: &FontRef, ins: &Insert, fade: f32) -> RgbImage {
     let px = card_px(w, h);
     match ins.kind.as_str() {
+        "code" | "terminal" => code_card(w, h, f, ins, fade),
         "bullets" => {
             let mut img = background(w, h);
             let (wf, hf) = (w as f32, h as f32);
@@ -580,13 +673,26 @@ type Spoken = (Option<std::sync::Arc<Vec<f32>>>, f64);
 
 /// Finds each line's audio: your take, else the draft voice (per
 /// `edl.voice`). Problems become notes, never failures.
-fn line_audio(dir: &Path, edl: &Edl, line: &Line, notes: &mut Vec<String>) -> Spoken {
+fn line_audio(
+    dir: &Path,
+    edl: &Edl,
+    line: &Line,
+    lang: Option<&str>,
+    notes: &mut Vec<String>,
+) -> Spoken {
     let take = voice::take_path(dir, &line.id);
     let mut path = None;
-    if matches!(edl.voice.as_str(), "auto" | "takes") && take.is_file() {
+    if lang.is_none() && matches!(edl.voice.as_str(), "auto" | "takes") && take.is_file() {
         path = Some(take);
     } else if matches!(edl.voice.as_str(), "auto" | "draft") {
-        match voice::draft(dir, line, &edl.draft_voice) {
+        // What the voice says (respellings applied); a translation's draft
+        // is filed apart from the original's.
+        let mut said = line.clone();
+        said.text = edl.spoken(&line.text);
+        if let Some(lang) = lang {
+            said.id = format!("{}-{lang}", line.id);
+        }
+        match voice::draft(dir, &said, &edl.draft_voice) {
             Ok(p) => path = Some(p),
             Err(e) => {
                 let n = format!("no draft voice: {e}");
@@ -734,6 +840,7 @@ fn mix_audio(
 fn encoder(
     bin: &Path,
     (w, h): (u32, u32),
+    fps: f64,
     audio: Option<&Path>,
     music_file: Option<&Path>,
     total: f64,
@@ -749,7 +856,14 @@ fn encoder(
         "-pix_fmt",
         "rgb24",
     ])
-    .args(["-s", &format!("{w}x{h}"), "-r", "30", "-i", "-"]);
+    .args([
+        "-s",
+        &format!("{w}x{h}"),
+        "-r",
+        &format!("{fps}"),
+        "-i",
+        "-",
+    ]);
     if let Some(a) = audio {
         cmd.arg("-i").arg(a);
     }
@@ -852,46 +966,66 @@ impl Enc {
     }
 }
 
-/// The recording's frames, decoded on demand (the last one kept).
+/// The recording's frames, decoded on demand (the last two kept, for
+/// dissolves between stills). One per drawing thread.
 struct Frames<'a> {
     dir: &'a Path,
     frames: &'a [FrameInfo],
     first: &'a RgbImage,
     size: (u32, u32),
-    cache: Option<(usize, RgbImage)>,
+    cache: Vec<(usize, std::sync::Arc<RgbImage>)>,
 }
 
-impl Frames<'_> {
-    /// The frame at second `s` and its CSS-to-pixel ratio.
-    fn at(&mut self, s: f64) -> (&RgbImage, f64) {
-        let idx = self
-            .frames
-            .partition_point(|fr| fr.t <= s)
-            .saturating_sub(1);
-        if self.cache.as_ref().is_none_or(|(c, _)| *c != idx) {
-            let (sw, sh) = self.size;
-            let img = image::open(self.dir.join("raw").join(&self.frames[idx].file))
-                .map(|i| i.to_rgb8())
-                .unwrap_or_else(|_| {
-                    self.cache
-                        .as_ref()
-                        .map(|c| c.1.clone())
-                        .unwrap_or_else(|| self.first.clone())
-                });
-            let img = if img.dimensions() == (sw, sh) {
-                img
-            } else {
-                imageops::resize(&img, sw, sh, imageops::FilterType::Triangle)
-            };
-            self.cache = Some((idx, img));
+impl<'a> Frames<'a> {
+    fn fresh(&self) -> Frames<'a> {
+        Frames {
+            dir: self.dir,
+            frames: self.frames,
+            first: self.first,
+            size: self.size,
+            cache: Vec::new(),
         }
+    }
+
+    fn index(&self, s: f64) -> usize {
+        self.frames
+            .partition_point(|fr| fr.t <= s)
+            .saturating_sub(1)
+    }
+
+    fn ratio(&self, idx: usize) -> f64 {
         let fr = &self.frames[idx];
-        let ratio = if fr.css_w > 0.0 {
+        if fr.css_w > 0.0 {
             self.size.0 as f64 / fr.css_w
         } else {
             1.0
+        }
+    }
+
+    fn image(&mut self, idx: usize) -> std::sync::Arc<RgbImage> {
+        if let Some((_, img)) = self.cache.iter().find(|c| c.0 == idx) {
+            return img.clone();
+        }
+        let (sw, sh) = self.size;
+        let img = image::open(self.dir.join("raw").join(&self.frames[idx].file))
+            .map(|i| i.to_rgb8())
+            .unwrap_or_else(|_| {
+                self.cache
+                    .last()
+                    .map(|c| (*c.1).clone())
+                    .unwrap_or_else(|| self.first.clone())
+            });
+        let img = if img.dimensions() == (sw, sh) {
+            img
+        } else {
+            imageops::resize(&img, sw, sh, imageops::FilterType::Triangle)
         };
-        (&self.cache.as_ref().expect("set above").1, ratio)
+        let img = std::sync::Arc::new(img);
+        if self.cache.len() >= 2 {
+            self.cache.remove(0);
+        }
+        self.cache.push((idx, img.clone()));
+        img
     }
 }
 
@@ -900,8 +1034,120 @@ struct Scene<'a> {
     edl: &'a Edl,
     points: Vec<(f64, f64, f64)>,
     clicks: Vec<&'a Event>,
+    /// Clicks and typing with the element's size, for highlights.
+    targets: Vec<&'a Event>,
+    privacy: &'a [Privacy],
+    /// Stills mode: the camera drifts over each still, stills dissolve.
+    stills: bool,
+    duration: f64,
     /// A portrait frame's backdrop (with the title), by size.
-    backdrops: std::cell::RefCell<HashMap<(u32, u32), RgbImage>>,
+    backdrops: std::sync::Mutex<HashMap<(u32, u32), RgbImage>>,
+}
+
+impl Scene<'_> {
+    /// Boxes to pixelate at second `s` (CSS pixels): what was private just
+    /// before and just after (the page changes between the two), and the
+    /// edit list's own.
+    fn blur_at(&self, s: f64) -> Vec<[f64; 4]> {
+        let mut out: Vec<[f64; 4]> = Vec::new();
+        if self.edl.privacy && !self.privacy.is_empty() {
+            let i = self.privacy.partition_point(|p| p.t <= s);
+            if i > 0 {
+                out.extend(&self.privacy[i - 1].boxes);
+            }
+            if let Some(next) = self.privacy.get(i)
+                && next.t - s < 5.0
+            {
+                out.extend(&next.boxes);
+            }
+            if i == 0 && out.is_empty() {
+                // Before the first look: what it found then.
+                out.extend(&self.privacy[0].boxes);
+            }
+        }
+        out.extend(
+            self.edl
+                .blur
+                .iter()
+                .filter(|b| s >= b.from && s <= b.to)
+                .map(|b| [b.x, b.y, b.w, b.h]),
+        );
+        out
+    }
+}
+
+/// Pixelates a box (pixels) of `img`.
+fn pixelate(img: &mut RgbImage, x: f64, y: f64, w: f64, h: f64) {
+    let (iw, ih) = (img.width() as i64, img.height() as i64);
+    let pad = 3.0;
+    let (x0, y0) = (
+        ((x - pad).floor() as i64).max(0),
+        ((y - pad).floor() as i64).max(0),
+    );
+    let (x1, y1) = (
+        ((x + w + pad).ceil() as i64).min(iw),
+        ((y + h + pad).ceil() as i64).min(ih),
+    );
+    if x1 <= x0 || y1 <= y0 {
+        return;
+    }
+    let block = ((iw as f64 / 110.0).max(6.0)) as i64;
+    let mut by = y0;
+    while by < y1 {
+        let mut bx = x0;
+        while bx < x1 {
+            let (ex, ey) = ((bx + block).min(x1), (by + block).min(y1));
+            let mut sum = [0u64; 3];
+            let mut n = 0u64;
+            for yy in by..ey {
+                for xx in bx..ex {
+                    let p = img.get_pixel(xx as u32, yy as u32).0;
+                    for c in 0..3 {
+                        sum[c] += p[c] as u64;
+                    }
+                    n += 1;
+                }
+            }
+            let avg = image::Rgb([
+                (sum[0] / n.max(1)) as u8,
+                (sum[1] / n.max(1)) as u8,
+                (sum[2] / n.max(1)) as u8,
+            ]);
+            for yy in by..ey {
+                for xx in bx..ex {
+                    img.put_pixel(xx as u32, yy as u32, avg);
+                }
+            }
+            bx += block;
+        }
+        by += block;
+    }
+}
+
+/// Outlines a box (pixels) and dims everything else by `dim` (0–1).
+fn spotlight(img: &mut RgbImage, (x, y, w, h): (f64, f64, f64, f64), weight: f32) {
+    if weight <= 0.0 {
+        return;
+    }
+    let (iw, ih) = (img.width() as i64, img.height() as i64);
+    let pad = 6.0;
+    let (x0, y0, x1, y1) = (x - pad, y - pad, x + w + pad, y + h + pad);
+    let dim = 0.18 * weight;
+    let line = (iw as f64 / 400.0).max(2.0);
+    for py in 0..ih {
+        for px in 0..iw {
+            let (fx, fy) = (px as f64 + 0.5, py as f64 + 0.5);
+            let inside = fx >= x0 && fx <= x1 && fy >= y0 && fy <= y1;
+            if !inside {
+                blend(img, px, py, [10, 8, 20], dim);
+            } else {
+                let edge = (fx - x0).min(x1 - fx).min(fy - y0).min(y1 - fy);
+                if edge < line {
+                    blend(img, px, py, [167, 139, 250], 0.95 * weight);
+                }
+            }
+        }
+    }
 }
 
 /// A vertical frame: the page at full width in the upper middle, the title
@@ -910,34 +1156,66 @@ fn compose_portrait(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbI
     let (sw, sh) = fr.size;
     let fh = ((w as f64 * sh as f64 / sw as f64) as u32 / 2 * 2).clamp(2, h);
     let inner = compose(sc, fr, s, w, fh);
-    let mut out = sc
-        .backdrops
-        .borrow_mut()
-        .entry((w, h))
-        .or_insert_with(|| {
-            let mut bg = background(w, h);
-            let f = font();
-            let px = w as f32 * 0.07;
-            let title = sc.edl.title.trim();
-            if !title.is_empty() {
-                let lines = wrap(&f, px, title, w as f32 * 0.86).len().min(3) as f32;
-                let top = h as f32 * 0.4 - fh as f32 / 2.0;
-                let y = (top - lines * px * 1.25 - px * 0.6).max(px * 1.2) + px;
-                centered(&mut bg, &f, px, y, title, [245, 243, 255]);
-            }
-            bg
-        })
-        .clone();
+    let mut out = {
+        let mut cache = sc.backdrops.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .entry((w, h))
+            .or_insert_with(|| {
+                let mut bg = background(w, h);
+                let f = font();
+                let px = w as f32 * 0.07;
+                let title = sc.edl.title.trim();
+                if !title.is_empty() {
+                    let lines = wrap(&f, px, title, w as f32 * 0.86).len().min(3) as f32;
+                    let top = h as f32 * 0.4 - fh as f32 / 2.0;
+                    let y = (top - lines * px * 1.25 - px * 0.6).max(px * 1.2) + px;
+                    centered(&mut bg, &f, px, y, title, [245, 243, 255]);
+                }
+                bg
+            })
+            .clone()
+    };
     let y0 = ((h as f64 * 0.4 - fh as f64 / 2.0).max(0.0)) as i64;
     imageops::overlay(&mut out, &inner, 0, y0);
     out
 }
 
-/// The recording at second `s`, framed for a `w`×`h` output (zoom,
-/// cursor, ripples; a portrait output follows the action).
+/// The recording at second `s`, framed for a `w`×`h` output: private parts
+/// pixelated, zoom (and in stills mode a slow drift and dissolves), cursor,
+/// ripples, the highlighted element.
 fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbImage {
     let (sw, sh) = fr.size;
-    let (src, ratio) = fr.at(s);
+    if h > w && sw > sh {
+        return compose_portrait(sc, fr, s, w, h);
+    }
+    let idx = fr.index(s);
+    let ratio = fr.ratio(idx);
+    let base = fr.image(idx);
+    let blur = sc.blur_at(s);
+    // Stills: dissolve from the previous still over the first 0.35 s.
+    let dissolve = if sc.stills && idx > 0 {
+        let k = (s - fr.frames[idx].t) / 0.35;
+        (0.0..1.0).contains(&k).then_some(ease(k) as f32)
+    } else {
+        None
+    };
+    let src: std::borrow::Cow<RgbImage> = if blur.is_empty() && dissolve.is_none() {
+        std::borrow::Cow::Borrowed(&*base)
+    } else {
+        let mut img = (*base).clone();
+        if let Some(k) = dissolve {
+            let prev = fr.image(idx - 1);
+            for (p, q) in img.pixels_mut().zip(prev.pixels()) {
+                for c in 0..3 {
+                    p.0[c] = (q.0[c] as f32 * (1.0 - k) + p.0[c] as f32 * k) as u8;
+                }
+            }
+        }
+        for [x, y, bw, bh] in &blur {
+            pixelate(&mut img, x * ratio, y * ratio, bw * ratio, bh * ratio);
+        }
+        std::borrow::Cow::Owned(img)
+    };
     let aspect = w as f64 / h as f64;
     let (bw, bh) = if sw as f64 / sh as f64 > aspect {
         (sh as f64 * aspect, sh as f64)
@@ -945,24 +1223,34 @@ fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbImage {
         (sw as f64, sw as f64 / aspect)
     };
     let (mx, my) = (sw as f64 / 2.0, sh as f64 / 2.0);
-    if h > w && sw > sh {
-        return compose_portrait(sc, fr, s, w, h);
-    }
     let cur = cursor_at(&sc.points, s);
-    let (bx, by) = (mx, my);
     let (scale, cx, cy) = match zoom_at(sc.edl, s) {
         Some((scale, wgt, tx, ty)) => (
             scale,
-            bx + (tx * ratio - bx) * wgt,
-            by + (ty * ratio - by) * wgt,
+            mx + (tx * ratio - mx) * wgt,
+            my + (ty * ratio - my) * wgt,
         ),
-        None => (1.0, bx, by),
+        None => (1.0, mx, my),
     };
+    // Stills: a slow push-in over each still, so a still never looks frozen.
+    let drift = if sc.stills {
+        let t0 = fr.frames[idx].t;
+        let t1 = fr
+            .frames
+            .get(idx + 1)
+            .map(|f| f.t)
+            .unwrap_or(sc.duration)
+            .max(t0 + 0.5);
+        1.0 + 0.05 * ease((s - t0) / (t1 - t0))
+    } else {
+        1.0
+    };
+    let scale = scale * drift;
     let cw = (bw / scale).round().clamp(2.0, sw as f64);
     let ch = (bh / scale).round().clamp(2.0, sh as f64);
     let x0 = (cx - cw / 2.0).clamp(0.0, sw as f64 - cw);
     let y0 = (cy - ch / 2.0).clamp(0.0, sh as f64 - ch);
-    let view = imageops::crop_imm(src, x0 as u32, y0 as u32, cw as u32, ch as u32).to_image();
+    let view = imageops::crop_imm(&*src, x0 as u32, y0 as u32, cw as u32, ch as u32).to_image();
     let mut img = if (cw as u32, ch as u32) == (w, h) {
         view
     } else {
@@ -970,6 +1258,34 @@ fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbImage {
     };
     let k = w as f64 / cw;
     let to_out = |px: f64, py: f64| ((px * ratio - x0) * k, (py * ratio - y0) * k);
+    if sc.edl.highlight
+        && let Some((e, wgt)) = sc
+            .targets
+            .iter()
+            .filter_map(|e| {
+                let d = s - e.t;
+                let wgt = if (-0.5..0.0).contains(&d) {
+                    ease((d + 0.5) / 0.5)
+                } else if (0.0..1.6).contains(&d) {
+                    1.0
+                } else if (1.6..2.0).contains(&d) {
+                    1.0 - ease((d - 1.6) / 0.4)
+                } else {
+                    0.0
+                };
+                (wgt > 0.0).then_some((*e, wgt))
+            })
+            .max_by(|a, b| a.1.total_cmp(&b.1))
+    {
+        let (cx, cy) = (e.x.unwrap_or(0.0), e.y.unwrap_or(0.0));
+        let (ew, eh) = (e.w.unwrap_or(0.0), e.h.unwrap_or(0.0));
+        let (ax, ay) = to_out(cx - ew / 2.0, cy - eh / 2.0);
+        let (bx, by) = to_out(cx + ew / 2.0, cy + eh / 2.0);
+        // Not for elements filling most of the frame.
+        if (bx - ax) < w as f64 * 0.8 && (by - ay) < h as f64 * 0.8 {
+            spotlight(&mut img, (ax, ay, bx - ax, by - ay), wgt as f32);
+        }
+    }
     if sc.edl.cursor {
         let unit = (w.min(h) as f64 / 720.0).max(0.6);
         for c in &sc.clicks {
@@ -1011,12 +1327,37 @@ fn frame_at(
         ),
         Moment::End(l) => card(w, h, f, &edl.end_text, "", fade(l, super::END_SECONDS)),
         Moment::Frame(s) => compose(sc, fr, s, w, h),
-        Moment::Insert(i, l) if i.kind == "hold" => {
-            let _ = l;
-            compose(sc, fr, i.at, w, h)
-        }
+        Moment::Insert(i, _) if i.kind == "hold" => compose(sc, fr, i.at, w, h),
         Moment::Insert(i, l) => insert_card(w, h, f, i, fade(l, i.seconds)),
     }
+}
+
+/// A grid of frames from the video (12), to check it at a glance.
+fn contact_sheet(frames: &[RgbImage]) -> Option<RgbImage> {
+    let first = frames.first()?;
+    let (tw, th) = (
+        320u32,
+        (320.0 * first.height() as f64 / first.width() as f64) as u32,
+    );
+    let cols = 4u32;
+    let rows = (frames.len() as u32).div_ceil(cols);
+    let gap = 6;
+    let mut sheet = RgbImage::from_pixel(
+        cols * (tw + gap) + gap,
+        rows * (th + gap) + gap,
+        image::Rgb([20, 18, 28]),
+    );
+    for (i, f) in frames.iter().enumerate() {
+        let t = imageops::resize(f, tw, th, imageops::FilterType::Triangle);
+        let (c, r) = (i as u32 % cols, i as u32 / cols);
+        imageops::overlay(
+            &mut sheet,
+            &t,
+            (gap + c * (tw + gap)) as i64,
+            (gap + r * (th + gap)) as i64,
+        );
+    }
+    Some(sheet)
 }
 
 /// One cut, rendered.
@@ -1028,6 +1369,26 @@ struct CutOut {
     files: Vec<PathBuf>,
 }
 
+/// How to render.
+#[derive(Debug, Clone, Default)]
+pub struct Options {
+    /// A quick low-resolution draft (`preview.mp4`): long cut, 480 px,
+    /// 12 fps, no GIF, no clean master.
+    pub preview: bool,
+    /// A translation (`translations.<lang>`): `video.<lang>.mp4`,
+    /// `captions.<lang>.srt`.
+    pub lang: Option<String>,
+}
+
+/// File names for one cut of one render.
+struct Names {
+    video: String,
+    caps: String,
+    gif: bool,
+    clean: bool,
+    extras: bool,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_cut(
     dir: &Path,
@@ -1035,10 +1396,12 @@ fn render_cut(
     sc: &Scene,
     fr: &mut Frames,
     spoken: &HashMap<String, Spoken>,
-    make_gif: bool,
+    names: &Names,
+    fps: f64,
     notes: &mut Vec<String>,
     progress: &dyn Fn(String),
 ) -> Result<CutOut, String> {
+    use rayon::prelude::*;
     let edl = sc.edl;
     let portrait = cut == "short";
     let (sw, sh) = fr.size;
@@ -1074,8 +1437,6 @@ fn render_cut(
             .flat_map(|((l, s), d)| line_cues(&l.text, *s, s + d))
             .collect()
     };
-    let name = if portrait { "short" } else { "video" };
-    let caps = if portrait { "short" } else { "captions" };
     let mut files = Vec::new();
 
     // Audio: narration over (ducked) generated music.
@@ -1100,7 +1461,7 @@ fn render_cut(
         })
         .filter(|p| p.is_file());
     let ffmpeg = super::ffmpeg();
-    let audio_path = dir.join(format!("{name}-audio.wav"));
+    let audio_path = dir.join(format!("{}-audio.wav", names.video));
     let audio = if ffmpeg.is_some() && (auto_music || !placed.is_empty()) {
         super::music::write_wav(&audio_path, &mix_audio(edl, dir, &placed, total))
             .map_err(|e| e.to_string())?;
@@ -1109,19 +1470,19 @@ fn render_cut(
         None
     };
     let mut captioned = ffmpeg.as_ref().and_then(|bin| {
-        let out = dir.join(format!("{name}.mp4"));
+        let out = dir.join(format!("{}.mp4", names.video));
         Enc::start(
-            encoder(bin, (w, h), audio, music_file.as_deref(), total, &out),
+            encoder(bin, (w, h), fps, audio, music_file.as_deref(), total, &out),
             out,
         )
     });
     let mut clean = ffmpeg
         .as_ref()
-        .filter(|_| !portrait && edl.clean_master)
+        .filter(|_| !portrait && edl.clean_master && names.clean)
         .and_then(|bin| {
-            let out = dir.join("video-clean.mp4");
+            let out = dir.join(format!("{}-clean.mp4", names.video));
             Enc::start(
-                encoder(bin, (w, h), audio, music_file.as_deref(), total, &out),
+                encoder(bin, (w, h), fps, audio, music_file.as_deref(), total, &out),
                 out,
             )
         });
@@ -1129,40 +1490,72 @@ fn render_cut(
         notes.push("ffmpeg couldn't start".into());
     }
 
+    let make_gif = names.gif;
+    let gif_every = (fps / 10.0).round().max(1.0) as usize;
     let gw = GIF_WIDTH.min(w) / 2 * 2;
     let gh = ((gw as f64 * h as f64 / w as f64) as u32).max(2);
-    let mut gif_frames: Vec<Vec<u8>> = Vec::new();
-    let n = (total * FPS).ceil() as usize;
+    // GIF frames, with how many times each repeats (unchanged ones merge).
+    let mut gif_frames: Vec<(Vec<u8>, u16)> = Vec::new();
+    let n = (total * fps).ceil() as usize;
     let mut last_pct = 0;
     let mut review: Option<RgbImage> = None;
-    for i in 0..n {
-        let ot = i as f64 / FPS;
-        let mut img = frame_at(sc, &tl, fr, &f, ot, w, h);
-        if let Some(e) = clean.as_mut() {
-            e.frame(&img);
+    let mut contact: Vec<RgbImage> = Vec::new();
+    let contact_every = (n / 12).max(1);
+    // Frames are drawn on every core, a batch at a time, and written in order.
+    const BATCH: usize = 16;
+    let want_clean = clean.is_some();
+    let mut i0 = 0;
+    while i0 < n {
+        let batch: Vec<usize> = (i0..(i0 + BATCH).min(n)).collect();
+        let drawn: Vec<(Option<RgbImage>, RgbImage)> = batch
+            .par_iter()
+            .map_init(
+                || fr.fresh(),
+                |frl, &i| {
+                    let ot = i as f64 / fps;
+                    let img = frame_at(sc, &tl, frl, &f, ot, w, h);
+                    let plain = want_clean.then(|| img.clone());
+                    let mut img = img;
+                    if let Some(c) = cues.iter().find(|c| ot >= c.from && ot < c.to) {
+                        caption(&mut img, &f, &c.text, portrait);
+                    }
+                    (plain, img)
+                },
+            )
+            .collect();
+        for (&i, (plain, img)) in batch.iter().zip(drawn) {
+            let ot = i as f64 / fps;
+            if let (Some(e), Some(p)) = (clean.as_mut(), plain.as_ref()) {
+                e.frame(p);
+            }
+            if let Some(e) = captioned.as_mut() {
+                e.frame(&img);
+            }
+            if portrait && review.is_none() && i >= n / 2 {
+                review = Some(img.clone());
+            }
+            if names.extras && i % contact_every == contact_every / 2 && contact.len() < 12 {
+                contact.push(img.clone());
+            }
+            if make_gif && i % gif_every == 0 && ot <= GIF_MAX_SECONDS {
+                let g = if (gw, gh) != (w, h) {
+                    imageops::resize(&img, gw, gh, imageops::FilterType::Triangle)
+                } else {
+                    img
+                }
+                .into_raw();
+                match gif_frames.last_mut() {
+                    Some((prev, k)) if *prev == g => *k += 1,
+                    _ => gif_frames.push((g, 1)),
+                }
+            }
+            let pct = i * 100 / n.max(1);
+            if pct >= last_pct + 25 {
+                last_pct = pct;
+                progress(format!("rendering the {cut} cut… {pct}%"));
+            }
         }
-        if let Some(c) = cues.iter().find(|c| ot >= c.from && ot < c.to) {
-            caption(&mut img, &f, &c.text, portrait);
-        }
-        if let Some(e) = captioned.as_mut() {
-            e.frame(&img);
-        }
-        if portrait && review.is_none() && i >= n / 2 {
-            review = Some(img.clone());
-        }
-        if make_gif && i % GIF_EVERY == 0 && ot <= GIF_MAX_SECONDS {
-            let g = if (gw, gh) != (w, h) {
-                imageops::resize(&img, gw, gh, imageops::FilterType::Triangle)
-            } else {
-                img
-            };
-            gif_frames.push(g.into_raw());
-        }
-        let pct = i * 100 / n.max(1);
-        if pct >= last_pct + 25 {
-            last_pct = pct;
-            progress(format!("rendering the {cut} cut… {pct}%"));
-        }
+        i0 += BATCH;
     }
     let mut mp4 = None;
     if let Some(e) = captioned {
@@ -1185,29 +1578,48 @@ fn render_cut(
     let mut gif = None;
     if make_gif {
         progress("making the GIF…".into());
-        let p = dir.join(format!("{name}.gif"));
+        let p = dir.join(format!("{}.gif", names.video));
         let file = std::fs::File::create(&p).map_err(|e| e.to_string())?;
         let mut enc = gif::Encoder::new(std::io::BufWriter::new(file), gw as u16, gh as u16, &[])
             .map_err(|e| e.to_string())?;
         let _ = enc.set_repeat(gif::Repeat::Infinite);
-        for rgb in &gif_frames {
+        let step = (100.0 * gif_every as f64 / fps) as u16;
+        for (rgb, k) in &gif_frames {
             let mut g = gif::Frame::from_rgb_speed(gw as u16, gh as u16, rgb, 20);
-            g.delay = (100.0 / (FPS / GIF_EVERY as f64)) as u16;
+            g.delay = step.saturating_mul(*k);
             enc.write_frame(&g).map_err(|e| e.to_string())?;
         }
         files.push(p.clone());
         gif = Some(p);
     }
-    let srt_path = dir.join(format!("{caps}.srt"));
+    let srt_path = dir.join(format!("{}.srt", names.caps));
     std::fs::write(&srt_path, srt_of(&cues)).map_err(|e| e.to_string())?;
-    let vtt_path = dir.join(format!("{caps}.vtt"));
+    let vtt_path = dir.join(format!("{}.vtt", names.caps));
     std::fs::write(&vtt_path, vtt_of(&cues)).map_err(|e| e.to_string())?;
     files.push(srt_path.clone());
     files.push(vtt_path);
+    if !names.extras {
+        return Ok(CutOut {
+            mp4,
+            gif,
+            srt: srt_path,
+            seconds: total,
+            files,
+        });
+    }
     let ch = chapters(&lines, &starts);
     if !portrait && !ch.is_empty() {
         let p = dir.join("chapters.txt");
         std::fs::write(&p, chapters_text(&ch)).map_err(|e| e.to_string())?;
+        files.push(p);
+    }
+    if let Some(sheet) = contact_sheet(&contact) {
+        let p = dir.join(if portrait {
+            "short-contact.png"
+        } else {
+            "contact.png"
+        });
+        sheet.save(&p).map_err(|e| e.to_string())?;
         files.push(p);
     }
 
@@ -1255,14 +1667,34 @@ fn render_cut(
 /// captions, chapters and thumbnails. Blocking; `progress` gets a few
 /// status lines.
 pub fn render(dir: &Path, progress: impl Fn(String)) -> Result<Rendered, String> {
+    render_with(dir, &Options::default(), progress)
+}
+
+/// [`render`] with options: a quick preview, or a translation.
+pub fn render_with(
+    dir: &Path,
+    opts: &Options,
+    progress: impl Fn(String),
+) -> Result<Rendered, String> {
     let Saved {
         frames,
         events,
         duration,
         edl,
+        mode,
+        privacy,
         ..
     } = load(dir)?;
-    let edl = edl.normalized(duration);
+    let mut edl = edl.normalized(duration);
+    if let Some(lang) = &opts.lang {
+        edl = edl.in_language(lang).ok_or_else(|| {
+            format!("no `{lang}` translation in the edit list — /video translate {lang}")
+        })?;
+    }
+    if opts.preview {
+        edl.width = edl.width.min(480);
+        edl.cuts = vec!["long".into()];
+    }
     if frames.is_empty() {
         return Err("the recording has no frames".into());
     }
@@ -1274,7 +1706,7 @@ pub fn render(dir: &Path, progress: impl Fn(String)) -> Result<Rendered, String>
         frames: &frames,
         size: first.dimensions(),
         first: &first,
-        cache: None,
+        cache: Vec::new(),
     };
     let sc = Scene {
         edl: &edl,
@@ -1286,6 +1718,17 @@ pub fn render(dir: &Path, progress: impl Fn(String)) -> Result<Rendered, String>
             .iter()
             .filter(|e| e.kind == "click" && e.x.is_some())
             .collect(),
+        targets: events
+            .iter()
+            .filter(|e| {
+                matches!(e.kind.as_str(), "click" | "type")
+                    && e.x.is_some()
+                    && e.w.is_some_and(|w| w > 0.0)
+            })
+            .collect(),
+        privacy: &privacy,
+        stills: mode == super::record::Mode::Stills,
+        duration,
         backdrops: Default::default(),
     };
     let mut notes: Vec<String> = Vec::new();
@@ -1297,22 +1740,40 @@ pub fn render(dir: &Path, progress: impl Fn(String)) -> Result<Rendered, String>
         let s = if edl.voice == "none" {
             (None, voice::estimate_seconds(&l.text))
         } else {
-            line_audio(dir, &edl, l, &mut notes)
+            line_audio(dir, &edl, l, opts.lang.as_deref(), &mut notes)
         };
         spoken.insert(l.id.clone(), s);
     }
+    let fps = if opts.preview { 12.0 } else { FPS };
     let mut main: Option<CutOut> = None;
     let mut files = Vec::new();
     for (k, cut) in edl.cuts.iter().enumerate() {
+        let short = cut == "short";
+        let names = match (&opts.lang, opts.preview) {
+            (_, true) => Names {
+                video: "preview".into(),
+                caps: "preview".into(),
+                gif: false,
+                clean: false,
+                extras: false,
+            },
+            (Some(lang), _) => Names {
+                video: format!("{}.{lang}", if short { "short" } else { "video" }),
+                caps: format!("{}.{lang}", if short { "short" } else { "captions" }),
+                gif: false,
+                clean: false,
+                extras: false,
+            },
+            (None, _) => Names {
+                video: if short { "short" } else { "video" }.into(),
+                caps: if short { "short" } else { "captions" }.into(),
+                gif: k == 0,
+                clean: true,
+                extras: true,
+            },
+        };
         let out = render_cut(
-            dir,
-            cut,
-            &sc,
-            &mut fr,
-            &spoken,
-            k == 0,
-            &mut notes,
-            &progress,
+            dir, cut, &sc, &mut fr, &spoken, &names, fps, &mut notes, &progress,
         )?;
         files.extend(out.files.iter().cloned());
         if main.is_none() {
@@ -1323,16 +1784,18 @@ pub fn render(dir: &Path, progress: impl Fn(String)) -> Result<Rendered, String>
     if super::ffmpeg().is_none() {
         notes.push("no ffmpeg, so no MP4, voice or music — `/video setup` downloads it (or install ffmpeg), then `/video render`".into());
     }
-    std::fs::write(
-        dir.join("render.json"),
-        serde_json::json!({
-            "seconds": main.seconds,
-            "files": files.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy()).collect::<Vec<_>>(),
-            "notes": notes,
-        })
-        .to_string(),
-    )
-    .map_err(|e| e.to_string())?;
+    if opts.lang.is_none() && !opts.preview {
+        std::fs::write(
+            dir.join("render.json"),
+            serde_json::json!({
+                "seconds": main.seconds,
+                "files": files.iter().filter_map(|p| p.file_name()).map(|n| n.to_string_lossy()).collect::<Vec<_>>(),
+                "notes": notes,
+            })
+            .to_string(),
+        )
+        .map_err(|e| e.to_string())?;
+    }
     Ok(Rendered {
         mp4: main.mp4,
         gif: main.gif.unwrap_or_else(|| dir.join("video.gif")),
@@ -1450,6 +1913,8 @@ mod tests {
             kind: "click".into(),
             x: Some(160.0),
             y: Some(100.0),
+            w: Some(60.0),
+            h: Some(24.0),
             label: "OK".into(),
         }];
         let mut edl = super::super::draft(&events, 4.0, "Test video");
@@ -1497,6 +1962,77 @@ mod tests {
             srt.contains("Click OK."),
             "captions follow the script: {srt}"
         );
+    }
+
+    #[test]
+    fn private_boxes_are_pixelated_around_page_changes() {
+        let edl = Edl {
+            privacy: true,
+            blur: vec![crate::video::BlurBox {
+                from: 0.0,
+                to: 2.0,
+                x: 1.0,
+                y: 1.0,
+                w: 2.0,
+                h: 2.0,
+            }],
+            ..Default::default()
+        };
+        let privacy = vec![
+            Privacy {
+                t: 1.0,
+                boxes: vec![[10.0, 10.0, 5.0, 5.0]],
+            },
+            Privacy {
+                t: 4.0,
+                boxes: vec![[50.0, 50.0, 5.0, 5.0]],
+            },
+        ];
+        let sc = Scene {
+            edl: &edl,
+            points: vec![],
+            clicks: vec![],
+            targets: vec![],
+            privacy: &privacy,
+            stills: false,
+            duration: 10.0,
+            backdrops: Default::default(),
+        };
+        // Between two looks: both (the page may be changing), plus the manual box.
+        assert_eq!(sc.blur_at(1.5).len(), 3);
+        // After the last look: only it.
+        assert_eq!(sc.blur_at(9.0), vec![[50.0, 50.0, 5.0, 5.0]]);
+        // Before the first look: the first.
+        assert!(sc.blur_at(0.2).contains(&[10.0, 10.0, 5.0, 5.0]));
+
+        let mut img =
+            RgbImage::from_fn(64, 64, |x, y| image::Rgb([(x * 4) as u8, (y * 4) as u8, 0]));
+        let before = img.clone();
+        pixelate(&mut img, 10.0, 10.0, 20.0, 20.0);
+        assert_ne!(img, before);
+        assert_eq!(
+            img.get_pixel(60, 60),
+            before.get_pixel(60, 60),
+            "outside untouched"
+        );
+        // A block is one colour.
+        assert_eq!(img.get_pixel(8, 8), img.get_pixel(9, 9));
+    }
+
+    #[test]
+    fn code_and_terminal_cards_draw() {
+        let f = font();
+        let ins = Insert {
+            at: 0.0,
+            seconds: 3.0,
+            kind: "terminal".into(),
+            title: "bash".into(),
+            items: vec!["$ cargo test".into(), "test result: ok".into()],
+        };
+        let img = insert_card(640, 360, &f, &ins, 1.0);
+        assert_eq!(img.dimensions(), (640, 360));
+        let plain = background(640, 360);
+        assert_ne!(img, plain, "something drawn");
     }
 
     fn line(id: &str, at: f64, text: &str, section: &str) -> Line {
