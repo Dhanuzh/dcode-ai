@@ -11,9 +11,308 @@ use crate::slash_commands::SLASH_COMMANDS;
 /// Max command rows shown in the slash/at panels before scrolling.
 pub(crate) const SLASH_PANEL_MAX_ROWS: usize = 8;
 
-/// The slash panel shows while the buffer is a bare `/command` token.
+/// A command's options: (option, needs more text after it, what it does).
+type Options = &'static [(&'static str, bool, &'static str)];
+
+/// The options of commands that take them, for the dropdown after
+/// `/command `: (command, [(option, needs more text after it, what it does)]).
+pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
+    (
+        "/video",
+        &[
+            ("list", false, "your recordings"),
+            (
+                "open",
+                false,
+                "play the newest (or `open <id> contact|preview|short`)",
+            ),
+            (
+                "preview",
+                false,
+                "a quick low-resolution draft to check timing",
+            ),
+            ("render", false, "render again from the edit list"),
+            (
+                "edit",
+                true,
+                "change it in plain words — \"under 30 s, no music\"",
+            ),
+            ("short", false, "add a 9:16 version (Shorts, Reels, Status)"),
+            (
+                "script",
+                false,
+                "the narration lines and which have your voice",
+            ),
+            ("voice", false, "record your own narration, line by line"),
+            (
+                "hear",
+                false,
+                "check your takes against the script (Whisper)",
+            ),
+            ("note", true, "a review note: <line> <what to change>"),
+            ("notes", false, "the open review notes"),
+            ("apply", false, "the agent applies the review notes"),
+            ("translate", true, "another language: <language>"),
+            ("status", false, "takes, renders, approval"),
+            ("approve", false, "sign off on what's rendered"),
+            ("publish", false, "upload folders per platform"),
+            ("setup", false, "download ffmpeg (MP4 and music)"),
+            (
+                "setup voice",
+                false,
+                "download Piper, a natural draft voice",
+            ),
+        ],
+    ),
+    (
+        "/record",
+        &[(
+            "--stills",
+            true,
+            "one sharp still per step (dashboards, reports)",
+        )],
+    ),
+    (
+        "/talk",
+        &[
+            ("send", false, "say it and send it"),
+            (
+                "loop",
+                false,
+                "hands-free: it answers aloud, then listens again",
+            ),
+            ("test", false, "check the microphone"),
+        ],
+    ),
+    ("/standup", &[("voice", false, "talk through your day")]),
+    (
+        "/slack",
+        &[("on", false, "start answering"), ("off", false, "stop")],
+    ),
+    (
+        "/teams",
+        &[("on", false, "start answering"), ("off", false, "stop")],
+    ),
+    (
+        "/sounds",
+        &[("on", false, "turn on"), ("off", false, "turn off")],
+    ),
+    (
+        "/watch",
+        &[
+            ("lan", false, "share on this network"),
+            ("stop", false, "stop sharing"),
+        ],
+    ),
+    (
+        "/invite",
+        &[
+            ("web", false, "join from a browser"),
+            ("relay", true, "through a relay: <host:port>"),
+            ("stop", false, "close the invite"),
+        ],
+    ),
+    ("/todo", &[("done", true, "tick one off: <n>")]),
+    (
+        "/board",
+        &[
+            ("add", true, "a card: [jira] <title>"),
+            ("work", true, "work on a card: <KEY> [worktree]"),
+            ("plan", true, "plan cards for a goal: <goal>"),
+            ("run", false, "let agents work the board"),
+            ("jira", true, "link a Jira project: <PROJECT> [me] [sprint]"),
+        ],
+    ),
+    (
+        "/schedule",
+        &[
+            ("add", true, "\"weekdays 09:00\" [--auto] <what to do>"),
+            ("list", false, "scheduled runs"),
+            ("run", true, "run one now: <n>"),
+            ("pause", true, "<n>"),
+            ("resume", true, "<n>"),
+            ("rm", true, "<n>"),
+        ],
+    ),
+    (
+        "/app",
+        &[
+            ("open", true, "<name|path> [--new]"),
+            ("connect", true, "<name> <port>"),
+            ("list", false, "connected apps"),
+            ("close", false, "close it"),
+        ],
+    ),
+    (
+        "/browser",
+        &[
+            ("status", false, "what it's connected to"),
+            ("open", false, "open it (optionally a url)"),
+            ("connect", true, "<port>"),
+            ("save", false, "save the recorded steps"),
+            ("close", false, "close it"),
+        ],
+    ),
+    (
+        "/plugins",
+        &[("enable", true, "<name>"), ("disable", true, "<name>")],
+    ),
+    (
+        "/goal",
+        &[
+            ("pause", false, "pause the objective"),
+            ("resume", false, "resume it"),
+            ("clear", false, "drop it"),
+        ],
+    ),
+    (
+        "/cost",
+        &[
+            ("today", false, "today's spend"),
+            ("week", false, "this week"),
+            ("month", false, "this month"),
+        ],
+    ),
+    ("/replay", &[("--gif", false, "as a GIF too")]),
+    (
+        "/effort",
+        &[
+            ("low", false, "quick answers"),
+            ("medium", false, "balanced"),
+            ("high", false, "think harder"),
+            ("xhigh", false, "think much harder"),
+            ("max", false, "the most thinking"),
+        ],
+    ),
+    (
+        "/permission-bypass",
+        &[
+            ("on", false, "skip approval prompts"),
+            ("off", false, "ask again"),
+            ("toggle", false, "switch"),
+        ],
+    ),
+    (
+        "/transcript",
+        &[
+            ("today", false, "today's conversations"),
+            ("week", false, "this week"),
+            ("month", false, "this month"),
+        ],
+    ),
+    ("/bashes", &[("kill", true, "stop one: <id>")]),
+    (
+        "/memory",
+        &[
+            ("forget", true, "remove a note: <id>"),
+            ("tidy", false, "show duplicates to drop"),
+            ("tidy apply", false, "drop the duplicates"),
+            ("auto on", false, "the agent saves notes by itself"),
+            ("auto off", false, "only when you ask"),
+        ],
+    ),
+    (
+        "/permissions",
+        &[
+            ("mode", false, "pick the permission mode"),
+            ("allow", true, "always allow: <rule> [--user|--project]"),
+            ("ask", true, "always ask: <rule> [--user|--project]"),
+            ("deny", true, "never allow: <rule> [--user|--project]"),
+            ("remove", true, "drop a rule: <rule>"),
+            ("default", false, "ask before edits and commands"),
+            ("plan", false, "read-only planning"),
+            ("accept-edits", false, "edits without asking"),
+            ("auto", false, "a model checks each action"),
+            ("dont-ask", false, "deny what isn't allowed, never prompt"),
+            ("bypass-permissions", false, "no checks at all"),
+        ],
+    ),
+    (
+        "/hooks",
+        &[
+            (
+                "add",
+                true,
+                "<event> [--matcher <tool>] [--blocking] [--user] <command>",
+            ),
+            ("remove", true, "<event> <n> [--user]"),
+        ],
+    ),
+    (
+        "/mcp",
+        &[("test", false, "check the servers answer (or `test <name>`)")],
+    ),
+    (
+        "/project-config",
+        &[
+            ("model", false, "save the current model for the team"),
+            ("mode", false, "save the current mode for the team"),
+        ],
+    ),
+    ("/export", &[("copy", false, "to the clipboard")]),
+    ("/share", &[("copy", false, "to the clipboard")]),
+    ("/side", &[("end", false, "back to the main conversation")]),
+    ("/stop", &[("all", false, "every background job")]),
+    (
+        "/provider",
+        &[
+            ("anthropic", false, "Claude"),
+            ("copilot", false, "GitHub Copilot"),
+        ],
+    ),
+    (
+        "/update",
+        &[
+            ("--check", false, "only check for a new version"),
+            ("--force", false, "reinstall even if up to date"),
+        ],
+    ),
+    (
+        "/context",
+        &[("config", false, "back to the configured context size")],
+    ),
+];
+
+fn options_of(cmd: &str) -> Option<Options> {
+    SUBCOMMANDS
+        .iter()
+        .find(|(c, _)| c.eq_ignore_ascii_case(cmd))
+        .map(|(_, o)| *o)
+}
+
+/// Commands listed with their option (`/compact --preview`,
+/// `/project add`): (command, option).
+fn listed_options() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SLASH_COMMANDS.iter().filter_map(|c| c.split_once(' '))
+}
+
+/// Whether `cmd` has options to drop down.
+fn has_options(cmd: &str) -> bool {
+    options_of(cmd).is_some() || listed_options().any(|(c, _)| c.eq_ignore_ascii_case(cmd))
+}
+
+/// `/command partial` with a command that has options: (command, partial).
+fn option_query(buffer: &str) -> Option<(&str, &str)> {
+    let (cmd, rest) = buffer.split_once(' ')?;
+    if !cmd.starts_with('/') || !has_options(cmd) {
+        return None;
+    }
+    // One level: "setup voice" is a single option, so allow its space.
+    let opts = options_of(cmd).unwrap_or(&[]);
+    if rest.contains(' ')
+        && !opts
+            .iter()
+            .any(|o| o.0.starts_with(rest) && o.0.contains(' '))
+    {
+        return None;
+    }
+    Some((cmd, rest))
+}
+
+/// The slash panel shows while the buffer is a bare `/command` token, or a
+/// command with options followed by a space (its options drop down).
 pub(crate) fn slash_panel_visible(buffer: &str) -> bool {
-    buffer.starts_with('/') && !buffer.contains(' ')
+    buffer.starts_with('/') && (!buffer.contains(' ') || option_query(buffer).is_some())
 }
 
 pub(crate) fn slash_panel_height(filtered_len: usize) -> u16 {
@@ -37,6 +336,14 @@ pub(crate) fn slash_panel_height(filtered_len: usize) -> u16 {
 #[derive(Clone)]
 pub enum SlashEntry {
     Command(&'static str),
+    /// One option of a command (`/video render`).
+    Option {
+        command: &'static str,
+        option: &'static str,
+        /// Needs more text after it (the prompt waits for it).
+        more: bool,
+        what: &'static str,
+    },
     Skill {
         command: String,
         description: Option<String>,
@@ -45,9 +352,32 @@ pub enum SlashEntry {
 }
 
 impl SlashEntry {
+    /// What picking it puts in the prompt: a command with options ends in a
+    /// space (its options drop down), an option needing more text too.
+    pub(crate) fn completion(&self) -> String {
+        match self {
+            SlashEntry::Command(c) if has_options(c) => format!("{c} "),
+            SlashEntry::Option { more: true, .. } => format!("{} ", self.command_str()),
+            _ => self.command_str(),
+        }
+    }
+
+    /// Whether picking it should wait for more text instead of running.
+    pub(crate) fn needs_more(&self) -> bool {
+        matches!(self, SlashEntry::Option { more: true, .. })
+    }
+
     pub(crate) fn command_str(&self) -> String {
         match self {
             SlashEntry::Command(s) => s.to_string(),
+            SlashEntry::Option {
+                command,
+                option: "",
+                ..
+            } => command.to_string(),
+            SlashEntry::Option {
+                command, option, ..
+            } => format!("{command} {option}"),
             SlashEntry::Skill { command, .. } => format!("/{command}"),
         }
     }
@@ -58,6 +388,7 @@ impl SlashEntry {
             SlashEntry::Command(s) => {
                 crate::slash_commands::slash_command_description(s).to_string()
             }
+            SlashEntry::Option { what, .. } => what.to_string(),
             SlashEntry::Skill {
                 description,
                 source,
@@ -115,6 +446,44 @@ pub(crate) fn load_slash_entries(workspace_root: &Path, skill_dirs: &[PathBuf]) 
             .cmp(&b.command_str().to_lowercase())
     });
     entries.dedup_by(|a, b| a.command_str().eq_ignore_ascii_case(&b.command_str()));
+    // Each command with options: first, the command on its own.
+    let mut bases: Vec<&'static str> = SUBCOMMANDS.iter().map(|(c, _)| *c).collect();
+    bases.extend(listed_options().map(|(c, _)| c));
+    bases.dedup();
+    for command in bases {
+        if let Some(c) = SLASH_COMMANDS.iter().find(|c| **c == command) {
+            entries.push(SlashEntry::Option {
+                command: c,
+                option: "",
+                more: false,
+                what: crate::slash_commands::slash_command_description(c),
+            });
+        }
+    }
+    // Commands listed with an option become that command's options too.
+    for (command, option) in listed_options() {
+        if options_of(command).is_none() {
+            entries.push(SlashEntry::Option {
+                command,
+                option,
+                more: false,
+                what: crate::slash_commands::slash_command_description(&format!(
+                    "{command} {option}"
+                )),
+            });
+        }
+    }
+    // Commands' options, in their own order (shown after `/command `).
+    for (command, opts) in SUBCOMMANDS {
+        for (option, more, what) in *opts {
+            entries.push(SlashEntry::Option {
+                command,
+                option,
+                more: *more,
+                what,
+            });
+        }
+    }
     entries
 }
 
@@ -126,6 +495,27 @@ pub(crate) fn filter_slash_entries<'a>(
     if !slash_panel_visible(buffer) {
         return Vec::new();
     }
+    // After `/command `: that command's options, in order.
+    if let Some((cmd, partial)) = option_query(buffer) {
+        let partial = partial.to_lowercase();
+        let starts: Vec<&SlashEntry> = entries
+            .iter()
+            .filter(|e| {
+                matches!(e, SlashEntry::Option { command, option, .. }
+                    if command.eq_ignore_ascii_case(cmd) && option.starts_with(&partial))
+            })
+            .collect();
+        if !starts.is_empty() || partial.len() < 3 {
+            return starts;
+        }
+        return entries
+            .iter()
+            .filter(|e| {
+                matches!(e, SlashEntry::Option { command, option, .. }
+                    if command.eq_ignore_ascii_case(cmd) && option.contains(&partial))
+            })
+            .collect();
+    }
     let needle = buffer.trim_start_matches('/').to_lowercase();
     let recent = recent_commands();
     // Recently used first (when they match), then commands that start
@@ -133,6 +523,7 @@ pub(crate) fn filter_slash_entries<'a>(
     // description) — each by group, then name.
     let mut ranked: Vec<(u8, usize, u8, String, &SlashEntry)> = entries
         .iter()
+        .filter(|e| !matches!(e, SlashEntry::Option { .. }))
         .filter_map(|e| {
             let cmd = e.command_str();
             let name = cmd.trim_start_matches('/').to_lowercase();
@@ -368,5 +759,55 @@ mod tests {
         assert_eq!(names(filter_slash_entries(&all, "/"))[0], "/cost");
         // Not a slash panel: nothing.
         assert!(filter_slash_entries(&all, "/co x").is_empty());
+    }
+
+    #[test]
+    fn a_commands_options_drop_down_after_a_space() {
+        let all = load_slash_entries(std::path::Path::new("/nonexistent"), &[]);
+        let names = |v: Vec<&SlashEntry>| v.iter().map(|e| e.command_str()).collect::<Vec<_>>();
+        // Options never crowd the root list.
+        assert!(
+            !names(filter_slash_entries(&all, "/vid"))
+                .iter()
+                .any(|n| n.contains(' '))
+        );
+        // `/video ` lists every option, in order.
+        let opts = names(filter_slash_entries(&all, "/video "));
+        assert_eq!(
+            opts.first().map(String::as_str),
+            Some("/video"),
+            "on its own first"
+        );
+        assert_eq!(opts.get(1).map(String::as_str), Some("/video list"));
+        // Options listed as commands (`/project add`) drop down too.
+        let project = names(filter_slash_entries(&all, "/project "));
+        assert!(project.contains(&"/project add".to_string()), "{project:?}");
+        assert!(opts.contains(&"/video translate".to_string()));
+        assert!(opts.len() >= 15, "{opts:?}");
+        // Typing narrows them; a two-word option still matches.
+        assert_eq!(
+            names(filter_slash_entries(&all, "/video tr")),
+            ["/video translate"]
+        );
+        assert_eq!(
+            names(filter_slash_entries(&all, "/video setup v")),
+            ["/video setup voice"]
+        );
+        // Picking: a command with options opens them; an option needing
+        // text waits for it.
+        let video = all.iter().find(|e| e.command_str() == "/video").unwrap();
+        assert_eq!(video.completion(), "/video ");
+        let tr = all
+            .iter()
+            .find(|e| e.command_str() == "/video translate")
+            .unwrap();
+        assert!(tr.needs_more());
+        assert_eq!(tr.completion(), "/video translate ");
+        // Free text after an option: the panel closes.
+        assert!(!slash_panel_visible("/video translate german"));
+        assert!(!slash_panel_visible("/help me"), "no options: no panel");
+        // Free text after a command with options isn't turned into one.
+        assert!(names(filter_slash_entries(&all, "/memory the")).is_empty());
+        assert!(slash_panel_visible("/talk "));
     }
 }

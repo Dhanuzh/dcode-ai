@@ -447,17 +447,23 @@ where
 
 fn open_browser(url: &str) -> bool {
     #[cfg(target_os = "macos")]
-    let cmd = std::process::Command::new("open").arg(url).spawn();
+    let mut cmd = std::process::Command::new("open");
     #[cfg(target_os = "linux")]
-    let cmd = std::process::Command::new("xdg-open").arg(url).spawn();
+    let mut cmd = std::process::Command::new("xdg-open");
     #[cfg(target_os = "windows")]
-    let cmd = std::process::Command::new("cmd")
-        .args(["/c", "start", url])
-        .spawn();
+    let mut cmd = {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/c", "start", ""]);
+        c
+    };
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    let cmd: Result<_, _> = Err(std::io::Error::other("unsupported"));
-
-    cmd.is_ok()
+    return false;
+    #[cfg(any(target_os = "macos", target_os = "linux", target_os = "windows"))]
+    {
+        cmd.arg(url);
+        // Detached from this terminal, so it never takes the keyboard.
+        crate::ffmpeg_setup::detached(cmd).is_ok()
+    }
 }
 
 pub fn try_open_browser(url: &str) -> bool {

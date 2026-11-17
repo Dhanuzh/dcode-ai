@@ -1,5 +1,45 @@
 # Changelog
 
+## 1.0.73 — 2026-11-17
+
+### Fixed
+- **The input box stopped answering after `/video open`** (and after a
+  sign-in opened the browser): the player was started with this terminal's
+  input, and on WSL a Windows program took the keyboard. Players and
+  browsers now start fully detached.
+
+### New — videos edited like a professional screen recorder
+- **On a background**: the recording sits on a soft gradient (or a colour,
+  or your image) with padding, rounded corners and a shadow
+  (`background`, `padding`).
+- **A real camera**: zoom and pan follow a critically damped spring — no
+  linear slides — and nearby actions keep the camera in, panning from one
+  to the next instead of bouncing out and in. Motion blur while it moves
+  (`motion_blur`).
+- **A smoothed cursor**, larger, that dips as it clicks; a soft click
+  sound on each click (`click_sounds`).
+- **Captions** in a rounded pill, the words lighting up as they are said.
+- **Crossfades** between the title, cards and the footage instead of
+  fading through black.
+- **Pacing**: long waits are cut (a moment after the last action, a
+  moment before the next) instead of fast-forwarded; idle time before the
+  first action and after the last is trimmed.
+- **Even narration**: every line levelled to the same loudness.
+- A gentler highlight on the element being used.
+
+### New — options in the `/` menu
+- Commands with options show them in a dropdown after `/command ` —
+  `/video ` lists list, open, preview, render, edit, short, voice, note,
+  translate, publish…; likewise every command that takes options
+  (`/talk`, `/board`, `/schedule`, `/app`, `/browser`, `/invite`, `/watch`,
+  `/slack`, `/teams`, `/goal`, `/cost`, `/effort`, `/transcript`,
+  `/permission-bypass`, `/bashes`, `/project`, `/compact`, `/memory`,
+  `/permissions` (and its modes), `/hooks`, `/mcp`, `/project-config`,
+  `/export`, `/share`, `/side`, `/stop`, `/provider`, `/update` — 37 in
+  all). The command on its own is the first row; Tab or Enter picks one;
+  one that needs more text (`translate <language>`) waits for it. Words
+  that only resemble an option stay your text (`/memory the build…`).
+
 ## 1.0.72 — 2026-11-17
 
 ### New — better demo videos

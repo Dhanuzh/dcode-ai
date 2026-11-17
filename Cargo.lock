@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-autoresearch"
-version = "1.0.72"
+version = "1.0.73"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1697,7 +1697,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-cli"
-version = "1.0.72"
+version = "1.0.73"
 dependencies = [
  "ansi-to-tui",
  "anyhow",
@@ -1760,7 +1760,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-common"
-version = "1.0.72"
+version = "1.0.73"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1777,7 +1777,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-core"
-version = "1.0.72"
+version = "1.0.73"
 dependencies = [
  "ab_glyph",
  "async-trait",
@@ -1814,7 +1814,7 @@ dependencies = [
 
 [[package]]
 name = "dcode-ai-runtime"
-version = "1.0.72"
+version = "1.0.73"
 dependencies = [
  "anyhow",
  "async-trait",

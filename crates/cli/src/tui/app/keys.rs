@@ -1412,7 +1412,8 @@ pub(super) fn handle_key_event(
                 let slash_filtered = filter_slash_entries(slash_entries, &g.input_buffer);
                 if !slash_filtered.is_empty() && slash_panel_visible(&g.input_buffer) {
                     let pick = g.slash_menu_index % slash_filtered.len();
-                    g.set_input_text(slash_filtered[pick].command_str());
+                    g.set_input_text(slash_filtered[pick].completion());
+                    g.slash_menu_index = 0;
                 } else {
                     let _ = cmd_tx.send(TuiCmd::CycleAgent);
                 }
@@ -1675,11 +1676,35 @@ pub(super) fn handle_key_event(
             // so `/age` + Enter runs `/agent`, not an unknown command.
             if slash_panel_visible(&g.input_buffer) {
                 let typed = g.input_buffer.trim().to_string();
-                let is_exact = slash_entries.iter().any(|e| e.command_str() == typed);
+                // `/video ` (options showing) is not a finished command:
+                // Enter picks the highlighted option.
+                let is_exact = !g.input_buffer.ends_with(' ')
+                    && slash_entries.iter().any(|e| e.command_str() == typed);
                 if !is_exact {
                     let filtered = filter_slash_entries(slash_entries, &g.input_buffer);
+                    // An option is only completed from its own beginning
+                    // (`/video tr` → translate); other words after a
+                    // command are its text (`/memory the build is slow`).
+                    let typed_raw = g.input_buffer.clone();
+                    let filtered: Vec<_> = filtered
+                        .into_iter()
+                        .filter(|e| {
+                            !matches!(e, SlashEntry::Option { .. })
+                                || typed_raw.ends_with(' ')
+                                || e.command_str()
+                                    .to_lowercase()
+                                    .starts_with(&typed_raw.to_lowercase())
+                        })
+                        .collect();
                     if !filtered.is_empty() {
                         let pick = g.slash_menu_index.min(filtered.len() - 1);
+                        // An option that needs more text waits for it.
+                        if filtered[pick].needs_more() {
+                            let text = filtered[pick].completion();
+                            g.set_input_text(text);
+                            g.slash_menu_index = 0;
+                            return KeyFlow::Continue;
+                        }
                         let cmd = filtered[pick].command_str();
                         g.set_input_text(cmd);
                     }

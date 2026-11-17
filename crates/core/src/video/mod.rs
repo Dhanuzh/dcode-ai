@@ -10,6 +10,7 @@
 //!   ("under 45 s, bigger captions") without recording again.
 //! - [`render`]: draws the edit frame by frame in Rust.
 
+pub mod motion;
 pub mod music;
 pub mod publish;
 pub mod record;
@@ -245,6 +246,28 @@ pub struct Edl {
     /// The draft voice per language (`{"de": "piper:/path/de.onnx"}`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub voices: std::collections::BTreeMap<String, String>,
+    /// What the recording sits on: `gradient` (default), `none` (full
+    /// frame), a colour `#rrggbb`, or an image file.
+    #[serde(default = "default_background")]
+    pub background: String,
+    /// Space around the recording on the background, as a share of the
+    /// frame (0–0.15).
+    #[serde(default = "default_padding")]
+    pub padding: f64,
+    /// Motion blur while the camera moves.
+    #[serde(default = "yes")]
+    pub motion_blur: bool,
+    /// A soft click sound on each click.
+    #[serde(default = "yes")]
+    pub click_sounds: bool,
+}
+
+fn default_background() -> String {
+    "gradient".into()
+}
+
+fn default_padding() -> f64 {
+    0.06
 }
 
 impl Edl {
@@ -353,6 +376,11 @@ impl Edl {
         self.captions
             .retain(|c| c.to > c.from && !c.text.trim().is_empty());
         self.width = self.width.clamp(320, 1920) / 2 * 2;
+        self.padding = if self.padding.is_finite() {
+            self.padding.clamp(0.0, 0.15)
+        } else {
+            default_padding()
+        };
         self.lines.retain(|l| !l.text.trim().is_empty());
         let mut seen = std::collections::HashSet::new();
         for (n, l) in self.lines.iter_mut().enumerate() {
@@ -442,15 +470,36 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
         }
     }
     let mut segments = Vec::new();
-    let mut at = 0.0;
+    // Before the first action: only a short moment to see the page.
+    let mut at = windows.first().map(|w| (w.0 - 1.2).max(0.0)).unwrap_or(0.0);
     for (a, b) in windows {
-        if a - at > 0.3 {
-            // Waiting: fast, but long waits faster.
-            let gap = a - at;
+        let gap = a - at;
+        if gap > 6.0 {
+            // A long wait is cut, as an editor would: a moment after the
+            // last action, a moment before the next (a jump the camera
+            // smooths over).
+            segments.push(Segment {
+                from: at,
+                to: at + 0.6,
+                speed: 2.0,
+            });
+            segments.push(Segment {
+                from: a - 0.6,
+                to: a,
+                speed: 2.0,
+            });
+        } else if gap > 1.2 {
+            // A short wait plays faster.
             segments.push(Segment {
                 from: at,
                 to: a,
-                speed: if gap > 8.0 { 12.0 } else { 6.0 },
+                speed: 3.0,
+            });
+        } else if gap > 0.0 {
+            segments.push(Segment {
+                from: at,
+                to: a,
+                speed: 1.0,
             });
         }
         segments.push(Segment {
@@ -460,11 +509,12 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
         });
         at = b;
     }
+    // After the last action: a beat to see the result, then end.
     if duration - at > 0.3 {
         segments.push(Segment {
             from: at,
-            to: duration,
-            speed: 8.0,
+            to: (at + 1.5).min(duration),
+            speed: 1.0,
         });
     }
     let mut zooms: Vec<Zoom> = Vec::new();
@@ -530,6 +580,10 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
         respell: Vec::new(),
         translations: Default::default(),
         voices: Default::default(),
+        background: default_background(),
+        padding: default_padding(),
+        motion_blur: true,
+        click_sounds: true,
     }
     .normalized(duration)
 }
@@ -579,17 +633,16 @@ mod tests {
             ev(30.0, "click", Some((500.0, 400.0)), "\"Create\""),
         ];
         let e = draft(&events, 35.0, "Signing up");
-        // Actions at normal speed, the long wait in between fast.
+        // Actions at normal speed; the long wait in between is cut.
         let at = |t: f64| {
             e.segments
                 .iter()
                 .find(|s| t >= s.from && t <= s.to)
-                .unwrap()
-                .speed
+                .map(|s| s.speed)
         };
-        assert_eq!(at(12.0), 1.0);
-        assert_eq!(at(30.0), 1.0);
-        assert!(at(20.0) >= 6.0, "{:?}", e.segments);
+        assert_eq!(at(12.0), Some(1.0));
+        assert_eq!(at(30.0), Some(1.0));
+        assert_eq!(at(20.0), None, "{:?}", e.segments);
         // One zoom per click, not for the field typed 0.5 s later.
         assert_eq!(e.zooms.len(), 2);
         assert!(

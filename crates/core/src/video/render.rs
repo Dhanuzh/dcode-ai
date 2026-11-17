@@ -27,7 +27,6 @@ use super::{Edl, Event, FrameInfo, Insert, Line, voice};
 pub const FPS: f64 = 30.0;
 const GIF_WIDTH: u32 = 640;
 const GIF_MAX_SECONDS: f64 = 60.0;
-const RAMP: f64 = 0.6;
 const AUDIO_RATE: u32 = 44_100;
 /// Pause after a line before the next may start.
 const LINE_GAP: f64 = 0.35;
@@ -299,36 +298,87 @@ fn insert_card(w: u32, h: u32, f: &FontRef, ins: &Insert, fade: f32) -> RgbImage
     }
 }
 
-/// The caption box. Shorts keep it clear of the app's overlays: above the
-/// bottom quarter and left of the right-hand buttons.
-fn caption(img: &mut RgbImage, f: &FontRef, text: &str, portrait: bool) {
+/// Fills a rounded rectangle (anti-aliased corners).
+fn fill_round_rect(
+    img: &mut RgbImage,
+    (x0, y0, w, h): (f32, f32, f32, f32),
+    r: f32,
+    c: [u8; 3],
+    a: f32,
+) {
+    let r = r.min(w / 2.0).min(h / 2.0);
+    for y in y0.floor().max(0.0) as i64..(y0 + h).ceil() as i64 {
+        for x in x0.floor().max(0.0) as i64..(x0 + w).ceil() as i64 {
+            let (fx, fy) = (x as f32 + 0.5 - x0, y as f32 + 0.5 - y0);
+            let dx = (r - fx).max(fx - (w - r)).max(0.0);
+            let dy = (r - fy).max(fy - (h - r)).max(0.0);
+            let cover = if dx > 0.0 && dy > 0.0 {
+                (r + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0)
+            } else {
+                let edge = fx.min(w - fx).min(fy).min(h - fy);
+                (edge + 0.5).clamp(0.0, 1.0)
+            };
+            if cover > 0.0 {
+                blend(img, x, y, c, a * cover);
+            }
+        }
+    }
+}
+
+/// The caption: a rounded pill, the words lighting up as they are said
+/// (`progress`, 0–1 through the caption). Shorts keep it clear of the
+/// app's overlays: above the bottom quarter and left of the right-hand
+/// buttons.
+fn caption(img: &mut RgbImage, f: &FontRef, text: &str, portrait: bool, progress: f32) {
     let (w, h) = (img.width() as f32, img.height() as f32);
     let (px, max_w, center, bottom) = if portrait {
         ((w * 0.052).max(16.0), w * 0.68, w * 0.46, h * 0.72)
     } else {
-        ((h * 0.042).max(16.0), w * 0.8, w / 2.0, h * 0.95)
+        ((h * 0.040).max(16.0), w * 0.72, w / 2.0, h * 0.94)
     };
     let lines: Vec<String> = wrap(f, px, text, max_w).into_iter().take(3).collect();
     if lines.is_empty() {
         return;
     }
-    let pad = px * 0.6;
+    let (padx, pady) = (px * 0.75, px * 0.45);
     let tw = lines
         .iter()
         .map(|l| text_width(f, px, l))
         .fold(0.0, f32::max);
-    let bh = lines.len() as f32 * px * 1.3 + pad;
-    let (x0, y0) = (center - tw / 2.0 - pad, bottom - bh);
-    for y in y0.max(0.0) as i64..(y0 + bh) as i64 {
-        for x in x0.max(0.0) as i64..(x0 + tw + 2.0 * pad) as i64 {
-            blend(img, x, y, [16, 14, 24], 0.72);
-        }
-    }
-    let mut base = y0 + pad / 2.0 + px;
+    let lh = px * 1.28;
+    let bh = lines.len() as f32 * lh + pady * 2.0 - (lh - px);
+    let (x0, y0) = (center - tw / 2.0 - padx, bottom - bh);
+    fill_round_rect(
+        img,
+        (x0, y0, tw + 2.0 * padx, bh),
+        px * 0.55,
+        [14, 12, 22],
+        0.78,
+    );
+    // Words said so far are white; the rest a soft grey.
+    let total: usize = lines
+        .iter()
+        .map(|l| l.chars().count())
+        .sum::<usize>()
+        .max(1);
+    let said = (progress.clamp(0.0, 1.0) * total as f32 * 1.08) as usize;
+    let space = text_width(f, px, " ");
+    let mut seen = 0usize;
+    let mut base = y0 + pady + px * 0.82;
     for l in &lines {
-        let x = center - text_width(f, px, l) / 2.0;
-        draw_text(img, f, px, x, base, l, [255, 255, 255], 1.0);
-        base += px * 1.3;
+        let mut x = center - text_width(f, px, l) / 2.0;
+        for word in l.split(' ') {
+            let n = word.chars().count();
+            let color = if seen + n / 2 <= said {
+                [255, 255, 255]
+            } else {
+                [196, 192, 212]
+            };
+            draw_text(img, f, px, x, base, word, color, 1.0);
+            x += text_width(f, px, word) + space;
+            seen += n + 1;
+        }
+        base += lh;
     }
 }
 
@@ -366,48 +416,6 @@ fn thumbnail(mut img: RgbImage, f: &FontRef, title: &str) -> RgbImage {
         y += px * 1.15;
     }
     img
-}
-
-/// The zoom at second `s`: (scale, weight 0–1, target x, target y in CSS
-/// pixels); the strongest zoom wins.
-fn zoom_at(edl: &Edl, s: f64) -> Option<(f64, f64, f64, f64)> {
-    edl.zooms
-        .iter()
-        .map(|z| {
-            let w = if s < z.at - RAMP || s > z.at + z.hold + RAMP {
-                0.0
-            } else if s < z.at {
-                ease((s - (z.at - RAMP)) / RAMP)
-            } else if s <= z.at + z.hold {
-                1.0
-            } else {
-                1.0 - ease((s - z.at - z.hold) / RAMP)
-            };
-            (1.0 + (z.scale - 1.0) * w, w, z.x, z.y)
-        })
-        .filter(|z| z.1 > 0.0)
-        .max_by(|a, b| a.1.total_cmp(&b.1))
-}
-
-/// The cursor (CSS pixels) at second `s`: still between actions, gliding
-/// to the next one in the last moment before it.
-fn cursor_at(points: &[(f64, f64, f64)], s: f64) -> Option<(f64, f64)> {
-    let first = points.first()?;
-    let next = points.iter().position(|p| p.0 >= s);
-    match next {
-        None => points.last().map(|p| (p.1, p.2)),
-        Some(0) => Some((first.1, first.2)),
-        Some(j) => {
-            let (a, b) = (points[j - 1], points[j]);
-            let start = (b.0 - 0.6).max(a.0);
-            if s <= start {
-                Some((a.1, a.2))
-            } else {
-                let k = ease((s - start) / (b.0 - start).max(0.01));
-                Some((a.1 + (b.1 - a.1) * k, a.2 + (b.2 - a.2) * k))
-            }
-        }
-    }
 }
 
 fn blend(img: &mut RgbImage, x: i64, y: i64, c: [u8; 3], a: f32) {
@@ -708,7 +716,8 @@ fn line_audio(
     match voice::read_wav(&path) {
         Ok(pcm) => {
             let pcm = voice::trim_silence(&pcm);
-            let audio = voice::resample(&pcm, AUDIO_RATE);
+            let mut audio = voice::resample(&pcm, AUDIO_RATE);
+            level(&mut audio);
             let secs = audio.len() as f64 / AUDIO_RATE as f64;
             (Some(std::sync::Arc::new(audio)), secs)
         }
@@ -795,10 +804,42 @@ pub fn chapters_text(ch: &[(f64, String)]) -> String {
 }
 
 /// Narration over the music, which ducks while a line is said.
+/// A soft click: a short, quickly fading tick.
+fn click_sound() -> Vec<f32> {
+    let n = (AUDIO_RATE as f64 * 0.045) as usize;
+    let mut seed = 0x2545_f491u32;
+    (0..n)
+        .map(|i| {
+            let t = i as f32 / AUDIO_RATE as f32;
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            let noise = (seed as f32 / u32::MAX as f32) * 2.0 - 1.0;
+            let tone = (std::f32::consts::TAU * 2300.0 * t).sin();
+            (tone * 0.6 + noise * 0.4) * (-t * 140.0).exp() * 0.22
+        })
+        .collect()
+}
+
+/// Levels a narration line: about the same loudness for every line (and
+/// every voice), peaks kept below clipping.
+fn level(audio: &mut [f32]) {
+    let rms = (audio.iter().map(|v| v * v).sum::<f32>() / audio.len().max(1) as f32).sqrt();
+    if rms < 1e-4 {
+        return;
+    }
+    let peak = audio.iter().fold(0f32, |m, v| m.max(v.abs()));
+    let gain = (0.12 / rms).min(0.92 / peak.max(1e-4)).clamp(0.25, 8.0);
+    for v in audio.iter_mut() {
+        *v *= gain;
+    }
+}
+
 fn mix_audio(
     edl: &Edl,
     dir: &Path,
     placed: &[(f64, std::sync::Arc<Vec<f32>>)],
+    clicks: &[f64],
     total: f64,
 ) -> Vec<i16> {
     let n = ((total + 0.2) * AUDIO_RATE as f64) as usize;
@@ -816,6 +857,17 @@ fn mix_audio(
             if let Some(slot) = voice_track.get_mut(s0 + k) {
                 *slot += v * 0.95;
                 active[s0 + k] = true;
+            }
+        }
+    }
+    if edl.click_sounds {
+        let tick = click_sound();
+        for c in clicks {
+            let s0 = (c * AUDIO_RATE as f64) as usize;
+            for (k, v) in tick.iter().enumerate() {
+                if let Some(slot) = voice_track.get_mut(s0 + k) {
+                    *slot += v;
+                }
             }
         }
     }
@@ -1032,7 +1084,6 @@ impl<'a> Frames<'a> {
 /// Everything a cut draws from.
 struct Scene<'a> {
     edl: &'a Edl,
-    points: Vec<(f64, f64, f64)>,
     clicks: Vec<&'a Event>,
     /// Clicks and typing with the element's size, for highlights.
     targets: Vec<&'a Event>,
@@ -1042,6 +1093,14 @@ struct Scene<'a> {
     duration: f64,
     /// A portrait frame's backdrop (with the title), by size.
     backdrops: std::sync::Mutex<HashMap<(u32, u32), RgbImage>>,
+    /// The camera: scale and centre (CSS pixels) over recording time.
+    camera: super::motion::Track,
+    /// The cursor, smoothed.
+    cursor: Option<super::motion::Track>,
+    /// Backgrounds with the shadow baked in, by size.
+    canvases: std::sync::Mutex<HashMap<(u32, u32), RgbImage>>,
+    /// The recording's folder (for a background image).
+    dir: &'a Path,
 }
 
 impl Scene<'_> {
@@ -1132,7 +1191,7 @@ fn spotlight(img: &mut RgbImage, (x, y, w, h): (f64, f64, f64, f64), weight: f32
     let (iw, ih) = (img.width() as i64, img.height() as i64);
     let pad = 6.0;
     let (x0, y0, x1, y1) = (x - pad, y - pad, x + w + pad, y + h + pad);
-    let dim = 0.18 * weight;
+    let dim = 0.07 * weight;
     let line = (iw as f64 / 400.0).max(2.0);
     for py in 0..ih {
         for px in 0..iw {
@@ -1152,10 +1211,10 @@ fn spotlight(img: &mut RgbImage, (x, y, w, h): (f64, f64, f64, f64), weight: f32
 
 /// A vertical frame: the page at full width in the upper middle, the title
 /// above it, room for captions below — the usual layout of a short.
-fn compose_portrait(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbImage {
+fn compose_portrait(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32, shutter: f64) -> RgbImage {
     let (sw, sh) = fr.size;
     let fh = ((w as f64 * sh as f64 / sw as f64) as u32 / 2 * 2).clamp(2, h);
-    let inner = compose(sc, fr, s, w, fh);
+    let inner = compose(sc, fr, s, w, fh, shutter);
     let mut out = {
         let mut cache = sc.backdrops.lock().unwrap_or_else(|e| e.into_inner());
         cache
@@ -1180,13 +1239,47 @@ fn compose_portrait(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbI
     out
 }
 
+/// The camera's view of the source at second `s`: crop rectangle (source
+/// pixels) for an output of aspect `aspect`.
+fn view_rect(sc: &Scene, fr: &Frames, idx: usize, s: f64, aspect: f64) -> (f64, f64, f64, f64) {
+    let (sw, sh) = fr.size;
+    let ratio = fr.ratio(idx);
+    let (bw, bh) = if sw as f64 / sh as f64 > aspect {
+        (sh as f64 * aspect, sh as f64)
+    } else {
+        (sw as f64, sw as f64 / aspect)
+    };
+    let [scale, cx, cy] = sc.camera.at(s);
+    // Stills: a slow push-in over each still, so a still never looks frozen.
+    let drift = if sc.stills {
+        let t0 = fr.frames[idx].t;
+        let t1 = fr
+            .frames
+            .get(idx + 1)
+            .map(|f| f.t)
+            .unwrap_or(sc.duration)
+            .max(t0 + 0.5);
+        1.0 + 0.05 * ease((s - t0) / (t1 - t0))
+    } else {
+        1.0
+    };
+    let scale = (scale * drift).max(1.0);
+    let cw = (bw / scale).clamp(2.0, sw as f64);
+    let ch = (bh / scale).clamp(2.0, sh as f64);
+    let x0 = (cx * ratio - cw / 2.0).clamp(0.0, sw as f64 - cw);
+    let y0 = (cy * ratio - ch / 2.0).clamp(0.0, sh as f64 - ch);
+    (x0, y0, cw, ch)
+}
+
 /// The recording at second `s`, framed for a `w`×`h` output: private parts
-/// pixelated, zoom (and in stills mode a slow drift and dissolves), cursor,
-/// ripples, the highlighted element.
-fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbImage {
+/// pixelated, the camera (spring-smoothed zoom and pan, motion blur while it
+/// moves; in stills mode a slow drift and dissolves), the highlighted
+/// element, cursor and click ripples. `shutter`: recording seconds one
+/// output frame spans (for motion blur).
+fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32, shutter: f64) -> RgbImage {
     let (sw, sh) = fr.size;
     if h > w && sw > sh {
-        return compose_portrait(sc, fr, s, w, h);
+        return compose_portrait(sc, fr, s, w, h, shutter);
     }
     let idx = fr.index(s);
     let ratio = fr.ratio(idx);
@@ -1217,45 +1310,48 @@ fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbImage {
         std::borrow::Cow::Owned(img)
     };
     let aspect = w as f64 / h as f64;
-    let (bw, bh) = if sw as f64 / sh as f64 > aspect {
-        (sh as f64 * aspect, sh as f64)
-    } else {
-        (sw as f64, sw as f64 / aspect)
+    let (x0, y0, cw, ch) = view_rect(sc, fr, idx, s, aspect);
+    let crop = |x0: f64, y0: f64, cw: f64, ch: f64| -> RgbImage {
+        let view = imageops::crop_imm(
+            &*src,
+            x0.round() as u32,
+            y0.round() as u32,
+            (cw.round() as u32).max(1),
+            (ch.round() as u32).max(1),
+        )
+        .to_image();
+        if view.dimensions() == (w, h) {
+            view
+        } else {
+            imageops::resize(&view, w, h, imageops::FilterType::Triangle)
+        }
     };
-    let (mx, my) = (sw as f64 / 2.0, sh as f64 / 2.0);
-    let cur = cursor_at(&sc.points, s);
-    let (scale, cx, cy) = match zoom_at(sc.edl, s) {
-        Some((scale, wgt, tx, ty)) => (
-            scale,
-            mx + (tx * ratio - mx) * wgt,
-            my + (ty * ratio - my) * wgt,
-        ),
-        None => (1.0, mx, my),
-    };
-    // Stills: a slow push-in over each still, so a still never looks frozen.
-    let drift = if sc.stills {
-        let t0 = fr.frames[idx].t;
-        let t1 = fr
-            .frames
-            .get(idx + 1)
-            .map(|f| f.t)
-            .unwrap_or(sc.duration)
-            .max(t0 + 0.5);
-        1.0 + 0.05 * ease((s - t0) / (t1 - t0))
-    } else {
-        1.0
-    };
-    let scale = scale * drift;
-    let cw = (bw / scale).round().clamp(2.0, sw as f64);
-    let ch = (bh / scale).round().clamp(2.0, sh as f64);
-    let x0 = (cx - cw / 2.0).clamp(0.0, sw as f64 - cw);
-    let y0 = (cy - ch / 2.0).clamp(0.0, sh as f64 - ch);
-    let view = imageops::crop_imm(&*src, x0 as u32, y0 as u32, cw as u32, ch as u32).to_image();
-    let mut img = if (cw as u32, ch as u32) == (w, h) {
-        view
-    } else {
-        imageops::resize(&view, w, h, imageops::FilterType::Triangle)
-    };
+    let mut img = crop(x0, y0, cw, ch);
+    // Motion blur: while the camera moves, average the view across the
+    // frame's shutter.
+    if sc.edl.motion_blur && shutter > 0.0 {
+        // Five looks across the shutter, averaged: a streak, not a double.
+        let a = view_rect(sc, fr, idx, s - shutter * 0.5, aspect);
+        let b = view_rect(sc, fr, idx, s + shutter * 0.5, aspect);
+        let moved = (a.0 - b.0)
+            .abs()
+            .max((a.1 - b.1).abs())
+            .max((a.2 - b.2).abs())
+            .max((a.3 - b.3).abs());
+        if moved * (w as f64 / cw) > 1.5 {
+            let mut acc: Vec<u32> = img.as_raw().iter().map(|&v| v as u32).collect();
+            for k in [-0.5, -0.25, 0.25, 0.5] {
+                let r = view_rect(sc, fr, idx, s + shutter * k, aspect);
+                let v = crop(r.0, r.1, r.2, r.3);
+                for (a, b) in acc.iter_mut().zip(v.as_raw()) {
+                    *a += *b as u32;
+                }
+            }
+            for (p, a) in img.iter_mut().zip(acc) {
+                *p = (a / 5) as u8;
+            }
+        }
+    }
     let k = w as f64 / cw;
     let to_out = |px: f64, py: f64| ((px * ratio - x0) * k, (py * ratio - y0) * k);
     if sc.edl.highlight
@@ -1288,22 +1384,154 @@ fn compose(sc: &Scene, fr: &mut Frames, s: f64, w: u32, h: u32) -> RgbImage {
     }
     if sc.edl.cursor {
         let unit = (w.min(h) as f64 / 720.0).max(0.6);
+        let mut pressed = 1.0;
         for c in &sc.clicks {
             let p = (s - c.t) / 0.5;
             if (0.0..1.0).contains(&p) {
                 let (ox, oy) = to_out(c.x.unwrap_or(0.0), c.y.unwrap_or(0.0));
                 ripple(&mut img, ox, oy, p, 40.0 * unit);
             }
+            // A quick press: the cursor dips as it clicks.
+            let d = (s - c.t).abs();
+            if d < 0.12 {
+                pressed = 0.82 + 0.18 * (d / 0.12);
+            }
         }
-        if let Some((px, py)) = cur {
+        if let Some(track) = &sc.cursor {
+            let [px, py, _] = track.at(s);
             let (ox, oy) = to_out(px, py);
-            cursor(&mut img, ox, oy, 34.0 * unit);
+            cursor(&mut img, ox, oy, 40.0 * unit * pressed);
         }
     }
     img
 }
 
-/// The frame at finished-video second `ot`, without captions.
+/// The footage on its background: padding, rounded corners and a soft
+/// shadow, the way screen-recording editors frame a recording.
+fn on_canvas(sc: &Scene, inner_of: impl FnOnce(u32, u32) -> RgbImage, w: u32, h: u32) -> RgbImage {
+    let bg = sc.edl.background.trim();
+    if bg.is_empty() || bg.eq_ignore_ascii_case("none") || sc.edl.padding <= 0.0 {
+        return inner_of(w, h);
+    }
+    let pad = sc.edl.padding;
+    let iw = ((w as f64 * (1.0 - 2.0 * pad)) as u32 / 2 * 2).max(2);
+    let ih = ((h as f64 * (1.0 - 2.0 * pad)) as u32 / 2 * 2).max(2);
+    let (ox, oy) = ((w - iw) / 2, (h - ih) / 2);
+    let radius = (h as f64 * 0.018).max(4.0);
+    let mut out = {
+        let mut cache = sc.canvases.lock().unwrap_or_else(|e| e.into_inner());
+        cache
+            .entry((w, h))
+            .or_insert_with(|| canvas(bg, sc.dir, w, h, (ox, oy, iw, ih), radius))
+            .clone()
+    };
+    let inner = inner_of(iw, ih);
+    // Paste with rounded corners (anti-aliased).
+    for y in 0..ih {
+        for x in 0..iw {
+            let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
+            let dx = (radius - fx).max(fx - (iw as f64 - radius)).max(0.0);
+            let dy = (radius - fy).max(fy - (ih as f64 - radius)).max(0.0);
+            let cover = if dx > 0.0 && dy > 0.0 {
+                (radius + 0.5 - (dx * dx + dy * dy).sqrt()).clamp(0.0, 1.0)
+            } else {
+                1.0
+            };
+            if cover > 0.0 {
+                let c = inner.get_pixel(x, y).0;
+                blend(&mut out, (ox + x) as i64, (oy + y) as i64, c, cover as f32);
+            }
+        }
+    }
+    out
+}
+
+/// The background with the recording's shadow baked in.
+fn canvas(
+    bg: &str,
+    dir: &Path,
+    w: u32,
+    h: u32,
+    (ox, oy, iw, ih): (u32, u32, u32, u32),
+    radius: f64,
+) -> RgbImage {
+    let mut img = if let Some(hex) = bg.strip_prefix('#')
+        && hex.len() == 6
+        && let Ok(v) = u32::from_str_radix(hex, 16)
+    {
+        RgbImage::from_pixel(w, h, image::Rgb([(v >> 16) as u8, (v >> 8) as u8, v as u8]))
+    } else if !bg.eq_ignore_ascii_case("gradient")
+        && let Ok(pic) = image::open(if Path::new(bg).is_absolute() {
+            PathBuf::from(bg)
+        } else {
+            dir.join(bg)
+        })
+    {
+        // Cover the frame.
+        let pic = pic.to_rgb8();
+        let k = (w as f64 / pic.width() as f64).max(h as f64 / pic.height() as f64);
+        let (rw, rh) = (
+            (pic.width() as f64 * k).ceil() as u32,
+            (pic.height() as f64 * k).ceil() as u32,
+        );
+        let big = imageops::resize(&pic, rw, rh, imageops::FilterType::Triangle);
+        imageops::crop_imm(&big, (rw - w) / 2, (rh - h) / 2, w, h).to_image()
+    } else {
+        // A calm diagonal gradient, violet to deep blue, with a soft glow.
+        RgbImage::from_fn(w, h, |x, y| {
+            let (u, v) = (x as f32 / w as f32, y as f32 / h as f32);
+            let d = (u * 0.6 + v * 0.4).clamp(0.0, 1.0);
+            let glow = (1.0 - ((u - 0.3).powi(2) + (v - 0.2).powi(2)).sqrt() * 1.6).max(0.0);
+            let c0 = [76.0, 52.0, 140.0];
+            let c1 = [24.0, 34.0, 82.0];
+            image::Rgb(
+                [0, 1, 2]
+                    .map(|i| (c0[i] + (c1[i] - c0[i]) * d + glow * 40.0).clamp(0.0, 255.0) as u8),
+            )
+        })
+    };
+    // Soft shadow: a darkened rounded rectangle, spread and offset a little.
+    let spread = (h as f64 * 0.03).max(6.0);
+    let drop = h as f64 * 0.012;
+    let (x0, y0) = (ox as f64, oy as f64 + drop);
+    let (x1, y1) = (x0 + iw as f64, y0 + ih as f64);
+    let ys = ((y0 - spread).max(0.0) as u32)..((y1 + spread).min(h as f64) as u32);
+    for y in ys {
+        for x in ((x0 - spread).max(0.0) as u32)..((x1 + spread).min(w as f64) as u32) {
+            let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
+            // Distance outside the rounded rectangle.
+            let qx = (x0 + radius - fx).max(fx - (x1 - radius)).max(0.0);
+            let qy = (y0 + radius - fy).max(fy - (y1 - radius)).max(0.0);
+            let d = (qx * qx + qy * qy).sqrt() - radius;
+            let a = if d <= 0.0 {
+                0.45
+            } else {
+                0.45 * (1.0 - d / spread).max(0.0).powi(2)
+            };
+            if a > 0.0 {
+                blend(&mut img, x as i64, y as i64, [0, 0, 0], a as f32);
+            }
+        }
+    }
+    img
+}
+
+/// Mixes `b` into `a` by `k` (0 = a, 1 = b).
+fn crossfade(mut a: RgbImage, b: &RgbImage, k: f32) -> RgbImage {
+    let k = k.clamp(0.0, 1.0);
+    for (p, q) in a.pixels_mut().zip(b.pixels()) {
+        for c in 0..3 {
+            p.0[c] = (p.0[c] as f32 * (1.0 - k) + q.0[c] as f32 * k) as u8;
+        }
+    }
+    a
+}
+
+/// Seconds of a crossfade between a card and the footage.
+const XFADE: f64 = 0.45;
+
+/// The frame at finished-video second `ot`, without captions: the
+/// footage on its background, cards crossfading into and out of it.
 fn frame_at(
     sc: &Scene,
     tl: &Timeline,
@@ -1314,21 +1542,70 @@ fn frame_at(
     h: u32,
 ) -> RgbImage {
     let edl = sc.edl;
-    let fade =
-        |local: f64, len: f64| (local / 0.35).min((len - local) / 0.35).clamp(0.0, 1.0) as f32;
+    let fps_step = 1.0 / FPS;
+    // The recording seconds one output frame spans (for motion blur).
+    let shutter = |s: f64| match tl.at(ot + fps_step) {
+        Moment::Frame(n) if n > s => (n - s).min(0.5),
+        _ => 0.0,
+    };
+    let footage = |fr: &mut Frames, s: f64, sh: f64| -> RgbImage {
+        if h > w {
+            compose(sc, fr, s, w, h, sh)
+        } else {
+            on_canvas(sc, |iw, ih| compose(sc, fr, s, iw, ih, sh), w, h)
+        }
+    };
+    let first_s = edl.segments.first().map(|s| s.from).unwrap_or(0.0);
+    let last_s = edl.segments.last().map(|s| s.to).unwrap_or(0.0);
     match tl.at(ot) {
-        Moment::Title(l) => card(
-            w,
-            h,
-            f,
-            &edl.title,
-            &edl.subtitle,
-            fade(l, super::TITLE_SECONDS),
-        ),
-        Moment::End(l) => card(w, h, f, &edl.end_text, "", fade(l, super::END_SECONDS)),
-        Moment::Frame(s) => compose(sc, fr, s, w, h),
-        Moment::Insert(i, _) if i.kind == "hold" => compose(sc, fr, i.at, w, h),
-        Moment::Insert(i, l) => insert_card(w, h, f, i, fade(l, i.seconds)),
+        Moment::Title(l) => {
+            let len = super::TITLE_SECONDS;
+            // In from black, out by crossfading into the footage.
+            let c = card(
+                w,
+                h,
+                f,
+                &edl.title,
+                &edl.subtitle,
+                (l / 0.35).min(1.0) as f32,
+            );
+            if l > len - XFADE {
+                let k = ease((l - (len - XFADE)) / XFADE) as f32;
+                crossfade(c, &footage(fr, first_s, 0.0), k)
+            } else {
+                c
+            }
+        }
+        Moment::End(l) => {
+            let len = super::END_SECONDS;
+            let c = card(
+                w,
+                h,
+                f,
+                &edl.end_text,
+                "",
+                ((len - l) / 0.5).min(1.0) as f32,
+            );
+            if l < XFADE {
+                let k = ease(l / XFADE) as f32;
+                crossfade(footage(fr, last_s, 0.0), &c, k)
+            } else {
+                c
+            }
+        }
+        Moment::Frame(s) => footage(fr, s, shutter(s)),
+        Moment::Insert(i, _) if i.kind == "hold" => footage(fr, i.at, 0.0),
+        Moment::Insert(i, l) => {
+            let c = insert_card(w, h, f, i, 1.0);
+            if l < XFADE {
+                crossfade(footage(fr, i.at, 0.0), &c, ease(l / XFADE) as f32)
+            } else if l > i.seconds - XFADE {
+                let k = ease((l - (i.seconds - XFADE)) / XFADE) as f32;
+                crossfade(c, &footage(fr, i.at, 0.0), k)
+            } else {
+                c
+            }
+        }
     }
 }
 
@@ -1462,8 +1739,14 @@ fn render_cut(
         .filter(|p| p.is_file());
     let ffmpeg = super::ffmpeg();
     let audio_path = dir.join(format!("{}-audio.wav", names.video));
-    let audio = if ffmpeg.is_some() && (auto_music || !placed.is_empty()) {
-        super::music::write_wav(&audio_path, &mix_audio(edl, dir, &placed, total))
+    let clicks: Vec<f64> = sc
+        .clicks
+        .iter()
+        .filter_map(|c| tl.output_time(c.t))
+        .collect();
+    let has_clicks = edl.click_sounds && !clicks.is_empty();
+    let audio = if ffmpeg.is_some() && (auto_music || !placed.is_empty() || has_clicks) {
+        super::music::write_wav(&audio_path, &mix_audio(edl, dir, &placed, &clicks, total))
             .map_err(|e| e.to_string())?;
         Some(audio_path.as_path())
     } else {
@@ -1517,7 +1800,8 @@ fn render_cut(
                     let plain = want_clean.then(|| img.clone());
                     let mut img = img;
                     if let Some(c) = cues.iter().find(|c| ot >= c.from && ot < c.to) {
-                        caption(&mut img, &f, &c.text, portrait);
+                        let progress = ((ot - c.from) / (c.to - c.from).max(0.01)) as f32;
+                        caption(&mut img, &f, &c.text, portrait, progress);
                     }
                     (plain, img)
                 },
@@ -1637,9 +1921,9 @@ fn render_cut(
     };
     // A short's frame already carries the title above the page.
     let t = if portrait {
-        compose(sc, fr, s, tw, th)
+        compose(sc, fr, s, tw, th, 0.0)
     } else {
-        thumbnail(compose(sc, fr, s, tw, th), &f, thumb_title)
+        thumbnail(compose(sc, fr, s, tw, th, 0.0), &f, thumb_title)
     };
     let tp = dir.join(if portrait {
         "short-thumbnail.png"
@@ -1710,10 +1994,6 @@ pub fn render_with(
     };
     let sc = Scene {
         edl: &edl,
-        points: events
-            .iter()
-            .filter_map(|e| Some((e.t, e.x?, e.y?)))
-            .collect(),
         clicks: events
             .iter()
             .filter(|e| e.kind == "click" && e.x.is_some())
@@ -1730,6 +2010,25 @@ pub fn render_with(
         stills: mode == super::record::Mode::Stills,
         duration,
         backdrops: Default::default(),
+        camera: {
+            // The page's centre in CSS pixels.
+            let css_w = frames
+                .iter()
+                .map(|f| f.css_w)
+                .find(|w| *w > 0.0)
+                .unwrap_or(first.width() as f64);
+            let css_h = css_w * first.height() as f64 / first.width() as f64;
+            super::motion::camera(&edl, (css_w / 2.0, css_h / 2.0), duration + 1.0)
+        },
+        cursor: super::motion::cursor(
+            &events
+                .iter()
+                .filter_map(|e| Some((e.t, e.x?, e.y?)))
+                .collect::<Vec<_>>(),
+            duration + 1.0,
+        ),
+        canvases: Default::default(),
+        dir,
     };
     let mut notes: Vec<String> = Vec::new();
     let mut spoken: HashMap<String, Spoken> = HashMap::new();
@@ -1809,7 +2108,7 @@ pub fn render_with(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::video::{Caption, Line, Segment, Zoom};
+    use crate::video::{Caption, Line, Segment};
 
     #[test]
     fn output_and_source_times_agree() {
@@ -1834,34 +2133,6 @@ mod tests {
         assert!((source_time(&edl, 6.5) - 4.0).abs() < 1e-9);
         assert!((source_time(&edl, 7.5) - 10.0).abs() < 1e-9);
         assert!((edl.output_time(10.0).unwrap() - 7.5).abs() < 1e-9);
-    }
-
-    #[test]
-    fn zoom_eases_in_holds_and_out() {
-        let edl = Edl {
-            zooms: vec![Zoom {
-                at: 5.0,
-                x: 100.0,
-                y: 50.0,
-                scale: 2.0,
-                hold: 1.0,
-            }],
-            ..Default::default()
-        };
-        assert!(zoom_at(&edl, 3.0).is_none());
-        let (half, _, _, _) = zoom_at(&edl, 4.7).unwrap();
-        assert!(half > 1.0 && half < 2.0);
-        assert_eq!(zoom_at(&edl, 5.5).unwrap().0, 2.0);
-        assert!(zoom_at(&edl, 7.0).is_none());
-    }
-
-    #[test]
-    fn the_cursor_waits_then_glides() {
-        let pts = [(1.0, 0.0, 0.0), (5.0, 100.0, 0.0)];
-        assert_eq!(cursor_at(&pts, 2.0), Some((0.0, 0.0)));
-        let (x, _) = cursor_at(&pts, 4.7).unwrap();
-        assert!(x > 0.0 && x < 100.0);
-        assert_eq!(cursor_at(&pts, 9.0), Some((100.0, 0.0)));
     }
 
     #[test]
@@ -1990,13 +2261,16 @@ mod tests {
         ];
         let sc = Scene {
             edl: &edl,
-            points: vec![],
             clicks: vec![],
             targets: vec![],
             privacy: &privacy,
             stills: false,
             duration: 10.0,
             backdrops: Default::default(),
+            camera: crate::video::motion::camera(&edl, (0.0, 0.0), 1.0),
+            cursor: None,
+            canvases: Default::default(),
+            dir: Path::new("."),
         };
         // Between two looks: both (the page may be changing), plus the manual box.
         assert_eq!(sc.blur_at(1.5).len(), 3);
@@ -2157,6 +2431,7 @@ mod look {
             &f,
             "Click “Create project” to start a new one",
             false,
+            0.5,
         );
         img.save(format!("{out}/zoom.png")).unwrap();
     }

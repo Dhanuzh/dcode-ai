@@ -220,8 +220,12 @@ pub(super) fn handle_mouse_event(
             if (inner_y as usize) < n_show {
                 let idx = list_scroll + inner_y as usize;
                 if idx < slash_filtered.len() {
-                    g.set_input_text(slash_filtered[idx].command_str());
-                    g.slash_menu_index = idx;
+                    g.set_input_text(slash_filtered[idx].completion());
+                    g.slash_menu_index = if slash_filtered[idx].completion().ends_with(' ') {
+                        0
+                    } else {
+                        idx
+                    };
                 }
             }
         } else if !at_matches.is_empty() {

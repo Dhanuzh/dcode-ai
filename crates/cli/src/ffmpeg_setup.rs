@@ -207,28 +207,59 @@ pub async fn install_piper(progress: impl Fn(String)) -> Result<PathBuf, String>
     Ok(model)
 }
 
-/// Opens a file with the system's player/viewer (WSL: the Windows one).
+/// A command started fully on its own: no terminal input or output, and
+/// its own process group. A Windows program started from WSL with the
+/// terminal's stdin otherwise takes the keyboard — dcode-ai's input box
+/// stopped answering after `/video open`.
+pub fn detached(mut cmd: std::process::Command) -> std::io::Result<()> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
+    let mut child = cmd.spawn()?;
+    // Reaped in the background, never waited on here.
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
+/// Opens a file with the system's player/viewer (WSL: the Windows one),
+/// without touching this terminal.
 pub fn open(path: &Path) -> std::io::Result<()> {
     let wsl = std::env::var_os("WSL_DISTRO_NAME").is_some();
     if wsl {
         let win = std::process::Command::new("wslpath")
             .arg("-w")
             .arg(path)
+            .stdin(std::process::Stdio::null())
             .output()?;
         let win = String::from_utf8_lossy(&win.stdout).trim().to_string();
-        std::process::Command::new("explorer.exe")
-            .arg(win)
-            .spawn()?;
-        return Ok(());
+        let mut c = std::process::Command::new("explorer.exe");
+        c.arg(win);
+        return detached(c);
     }
     #[cfg(target_os = "windows")]
-    std::process::Command::new("cmd")
-        .args(["/C", "start", ""])
-        .arg(path)
-        .spawn()?;
+    {
+        let mut c = std::process::Command::new("cmd");
+        c.args(["/C", "start", ""]).arg(path);
+        detached(c)?;
+    }
     #[cfg(target_os = "macos")]
-    std::process::Command::new("open").arg(path).spawn()?;
+    {
+        let mut c = std::process::Command::new("open");
+        c.arg(path);
+        detached(c)?;
+    }
     #[cfg(target_os = "linux")]
-    std::process::Command::new("xdg-open").arg(path).spawn()?;
+    {
+        let mut c = std::process::Command::new("xdg-open");
+        c.arg(path);
+        detached(c)?;
+    }
     Ok(())
 }
