@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.76 — 2026-11-17
+
+### Fixed
+- **`/record --screen` on WSL captured nothing** ("no frames were
+  captured" at the end of the take): the PowerShell screenshot loop is fed
+  through `powershell -Command -`, which only runs a multi-line block at
+  the end once a blank line follows it — so the loop never started. The
+  script now ends with one (a live test records the Windows desktop).
+- A screen recording now waits for its first screenshot (up to 15 s) and
+  fails at `record_start` if none comes, instead of after the whole take.
+- Screen frames are timed from when the screenshots actually start, not
+  before PowerShell's start-up, so narration lines up with the screen.
+
 ## 1.0.75 — 2026-11-17
 
 ### New — sessions

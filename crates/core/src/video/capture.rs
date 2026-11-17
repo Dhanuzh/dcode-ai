@@ -107,7 +107,35 @@ fn start_wsl_screen(dir: &Path, at: f64) -> Result<Running, String> {
             .map_err(|e| e.to_string())?;
         Ok(String::from_utf8_lossy(&o.stdout).trim().to_string())
     };
-    let script = format!(
+    let script = wsl_screen_script(&win(&out)?, &win(&stop)?);
+    let child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", "-"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("couldn't start PowerShell to record the Windows screen: {e}"))?;
+    let mut r = Running {
+        child,
+        out,
+        at,
+        stop_file: Some(stop),
+    };
+    if let Some(mut stdin) = r.child.stdin.take() {
+        stdin
+            .write_all(script.as_bytes())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(r)
+}
+
+/// The PowerShell that screenshots the Windows desktop into `dir` (Windows
+/// path) until `stop` exists. It is fed to `powershell -Command -`, which
+/// reads stdin like an interactive console: a multi-line block at the very
+/// end only runs once a blank line follows it. So the script must end with
+/// one; without it the capture loop never starts and nothing is recorded.
+fn wsl_screen_script(dir: &str, stop: &str) -> String {
+    format!(
         r#"
 Add-Type -AssemblyName System.Windows.Forms,System.Drawing
 Add-Type -Name D -Namespace W -MemberDefinition '[DllImport("user32.dll")] public static extern bool SetProcessDPIAware();'
@@ -128,29 +156,11 @@ while (-not (Test-Path $stop) -and $sw.ElapsedMilliseconds -lt 600000) {{
   $g.Dispose(); $bmp.Dispose()
   $wait = 200 - ($sw.ElapsedMilliseconds - $t); if ($wait -gt 0) {{ Start-Sleep -Milliseconds $wait }}
 }}
+
 "#,
-        dir = win(&out)?.replace('\'', "''"),
-        stop = win(&stop)?.replace('\'', "''"),
-    );
-    let child = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", "-"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| format!("couldn't start PowerShell to record the Windows screen: {e}"))?;
-    let mut r = Running {
-        child,
-        out,
-        at,
-        stop_file: Some(stop),
-    };
-    if let Some(mut stdin) = r.child.stdin.take() {
-        stdin
-            .write_all(script.as_bytes())
-            .map_err(|e| e.to_string())?;
-    }
-    Ok(r)
+        dir = dir.replace('\'', "''"),
+        stop = stop.replace('\'', "''"),
+    )
 }
 
 /// The ffmpeg input for the default webcam.
@@ -252,6 +262,36 @@ impl Running {
     pub fn failed_early(&mut self) -> bool {
         matches!(self.child.try_wait(), Ok(Some(_)))
     }
+
+    /// For the WSL screenshot loop: waits until the first screenshot is
+    /// written, so a capture that runs but takes nothing fails at the start
+    /// instead of at stop. `Ok(true)` when it waited for one (the loop's
+    /// clock, which names the files, started just now); `Ok(false)` for
+    /// ffmpeg captures, which aren't waited for.
+    pub fn wait_first_frame(&mut self, timeout: std::time::Duration) -> Result<bool, String> {
+        if self.stop_file.is_none() {
+            return Ok(false);
+        }
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let shot = std::fs::read_dir(&self.out).is_ok_and(|mut d| {
+                d.any(|e| e.is_ok_and(|e| e.path().extension().is_some_and(|x| x == "jpg")))
+            });
+            if shot {
+                return Ok(true);
+            }
+            if self.failed_early() {
+                return Err("the screen recorder ended without taking a screenshot".into());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "the screen recorder took no screenshot in {} s (can PowerShell capture the Windows desktop?)",
+                    timeout.as_secs()
+                ));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
 }
 
 /// The frames of a finished screen capture as `(t, file)` in `raw/`
@@ -327,5 +367,89 @@ mod tests {
         );
         assert_eq!(std::fs::read(raw.join("f000001.jpg")).unwrap(), b"a");
         assert!(!cap.exists());
+    }
+
+    #[test]
+    fn wsl_script_ends_with_a_blank_line_so_its_loop_runs() {
+        let s = wsl_screen_script(r"C:\rec\screen", r"C:\it's\screen.stop");
+        // `powershell -Command -` only runs a trailing multi-line block once
+        // a blank line follows it; without one nothing is ever captured.
+        assert!(s.ends_with("}\n\n"), "{s:?}");
+        assert!(s.contains(r"$dir = 'C:\rec\screen'"));
+        assert!(s.contains(r"$stop = 'C:\it''s\screen.stop'"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn wait_first_frame_fails_loudly_until_a_screenshot_exists() {
+        let d = tempfile::tempdir().unwrap();
+        let out = d.path().join("screen");
+        std::fs::create_dir_all(&out).unwrap();
+        let stop = Some(d.path().join("screen.stop"));
+        let short = std::time::Duration::from_millis(300);
+
+        // A loop that ended without a screenshot.
+        let mut ended = Running {
+            child: Command::new("true").spawn().unwrap(),
+            out: out.clone(),
+            at: 0.0,
+            stop_file: stop.clone(),
+        };
+        let _ = ended.child.wait();
+        let e = ended.wait_first_frame(short).unwrap_err();
+        assert!(e.contains("ended without"), "{e}");
+
+        // A loop that runs but takes nothing, then one that took a shot.
+        let mut r = Running {
+            child: Command::new("sleep").arg("5").spawn().unwrap(),
+            out: out.clone(),
+            at: 0.0,
+            stop_file: stop,
+        };
+        let e = r.wait_first_frame(short).unwrap_err();
+        assert!(e.contains("no screenshot"), "{e}");
+        std::fs::write(out.join("s000001_0.jpg"), b"x").unwrap();
+        assert!(r.wait_first_frame(short).unwrap());
+        let _ = r.child.kill();
+        let _ = r.child.wait();
+
+        // ffmpeg captures aren't waited for.
+        let mut ff = Running {
+            child: Command::new("sleep").arg("5").spawn().unwrap(),
+            out: d.path().join("screen.mp4"),
+            at: 0.0,
+            stop_file: None,
+        };
+        assert!(!ff.wait_first_frame(short).unwrap());
+        let _ = ff.child.kill();
+        let _ = ff.child.wait();
+    }
+}
+
+/// Live, on WSL: records the Windows desktop for ~3 s and gets frames.
+/// `cargo test -- --ignored wsl_screen_records`.
+#[cfg(all(test, unix))]
+mod live_wsl {
+    #[test]
+    #[ignore]
+    fn wsl_screen_records_frames() {
+        if !super::is_wsl() {
+            return;
+        }
+        let d = tempfile::tempdir().unwrap();
+        let raw = d.path().join("raw");
+        std::fs::create_dir_all(&raw).unwrap();
+        let mut r = super::start_screen(d.path(), 0.0).unwrap();
+        assert!(
+            r.wait_first_frame(std::time::Duration::from_secs(15))
+                .unwrap()
+        );
+        std::thread::sleep(std::time::Duration::from_secs(3));
+        let out = r.out.clone();
+        r.stop();
+        let frames = super::screen_frames(&out, &raw, 0.0).unwrap();
+        eprintln!("{} frames", frames.len());
+        assert!(frames.len() >= 5, "{frames:?}");
+        assert!(frames.windows(2).all(|w| w[0].0 <= w[1].0));
     }
 }

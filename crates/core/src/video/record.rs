@@ -280,6 +280,16 @@ pub async fn start(workspace: &Path, goal: &str, opts: Options) -> Result<Starte
                     "the screen recorder stopped straight away (no screen capture here?)".into(),
                 );
             }
+            match r.wait_first_frame(std::time::Duration::from_secs(15)) {
+                // The screenshot loop's clock, which names its files, starts
+                // after PowerShell's start-up: anchor its frames to now.
+                Ok(true) => r.at = (now() - start).max(0.0),
+                Ok(false) => {}
+                Err(e) => {
+                    r.stop();
+                    return Err(e);
+                }
+            }
             Some(r)
         } else {
             None
