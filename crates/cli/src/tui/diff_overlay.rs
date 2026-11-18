@@ -141,8 +141,8 @@ pub(crate) fn diff_lines_side_by_side(
                 .add_modifier(Modifier::BOLD),
         )));
         let (mut old, mut new) = hunk_starts(&hunk.header);
-        let (mut dels, mut adds): (Vec<(usize, String)>, Vec<(usize, String)>) =
-            (Vec::new(), Vec::new());
+        let mut dels: Vec<(usize, String)> = Vec::new();
+        let mut adds: Vec<(usize, String)> = Vec::new();
         let flush = |dels: &mut Vec<(usize, String)>,
                      adds: &mut Vec<(usize, String)>,
                      lines: &mut Vec<Line<'static>>| {

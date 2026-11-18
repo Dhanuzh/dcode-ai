@@ -1,11 +1,11 @@
 ---
 source: crates/cli/src/tui/app.rs
-assertion_line: 4955
+assertion_line: 2477
 expression: lines_to_text(&lines)
 ---
 Here’s some code:
 
- rust   copy
+ rust   copy  4 lines · /copy code
 ▏ fn main() {
 ▏     println!("hello");
 ▏ }
