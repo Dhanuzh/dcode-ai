@@ -1,5 +1,46 @@
 # Changelog
 
+## 1.0.82 — 2026-11-19
+
+### Fixed
+- **Stray markup in replies**: lines like `<retrieval_document>` that some
+  models wrap tool output in are no longer shown (outside code blocks), and
+  a reply of nothing else isn't shown at all.
+- **The status bar cut the model name off** ("claude-opus-"): when the line
+  is too narrow, the mode's key hint goes first, then the model shortens
+  (`opus-5.5`), then MCP news; what still doesn't fit is cut from the left.
+- **The dashboard's scratch preview cut log lines** at the panel edge: they
+  wrap now.
+
+### New — reading
+- **Long tool output** shows its first and last lines (where test results
+  and errors are) around "… +N lines (ctrl+o to expand)".
+- **Code blocks** always have a label row (the language, or "code") with
+  click-to-copy and their length; long blocks number their lines;
+  `/copy code` copies the newest code block (`/copy code 2` the one before).
+- **Readable width**: on very wide terminals prose wraps at 100 columns;
+  code and tables keep the full width.
+- **Transcript view** (Ctrl+O / `/transcript`): `[` and `]` jump to the
+  previous / next prompt.
+
+### New — dashboard
+- **Resize with keys**: Alt+←/→ the side panel, Alt+Shift+←/→ the sessions
+  panel; dragged or keyed widths are remembered (`~/.dcode-ai/tui.json`).
+- **Choose the panels**: `/dashboard left off|on`, `/dashboard right off|on`,
+  `/dashboard reset`.
+- **Zoom**: Alt+Z fills the screen with the focused panel (Esc returns);
+  `/files open` pops the files panel out.
+- **Side-by-side diff** in the full diff view when the terminal is at least
+  140 columns wide.
+
+### Developer
+- Dev builds keep line numbers only for our code and no debug info for
+  dependencies: a full build and test run takes ~6 GB (was 60–100 GB).
+- The pre-commit hook checks only the crates a commit touches (the full
+  suite runs in CI) and keeps the build folder in check
+  (`scripts/sweep.sh`); `scripts/release.sh <version> "<summary>"` releases
+  in one step.
+
 ## 1.0.81 — 2026-11-18
 
 ### Fixed — quitting
