@@ -43,6 +43,44 @@ fn spec(name: &str) -> Spec {
             ],
             quantized: false,
         },
+        // Multilingual, bigger and better at languages like Tamil (downloaded
+        // only when chosen with `[ui] stt_model`).
+        "base" => Spec {
+            dir: "whisper-base",
+            files: [
+                (
+                    "model.safetensors",
+                    "https://huggingface.co/openai/whisper-base/resolve/main/model.safetensors",
+                ),
+                (
+                    "config.json",
+                    "https://huggingface.co/openai/whisper-base/resolve/main/config.json",
+                ),
+                (
+                    "tokenizer.json",
+                    "https://huggingface.co/openai/whisper-base/resolve/main/tokenizer.json",
+                ),
+            ],
+            quantized: false,
+        },
+        "small" => Spec {
+            dir: "whisper-small",
+            files: [
+                (
+                    "model.safetensors",
+                    "https://huggingface.co/openai/whisper-small/resolve/main/model.safetensors",
+                ),
+                (
+                    "config.json",
+                    "https://huggingface.co/openai/whisper-small/resolve/main/config.json",
+                ),
+                (
+                    "tokenizer.json",
+                    "https://huggingface.co/openai/whisper-small/resolve/main/tokenizer.json",
+                ),
+            ],
+            quantized: false,
+        },
         // Multilingual: hears ~99 languages and says which it heard.
         "tiny" => Spec {
             dir: "whisper-tiny",
@@ -249,6 +287,17 @@ pub struct Transcriber {
     transcribe_token: Option<u32>,
     /// The language heard last (multilingual models).
     pub language: Option<String>,
+}
+
+/// A language to hear instead of guessing it (`/talk lang ta`): guessing
+/// is unreliable for some languages on small models.
+static FORCED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+/// Sets (or clears) the language multilingual models listen for.
+pub fn force_language(lang: Option<String>) {
+    if let Ok(mut f) = FORCED.lock() {
+        *f = lang;
+    }
 }
 
 /// Whisper's languages, in its token order (the codes).
@@ -458,7 +507,16 @@ impl Transcriber {
         let mut tokens = vec![self.sot];
         // A multilingual model: which language, then "transcribe" (not
         // translate) in it.
-        if let Some((code, id)) = self.detect_language(&audio)? {
+        let forced = FORCED
+            .lock()
+            .ok()
+            .and_then(|f| f.clone())
+            .and_then(|f| self.languages.iter().find(|(c, _)| *c == f).copied());
+        let picked = match forced {
+            Some(l) => Some(l),
+            None => self.detect_language(&audio)?,
+        };
+        if let Some((code, id)) = picked {
             self.language = Some(code.to_string());
             tokens.push(id);
             if let Some(t) = self.transcribe_token {

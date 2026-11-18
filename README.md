@@ -364,7 +364,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **Edited like a pro screen recorder:** the recording sits on a gradient background with padding, rounded corners and a shadow; the camera zooms and pans on a spring (staying in between nearby clicks) with motion blur; a smoothed cursor and click sounds; word-by-word captions in a pill; crossfades between cards and footage; long waits cut, not fast-forwarded. Pages are recorded at a standard 1440×810 viewport in 1920×1080, so text stays sharp and readable however the browser window is sized or zoomed, and each click is marked on a still taken just before it. The camera frames the page's main content, `/video redo <step>` re-records one bad step in place, `/record --screen` records the whole desktop (on WSL, the Windows desktop; it checks for a first screenshot before the take starts) and `--webcam` adds you in a corner bubble; `/video show` draws stills and the contact sheet right in the terminal, and renders show percent done and time left.
 - **Browser flows as smoke tests:** `/browser test save` / `run` replays saved steps and compares screenshots to a baseline; `/browser remember` keeps a site's sign-in for recordings; recordings follow links into new tabs.
 - **Video extras:** a brand kit (logo, colours, font, intro/outro), YouTube chapters and a ready description, `/video doc` how-to guides from recordings, `/video render all`, and GPU encoding when available.
-- **Talk extras:** `/talk wake` ("hey dcode"), `/talk lang` (answers in the language you speak), `/talk persona calm|brief|cheerful`. `/recap` makes a card and short video of your day, with streaks and achievements.
+- **Talk extras:** `/talk wake` ("hey dcode"), `/talk lang [code]` (answers in the language you speak — `/talk lang ta` for Tamil), `/talk voice` (Piper or any Windows voice; each language gets a voice that speaks it, never an English one reading it), `/talk persona calm|brief|cheerful`. `/recap` makes a card and short video of your day, with streaks and achievements.
 - **herdr and terminal tabs:** inside [herdr](https://herdr.dev) dcode-ai reports working / idle / needs-you and its session (so herdr's restore reopens it); every terminal's tab title follows its state.
 - **Reviews:** `/verify` (a read-only reviewer over your diff), `/second-opinion` (a model from another family), `/security-review`, `/pr-comments`.
 - **Headless and CI:**
@@ -431,7 +431,7 @@ code_mode = true               # offer run_script (chain tool calls in one scrip
 [ui]
 theme = "claude"
 # push_url = "https://ntfy.sh/<your-topic>"   # ping your phone when an approval waits
-# stt_model = "base.en"                       # /talk: bigger, more accurate speech model ("tiny" = any language)
+# stt_model = "base.en"                       # /talk: bigger, more accurate speech model ("tiny", "base", "small" = any language)
 working_style = "bar"          # bar | dots | plain
 ```
 

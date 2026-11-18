@@ -281,9 +281,13 @@ async fn talk_session(
         let s2 = stop.clone();
         let spoken =
             tokio::task::spawn_blocking(move || crate::tui::notify::speak_until(&reply, &s2)).await;
-        if matches!(spoken, Ok(Ok(true))) {
-            talk_say(&st, "[talk] stopped".into());
-            break;
+        match spoken {
+            Ok(Ok(true)) => {
+                talk_say(&st, "[talk] stopped".into());
+                break;
+            }
+            Ok(Err(e)) if e != "nothing to read aloud" => talk_say(&st, format!("[talk] {e}")),
+            _ => {}
         }
     }
 }
@@ -459,8 +463,10 @@ async fn talk_wake(
         let s2 = stop.clone();
         let cut =
             tokio::task::spawn_blocking(move || crate::tui::notify::speak_until(&reply, &s2)).await;
-        if matches!(cut, Ok(Ok(true))) {
-            break;
+        match cut {
+            Ok(Ok(true)) => break,
+            Ok(Err(e)) if e != "nothing to read aloud" => talk_say(st, format!("[talk] {e}")),
+            _ => {}
         }
         talk_say(st, "[talk] 👂 waiting for \"hey dcode\"…".into());
     }
@@ -798,7 +804,74 @@ impl Repl {
                     .stt_model
                     .clone()
                     .unwrap_or_else(|| "tiny.en".into());
-                let sub = rest.trim();
+                let mut sub = rest.trim();
+                // `/talk voice [name]`: the voice replies are read in.
+                if command == "/talk" && (sub == "voice" || sub.starts_with("voice ")) {
+                    let want = sub.trim_start_matches("voice").trim();
+                    use crate::tui::notify;
+                    let (piper, windows) = tokio::task::spawn_blocking(|| {
+                        (notify::piper_voices(), notify::windows_voices())
+                    })
+                    .await
+                    .unwrap_or_default();
+                    if want.is_empty() {
+                        out.println(&format!("[talk] reply voice: {} — /talk voice <name> changes it, /talk voice system goes back", notify::talk_voice()));
+                        for v in &piper {
+                            out.println(&format!("[talk]   piper: {v}"));
+                        }
+                        for (n, l) in &windows {
+                            out.println(&format!("[talk]   windows: {n} ({l})"));
+                        }
+                        if piper.is_empty() && windows.is_empty() {
+                            out.println("[talk]   (only the system voice here)");
+                        }
+                        out.println("[talk] other languages get a voice of their own when one is installed (Piper voices: /video voices)");
+                        return Ok(true);
+                    }
+                    let pick = if want == "system" || want == "default" {
+                        Some("system".to_string())
+                    } else if let Some(v) = piper.iter().find(|v| {
+                        v.eq_ignore_ascii_case(want)
+                            || v.to_ascii_lowercase().contains(&want.to_ascii_lowercase())
+                    }) {
+                        Some(format!("piper:{v}"))
+                    } else {
+                        windows
+                            .iter()
+                            .find(|(n, _)| {
+                                n.eq_ignore_ascii_case(want)
+                                    || n.to_ascii_lowercase().contains(&want.to_ascii_lowercase())
+                            })
+                            .map(|(n, _)| format!("windows:{n}"))
+                    };
+                    match pick {
+                        Some(v) => match notify::set_talk_voice(&v) {
+                            Ok(()) => out.println(&format!("[talk] replies are read by {v} from now on")),
+                            Err(e) => out.eprintln(&format!("[talk] {e}")),
+                        },
+                        None => out.println(&format!("[talk] no voice called {want} here — /talk voice lists them (Piper voices are added with /video setup voice <name>)")),
+                    }
+                    return Ok(true);
+                }
+                // `/talk lang [code]`: any language; a code skips guessing it.
+                let mut forced: Option<String> = None;
+                if command == "/talk"
+                    && sub.starts_with("lang")
+                    && (sub == "lang" || sub.starts_with("lang "))
+                {
+                    let code = sub.trim_start_matches("lang").trim().to_ascii_lowercase();
+                    if !code.is_empty() {
+                        if !dcode_ai_cli::voice::stt::LANGUAGES.contains(&code.as_str()) {
+                            out.println(&format!("[talk] `{code}` isn't a language code Whisper knows — e.g. ta, hi, de, fr, es"));
+                            return Ok(true);
+                        }
+                        forced = Some(code);
+                    }
+                    sub = "lang";
+                }
+                if command == "/talk" {
+                    dcode_ai_cli::voice::stt::force_language(forced.clone());
+                }
                 if command == "/talk" && (sub == "persona" || sub.starts_with("persona ")) {
                     let want = sub.trim_start_matches("persona").trim();
                     let file = dcode_ai_common::config::dcode_ai_home_dir()
@@ -836,13 +909,20 @@ impl Repl {
                 }
                 // Any language: the multilingual model, answers in the
                 // language you spoke.
-                if command == "/talk" && sub == "lang" && model.ends_with(".en") {
-                    model = model.trim_end_matches(".en").to_string();
-                    if model != "tiny" && model != "base" {
+                if command == "/talk" && sub == "lang" {
+                    // An English-only model can't hear other languages: its
+                    // multilingual sibling (tiny, base or small).
+                    if model.ends_with(".en") {
+                        model = model.trim_end_matches(".en").to_string();
+                    }
+                    if !matches!(model.as_str(), "tiny" | "base" | "small") {
                         model = "tiny".into();
                     }
-                    if model == "base" {
-                        model = "tiny".into();
+                    if let Some(code) = &forced {
+                        out.println(&format!(
+                            "[talk] listening for {} (model {model}; small models are weak at some languages — `[ui] stt_model = \"small\"` hears them better, a larger download)",
+                            dcode_ai_cli::voice::stt::language_name(code)
+                        ));
                     }
                 }
                 if command == "/standup" && sub != "voice" {
@@ -1793,7 +1873,9 @@ mod wake_tests {
     fn spoken_requests_ask_for_the_language() {
         let r = spoken_request("wie spät ist es", Some("de"));
         assert!(r.contains("answer in German"), "{r}");
+        // English needs no language ask (a persona may still add a tone).
         let r = spoken_request("hi", Some("en"));
-        assert!(!r.contains("answer in"), "{r}");
+        assert!(!r.contains("answer in English"), "{r}");
+        assert!(r.starts_with("hi"), "{r}");
     }
 }

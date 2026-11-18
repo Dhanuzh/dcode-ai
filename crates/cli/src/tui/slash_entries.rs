@@ -133,7 +133,12 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
             (
                 "lang",
                 false,
-                "any language: answers in the language you speak",
+                "any language: answers in the language you speak (`lang ta` for Tamil)",
+            ),
+            (
+                "voice",
+                false,
+                "the voice replies are read in (Piper or Windows)",
             ),
             ("persona", false, "how replies sound: calm, brief, cheerful"),
         ],

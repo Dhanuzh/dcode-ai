@@ -1,5 +1,24 @@
 # Changelog
 
+## 1.0.78 — 2026-11-18
+
+### New
+- **`/talk voice`**: pick the voice spoken replies are read in — a Piper
+  voice (natural) or any Windows voice, including the newer ones
+  (`/talk voice` lists them, `/talk voice system` goes back).
+- **`/talk lang <code>`** (e.g. `/talk lang ta`): listens for that language
+  instead of guessing it — guessing is unreliable for languages like Tamil
+  on small speech models. `[ui] stt_model = "base"` or `"small"` are bigger
+  multilingual models that hear such languages much better (a larger
+  download, only when you choose it).
+
+### Fixed
+- **Answers in another language were read out as nonsense** by an English
+  voice (Tamil text read by "Microsoft David"). Replies now use a voice that
+  speaks the answer's language — a Piper voice for it first, then a Windows
+  one — and when there is none, the answer is shown, not read, with how to
+  add a voice for that language.
+
 ## 1.0.77 — 2026-11-18
 
 ### Fixed
