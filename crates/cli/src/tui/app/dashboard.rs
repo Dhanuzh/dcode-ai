@@ -7,8 +7,8 @@ use crate::tui::diff_review::DiffReview;
 use crate::tui::render_helpers::truncate_chars;
 use crate::tui::state::{DashTarget, RailTab};
 
-const LEFT_W: u16 = 26;
-const RIGHT_W: u16 = 44;
+pub(super) const LEFT_W: u16 = 26;
+pub(super) const RIGHT_W: u16 = 44;
 /// Both rails need this many columns to leave a usable centre pane.
 const BOTH_RAILS_MIN_W: u16 = 120;
 /// Below this only the centre pane is shown.
@@ -61,7 +61,31 @@ pub(super) fn draw_dashboard_frame(
         area,
     );
 
-    let (left, centre, right) = dashboard_columns(area, g.dash_hits.left_w, g.dash_hits.right_w);
+    let (mut left, mut centre, mut right) =
+        dashboard_columns(area, g.dash_hits.left_w, g.dash_hits.right_w);
+    // Panels switched off give their room to the centre.
+    if g.dash_hits.hide_left
+        && let Some(l) = left.take()
+    {
+        centre = centre.union(l);
+    }
+    if g.dash_hits.hide_right
+        && let Some(r) = right.take()
+    {
+        centre = centre.union(r);
+    }
+    // Zoomed: the focused panel (the right one when it has focus, else the
+    // conversation) takes the whole screen.
+    let zoom_right = g.dash_hits.zoom && g.rail_focus && right.is_some();
+    if g.dash_hits.zoom {
+        left = None;
+        if zoom_right {
+            right = Some(area);
+        } else {
+            right = None;
+            centre = area;
+        }
+    }
     g.dash_hits.targets.clear();
     g.dash_hits.transcript = None;
     g.dash_hits.left_rail = left;
@@ -71,6 +95,9 @@ pub(super) fn draw_dashboard_frame(
     }
     if let Some(rect) = right {
         render_right_rail(frame, rect, g);
+    }
+    if zoom_right {
+        return;
     }
     draw_session_pane(
         frame,

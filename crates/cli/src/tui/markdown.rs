@@ -120,6 +120,26 @@ impl DiffHighlighter {
     }
 }
 
+/// Blocks longer than this show line numbers.
+const LONG_CODE_BLOCK: usize = 15;
+
+/// The code blocks of a Markdown text (newest last), for `/copy code`.
+pub fn code_blocks(markdown: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur: Option<Vec<&str>> = None;
+    for line in markdown.lines() {
+        if line.trim_start().starts_with("```") {
+            match cur.take() {
+                Some(body) => out.push(body.join("\n")),
+                None => cur = Some(Vec::new()),
+            }
+        } else if let Some(body) = cur.as_mut() {
+            body.push(line);
+        }
+    }
+    out
+}
+
 fn render_code_block_lines(
     out: &mut Vec<Line<'static>>,
     hits: &mut Vec<LineAnswerHit>,
@@ -140,9 +160,17 @@ fn render_code_block_lines(
     let line_count = code.split('\n').count().max(1);
     let line_num_width = line_count.to_string().len();
     let copy_payload = code.to_string();
+    // Long blocks get line numbers even when they're off, to find a line.
+    let code_line_numbers = code_line_numbers || line_count > LONG_CODE_BLOCK;
 
-    // Language label chip on top of the block, with a click-to-copy affordance.
-    if let Some(lang) = language.as_deref().map(str::trim).filter(|l| !l.is_empty()) {
+    // Label chip on top of the block (the language, or "code"), with a
+    // click-to-copy affordance and the key that copies the latest block.
+    {
+        let lang = language
+            .as_deref()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .unwrap_or("code");
         out.push(Line::from(vec![
             Span::styled(
                 format!(" {lang} "),
@@ -156,6 +184,10 @@ fn render_code_block_lines(
                 Style::default()
                     .fg(theme::muted())
                     .add_modifier(Modifier::UNDERLINED),
+            ),
+            Span::styled(
+                format!("  {line_count} lines · /copy code"),
+                Style::default().fg(theme::muted()),
             ),
         ]));
         hits.push(Some(LineClickHit::CopyText(copy_payload.clone())));
@@ -751,9 +783,15 @@ pub(crate) fn render_markdown_lines_with_hits(
     if out.is_empty() {
         (vec![Line::default()], vec![None])
     } else {
-        wrap_rendered(out, hits, &no_wrap, table_width)
+        // Prose wraps at a comfortable reading width on very wide
+        // terminals; code blocks and tables keep the full width.
+        wrap_rendered(out, hits, &no_wrap, table_width.min(PROSE_MAX_W))
     }
 }
+
+/// Paragraphs wrap at no more than this many columns (lines much longer
+/// are hard to read); code and tables are not affected.
+pub(crate) const PROSE_MAX_W: usize = 100;
 
 /// Word-wrap rendered lines to `width`, keeping styles. List items and
 /// quotes get a hanging indent so continuation lines align with the text.
@@ -1217,6 +1255,44 @@ mod wrap_tests {
         let md = "- a\n- b\n\nOne.\n\nTwo.";
         let t = texts(&render_markdown_lines_with_hits(md, false, 80).0);
         assert_eq!(t, vec!["• a", "• b", "", "One.", "", "Two."]);
+    }
+
+    #[test]
+    fn code_blocks_are_found_for_copying() {
+        let md = "Run this:\n```sh\ncargo test\n```\nthen\n```\nline 1\nline 2\n```";
+        assert_eq!(
+            code_blocks(md),
+            vec!["cargo test".to_string(), "line 1\nline 2".to_string()]
+        );
+        // An unlabelled block gets a label row too (so it can be copied).
+        let t = texts(&render_markdown_lines_with_hits("```\nx\n```", false, 40).0);
+        assert!(
+            t.iter()
+                .any(|l| l.contains("code") && l.contains("/copy code")),
+            "{t:#?}"
+        );
+        // A long block numbers its lines even with numbers off.
+        let long: String = (1..=20).map(|i| format!("l{i}\n")).collect();
+        let t = texts(&render_markdown_lines_with_hits(&format!("```\n{long}```"), false, 60).0);
+        assert!(t.iter().any(|l| l.contains("20 │")), "{t:#?}");
+    }
+
+    #[test]
+    fn prose_wraps_at_a_reading_width_but_code_does_not() {
+        let para = "word ".repeat(60);
+        let code = "x".repeat(150);
+        let md = format!("{para}\n\n```\n{code}\n```");
+        let t = texts(&render_markdown_lines_with_hits(&md, false, 200).0);
+        let prose_rows: Vec<&String> = t.iter().filter(|l| l.contains("word")).collect();
+        assert!(prose_rows.len() >= 3, "{t:#?}");
+        assert!(
+            prose_rows.iter().all(|l| l.chars().count() <= PROSE_MAX_W),
+            "{t:#?}"
+        );
+        assert!(
+            t.iter().any(|l| l.contains(&code)),
+            "code keeps its width: {t:#?}"
+        );
     }
 
     #[test]

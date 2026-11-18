@@ -233,6 +233,54 @@ pub(super) fn handle_key_event(
         g.toggle_changes_focus();
         return KeyFlow::Continue;
     }
+    // Alt+←/→ resize the right panel, Alt+Shift+←/→ the left one; Alt+Z
+    // zooms the focused panel (Esc returns). All remembered.
+    if dashboard_free
+        && key.modifiers.contains(KeyModifiers::ALT)
+        && matches!(key.code, KeyCode::Left | KeyCode::Right)
+    {
+        use super::dashboard::{LEFT_W, RAIL_MIN_W, RIGHT_W};
+        let cols = crossterm::terminal::size().map(|s| s.0).unwrap_or(120);
+        let step = if key.code == KeyCode::Right { 4 } else { -4 };
+        let max = cols / 2;
+        if key.modifiers.contains(KeyModifiers::SHIFT) {
+            g.dash_hits.left_w = crate::tui::dash_prefs::nudge_width(
+                g.dash_hits.left_w,
+                LEFT_W,
+                step,
+                RAIL_MIN_W,
+                max,
+            );
+        } else {
+            // The right panel's edge moves with the arrow: ← makes it wider.
+            g.dash_hits.right_w = crate::tui::dash_prefs::nudge_width(
+                g.dash_hits.right_w,
+                RIGHT_W,
+                -step,
+                RAIL_MIN_W,
+                max,
+            );
+        }
+        let mut p = crate::tui::dash_prefs::load();
+        p.left_w = g.dash_hits.left_w;
+        p.right_w = g.dash_hits.right_w;
+        crate::tui::dash_prefs::save(&p);
+        g.touch_transcript();
+        return KeyFlow::Continue;
+    }
+    if dashboard_free
+        && key.modifiers == KeyModifiers::ALT
+        && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z'))
+    {
+        g.dash_hits.zoom = !g.dash_hits.zoom;
+        g.touch_transcript();
+        return KeyFlow::Continue;
+    }
+    if dashboard_free && g.dash_hits.zoom && key.code == KeyCode::Esc {
+        g.dash_hits.zoom = false;
+        g.touch_transcript();
+        return KeyFlow::Continue;
+    }
     // Alt+1/2/3/4 pick the right-rail tab (context, changes, agents, files).
     if dashboard_free && key.modifiers == KeyModifiers::ALT {
         use crate::tui::state::RailTab;

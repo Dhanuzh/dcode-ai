@@ -26,6 +26,13 @@ panic = "abort"
 # Dev profile for faster builds during development
 [profile.dev]
 opt-level = 0
+# Line numbers for our own code (backtraces keep file:line), no debug info
+# for the ~800 dependencies: the build folder is a fraction of the size
+# (it reached 60–100 GB) and linking is faster.
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [workspace.dependencies]
 # Shared across multiple crates

@@ -185,6 +185,33 @@ pub(super) fn mode_indicator(permission_mode: &str) -> Option<(String, Color)> {
     Some((format!("{label} (shift+tab to cycle)"), color))
 }
 
+/// A model id short enough for a narrow status line:
+/// `claude-opus-5-5` → `opus-5.5`, `claude-sonnet-4-5-20250929` →
+/// `sonnet-4.5`; other names are kept.
+pub(super) fn short_model_name(model: &str) -> String {
+    let Some(rest) = model.strip_prefix("claude-") else {
+        return model.to_string();
+    };
+    let mut parts: Vec<&str> = rest.split('-').collect();
+    // A trailing date (8 digits) says nothing useful here.
+    if parts
+        .last()
+        .is_some_and(|p| p.len() == 8 && p.chars().all(|c| c.is_ascii_digit()))
+    {
+        parts.pop();
+    }
+    let name: Vec<&str> = parts
+        .iter()
+        .copied()
+        .take_while(|p| !p.chars().all(|c| c.is_ascii_digit()))
+        .collect();
+    let nums: Vec<&str> = parts[name.len()..].to_vec();
+    if name.is_empty() || nums.is_empty() {
+        return rest.to_string();
+    }
+    format!("{}-{}", name.join("-"), nums.join("."))
+}
+
 /// `1 shell` / `3 shells` while the agent's background jobs run.
 pub(super) fn shells_badge(g: &TuiSessionState) -> Option<String> {
     match g.background_shells.len() {
@@ -339,9 +366,57 @@ pub(super) fn render_footer(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &TuiS
     }
     right_spans.push(Span::styled(right, Style::default().fg(theme::muted())));
 
-    let lw: usize = left.iter().map(|s| s.content.chars().count()).sum();
-    let rw: usize = right_spans.iter().map(|s| s.content.chars().count()).sum();
-    let gap = (rect.width as usize).saturating_sub(lw + rw);
+    // Too wide for the line: the least useful parts go first, so the model
+    // never ends up cut off ("claude-opus-").
+    let width = rect.width as usize;
+    let len = |v: &[Span<'static>]| -> usize { v.iter().map(|s| s.content.chars().count()).sum() };
+    const CYCLE_HINT: &str = " (shift+tab to cycle)";
+    if len(&left) + len(&right_spans) > width {
+        // 1. The mode's key hint.
+        for s in left.iter_mut() {
+            if let Some(short) = s.content.strip_suffix(CYCLE_HINT) {
+                s.content = std::borrow::Cow::Owned(short.to_string());
+            }
+        }
+    }
+    if len(&left) + len(&right_spans) > width
+        && let Some(last) = right_spans.last_mut()
+    {
+        // 2. The model's short name.
+        let short = short_model_name(&g.model);
+        if short != g.model {
+            last.content = std::borrow::Cow::Owned(last.content.replacen(&g.model, &short, 1));
+        }
+    }
+    if len(&left) + len(&right_spans) > width {
+        // 3. MCP news (it shows in /mcp too).
+        right_spans.retain(|s| !s.content.starts_with("mcp "));
+    }
+    // 4. Whatever still doesn't fit is cut from the left side's end.
+    let room = width.saturating_sub(len(&right_spans));
+    if len(&left) > room {
+        let mut used = 0;
+        let mut kept: Vec<Span<'static>> = Vec::new();
+        for s in left {
+            let n = s.content.chars().count();
+            if used + n <= room {
+                used += n;
+                kept.push(s);
+            } else {
+                let fit = room.saturating_sub(used);
+                if fit > 1 {
+                    let cut: String = s.content.chars().take(fit - 1).collect();
+                    kept.push(Span::styled(format!("{cut}…"), s.style));
+                }
+                break;
+            }
+        }
+        left = kept;
+    }
+
+    let lw: usize = len(&left);
+    let rw: usize = len(&right_spans);
+    let gap = width.saturating_sub(lw + rw);
     left.push(Span::raw(" ".repeat(gap)));
     left.extend(right_spans);
     frame.render_widget(Paragraph::new(Line::from(left)), rect);
@@ -459,5 +534,19 @@ mod tests {
         assert_eq!(working_label(&g), "running bash");
         g.current_busy_state = BusyState::Thinking;
         assert_eq!(working_label(&g), "thinking");
+    }
+}
+
+#[cfg(test)]
+mod short_model_tests {
+    use super::short_model_name;
+
+    #[test]
+    fn model_names_shorten_for_narrow_lines() {
+        assert_eq!(short_model_name("claude-opus-5-5"), "opus-5.5");
+        assert_eq!(short_model_name("claude-sonnet-4-5-20250929"), "sonnet-4.5");
+        assert_eq!(short_model_name("claude-haiku-5-5"), "haiku-5.5");
+        assert_eq!(short_model_name("gpt-5"), "gpt-5");
+        assert_eq!(short_model_name("claude-sonnet-5"), "sonnet-5");
     }
 }

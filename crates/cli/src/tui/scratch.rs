@@ -267,21 +267,41 @@ pub fn preview(f: &ScratchFile, width: u16, height: u16) -> Vec<Line<'static>> {
                 None
             };
             let body = pretty.unwrap_or(text);
-            let all: Vec<&str> = body.lines().collect();
+            // Long lines wrap (a log line cut at the panel's edge lost its
+            // end: "ddhanus…"); continuation rows are indented a little.
+            let w = (width as usize).max(8);
+            let mut rows: Vec<(String, String)> = Vec::new();
+            for line in body.lines() {
+                let chars: Vec<char> = line.chars().collect();
+                if chars.len() <= w {
+                    rows.push((line.to_string(), line.to_ascii_lowercase()));
+                    continue;
+                }
+                let lower = line.to_ascii_lowercase();
+                let mut start = 0;
+                let mut first = true;
+                while start < chars.len() {
+                    let room = if first { w } else { w - 2 };
+                    let end = (start + room).min(chars.len());
+                    let piece: String = chars[start..end].iter().collect();
+                    rows.push((
+                        if first { piece } else { format!("  {piece}") },
+                        lower.clone(),
+                    ));
+                    first = false;
+                    start = end;
+                }
+            }
             // JSON from the top; logs from the end (the latest output).
-            let shown: Vec<&str> = if f.kind == Kind::Json {
-                all.iter().take(h).copied().collect()
+            let shown: Vec<(String, String)> = if f.kind == Kind::Json {
+                rows.into_iter().take(h).collect()
             } else {
-                all.iter()
-                    .skip(all.len().saturating_sub(h))
-                    .copied()
-                    .collect()
+                let skip = rows.len().saturating_sub(h);
+                rows.into_iter().skip(skip).collect()
             };
             shown
                 .into_iter()
-                .map(|l| {
-                    let l: String = l.chars().take(width as usize).collect();
-                    let lower = l.to_ascii_lowercase();
+                .map(|(l, lower)| {
                     let color = if lower.contains("error")
                         || lower.contains("failed")
                         || lower.contains("panicked")
@@ -357,5 +377,37 @@ mod tests {
         let log = s.preview_lines(40, 2);
         assert_eq!(log.len(), 2);
         assert_eq!(log[1].spans[0].content, "test result: FAILED");
+    }
+
+    #[test]
+    fn long_log_lines_wrap_instead_of_being_cut() {
+        let dir = tempfile::tempdir().unwrap();
+        let line = "[19:58:01] ddhanush1 sharepoint ra-dashboard build finished NSE.txt";
+        std::fs::write(dir.path().join("serve.log"), format!("{line}\n")).unwrap();
+        let mut s = Scratch::default();
+        s.refresh(&[(String::new(), dir.path().to_path_buf())]);
+        let rows: Vec<String> = s
+            .preview_lines(30, 10)
+            .iter()
+            .map(|l| l.spans[0].content.to_string())
+            .collect();
+        assert!(rows.len() > 1, "{rows:?}");
+        assert!(rows.iter().all(|r| r.chars().count() <= 30), "{rows:?}");
+        // Nothing is lost: the pieces (continuations without their indent)
+        // put back are the line.
+        let joined: String = rows
+            .iter()
+            .enumerate()
+            .map(|(i, r)| {
+                if i == 0 {
+                    r.as_str()
+                } else {
+                    r.strip_prefix("  ").unwrap_or(r)
+                }
+            })
+            .collect();
+        assert_eq!(joined, line);
+        assert!(rows[0].starts_with("[19:58:01] ddhanush1"));
+        assert!(rows.last().unwrap().contains("NSE.txt"));
     }
 }

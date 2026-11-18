@@ -333,6 +333,40 @@ impl Repl {
                     out.println("[copy] available in TUI mode");
                 }
             }
+            "/copy" if rest.trim().starts_with("code") => {
+                // The newest code block in a reply (`/copy code 2`: the one
+                // before it).
+                let back: usize = rest.trim()["code".len()..]
+                    .trim()
+                    .parse()
+                    .unwrap_or(1)
+                    .max(1);
+                if let ReplOutput::Tui(st) = &out {
+                    let block = st.lock().ok().and_then(|g| {
+                        g.blocks
+                            .iter()
+                            .rev()
+                            .filter_map(|b| match b {
+                                DisplayBlock::Assistant(t) => Some(t.as_str()),
+                                _ => None,
+                            })
+                            .flat_map(|t| crate::tui::markdown::code_blocks(t).into_iter().rev())
+                            .nth(back - 1)
+                    });
+                    match block {
+                        Some(code) => match crate::tui::clipboard::copy_to_clipboard(&code) {
+                            Ok(_) => out.println(&format!(
+                                "[copy] Code block copied ({} lines).",
+                                code.lines().count()
+                            )),
+                            Err(e) => out.eprintln(&format!("[copy] {e}")),
+                        },
+                        None => out.println("[copy] No code block in the replies yet."),
+                    }
+                } else {
+                    out.println("[copy] available in TUI mode");
+                }
+            }
             "/copy" => {
                 // Copy the last assistant response to the clipboard.
                 if let ReplOutput::Tui(st) = &out {
@@ -355,8 +389,49 @@ impl Repl {
             }
             "/dashboard" | "/dash" => {
                 if let ReplOutput::Tui(st) = &out {
-                    if let Ok(mut g) = st.lock() {
-                        g.toggle_view_mode();
+                    let words: Vec<&str> = rest.split_whitespace().collect();
+                    match words.as_slice() {
+                        // `/dashboard left off`, `/dashboard right on`: which
+                        // side panels show (remembered).
+                        [side @ ("left" | "right"), state @ ("on" | "off")] => {
+                            let show = *state == "on";
+                            let mut p = crate::tui::dash_prefs::load();
+                            if *side == "left" {
+                                p.hide_left = !show;
+                            } else {
+                                p.hide_right = !show;
+                            }
+                            crate::tui::dash_prefs::save(&p);
+                            if let Ok(mut g) = st.lock() {
+                                g.dash_hits.hide_left = p.hide_left;
+                                g.dash_hits.hide_right = p.hide_right;
+                                g.touch_transcript();
+                            }
+                            out.println(&format!(
+                                "[dashboard] {side} panel {} — Alt+←/→ resizes, Alt+Z zooms the focused panel",
+                                if show { "shown" } else { "hidden" }
+                            ));
+                        }
+                        ["reset"] => {
+                            crate::tui::dash_prefs::save(
+                                &crate::tui::dash_prefs::DashPrefs::default(),
+                            );
+                            if let Ok(mut g) = st.lock() {
+                                g.dash_hits.left_w = 0;
+                                g.dash_hits.right_w = 0;
+                                g.dash_hits.hide_left = false;
+                                g.dash_hits.hide_right = false;
+                                g.dash_hits.zoom = false;
+                                g.touch_transcript();
+                            }
+                            out.println("[dashboard] layout reset");
+                        }
+                        [] => {
+                            if let Ok(mut g) = st.lock() {
+                                g.toggle_view_mode();
+                            }
+                        }
+                        _ => out.println("usage: /dashboard [left|right on|off · reset]"),
                     }
                 } else {
                     out.println("[dashboard] available in TUI mode");

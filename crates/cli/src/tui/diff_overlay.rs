@@ -44,6 +44,10 @@ fn hunk_starts(header: &str) -> (usize, usize) {
 
 /// The diff of one file as lines, plus the line index where each hunk starts.
 pub(crate) fn diff_lines(hunks: &[DiffHunk], width: usize) -> (Vec<Line<'static>>, Vec<usize>) {
+    // Wide enough: old and new side by side.
+    if width >= SIDE_BY_SIDE_MIN_W {
+        return diff_lines_side_by_side(hunks, width);
+    }
     let mut lines = Vec::new();
     let mut starts = Vec::new();
     let gutter = Style::default().fg(theme::muted());
@@ -92,6 +96,93 @@ pub(crate) fn diff_lines(hunks: &[DiffHunk], width: usize) -> (Vec<Line<'static>
                 Span::styled(format!("{body}{}", " ".repeat(pad)), style),
             ]));
         }
+    }
+    (lines, starts)
+}
+
+/// From this width the diff shows old and new side by side.
+pub(crate) const SIDE_BY_SIDE_MIN_W: usize = 140;
+
+/// One side of a side-by-side row: `  12 text`, padded to `w`.
+fn side_cell(num: Option<usize>, text: &str, w: usize, style: Style) -> Vec<Span<'static>> {
+    let n = num
+        .map(|n| format!("{n:>5} "))
+        .unwrap_or_else(|| "      ".into());
+    let body = truncate_chars(text, w.saturating_sub(7));
+    let pad = w.saturating_sub(6 + body.chars().count());
+    vec![
+        Span::styled(n, Style::default().fg(theme::muted())),
+        Span::styled(format!("{body}{}", " ".repeat(pad)), style),
+    ]
+}
+
+/// The diff with old lines on the left and new on the right: removed and
+/// added runs paired up row by row, unchanged lines on both sides.
+pub(crate) fn diff_lines_side_by_side(
+    hunks: &[DiffHunk],
+    width: usize,
+) -> (Vec<Line<'static>>, Vec<usize>) {
+    let half = width.saturating_sub(1) / 2;
+    let del = Style::default().fg(theme::error()).bg(theme::diff_del());
+    let add = Style::default().fg(theme::success()).bg(theme::diff_add());
+    let same = Style::default().fg(theme::text());
+    let sep = Span::styled("│", Style::default().fg(theme::border()));
+    let mut lines = Vec::new();
+    let mut starts = Vec::new();
+    for hunk in hunks {
+        if !lines.is_empty() {
+            lines.push(Line::default());
+        }
+        starts.push(lines.len());
+        lines.push(Line::from(Span::styled(
+            hunk.header.clone(),
+            Style::default()
+                .fg(theme::accent())
+                .add_modifier(Modifier::BOLD),
+        )));
+        let (mut old, mut new) = hunk_starts(&hunk.header);
+        let (mut dels, mut adds): (Vec<(usize, String)>, Vec<(usize, String)>) =
+            (Vec::new(), Vec::new());
+        let flush = |dels: &mut Vec<(usize, String)>,
+                     adds: &mut Vec<(usize, String)>,
+                     lines: &mut Vec<Line<'static>>| {
+            for i in 0..dels.len().max(adds.len()) {
+                let mut row = match dels.get(i) {
+                    Some((n, t)) => side_cell(Some(*n), t, half, del),
+                    None => side_cell(None, "", half, same),
+                };
+                row.push(sep.clone());
+                row.extend(match adds.get(i) {
+                    Some((n, t)) => side_cell(Some(*n), t, half, add),
+                    None => side_cell(None, "", half, same),
+                });
+                lines.push(Line::from(row));
+            }
+            dels.clear();
+            adds.clear();
+        };
+        for (sigil, text) in &hunk.lines {
+            match sigil {
+                '-' => {
+                    dels.push((old, text.clone()));
+                    old += 1;
+                }
+                '+' => {
+                    adds.push((new, text.clone()));
+                    new += 1;
+                }
+                _ => {
+                    flush(&mut dels, &mut adds, &mut lines);
+                    let mut row = side_cell(Some(old), text, half, same);
+                    row.push(sep.clone());
+                    row.extend(side_cell(Some(new), text, half, same));
+                    lines.push(Line::from(row));
+                    old += 1;
+                    new += 1;
+                }
+            }
+        }
+        flush(&mut dels, &mut adds, &mut lines);
     }
     (lines, starts)
 }
@@ -397,6 +488,38 @@ pub(crate) fn run_diff_overlay(state: &Arc<Mutex<TuiSessionState>>) -> anyhow::R
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn wide_diffs_pair_old_and_new_side_by_side() {
+        let hunk = DiffHunk {
+            header: "@@ -10,3 +10,3 @@".into(),
+            lines: vec![
+                (' ', "keep".into()),
+                ('-', "old one".into()),
+                ('-', "old two".into()),
+                ('+', "new one".into()),
+                (' ', "tail".into()),
+            ],
+        };
+        let (lines, starts) = diff_lines(std::slice::from_ref(&hunk), 160);
+        assert_eq!(starts, vec![0]);
+        let rows: Vec<String> = lines
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        // keep (both sides), old one | new one, old two | (blank), tail.
+        assert_eq!(rows.len(), 1 + 4, "{rows:#?}");
+        assert!(rows[1].contains("keep") && rows[1].matches("keep").count() == 2);
+        assert!(rows[2].contains("old one") && rows[2].contains("new one"));
+        assert!(rows[2].contains("   11 ") && rows[2].contains("   11 "));
+        assert!(rows[3].contains("old two") && !rows[3].contains("new"));
+        assert!(
+            rows[4].contains("tail") && rows[4].contains("   13 ") && rows[4].contains("   12 ")
+        );
+        // Narrow: one column as before.
+        let (narrow, _) = diff_lines(std::slice::from_ref(&hunk), 100);
+        assert_eq!(narrow.len(), 1 + 5);
+    }
 
     #[test]
     fn diff_lines_number_old_and_new_sides() {

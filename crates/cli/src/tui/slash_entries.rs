@@ -244,6 +244,37 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
         "/move",
         &[("import", true, "<file>: a session from another computer")],
     ),
+    (
+        "/files",
+        &[("open", false, "the files panel full screen (Esc returns)")],
+    ),
+    (
+        "/dashboard",
+        &[
+            (
+                "left off",
+                false,
+                "hide the sessions panel (left on: show it)",
+            ),
+            (
+                "right off",
+                false,
+                "hide the side panel (right on: show it)",
+            ),
+            ("reset", false, "panel widths and panels back to default"),
+        ],
+    ),
+    (
+        "/copy",
+        &[
+            (
+                "code",
+                false,
+                "the newest code block (`code 2`: the one before)",
+            ),
+            ("link", false, "the newest link"),
+        ],
+    ),
     ("/budget", &[("off", false, "no budget (or /budget <usd>)")]),
     (
         "/checkpoint",

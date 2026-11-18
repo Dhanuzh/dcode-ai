@@ -322,7 +322,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         }
         "/redo" => "redo the last undone turn",
         "/diff" => "show git diff (incl. untracked)",
-        "/copy" => "copy the last response as markdown (/copy link: the newest link)",
+        "/copy" => {
+            "copy the last response as markdown (/copy code: the newest code block · /copy link: the newest link)"
+        }
         "/transcript" => "full-screen transcript (scroll/expand)",
         "/dashboard" => "toggle the full-screen dashboard (Ctrl+\\)",
         "/cost" => {

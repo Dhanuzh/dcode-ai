@@ -1,0 +1,32 @@
+#!/bin/sh
+# dcode-ai pre-commit: quick checks on what the commit changes. The full
+# suite (every crate, Linux/macOS/Windows, live video) runs in CI.
+set -e
+changed=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -n "$changed" ] || exit 0
+
+echo '+cargo fmt --check'
+cargo fmt --all -- --check
+
+# Only Rust changes need compiling.
+echo "$changed" | grep -qE '\.rs$|Cargo\.(toml|lock)$' || exit 0
+
+# The crates the commit touches; a root Cargo change checks them all.
+pkgs=""
+if echo "$changed" | grep -qE '^Cargo\.(toml|lock)$'; then
+  pkgs="--workspace"
+else
+  for c in $(echo "$changed" | sed -n 's#^crates/\([^/]*\)/.*#\1#p' | sort -u); do
+    name=$(sed -n 's/^name = "\(.*\)"/\1/p' "crates/$c/Cargo.toml" 2>/dev/null | head -1)
+    [ -n "$name" ] && pkgs="$pkgs -p $name"
+  done
+fi
+[ -n "$pkgs" ] || exit 0
+
+echo "+cargo clippy$pkgs"
+cargo clippy $pkgs --all-targets -- -D warnings
+echo "+cargo test$pkgs --lib --bins"
+cargo test $pkgs --lib --bins
+
+# Keep the build folder from growing without end.
+sh scripts/sweep.sh || true

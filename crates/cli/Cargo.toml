@@ -90,7 +90,8 @@ assert_cmd = "2"
 insta = "1"
 predicates = "3"
 criterion = "0.5"
-cargo-husky = { version = "1", default-features = false, features = ["precommit-hook", "run-cargo-fmt", "run-cargo-clippy", "run-cargo-test"] }
+# Installs .cargo-husky/hooks/pre-commit (fast checks on what changed).
+cargo-husky = { version = "1", default-features = false, features = ["user-hooks"] }
 
 [[bench]]
 name = "tui_perf"

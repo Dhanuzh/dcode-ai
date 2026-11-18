@@ -60,6 +60,8 @@ pub(crate) fn run_transcript_overlay(state: &Arc<Mutex<TuiSessionState>>) -> any
 
             let total = lines.len();
             let max_scroll = total.saturating_sub(view_h);
+            // Where each prompt you typed starts (`> …`), for [ and ].
+            let prompts = prompt_rows(&lines);
             let scroll = {
                 let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
                 g.transcript_overlay_scroll = g.transcript_overlay_scroll.min(max_scroll);
@@ -116,7 +118,7 @@ pub(crate) fn run_transcript_overlay(state: &Arc<Mutex<TuiSessionState>>) -> any
                 let pct = (scroll * 100).checked_div(max_scroll).unwrap_or(100).min(100);
                 let footer = Line::from(vec![
                     Span::styled(
-                        " ↑↓/PgUp/PgDn scroll · t thinking · o tools · r raw · g/G top/bottom · q close ",
+                        " ↑↓/PgUp/PgDn scroll · [ ] prev/next prompt · g/G top/bottom · t thinking · o tools · r raw · q close ",
                         Style::default().fg(theme::muted()),
                     ),
                     Span::styled(
@@ -180,6 +182,16 @@ pub(crate) fn run_transcript_overlay(state: &Arc<Mutex<TuiSessionState>>) -> any
                     (KeyCode::End, _) | (KeyCode::Char('G'), _) => {
                         g.transcript_overlay_scroll = max_scroll;
                     }
+                    (KeyCode::Char('['), _) => {
+                        if let Some(at) = prev_prompt(&prompts, g.transcript_overlay_scroll) {
+                            g.transcript_overlay_scroll = at.min(max_scroll);
+                        }
+                    }
+                    (KeyCode::Char(']'), _) => {
+                        if let Some(at) = next_prompt(&prompts, g.transcript_overlay_scroll) {
+                            g.transcript_overlay_scroll = at.min(max_scroll);
+                        }
+                    }
                     (KeyCode::Char('t'), KeyModifiers::NONE) => {
                         g.thinking_expanded = !g.thinking_expanded;
                     }
@@ -197,4 +209,50 @@ pub(crate) fn run_transcript_overlay(state: &Arc<Mutex<TuiSessionState>>) -> any
 
     let _ = execute!(stdout(), LeaveAlternateScreen);
     res
+}
+
+/// Rows where a prompt you typed starts (its first row begins with `> `).
+fn prompt_rows(lines: &[Line<'_>]) -> Vec<usize> {
+    lines
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.spans.first().is_some_and(|s| s.content.as_ref() == "> "))
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// The prompt above the view's top row.
+fn prev_prompt(prompts: &[usize], top: usize) -> Option<usize> {
+    prompts.iter().rev().find(|&&p| p < top).copied()
+}
+
+/// The prompt below the view's top row.
+fn next_prompt(prompts: &[usize], top: usize) -> Option<usize> {
+    prompts.iter().find(|&&p| p > top).copied()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn brackets_jump_between_prompts() {
+        let lines: Vec<Line> = vec![
+            Line::from(vec![Span::raw("> "), Span::raw("first")]),
+            Line::from("reply"),
+            Line::from("reply"),
+            Line::from(vec![Span::raw("> "), Span::raw("second")]),
+            Line::from("reply"),
+            Line::from(vec![Span::raw("  "), Span::raw("wrapped")]),
+            Line::from(vec![Span::raw("> "), Span::raw("third")]),
+        ];
+        let p = prompt_rows(&lines);
+        assert_eq!(p, vec![0, 3, 6]);
+        assert_eq!(next_prompt(&p, 0), Some(3));
+        assert_eq!(next_prompt(&p, 3), Some(6));
+        assert_eq!(next_prompt(&p, 6), None);
+        assert_eq!(prev_prompt(&p, 6), Some(3));
+        assert_eq!(prev_prompt(&p, 4), Some(3));
+        assert_eq!(prev_prompt(&p, 0), None);
+    }
 }

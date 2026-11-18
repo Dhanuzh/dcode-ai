@@ -785,6 +785,14 @@ pub fn run_blocking(
 ) -> anyhow::Result<()> {
     crate::tui::markdown::warm_up_highlighting();
     let mut terminal = setup_terminal(mouse_capture)?;
+    // The dashboard as it was left: panel widths and which panels show.
+    if let Ok(mut g) = state.lock() {
+        let p = crate::tui::dash_prefs::load();
+        g.dash_hits.left_w = p.left_w;
+        g.dash_hits.right_w = p.right_w;
+        g.dash_hits.hide_left = p.hide_left;
+        g.dash_hits.hide_right = p.hide_right;
+    }
     // The inline view leaves the mouse to the terminal (its scrollback holds
     // the conversation: native wheel scroll and selection) unless the user
     // opted into in-app mouse handling.

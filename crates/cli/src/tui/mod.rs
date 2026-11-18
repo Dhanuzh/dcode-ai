@@ -15,6 +15,7 @@ pub mod clipboard;
 pub mod composer;
 pub mod composer_input;
 pub mod connect_modal;
+pub mod dash_prefs;
 pub(crate) mod diagram_overlay;
 #[allow(dead_code)]
 pub mod diff_hunk;

@@ -393,11 +393,12 @@ pub(crate) fn transcript_lines_and_hits_from(
     // ── Streaming assistant ── identical styling to the finalized block so
     // there's no visual jump when generation completes.
     if let Some(stream) = &state.streaming_assistant
-        && !stream.is_empty()
+        && !strip_wrapper_lines(stream).trim().is_empty()
     {
+        let stream = strip_wrapper_lines(stream);
         push_transcript_line(&mut lines, &mut hits, Line::default(), None);
         let (md_lines, md_hits) =
-            render_markdown_lines_with_hits(stream, state.code_line_numbers, w.saturating_sub(3));
+            render_markdown_lines_with_hits(&stream, state.code_line_numbers, w.saturating_sub(3));
         for (i, (md_line, md_hit)) in md_lines.into_iter().zip(md_hits).enumerate() {
             let prefix = if i == 0 {
                 bullet(theme::text())
@@ -697,6 +698,62 @@ fn render_todos(
     }
 }
 
+/// Tags some models wrap tool output in and then write into their reply as
+/// text (`<retrieval_document>` … `</retrieval_document>`).
+const WRAPPER_TAGS: &[&str] = &[
+    "retrieval_document",
+    "function_results",
+    "function_calls",
+    "search_results",
+    "search_result",
+    "document",
+    "documents",
+    "document_content",
+    "result",
+    "results",
+];
+
+/// Whether `line` is nothing but one of those tags (open, close, or with
+/// attributes): `<retrieval_document>`, `</function_results>`, `<document index="1">`.
+fn is_wrapper_tag_line(line: &str) -> bool {
+    let t = line.trim();
+    let Some(inner) = t.strip_prefix('<').and_then(|r| r.strip_suffix('>')) else {
+        return false;
+    };
+    let inner = inner.strip_prefix('/').unwrap_or(inner);
+    let name = inner
+        .split(|c: char| c.is_whitespace() || c == '/')
+        .next()
+        .unwrap_or("");
+    WRAPPER_TAGS.contains(&name)
+}
+
+/// The reply without lines that are only wrapper markup (outside code
+/// fences, where such tags are an example the user may want to see).
+pub(crate) fn strip_wrapper_lines(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('<') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut fence = false;
+    let mut dropped = false;
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|l| {
+            if l.trim_start().starts_with("```") {
+                fence = !fence;
+                return true;
+            }
+            let drop = !fence && is_wrapper_tag_line(l);
+            dropped |= drop;
+            !drop
+        })
+        .collect();
+    if !dropped {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    std::borrow::Cow::Owned(kept.join("\n"))
+}
+
 fn render_block(
     block: &DisplayBlock,
     idx: usize,
@@ -727,7 +784,13 @@ fn render_block(
 
         DisplayBlock::Assistant(content) => {
             // `● reply`. Long replies collapse to a one-line preview on click
-            // (see LineClickHit::ToggleAssistant).
+            // (see LineClickHit::ToggleAssistant). Markup a model wrapped tool
+            // output in isn't shown; a reply of nothing else isn't either.
+            let stripped = strip_wrapper_lines(content);
+            let content: &str = &stripped;
+            if content.trim().is_empty() {
+                return;
+            }
             push_transcript_line(lines, hits, Line::default(), None);
             let collapsed = state.collapsed_assistant_blocks.contains(&idx);
             if collapsed {
@@ -977,47 +1040,79 @@ fn render_block(
                 return;
             }
 
+            // Short output in full; long output as its start and its end
+            // (where test results and errors are) around "… +N lines".
             const MAX_PREVIEW: usize = 14;
-            let mut shown = 0usize;
-            let mut total = 0usize;
-            for raw in detail.lines() {
-                total += 1;
-                if shown >= MAX_PREVIEW {
-                    continue;
-                }
-                let line_style = if raw.starts_with('+') && !raw.starts_with("+++") {
+            const HEAD: usize = 6;
+            const TAIL: usize = 6;
+            let style_of = |raw: &str| {
+                if raw.starts_with('+') && !raw.starts_with("+++") {
                     Style::default().fg(theme::success())
                 } else if raw.starts_with('-') && !raw.starts_with("---") {
                     Style::default().fg(theme::error())
                 } else {
                     Style::default().fg(theme::muted())
-                };
+                }
+            };
+            let all: Vec<&str> = detail.lines().collect();
+            // Very long output: only its two ends are wrapped.
+            let ends: Vec<&str> = if all.len() > 400 {
+                all[..200]
+                    .iter()
+                    .chain(&all[all.len() - 200..])
+                    .copied()
+                    .collect()
+            } else {
+                all.clone()
+            };
+            let mut rows: Vec<(String, Style)> = Vec::new();
+            for raw in ends.iter().copied() {
+                let st = style_of(raw);
                 for wl in wrap_text(raw, w.saturating_sub(8)) {
-                    if shown >= MAX_PREVIEW {
-                        break;
-                    }
+                    rows.push((wl, st));
+                }
+            }
+            let hidden_extra = all.len() - ends.len();
+            if rows.len() <= MAX_PREVIEW && hidden_extra == 0 {
+                for (k, (wl, st)) in rows.into_iter().enumerate() {
                     push_transcript_line(
                         lines,
                         hits,
-                        result_line(shown == 0, vec![Span::styled(wl, line_style)]),
+                        result_line(k == 0, vec![Span::styled(wl, st)]),
                         None,
                     );
-                    shown += 1;
                 }
-            }
-            if total > MAX_PREVIEW {
+            } else {
+                let hidden = rows.len().saturating_sub(HEAD + TAIL) + hidden_extra;
+                let tail_from = rows.len().saturating_sub(TAIL);
+                for (k, (wl, st)) in rows.iter().take(HEAD).enumerate() {
+                    push_transcript_line(
+                        lines,
+                        hits,
+                        result_line(k == 0, vec![Span::styled(wl.clone(), *st)]),
+                        None,
+                    );
+                }
                 push_transcript_line(
                     lines,
                     hits,
                     result_line(
                         false,
                         vec![Span::styled(
-                            format!("… +{} lines (ctrl+o to expand)", total - MAX_PREVIEW),
+                            format!("… +{hidden} lines (ctrl+o to expand)"),
                             dim(),
                         )],
                     ),
                     None,
                 );
+                for (wl, st) in rows.iter().skip(tail_from.max(HEAD)) {
+                    push_transcript_line(
+                        lines,
+                        hits,
+                        result_line(false, vec![Span::styled(wl.clone(), *st)]),
+                        None,
+                    );
+                }
             }
         }
         DisplayBlock::ApprovalPending(req) => {
@@ -1436,6 +1531,36 @@ mod tests {
     }
 
     #[test]
+    fn long_tool_output_shows_its_start_and_its_end() {
+        let mut st = state_with_assistant_block("ok");
+        let detail: String = (1..=40).map(|i| format!("line {i}\n")).collect();
+        st.push_block(DisplayBlock::ToolDone {
+            name: "execute_bash".into(),
+            call_id: "c2".into(),
+            input: r#"{"command":"cargo test"}"#.into(),
+            ok: true,
+            detail,
+        });
+        let (lines, _) = transcript_lines_and_hits(&st, 80);
+        let t = flat(&lines);
+        // The first lines, the last lines (where results are), the count.
+        assert!(t.contains("line 1") && t.contains("line 6"), "{t}");
+        assert!(t.contains("line 35") && t.contains("line 40"), "{t}");
+        assert!(!t.contains("line 20"), "{t}");
+        assert!(t.contains("… +28 lines (ctrl+o to expand)"), "{t}");
+        assert!(!t.contains("line 7\n"), "{t}");
+    }
+
+    #[test]
+    fn wrapper_tags_alone_make_no_reply_block() {
+        let st = state_with_assistant_block("<retrieval_document>");
+        let (lines, _) = transcript_lines_and_hits(&st, 80);
+        let t = flat(&lines);
+        assert!(!t.contains("retrieval_document"), "{t}");
+        assert!(!t.contains('●'), "{t}");
+    }
+
+    #[test]
     fn expanded_assistant_block_header_toggles_collapse() {
         let st = state_with_assistant_block("first line\nsecond line\nthird line");
         let (_, hits) = transcript_lines_and_hits(&st, 60);
@@ -1508,5 +1633,27 @@ mod tests {
         // A narrower width re-renders too.
         let (d, _) = transcript_lines_and_hits(&st, 30);
         assert!(d.len() >= c.len());
+    }
+}
+
+#[cfg(test)]
+mod wrapper_tag_tests {
+    use super::*;
+
+    #[test]
+    fn wrapper_markup_lines_are_not_shown() {
+        assert_eq!(strip_wrapper_lines("<retrieval_document>"), "");
+        assert_eq!(strip_wrapper_lines("  </retrieval_document>  "), "");
+        assert_eq!(
+            strip_wrapper_lines("Found it.\n<document index=\"1\">\nthe text\n</document>"),
+            "Found it.\nthe text"
+        );
+        // Prose that mentions a tag, and tags inside code, stay.
+        let prose = "The API returns <document> blocks.";
+        assert_eq!(strip_wrapper_lines(prose), prose);
+        let code = "```xml\n<document>\n```";
+        assert_eq!(strip_wrapper_lines(code), code);
+        // Other tags are left alone.
+        assert_eq!(strip_wrapper_lines("<div>"), "<div>");
     }
 }

@@ -229,6 +229,11 @@ pub struct DashHits {
     pub right_w: u16,
     /// The rail edge being dragged: `Some(true)` left, `Some(false)` right.
     pub resizing: Option<bool>,
+    /// Side panels switched off (`/dashboard left|right off`).
+    pub hide_left: bool,
+    pub hide_right: bool,
+    /// The focused panel fills the screen (Alt+Z; Esc returns).
+    pub zoom: bool,
 }
 
 pub struct TuiSessionState {

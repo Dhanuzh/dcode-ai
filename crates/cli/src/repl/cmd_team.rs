@@ -314,14 +314,21 @@ fn persona_style(p: &str) -> Option<(&'static str, i32)> {
 /// plus how to answer — in the language it was said in, in the persona's
 /// tone. Also sets the voice that reads the answer.
 fn spoken_request(text: &str, language: Option<&str>) -> String {
-    use dcode_ai_cli::voice::stt;
     let lang = language.filter(|l| *l != "en");
     let persona = voice_persona();
-    let style = persona_style(&persona);
     crate::tui::notify::set_speech(crate::tui::notify::Speech {
         lang: lang.map(str::to_string),
-        rate: style.map(|s| s.1).unwrap_or(0),
+        rate: persona_style(&persona).map(|s| s.1).unwrap_or(0),
     });
+    spoken_request_with(text, language, &persona)
+}
+
+/// [`spoken_request`]'s text for a given persona (no settings read; tests
+/// use it so your own persona doesn't change their outcome).
+fn spoken_request_with(text: &str, language: Option<&str>, persona: &str) -> String {
+    use dcode_ai_cli::voice::stt;
+    let lang = language.filter(|l| *l != "en");
+    let style = persona_style(persona);
     let mut asks = Vec::new();
     if let Some(l) = lang {
         asks.push(format!("answer in {}", stt::language_name(l)));
@@ -616,6 +623,21 @@ impl Repl {
                     g.timeline_open = true;
                 } else {
                     out.println("[timeline] the timeline needs the full-screen terminal UI");
+                }
+            }
+            // `/files open`: the files panel popped out to the whole screen
+            // (Esc goes back).
+            "/files" if rest.trim() == "open" && matches!(out, ReplOutput::Tui(_)) => {
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    if g.view_mode != crate::tui::state::ViewMode::Dashboard {
+                        g.toggle_view_mode();
+                    }
+                    g.select_rail_tab(crate::tui::state::RailTab::Files);
+                    g.rail_focus = true;
+                    g.dash_hits.zoom = true;
+                    g.touch_transcript();
                 }
             }
             "/files" => {
@@ -1871,11 +1893,12 @@ mod wake_tests {
 
     #[test]
     fn spoken_requests_ask_for_the_language() {
-        let r = spoken_request("wie spät ist es", Some("de"));
+        let r = spoken_request_with("wie spät ist es", Some("de"), "");
         assert!(r.contains("answer in German"), "{r}");
         // English needs no language ask (a persona may still add a tone).
-        let r = spoken_request("hi", Some("en"));
-        assert!(!r.contains("answer in English"), "{r}");
-        assert!(r.starts_with("hi"), "{r}");
+        let r = spoken_request_with("hi", Some("en"), "");
+        assert_eq!(r, "hi");
+        let r = spoken_request_with("hi", None, "calm");
+        assert!(r.contains("calmly"), "{r}");
     }
 }

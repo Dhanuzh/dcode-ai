@@ -335,7 +335,17 @@ fn dashboard_rail_resize(m: crossterm::event::MouseEvent, g: &mut TuiSessionStat
             g.touch_transcript();
             true
         }
-        MouseEventKind::Up(MouseButton::Left) => hits.resizing.take().is_some(),
+        MouseEventKind::Up(MouseButton::Left) => {
+            let was = hits.resizing.take().is_some();
+            if was {
+                // Remembered for next time.
+                let mut p = crate::tui::dash_prefs::load();
+                p.left_w = hits.left_w;
+                p.right_w = hits.right_w;
+                crate::tui::dash_prefs::save(&p);
+            }
+            was
+        }
         _ => false,
     }
 }
