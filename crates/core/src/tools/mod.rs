@@ -148,11 +148,13 @@ impl ToolRegistry {
 
     /// Built-in tools used rarely enough to load only on demand: their
     /// schemas would otherwise be sent with every request.
-    pub const RARELY_USED: [&'static str; 11] = [
+    pub const RARELY_USED: [&'static str; 13] = [
         "browser",
         "record_start",
         "record_stop",
         "record_note",
+        "record_pause",
+        "record_resume",
         "video_render",
         "notebook_edit",
         "inspect_binary",
@@ -257,6 +259,8 @@ impl ToolRegistry {
         }));
         registry.register(Box::new(video::RecordStopTool));
         registry.register(Box::new(video::RecordNoteTool));
+        registry.register(Box::new(video::RecordPauseTool { resume: false }));
+        registry.register(Box::new(video::RecordPauseTool { resume: true }));
         registry.register(Box::new(video::VideoRenderTool {
             workspace_root: workspace_root.clone(),
         }));

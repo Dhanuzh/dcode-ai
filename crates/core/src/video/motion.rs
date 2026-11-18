@@ -62,9 +62,9 @@ fn spring(target: impl Fn(f64) -> [f64; 3], until: f64, hz: [f64; 3]) -> Track {
 }
 
 /// A zoom held over a stretch: zooms closer than this merge.
-const MERGE_GAP: f64 = 1.5;
+pub const MERGE_GAP: f64 = 1.5;
 /// The camera starts moving this long before the action.
-const LEAD: f64 = 0.55;
+pub const LEAD: f64 = 0.55;
 
 /// The camera: scale and centre (CSS pixels) over recording time. `rest`:
 /// where it sits between zooms (the whole page, or its main content).
@@ -129,6 +129,7 @@ mod tests {
             y: 100.0,
             scale: 2.0,
             hold: 1.0,
+            anchor: String::new(),
         }
     }
 

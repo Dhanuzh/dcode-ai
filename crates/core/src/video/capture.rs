@@ -95,9 +95,20 @@ pub fn start_screen(dir: &Path, at: f64) -> Result<Running, String> {
 /// The Windows desktop from WSL: PowerShell takes about five screenshots a
 /// second, each named with its millisecond offset.
 fn start_wsl_screen(dir: &Path, at: f64) -> Result<Running, String> {
-    let out = dir.join("screen");
+    // Screenshots go to a Windows folder (%TEMP%): writing each one across
+    // the WSL share is slow. The stop file is there too.
+    let (out, stop) = match windows_temp() {
+        Some(t) => {
+            let base = t.join(format!(
+                "dcode-ai-screen-{}-{}",
+                std::process::id(),
+                chrono::Local::now().format("%H%M%S")
+            ));
+            (base.join("frames"), base.join("stop"))
+        }
+        None => (dir.join("screen"), dir.join("screen.stop")),
+    };
     std::fs::create_dir_all(&out).map_err(|e| e.to_string())?;
-    let stop = dir.join("screen.stop");
     let _ = std::fs::remove_file(&stop);
     let win = |p: &Path| -> Result<String, String> {
         let o = Command::new("wslpath")
@@ -129,6 +140,22 @@ fn start_wsl_screen(dir: &Path, at: f64) -> Result<Running, String> {
     Ok(r)
 }
 
+/// Windows' temp folder, as a WSL path (`/mnt/c/Users/…/Temp`).
+fn windows_temp() -> Option<PathBuf> {
+    let o = Command::new("cmd.exe")
+        .args(["/c", "echo %TEMP%"])
+        .stdin(Stdio::null())
+        .output()
+        .ok()?;
+    let win = String::from_utf8_lossy(&o.stdout).trim().to_string();
+    if win.is_empty() || win.contains('%') {
+        return None;
+    }
+    let o = Command::new("wslpath").arg("-u").arg(&win).output().ok()?;
+    let p = PathBuf::from(String::from_utf8_lossy(&o.stdout).trim());
+    p.is_dir().then_some(p)
+}
+
 /// The PowerShell that screenshots the Windows desktop into `dir` (Windows
 /// path) until `stop` exists. It is fed to `powershell -Command -`, which
 /// reads stdin like an interactive console: a multi-line block at the very
@@ -144,22 +171,25 @@ $dir = '{dir}'; $stop = '{stop}'
 $b = [System.Windows.Forms.SystemInformation]::VirtualScreen
 $enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object {{ $_.MimeType -eq 'image/jpeg' }}
 $p = New-Object System.Drawing.Imaging.EncoderParameters 1
-$p.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality), ([long]85)
-$sw = [Diagnostics.Stopwatch]::StartNew(); $i = 0
-while (-not (Test-Path $stop) -and $sw.ElapsedMilliseconds -lt 600000) {{
+$p.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter ([System.Drawing.Imaging.Encoder]::Quality), ([long]75)
+# One bitmap for every shot (making one per shot is slow).
+$bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$sw = [Diagnostics.Stopwatch]::StartNew(); $i = 0; $next = 0
+while ($sw.ElapsedMilliseconds -lt {max_ms}) {{
   $t = $sw.ElapsedMilliseconds
-  $bmp = New-Object System.Drawing.Bitmap $b.Width, $b.Height
-  $g = [System.Drawing.Graphics]::FromImage($bmp)
+  if ($t -ge $next) {{ if (Test-Path $stop) {{ break }}; $next = $t + 500 }}
   $g.CopyFromScreen($b.Left, $b.Top, 0, 0, $bmp.Size)
   $i++
   $bmp.Save((Join-Path $dir ('s{{0:D6}}_{{1}}.jpg' -f $i, $t)), $enc, $p)
-  $g.Dispose(); $bmp.Dispose()
-  $wait = 200 - ($sw.ElapsedMilliseconds - $t); if ($wait -gt 0) {{ Start-Sleep -Milliseconds $wait }}
+  $wait = 66 - ($sw.ElapsedMilliseconds - $t); if ($wait -gt 0) {{ Start-Sleep -Milliseconds $wait }}
 }}
+$g.Dispose(); $bmp.Dispose()
 
 "#,
         dir = dir.replace('\'', "''"),
         stop = stop.replace('\'', "''"),
+        max_ms = (super::record::MAX_SECONDS * 1000.0) as u64,
     )
 }
 
@@ -311,6 +341,20 @@ pub fn screen_frames(cap_out: &Path, raw: &Path, at: f64) -> Result<Vec<(f64, St
             .collect();
         shots.sort_by(|a, b| a.0.total_cmp(&b.0));
         let mut out = Vec::new();
+        // A shot identical to the one before adds nothing (the previous one
+        // stays on screen): a still desktop doesn't fill the disk.
+        let mut last: Option<Vec<u8>> = None;
+        let shots: Vec<(f64, PathBuf)> = shots
+            .into_iter()
+            .filter(|(_, p)| {
+                let Ok(bytes) = std::fs::read(p) else {
+                    return false;
+                };
+                let same = last.as_ref() == Some(&bytes);
+                last = Some(bytes);
+                !same
+            })
+            .collect();
         for (i, (t, p)) in shots.iter().enumerate() {
             let file = format!("f{:06}.jpg", i + 1);
             std::fs::rename(p, raw.join(&file))
@@ -319,6 +363,14 @@ pub fn screen_frames(cap_out: &Path, raw: &Path, at: f64) -> Result<Vec<(f64, St
             out.push((at + t, file));
         }
         let _ = std::fs::remove_dir_all(cap_out);
+        // The Windows temp folder it was in (with the stop file).
+        if let Some(parent) = cap_out.parent()
+            && parent
+                .file_name()
+                .is_some_and(|n| n.to_string_lossy().starts_with("dcode-ai-screen-"))
+        {
+            let _ = std::fs::remove_dir_all(parent);
+        }
         return Ok(out);
     }
     let bin = super::ffmpeg().ok_or("ffmpeg is needed")?;
@@ -374,7 +426,8 @@ mod tests {
         let s = wsl_screen_script(r"C:\rec\screen", r"C:\it's\screen.stop");
         // `powershell -Command -` only runs a trailing multi-line block once
         // a blank line follows it; without one nothing is ever captured.
-        assert!(s.ends_with("}\n\n"), "{s:?}");
+        assert!(s.ends_with("\n\n"), "{s:?}");
+        assert!(s.contains("while ($sw.ElapsedMilliseconds"));
         assert!(s.contains(r"$dir = 'C:\rec\screen'"));
         assert!(s.contains(r"$stop = 'C:\it''s\screen.stop'"));
     }
@@ -447,9 +500,13 @@ mod live_wsl {
         std::thread::sleep(std::time::Duration::from_secs(3));
         let out = r.out.clone();
         r.stop();
+        let shots = std::fs::read_dir(&out).unwrap().count();
+        eprintln!("{shots} shots taken in ~3 s = {:.1}/s", shots as f64 / 3.0);
+        assert!(shots >= 25, "{shots}");
         let frames = super::screen_frames(&out, &raw, 0.0).unwrap();
-        eprintln!("{} frames", frames.len());
-        assert!(frames.len() >= 5, "{frames:?}");
+        // Identical shots (a still desktop) are dropped; at least one stays.
+        eprintln!("{} different frames kept", frames.len());
+        assert!(!frames.is_empty());
         assert!(frames.windows(2).all(|w| w[0].0 <= w[1].0));
     }
 }

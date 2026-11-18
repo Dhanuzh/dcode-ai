@@ -12,7 +12,7 @@ use serde_json::Value;
 use super::{Edl, Event, FrameInfo};
 
 /// Longest recording, seconds.
-pub const MAX_SECONDS: f64 = 600.0;
+pub const MAX_SECONDS: f64 = 1800.0;
 
 /// How a recording takes its pictures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
@@ -42,6 +42,13 @@ pub struct Focus {
     pub b: [f64; 4],
 }
 
+/// The page's visible text at a moment (for text anchors).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
+pub struct PageText {
+    pub t: f64,
+    pub text: String,
+}
+
 struct Active {
     id: String,
     dir: PathBuf,
@@ -53,6 +60,7 @@ struct Active {
     frames: Arc<Mutex<Vec<FrameInfo>>>,
     privacy: Arc<Mutex<Vec<Privacy>>>,
     focus: Arc<Mutex<Vec<Focus>>>,
+    texts: Arc<Mutex<Vec<PageText>>>,
     writer: Arc<Writer>,
     task: Option<tokio::task::JoinHandle<()>>,
     /// Screenshots while the screencast is quiet.
@@ -73,14 +81,46 @@ struct Writer {
     frames: Arc<Mutex<Vec<FrameInfo>>>,
     /// When the last screencast frame arrived (wall clock).
     last: Mutex<f64>,
+    /// Paused since (recording seconds on the raw clock), and the paused
+    /// stretches so far (raw clock), cut out at stop.
+    paused_since: Mutex<Option<f64>>,
+    pauses: Mutex<Vec<(f64, f64)>>,
+    /// The cap cut the take short.
+    capped: std::sync::atomic::AtomicBool,
 }
 
 impl Writer {
+    fn is_paused(&self) -> bool {
+        self.paused_since.lock().is_ok_and(|p| p.is_some())
+    }
+
+    /// Seconds recorded so far on the raw clock `t`, pauses left out.
+    fn recorded(&self, t: f64) -> f64 {
+        let paused: f64 = self
+            .pauses
+            .lock()
+            .map(|p| p.iter().map(|(a, b)| b - a).sum())
+            .unwrap_or(0.0);
+        let open = self
+            .paused_since
+            .lock()
+            .ok()
+            .and_then(|p| *p)
+            .map(|since| (t - since).max(0.0))
+            .unwrap_or(0.0);
+        (t - paused - open).max(0.0)
+    }
+
     /// `screencast`: from the live stream (resets the quiet timer), else a
     /// fallback screenshot.
     fn write(&self, at: f64, bytes: &[u8], css_w: f64, screencast: bool) {
         let t = (at - self.start).max(0.0);
-        if t > MAX_SECONDS {
+        if self.is_paused() {
+            return;
+        }
+        if self.recorded(t) > MAX_SECONDS {
+            self.capped
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             return;
         }
         let n = self.n.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -135,6 +175,9 @@ pub fn note(kind: &str, xy: Option<(f64, f64)>, size: Option<(f64, f64)>, label:
     let at = ACTION_AT.lock().ok().and_then(|mut m| m.take());
     let Ok(g) = ACTIVE.lock() else { return };
     let Some(a) = g.as_ref() else { return };
+    if a.writer.is_paused() {
+        return;
+    }
     if let Ok(mut ev) = a.events.lock() {
         ev.push(Event {
             t: (at.unwrap_or_else(now) - a.start).max(0.0),
@@ -165,6 +208,79 @@ pub fn mark_action(on: bool) {
     }
 }
 
+/// Pauses the recording: nothing until [`resume`] goes into the video.
+pub fn pause() -> Result<String, String> {
+    let g = ACTIVE.lock().map_err(|_| "lock".to_string())?;
+    let a = g.as_ref().ok_or("not recording")?;
+    let mut p = a
+        .writer
+        .paused_since
+        .lock()
+        .map_err(|_| "lock".to_string())?;
+    if p.is_some() {
+        return Err("already paused — record_resume goes on".into());
+    }
+    *p = Some((now() - a.start).max(0.0));
+    Ok("paused — nothing is recorded until record_resume".into())
+}
+
+/// Goes on after [`pause`].
+pub fn resume() -> Result<String, String> {
+    let g = ACTIVE.lock().map_err(|_| "lock".to_string())?;
+    let a = g.as_ref().ok_or("not recording")?;
+    let since = a
+        .writer
+        .paused_since
+        .lock()
+        .map_err(|_| "lock".to_string())?
+        .take()
+        .ok_or("not paused")?;
+    let until = (now() - a.start).max(since);
+    if let Ok(mut p) = a.writer.pauses.lock() {
+        p.push((since, until));
+    }
+    Ok(format!(
+        "recording again (the {:.0} s paused are left out)",
+        until - since
+    ))
+}
+
+/// Seconds left before the cap, when under two minutes (for a heads-up in
+/// tool results).
+pub fn cap_warning() -> Option<String> {
+    let g = ACTIVE.lock().ok()?;
+    let a = g.as_ref()?;
+    let left = MAX_SECONDS - a.writer.recorded((now() - a.start).max(0.0));
+    if left <= 0.0 {
+        Some(format!(
+            "⚠ the recording reached its {} min cap — nothing more is being recorded; record_stop now",
+            MAX_SECONDS as u64 / 60
+        ))
+    } else if left < 120.0 {
+        Some(format!(
+            "⚠ {left:.0} s left before the recording's {} min cap — wrap up and record_stop (or record_pause while waiting)",
+            MAX_SECONDS as u64 / 60
+        ))
+    } else {
+        None
+    }
+}
+
+/// A time on the raw clock with the paused stretches cut out (`None`: it
+/// was during a pause).
+pub fn squeeze(t: f64, pauses: &[(f64, f64)]) -> Option<f64> {
+    let mut shift = 0.0;
+    for (a, b) in pauses {
+        if t >= *a && t < *b {
+            return None;
+        }
+        if t >= *b {
+            shift += b - a;
+        }
+    }
+    Some(t - shift)
+}
+
 /// A still for a stills-mode recording (a no-op otherwise).
 pub fn add_still(bytes: &[u8], css_w: f64) {
     let Ok(g) = ACTIVE.lock() else { return };
@@ -177,6 +293,7 @@ pub fn add_still(bytes: &[u8], css_w: f64) {
 pub fn add_privacy(boxes: Vec<[f64; 4]>) {
     let Ok(g) = ACTIVE.lock() else { return };
     if let Some(a) = g.as_ref()
+        && !a.writer.is_paused()
         && let Ok(mut p) = a.privacy.lock()
     {
         p.push(Privacy {
@@ -190,11 +307,26 @@ pub fn add_privacy(boxes: Vec<[f64; 4]>) {
 pub fn add_focus(b: [f64; 4]) {
     let Ok(g) = ACTIVE.lock() else { return };
     if let Some(a) = g.as_ref()
+        && !a.writer.is_paused()
         && let Ok(mut f) = a.focus.lock()
     {
         f.push(Focus {
             t: (now() - a.start).max(0.0),
             b,
+        });
+    }
+}
+
+/// The page's visible text now (a no-op when not recording).
+pub fn add_text(text: String) {
+    let Ok(g) = ACTIVE.lock() else { return };
+    if let Some(a) = g.as_ref()
+        && !a.writer.is_paused()
+        && let Ok(mut v) = a.texts.lock()
+    {
+        v.push(PageText {
+            t: (now() - a.start).max(0.0),
+            text,
         });
     }
 }
@@ -246,6 +378,9 @@ pub async fn start(workspace: &Path, goal: &str, opts: Options) -> Result<Starte
         n: Default::default(),
         frames: frames.clone(),
         last: Mutex::new(start),
+        paused_since: Mutex::new(None),
+        pauses: Mutex::new(Vec::new()),
+        capped: Default::default(),
     });
     let activate = |task, fallback| {
         if let Ok(mut g) = ACTIVE.lock() {
@@ -260,6 +395,7 @@ pub async fn start(workspace: &Path, goal: &str, opts: Options) -> Result<Starte
                 frames: frames.clone(),
                 privacy: Default::default(),
                 focus: Default::default(),
+                texts: Default::default(),
                 writer: writer.clone(),
                 task,
                 fallback,
@@ -454,6 +590,8 @@ pub struct Stopped {
     pub draft: Edl,
     /// A redo: what was spliced into the earlier recording.
     pub spliced: Option<String>,
+    /// Worth telling: the cap cut the take, pauses left out, a first edit.
+    pub notes: Vec<String>,
 }
 
 /// Stops recording; writes `frames.json`, `events.json` and a draft
@@ -475,7 +613,23 @@ pub async fn stop() -> Result<Stopped, String> {
     if active.mode != Mode::Screen {
         crate::browser::restore_viewport().await;
     }
-    let duration = (now() - active.start).clamp(0.0, MAX_SECONDS);
+    let raw_duration = (now() - active.start).max(0.0);
+    // Paused stretches (one still open is closed now), cut out below.
+    let mut pauses = active
+        .writer
+        .pauses
+        .lock()
+        .map(|p| p.clone())
+        .unwrap_or_default();
+    if let Some(since) = active.writer.paused_since.lock().ok().and_then(|p| *p) {
+        pauses.push((since, raw_duration));
+    }
+    let paused_total: f64 = pauses.iter().map(|(a, b)| b - a).sum();
+    let duration = (raw_duration - paused_total).clamp(0.0, MAX_SECONDS);
+    let capped = active
+        .writer
+        .capped
+        .load(std::sync::atomic::Ordering::Relaxed);
     let webcam_at = active.webcam.as_ref().map(|w| w.at);
     if let Some(w) = active.webcam {
         let _ = tokio::task::spawn_blocking(move || w.stop()).await;
@@ -499,16 +653,64 @@ pub async fn stop() -> Result<Stopped, String> {
     let mut frames = active.frames.lock().map(|f| f.clone()).unwrap_or_default();
     // Screencast frames and screenshots interleave; keep them in time order.
     frames.sort_by(|a, b| a.t.total_cmp(&b.t));
-    let events = active.events.lock().map(|e| e.clone()).unwrap_or_default();
+    let mut events = active.events.lock().map(|e| e.clone()).unwrap_or_default();
+    let mut privacy = active.privacy.lock().map(|p| p.clone()).unwrap_or_default();
+    let mut focus = active.focus.lock().map(|p| p.clone()).unwrap_or_default();
+    let mut texts = active.texts.lock().map(|p| p.clone()).unwrap_or_default();
+    if !pauses.is_empty() {
+        // The paused stretches go: what was in them, and the time.
+        frames.retain_mut(|f| squeeze(f.t, &pauses).map(|t| f.t = t).is_some());
+        events.retain_mut(|e| squeeze(e.t, &pauses).map(|t| e.t = t).is_some());
+        privacy.retain_mut(|p| squeeze(p.t, &pauses).map(|t| p.t = t).is_some());
+        focus.retain_mut(|p| squeeze(p.t, &pauses).map(|t| p.t = t).is_some());
+        texts.retain_mut(|p| squeeze(p.t, &pauses).map(|t| p.t = t).is_some());
+    }
+    frames.retain(|f| f.t <= MAX_SECONDS);
     if frames.is_empty() {
         return Err("no frames were captured — is the page visible in the browser?".into());
     }
     let mut draft = super::draft(&events, duration, &active.goal);
+    let mut notes = Vec::new();
+    if capped {
+        notes.push(format!(
+            "the {} min cap cut the take: what came after wasn't recorded",
+            MAX_SECONDS as u64 / 60
+        ));
+    }
+    if paused_total > 0.5 {
+        notes.push(format!(
+            "{:.0} s paused in {} pause(s), left out",
+            paused_total,
+            pauses.len()
+        ));
+    }
+    // A screen recording has no clicks to edit by: cut and zoom by where
+    // the picture changes.
+    if active.mode == Mode::Screen {
+        let (dir, fr) = (active.dir.clone(), frames.clone());
+        let ch = tokio::task::spawn_blocking(move || super::autoedit::changes(&dir, &fr))
+            .await
+            .unwrap_or_default();
+        let size = frames
+            .first()
+            .and_then(|f| image::image_dimensions(active.dir.join("raw").join(&f.file)).ok())
+            .unwrap_or((1920, 1080));
+        let (segs, zooms) = super::autoedit::apply(&mut draft, &events, &ch, duration, size);
+        draft = draft.normalized(duration);
+        notes.push(format!(
+            "first edit from screen changes: {segs} segments (still stretches sped up or cut), {zooms} zooms on busy areas"
+        ));
+    }
     if let Some(at) = webcam_at
         && active.dir.join("webcam.mp4").is_file()
     {
         draft.webcam = Some(super::Webcam {
             file: "webcam.mp4".into(),
+            // The clip runs through pauses: where they were and how long.
+            cuts: pauses
+                .iter()
+                .filter_map(|(a, b)| squeeze(*a, &pauses).map(|t| [t, b - a]))
+                .collect(),
             offset: at,
             corner: "bottom-right".into(),
             size: 0.26,
@@ -521,14 +723,11 @@ pub async fn stop() -> Result<Stopped, String> {
     write("frames.json", &frames)?;
     write("events.json", &events)?;
     write("edl.json", &draft)?;
-    write(
-        "privacy.json",
-        &active.privacy.lock().map(|p| p.clone()).unwrap_or_default(),
-    )?;
-    write(
-        "focus.json",
-        &active.focus.lock().map(|p| p.clone()).unwrap_or_default(),
-    )?;
+    write("privacy.json", &privacy)?;
+    write("focus.json", &focus)?;
+    if !texts.is_empty() {
+        write("text.json", &texts)?;
+    }
     std::fs::write(
         active.dir.join("meta.json"),
         serde_json::json!({"goal": active.goal, "duration": duration, "mode": active.mode})
@@ -550,6 +749,7 @@ pub async fn stop() -> Result<Stopped, String> {
             events: s.events,
             draft: s.edl,
             spliced: Some(summary),
+            notes,
         });
     }
     Ok(Stopped {
@@ -560,6 +760,7 @@ pub async fn stop() -> Result<Stopped, String> {
         events,
         draft,
         spliced: None,
+        notes,
     })
 }
 
@@ -584,6 +785,8 @@ pub struct Saved {
     pub privacy: Vec<Privacy>,
     /// The main content's box over time (none in older recordings).
     pub focus: Vec<Focus>,
+    /// The page's visible text at each step (browser recordings).
+    pub texts: Vec<PageText>,
     pub edl: Edl,
 }
 
@@ -611,6 +814,10 @@ pub fn load(dir: &Path) -> Result<Saved, String> {
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or_default();
+    let texts: Vec<PageText> = read("text.json")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default();
     Ok(Saved {
         dir: dir.to_path_buf(),
         frames,
@@ -619,6 +826,7 @@ pub fn load(dir: &Path) -> Result<Saved, String> {
         mode,
         privacy,
         focus,
+        texts,
         edl,
     })
 }
@@ -669,4 +877,19 @@ pub fn describe(events: &[Event]) -> String {
         lines.extend(tail);
     }
     lines.join("\n")
+}
+
+#[cfg(test)]
+mod pause_tests {
+    use super::squeeze;
+
+    #[test]
+    fn paused_stretches_are_cut_out() {
+        let pauses = [(10.0, 25.0), (40.0, 45.0)];
+        assert_eq!(squeeze(5.0, &pauses), Some(5.0));
+        assert_eq!(squeeze(12.0, &pauses), None);
+        assert_eq!(squeeze(30.0, &pauses), Some(15.0));
+        assert_eq!(squeeze(42.0, &pauses), None);
+        assert_eq!(squeeze(50.0, &pauses), Some(30.0));
+    }
 }

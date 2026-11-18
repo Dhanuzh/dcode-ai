@@ -49,6 +49,8 @@ fn hint(name: &str) -> Option<&'static str> {
         }
         "record_stop" => "stop a screen recording and get its edit plan",
         "record_note" => "mark a step reached while recording (screen recordings)",
+        "record_pause" => "pause a recording (sign-ins, waiting) — left out of the video",
+        "record_resume" => "go on recording after record_pause",
         "video_render" => {
             "render a recorded demo video: narration, cuts, zooms, cursor, captions, cards, 9:16 short, chapters, thumbnails, music"
         }

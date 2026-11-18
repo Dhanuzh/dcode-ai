@@ -269,6 +269,8 @@ impl ApprovalPolicy {
                 | "record_start"
                 | "record_stop"
                 | "record_note"
+                | "record_pause"
+                | "record_resume"
                 | "video_render"
                 | "invalid_tool_call"
                 | "query_symbols"

@@ -299,6 +299,7 @@ mod tests {
             text: "after".into(),
             section: String::new(),
             only: Vec::new(),
+            anchor: String::new(),
         });
         edl.segments = vec![Segment {
             from: 0.0,

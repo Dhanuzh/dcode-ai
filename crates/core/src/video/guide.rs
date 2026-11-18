@@ -227,6 +227,7 @@ mod tests {
             text: text.into(),
             section: "Start".into(),
             only: vec![],
+            anchor: String::new(),
         };
         let edl = Edl {
             title: "Make <a> project".into(),

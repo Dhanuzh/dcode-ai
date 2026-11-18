@@ -10,6 +10,7 @@
 //!   ("under 45 s, bigger captions") without recording again.
 //! - [`render`]: draws the edit frame by frame in Rust.
 
+pub mod autoedit;
 pub mod brand;
 pub mod capture;
 pub mod guide;
@@ -88,6 +89,10 @@ pub struct Zoom {
     /// Seconds held at full zoom after `at`.
     #[serde(default = "default_hold")]
     pub hold: f64,
+    /// Placed where this text first shows on the page instead of at `at`
+    /// (browser recordings; see `text.json`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub anchor: String,
 }
 
 fn default_scale() -> f64 {
@@ -119,6 +124,10 @@ pub struct Line {
     /// Only in these cuts (`long`, `short`); empty = every cut.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub only: Vec<String>,
+    /// Said where this text first shows on the page (after the line
+    /// before), instead of at `at` — a re-take keeps its narration in place.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub anchor: String,
 }
 
 impl Line {
@@ -283,6 +292,9 @@ pub struct Webcam {
     /// Recording second the clip's start lines up with.
     #[serde(default)]
     pub offset: f64,
+    /// Pauses the clip ran through: (recording second, seconds left out).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cuts: Vec<[f64; 2]>,
     /// `bottom-right` (default), `bottom-left`, `top-right`, `top-left`.
     #[serde(default = "default_corner")]
     pub corner: String,
@@ -578,6 +590,7 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
             y,
             scale: if e.kind == "type" { 1.8 } else { 1.6 },
             hold: 1.2,
+            anchor: String::new(),
         });
     }
     let mut lines: Vec<Line> = Vec::new();
@@ -599,6 +612,7 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
             text,
             section: String::new(),
             only: Vec::new(),
+            anchor: String::new(),
         });
     }
     Edl {
@@ -632,6 +646,46 @@ pub fn draft(events: &[Event], duration: f64, goal: &str) -> Edl {
         webcam: None,
     }
     .normalized(duration)
+}
+
+/// Places lines and zooms that have an `anchor` at the moment that text
+/// first shows on the page (the step's visible text, `text.json`): a line
+/// after the line before it, a moment before the text appears. Returns the
+/// anchors no step showed.
+pub fn resolve_anchors(edl: &mut Edl, texts: &[record::PageText]) -> Vec<String> {
+    let mut missing = Vec::new();
+    let find = |anchor: &str, after: f64| -> Option<f64> {
+        let a = anchor.to_lowercase();
+        texts
+            .iter()
+            .find(|p| p.t >= after && p.text.to_lowercase().contains(&a))
+            .map(|p| p.t)
+    };
+    let mut after = 0.0;
+    for l in &mut edl.lines {
+        if l.anchor.trim().is_empty() {
+            after = l.at;
+            continue;
+        }
+        match find(l.anchor.trim(), after) {
+            Some(t) => {
+                l.at = (t - 0.8).max(0.0);
+                // The next anchored line looks at later steps.
+                after = t + 0.01;
+            }
+            None => missing.push(format!("line {}: \"{}\"", l.id, l.anchor)),
+        }
+    }
+    for (i, z) in edl.zooms.iter_mut().enumerate() {
+        if z.anchor.trim().is_empty() {
+            continue;
+        }
+        match find(z.anchor.trim(), 0.0) {
+            Some(t) => z.at = t,
+            None => missing.push(format!("zoom {}: \"{}\"", i + 1, z.anchor)),
+        }
+    }
+    missing
 }
 
 /// `ffmpeg` here: on PATH or downloaded by `/video setup`.
@@ -713,6 +767,7 @@ mod tests {
                     text: "Open the UX dashboard.".into(),
                     section: String::new(),
                     only: Vec::new(),
+                    anchor: String::new(),
                 },
                 Line {
                     id: "b".into(),
@@ -720,6 +775,7 @@ mod tests {
                     text: "Done.".into(),
                     section: String::new(),
                     only: Vec::new(),
+                    anchor: String::new(),
                 },
             ],
             respell: vec![Respell {
@@ -784,6 +840,7 @@ mod tests {
                 y: 0.0,
                 scale: 9.0,
                 hold: 1.0,
+                anchor: String::new(),
             }],
             width: 1001,
             ..Default::default()
@@ -872,6 +929,7 @@ mod live {
                 text: "First, give your project a name.".into(),
                 section: "Set up".into(),
                 only: Vec::new(),
+                anchor: String::new(),
             },
             super::Line {
                 id: "create".into(),
@@ -879,6 +937,7 @@ mod live {
                 text: "Then click Create project, and it's ready.".into(),
                 section: "Create".into(),
                 only: Vec::new(),
+                anchor: String::new(),
             },
         ];
         edl.inserts = vec![super::Insert {
@@ -1211,5 +1270,51 @@ mod live_tabs {
         assert!(saved.starts_with("baseline saved"), "{saved}");
         let ran = crate::browser::smoke_test(&w, "tabs", false).await.unwrap();
         assert!(ran.starts_with("passed"), "{ran}");
+    }
+}
+
+#[cfg(test)]
+mod anchor_tests {
+    use super::*;
+
+    #[test]
+    fn anchored_lines_follow_the_page_text() {
+        let texts = vec![
+            record::PageText {
+                t: 2.0,
+                text: "Welcome".into(),
+            },
+            record::PageText {
+                t: 9.0,
+                text: "Settings · Context window".into(),
+            },
+            record::PageText {
+                t: 15.0,
+                text: "Context window saved".into(),
+            },
+        ];
+        let line = |id: &str, at: f64, anchor: &str| Line {
+            id: id.into(),
+            at,
+            text: "x".into(),
+            section: String::new(),
+            only: Vec::new(),
+            anchor: anchor.into(),
+        };
+        let mut edl = Edl {
+            lines: vec![
+                line("a", 1.0, ""),
+                line("b", 0.0, "context window"),
+                // After "b": the next time it shows is the later step.
+                line("c", 0.0, "Context window"),
+                line("d", 0.0, "nowhere"),
+            ],
+            ..Default::default()
+        };
+        let missing = resolve_anchors(&mut edl, &texts);
+        assert!((edl.lines[1].at - 8.2).abs() < 1e-9, "{:?}", edl.lines[1]);
+        assert!((edl.lines[2].at - 14.2).abs() < 1e-9, "{:?}", edl.lines[2]);
+        assert_eq!(missing.len(), 1);
+        assert!(missing[0].contains("line d"));
     }
 }

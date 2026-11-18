@@ -824,6 +824,115 @@ fn place(edl: &Edl, tl: &Timeline, t: f64) -> (f64, f64) {
     }
 }
 
+/// The edit report (`/video check`): what the render would do and what
+/// looks off, without rendering — the final length, narration longer than
+/// its footage, lines and zooms in cut-away parts, zooms that merge,
+/// anchors not found.
+pub fn check(dir: &Path) -> Result<Vec<String>, String> {
+    let s = load(dir)?;
+    let mut edl = s.edl.clone();
+    let missing = super::resolve_anchors(&mut edl, &s.texts);
+    let edl = edl.normalized(s.duration);
+    let mut out = Vec::new();
+    let mut warn = 0;
+    // How long each line takes to say: your take, a draft already made,
+    // else an estimate.
+    let secs_of = |l: &Line| -> (f64, &'static str) {
+        for (p, what) in [
+            (voice::take_path(dir, &l.id), "your take"),
+            (voice::draft_path(dir, &l.id), "draft voice"),
+        ] {
+            if let Ok(pcm) = voice::read_wav(&p) {
+                return (pcm.seconds(), what);
+            }
+        }
+        (voice::estimate_seconds(&l.text), "estimate")
+    };
+    let lines: Vec<&Line> = edl.lines.iter().filter(|l| l.in_cut("long")).collect();
+    let secs: Vec<f64> = lines.iter().map(|l| secs_of(l).0).collect();
+    let (holds, _) = fit(&edl, &lines, &secs);
+    let tl = Timeline::new(&edl, &holds);
+    let footage: f64 = edl
+        .segments
+        .iter()
+        .map(|g| (g.to - g.from) / g.speed.max(0.01))
+        .sum();
+    out.push(format!(
+        "length: {} (recording {}, kept footage {}, narration holds {:.1} s, cards {:.1} s)",
+        clock(tl.total()),
+        clock(s.duration),
+        clock(footage),
+        holds.iter().map(|h| h.seconds).sum::<f64>(),
+        edl.inserts
+            .iter()
+            .filter(|i| i.kind != "hold")
+            .map(|i| i.seconds)
+            .sum::<f64>(),
+    ));
+    if tl.total() > 600.0 {
+        out.push("⚠ over 10 minutes — long for a tutorial; cut or speed up waiting parts".into());
+        warn += 1;
+    }
+    let kept = |t: f64| edl.segments.iter().any(|g| t >= g.from && t < g.to);
+    for (i, l) in lines.iter().enumerate() {
+        if !edl.segments.is_empty() && !kept(l.at) {
+            out.push(format!(
+                "⚠ line {} (at {:.1} s) is in a cut-away part: it plays at the next kept moment",
+                l.id, l.at
+            ));
+            warn += 1;
+        }
+        if let Some(h) = holds.iter().find(|h| {
+            let next = lines.get(i + 1).map(|n| n.at).unwrap_or(f64::INFINITY);
+            h.at >= l.at && h.at <= next
+        }) {
+            let (sec, what) = secs_of(l);
+            out.push(format!(
+                "⚠ line {} takes {:.1} s ({what}) — {:.1} s more than its footage: the picture holds (shorten the line or slow that part to avoid it)",
+                l.id, sec, h.seconds
+            ));
+            warn += 1;
+        }
+    }
+    let mut zooms = edl.zooms.clone();
+    zooms.sort_by(|a, b| a.at.total_cmp(&b.at));
+    for (i, z) in zooms.iter().enumerate() {
+        if !edl.segments.is_empty() && !kept(z.at) {
+            out.push(format!(
+                "⚠ zoom {} (at {:.1} s) is in a cut-away part — it won't show",
+                i + 1,
+                z.at
+            ));
+            warn += 1;
+        }
+        if let Some(n) = zooms.get(i + 1) {
+            let end = z.at + z.hold + 0.3;
+            if n.at - super::motion::LEAD - end < super::motion::MERGE_GAP {
+                out.push(format!(
+                    "· zooms {} and {} ({:.1} s, {:.1} s) merge into one held zoom that pans between them",
+                    i + 1,
+                    i + 2,
+                    z.at,
+                    n.at
+                ));
+            }
+        }
+    }
+    for m in &missing {
+        out.push(format!("⚠ anchor not found on the page: {m}"));
+        warn += 1;
+    }
+    if edl.cuts.iter().any(|c| c == "short") {
+        out.push("· a 9:16 short is rendered too".into());
+    }
+    out.push(if warn == 0 {
+        "✓ nothing looks off — /video render".into()
+    } else {
+        format!("{warn} thing(s) to look at — /video timeline shows where; /video nudge moves a line or zoom")
+    });
+    Ok(out)
+}
+
 /// Holds that give every line time to be said before the next begins (and
 /// before the end card): (holds, each line's start).
 fn fit(edl: &Edl, lines: &[&Line], secs: &[f64]) -> (Vec<Insert>, Vec<f64>) {
@@ -1292,6 +1401,8 @@ struct Cam {
     dir: PathBuf,
     count: usize,
     offset: f64,
+    /// Pauses the clip ran through: (recording second, seconds).
+    cuts: Vec<[f64; 2]>,
     corner: String,
     size: f64,
     circle: bool,
@@ -1348,6 +1459,7 @@ fn webcam_frames(dir: &Path, edl: &Edl, notes: &mut Vec<String>) -> Option<Cam> 
         dir: out,
         count,
         offset: cam.offset,
+        cuts: cam.cuts.clone(),
         corner: cam.corner.clone(),
         size: cam.size.clamp(0.1, 0.5),
         circle: cam.shape != "rounded",
@@ -1356,7 +1468,9 @@ fn webcam_frames(dir: &Path, edl: &Edl, notes: &mut Vec<String>) -> Option<Cam> 
 
 /// The presenter bubble at recording second `s`, in a corner of `img`.
 fn draw_cam(img: &mut RgbImage, cam: &Cam, s: f64) {
-    let i = ((s - cam.offset) * CAM_FPS).floor();
+    // The clip kept running through pauses the video leaves out.
+    let skipped: f64 = cam.cuts.iter().filter(|c| c[0] <= s).map(|c| c[1]).sum();
+    let i = ((s - cam.offset + skipped) * CAM_FPS).floor();
     if i < 0.0 {
         return;
     }
@@ -2379,8 +2493,12 @@ pub fn render_with(
         mode,
         privacy,
         focus,
+        texts,
         ..
     } = load(dir)?;
+    // Lines and zooms anchored to text on the page get their times first.
+    let mut edl = edl;
+    let unanchored = super::resolve_anchors(&mut edl, &texts);
     let mut edl = edl.normalized(duration);
     // The brand kit, for this render.
     let brand = super::brand::file_for(dir).and_then(|f| super::brand::load(&f).ok());
@@ -2525,6 +2643,12 @@ pub fn render_with(
         webcam,
     };
     let mut notes: Vec<String> = cam_notes;
+    if !unanchored.is_empty() {
+        notes.push(format!(
+            "anchors not found on the page (kept at their times): {}",
+            unanchored.join(", ")
+        ));
+    }
     if unmarked > 0 {
         notes.push(format!(
             "{unmarked} click(s) have no still just before them (recorded before v1.0.74), so they \
@@ -2823,6 +2947,7 @@ mod tests {
             text: text.into(),
             section: section.into(),
             only: Vec::new(),
+            anchor: String::new(),
         }
     }
 
@@ -2968,5 +3093,301 @@ mod look {
         };
         let r = render(Path::new(&dir), |p| eprintln!("{p}")).unwrap();
         eprintln!("{:?} · {:.1}s · note: {:?}", r.mp4, r.seconds, r.note);
+    }
+}
+
+/// A recording's edit as a time bar for the terminal (`/video timeline`):
+/// what is kept (and how fast), zooms, narration lines and cards, `cols`
+/// wide; then each line and zoom with its time.
+pub fn timeline_view(dir: &Path, cols: usize) -> Result<Vec<String>, String> {
+    let s = load(dir)?;
+    let mut edl = s.edl.clone();
+    let _ = super::resolve_anchors(&mut edl, &s.texts);
+    let edl = edl.normalized(s.duration);
+    let cols = cols.clamp(40, 200);
+    let span = s.duration.max(1.0);
+    let col = |t: f64| {
+        ((t / span) * (cols - 1) as f64)
+            .round()
+            .clamp(0.0, (cols - 1) as f64) as usize
+    };
+    // Kept footage: █ normal, ▒ faster, ░ slower, · cut.
+    let mut kept = vec!['·'; cols];
+    for g in &edl.segments {
+        let c = if g.speed > 1.2 {
+            '▒'
+        } else if g.speed < 0.9 {
+            '░'
+        } else {
+            '█'
+        };
+        for k in kept
+            .iter_mut()
+            .take(col(g.to).min(cols - 1) + 1)
+            .skip(col(g.from))
+        {
+            *k = c;
+        }
+    }
+    if edl.segments.is_empty() {
+        kept = vec!['█'; cols];
+    }
+    let mut zoom = vec![' '; cols];
+    for z in &edl.zooms {
+        zoom[col(z.at)] = '▲';
+    }
+    let mut said = vec![' '; cols];
+    for l in &edl.lines {
+        said[col(l.at)] = '♪';
+    }
+    let mut cards = vec![' '; cols];
+    for i in &edl.inserts {
+        cards[col(i.at)] = if i.kind == "hold" { '⏸' } else { '▤' };
+    }
+    // A ruler with a time every ~10 columns.
+    let mut ruler = vec![' '; cols + 8];
+    let step = ((span / (cols as f64 / 12.0)).ceil()).max(1.0);
+    let mut t = 0.0;
+    while t <= span {
+        let label = clock(t);
+        let c = col(t);
+        for (k, ch) in label.chars().enumerate() {
+            if c + k < ruler.len() {
+                ruler[c + k] = ch;
+            }
+        }
+        t += step;
+    }
+    let row = |name: &str, v: &[char]| format!("{name:<6}{}", v.iter().collect::<String>());
+    let mut out = vec![
+        format!("      {}", ruler.iter().collect::<String>().trim_end()),
+        row("kept", &kept),
+        row("zoom", &zoom),
+        row("lines", &said),
+    ];
+    if !edl.inserts.is_empty() {
+        out.push(row("cards", &cards));
+    }
+    out.push("      █ kept  ▒ faster  ░ slower  · cut  ▲ zoom  ♪ narration  ▤ card  ⏸ hold".into());
+    for l in &edl.lines {
+        let text: String = l.text.chars().take(60).collect();
+        out.push(format!(
+            "♪ {:<14} {:>6}  {text}{}",
+            l.id,
+            clock(l.at),
+            if l.anchor.is_empty() {
+                String::new()
+            } else {
+                format!("  (at \"{}\")", l.anchor)
+            }
+        ));
+    }
+    for (i, z) in edl.zooms.iter().enumerate() {
+        out.push(format!(
+            "▲ zoom-{:<9} {:>6}  {:.1}× for {:.1} s",
+            i + 1,
+            clock(z.at),
+            z.scale,
+            z.hold
+        ));
+    }
+    Ok(out)
+}
+
+/// Moves narration line `target` (its id) or `zoom-N` by `delta` seconds in
+/// the saved edit list (an anchor on it is dropped: the time is yours now).
+pub fn nudge(dir: &Path, target: &str, delta: f64) -> Result<String, String> {
+    let p = dir.join("edl.json");
+    let mut edl: Edl =
+        serde_json::from_str(&std::fs::read_to_string(&p).map_err(|e| format!("edl.json: {e}"))?)
+            .map_err(|e| format!("edl.json: {e}"))?;
+    let s = load(dir)?;
+    let _ = super::resolve_anchors(&mut edl, &s.texts);
+    let msg = if let Some(n) = target
+        .strip_prefix("zoom-")
+        .or_else(|| target.strip_prefix("zoom"))
+        .and_then(|n| n.trim().parse::<usize>().ok())
+    {
+        edl.zooms.sort_by(|a, b| a.at.total_cmp(&b.at));
+        let z = edl
+            .zooms
+            .get_mut(n.wrapping_sub(1))
+            .ok_or_else(|| format!("no zoom {n} — /video timeline lists them"))?;
+        z.at = (z.at + delta).clamp(0.0, s.duration);
+        z.anchor.clear();
+        format!("zoom {n} now at {}", clock(z.at))
+    } else {
+        let l = edl
+            .lines
+            .iter_mut()
+            .find(|l| l.id == target)
+            .ok_or_else(|| format!("no line `{target}` — /video timeline lists them"))?;
+        l.at = (l.at + delta).clamp(0.0, s.duration);
+        l.anchor.clear();
+        format!("line {target} now at {}", clock(l.at))
+    };
+    std::fs::write(
+        &p,
+        serde_json::to_string_pretty(&edl).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(msg)
+}
+
+#[cfg(test)]
+mod edit_tools_tests {
+    use super::*;
+    use crate::video::{Segment, Zoom};
+
+    fn rec(dir: &Path, edl: &Edl, duration: f64) {
+        std::fs::create_dir_all(dir.join("raw")).unwrap();
+        image::RgbImage::new(64, 36)
+            .save(dir.join("raw/f1.jpg"))
+            .unwrap();
+        let frames = vec![FrameInfo {
+            t: 0.0,
+            file: "f1.jpg".into(),
+            css_w: 64.0,
+        }];
+        std::fs::write(
+            dir.join("frames.json"),
+            serde_json::to_string(&frames).unwrap(),
+        )
+        .unwrap();
+        std::fs::write(dir.join("edl.json"), serde_json::to_string(edl).unwrap()).unwrap();
+        std::fs::write(
+            dir.join("meta.json"),
+            format!("{{\"duration\":{duration}}}"),
+        )
+        .unwrap();
+        std::fs::write(dir.join("events.json"), "[]").unwrap();
+    }
+
+    fn line(id: &str, at: f64, text: &str) -> Line {
+        Line {
+            id: id.into(),
+            at,
+            text: text.into(),
+            section: String::new(),
+            only: Vec::new(),
+            anchor: String::new(),
+        }
+    }
+
+    #[test]
+    fn the_report_finds_what_looks_off() {
+        let d = tempfile::tempdir().unwrap();
+        let edl = Edl {
+            title: String::new(),
+            segments: vec![
+                Segment {
+                    from: 0.0,
+                    to: 5.0,
+                    speed: 1.0,
+                },
+                Segment {
+                    from: 20.0,
+                    to: 30.0,
+                    speed: 1.0,
+                },
+            ],
+            lines: vec![
+                // A long line over 2 s of footage before the next one.
+                line(
+                    "intro",
+                    0.5,
+                    "This is a rather long sentence that takes quite a while to say out loud for sure.",
+                ),
+                line("lost", 10.0, "Said in a cut part."),
+                line("end", 2.5, "Done."),
+            ],
+            zooms: vec![
+                Zoom {
+                    at: 22.0,
+                    x: 1.0,
+                    y: 1.0,
+                    scale: 1.6,
+                    hold: 1.0,
+                    anchor: String::new(),
+                },
+                Zoom {
+                    at: 23.5,
+                    x: 1.0,
+                    y: 1.0,
+                    scale: 1.6,
+                    hold: 1.0,
+                    anchor: String::new(),
+                },
+                Zoom {
+                    at: 12.0,
+                    x: 1.0,
+                    y: 1.0,
+                    scale: 1.6,
+                    hold: 1.0,
+                    anchor: String::new(),
+                },
+            ],
+            ..Default::default()
+        };
+        rec(d.path(), &edl, 30.0);
+        let r = check(d.path()).unwrap().join("\n");
+        assert!(r.contains("line lost") && r.contains("cut-away"), "{r}");
+        assert!(r.contains("line intro takes"), "{r}");
+        assert!(
+            r.contains("zoom 1 (at 12.0 s) is in a cut-away part"),
+            "{r}"
+        );
+        assert!(r.contains("merge into one held zoom"), "{r}");
+        assert!(r.starts_with("length: "), "{r}");
+    }
+
+    #[test]
+    fn the_timeline_and_nudges() {
+        let d = tempfile::tempdir().unwrap();
+        let edl = Edl {
+            segments: vec![
+                Segment {
+                    from: 0.0,
+                    to: 10.0,
+                    speed: 1.0,
+                },
+                Segment {
+                    from: 10.0,
+                    to: 20.0,
+                    speed: 3.0,
+                },
+            ],
+            lines: vec![line("intro", 1.0, "Hi.")],
+            zooms: vec![Zoom {
+                at: 5.0,
+                x: 1.0,
+                y: 1.0,
+                scale: 1.6,
+                hold: 1.0,
+                anchor: String::new(),
+            }],
+            ..Default::default()
+        };
+        rec(d.path(), &edl, 20.0);
+        let v = timeline_view(d.path(), 60).unwrap().join("\n");
+        assert!(
+            v.contains('█') && v.contains('▒') && v.contains('▲') && v.contains('♪'),
+            "{v}"
+        );
+        assert!(v.contains("intro") && v.contains("zoom-1"), "{v}");
+        assert_eq!(
+            nudge(d.path(), "intro", 1.5).unwrap(),
+            "line intro now at 0:02"
+        );
+        assert_eq!(
+            nudge(d.path(), "zoom-1", -2.0).unwrap(),
+            "zoom 1 now at 0:03"
+        );
+        assert!(nudge(d.path(), "nope", 1.0).is_err());
+        let saved: Edl =
+            serde_json::from_str(&std::fs::read_to_string(d.path().join("edl.json")).unwrap())
+                .unwrap();
+        assert!((saved.lines[0].at - 2.5).abs() < 1e-9);
+        assert!((saved.zooms[0].at - 3.0).abs() < 1e-9);
     }
 }

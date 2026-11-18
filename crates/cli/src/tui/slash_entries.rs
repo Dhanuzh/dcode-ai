@@ -76,6 +76,22 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
             ("voices use", true, "draft voice from now on: <name> [id]"),
             ("steps", false, "the recording's steps, numbered"),
             (
+                "check",
+                false,
+                "edit report: length, long narration, cut-away lines, merged zooms",
+            ),
+            (
+                "timeline",
+                false,
+                "the edit as a time bar: kept parts, zooms, lines",
+            ),
+            ("nudge", true, "<line|zoom-N> <±seconds>: move one"),
+            (
+                "autoedit",
+                false,
+                "cut and zoom by where the screen changes (screen recordings)",
+            ),
+            (
                 "doc",
                 false,
                 "a step-by-step how-to guide (Markdown + HTML)",

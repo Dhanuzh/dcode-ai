@@ -566,6 +566,7 @@ mod tests {
             text: "Welcome. Let's create a project.".into(),
             section: String::new(),
             only: Vec::new(),
+            anchor: String::new(),
         };
         let p = draft(dir.path(), &line, "").unwrap();
         let pcm = read_wav(&p).unwrap();

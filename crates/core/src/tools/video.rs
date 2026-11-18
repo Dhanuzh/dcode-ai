@@ -108,6 +108,44 @@ video, ask the user to bring the browser window to the front."
     }
 }
 
+pub struct RecordPauseTool {
+    pub resume: bool,
+}
+
+#[async_trait]
+impl ToolExecutor for RecordPauseTool {
+    fn definition(&self) -> ToolDefinition {
+        if self.resume {
+            ToolDefinition {
+                name: "record_resume".into(),
+                description: "Go on recording after record_pause.".into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        } else {
+            ToolDefinition {
+                name: "record_pause".into(),
+                description: "Pause the recording — for a sign-in, a long wait, setup the video \
+shouldn't show. Nothing is recorded until record_resume, and the paused time is left out of the \
+video."
+                    .into(),
+                parameters: serde_json::json!({"type": "object", "properties": {}}),
+            }
+        }
+    }
+
+    async fn execute(&self, call: &ToolCall) -> ToolResult {
+        let r = if self.resume {
+            video::record::resume()
+        } else {
+            video::record::pause()
+        };
+        match r {
+            Ok(m) => ok(call, m),
+            Err(e) => fail(call, e),
+        }
+    }
+}
+
 pub struct RecordNoteTool;
 
 #[async_trait]
@@ -133,7 +171,10 @@ event track, so narration can be timed to it."
         }
         let label = call.input["label"].as_str().unwrap_or("").trim();
         video::record::mark(label);
-        ok(call, format!("noted: {label}"))
+        match video::record::cap_warning() {
+            Some(w) => ok(call, format!("noted: {label}\n{w}")),
+            None => ok(call, format!("noted: {label}")),
+        }
     }
 }
 
@@ -167,6 +208,11 @@ narration still fits the step, then video_render with id \"{}\".\n\nEvent track 
                 ),
             ),
             Ok(s) => {
+                let notes = if s.notes.is_empty() {
+                    String::new()
+                } else {
+                    format!("\nNotes: {}.\n", s.notes.join("; "))
+                };
                 let script: Vec<String> = s
                     .draft
                     .lines
@@ -176,7 +222,7 @@ narration still fits the step, then video_render with id \"{}\".\n\nEvent track 
                 ok(
                     call,
                     format!(
-                        "Recorded {id}: {dur:.1}s, {frames} frames.\n\nEvent track (seconds · action · where · what):\n{track}\n\n\
+                        "Recorded {id}: {dur:.1}s, {frames} frames.{notes}\n\nEvent track (seconds · action · where · what):\n{track}\n\n\
 A draft edit list is saved (.dcode-ai/videos/{id}/edl.json): {segs} segments (waiting sped up), \
 {zooms} zooms on clicks, title \"{title}\", and this narration script (id @recording-second: text):\n{script}\n\n\
 Now call video_render with id \"{id}\" and an `edl` holding ONLY the fields you change — they \
@@ -225,6 +271,7 @@ recording. Never touch the files in `voice/` (the user's takes) or `approved.jso
                     "id": {"type": "string"},
                     "preview": {"type": "boolean", "description": "A quick low-resolution draft (preview.mp4) to check timing"},
                     "lang": {"type": "string", "description": "Render a translation from edl.translations.<lang> (e.g. \"de\")"},
+                    "check": {"type": "boolean", "description": "Only report what the render would do and what looks off (length, narration longer than its footage, lines or zooms in cut parts, merged zooms, anchors not found) — no rendering"},
                     "edl": {"type": "object", "description": "title, subtitle, end_text, segments[{from,to,speed}], zooms[{at,x,y,scale,hold}], lines[{id,at,text,section,only}] (narration), inserts[{at,seconds,kind,title,items}], cuts[\"long\",\"short\"], voice (auto|draft|takes|none), draft_voice, music, captions[{from,to,text}] (used only without lines), cursor, width, clean_master, platforms"}
                 }
             }),
@@ -265,6 +312,15 @@ recording. Never touch the files in `voice/` (the user's takes) or `approved.jso
             if let Err(e) = std::fs::write(dir.join("edl.json"), text) {
                 return fail(call, e.to_string());
             }
+        }
+        if call.input["check"].as_bool() == Some(true) {
+            return match video::render::check(&dir) {
+                Ok(lines) => ok(
+                    call,
+                    format!("Edit report (nothing rendered):\n{}", lines.join("\n")),
+                ),
+                Err(e) => fail(call, e),
+            };
         }
         let d = dir.clone();
         let opts = video::render::Options {

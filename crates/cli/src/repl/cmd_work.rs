@@ -6,6 +6,7 @@ use super::*;
 pub(crate) const RECORD_PROMPT: &str = "Make a short narrated demo video of the task below, recorded and edited by you.
 1. Load the tools with `tool_search` (record_start, record_stop, video_render, browser_task, browser).
 2. Get the starting page ready first (so loading isn't in the video): a `browser_task` that opens it in a fresh tab (`new_tab`, so it is the visible one) and waits until it has loaded. If it needs a sign-in, ask the user to sign in in the browser window — never type passwords. Then `record_start` with the task as `goal`, `mode` \"stills\" when asked for (or for a dashboard, report or settings page where nothing animates — one sharp still per step, unaffected by a covered window; otherwise \"live\"), and `redact` with any people's or customers' names that should not show (emails, ticket ids and tokens are blurred automatically).
+   If a sign-in or a long wait comes up mid-take, `record_pause` (and `record_resume` after) keeps it out of the video.
 3. Do the task with ONE `browser_task` while recording — it drives the browser in a sub-agent, so the page snapshots stay out of this conversation (much cheaper); its clicks and typing still go into the recording's event track. Give it the exact steps in order (what to click or type, what result to wait for), and tell it: one deliberate action at a time, wait_for the result of each before the next, no aimless scrolling, stay in the same tab, never type passwords, finish by reporting what each step showed. Use the plain `browser` tool yourself only if the sub-agent gets stuck.
 4. `record_stop`. From its event track, improve the draft edit list:
    - title (≤ 6 words), subtitle, end_text saying what was achieved;
@@ -13,7 +14,7 @@ pub(crate) const RECORD_PROMPT: &str = "Make a short narrated demo video of the 
    - optionally `inserts`: a `section` card when a new part starts, or a `bullets` card to sum up (title + items);
    - cut or speed up anything slow or repeated, zoom only on the clicks that matter; keep music \"auto\" unless asked. Aim for under 60 seconds;
    - cuts: [\"long\"], plus \"short\" when the user wants a vertical video (Shorts/Reels/Status).
-5. `video_render` with the recording id and your edit list. The draft voice speaks the lines (the user can record their own with /video voice). Report the MP4 path, length and the other files; mention any note it returns, and that `/video voice` records their own narration and `/video publish` makes upload folders.
+5. `video_render` with `check: true` first (an edit report: narration longer than its footage, lines in cut parts, merged zooms) and fix what it flags; narration `lines` may use `anchor` (text on the page) instead of a time. Then `video_render` with the recording id and your edit list. The draft voice speaks the lines (the user can record their own with /video voice). Report the MP4 path, length and the other files; mention any note it returns, and that `/video voice` records their own narration and `/video publish` makes upload folders.
 
 The task: ";
 
@@ -483,6 +484,59 @@ impl Repl {
                             }
                         }
                     }
+                    "check" => match pick(words.next()) {
+                        Some((id, dir)) => match dcode_ai_core::video::render::check(&dir) {
+                            Ok(lines) => {
+                                out.println(&format!("[video] {id} — edit report"));
+                                for l in lines {
+                                    out.println(&format!("[video]   {l}"));
+                                }
+                            }
+                            Err(e) => out.eprintln(&format!("[video] {e}")),
+                        },
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "timeline" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            let cols = crossterm::terminal::size().map(|s| s.0 as usize).unwrap_or(100).saturating_sub(14);
+                            match dcode_ai_core::video::render::timeline_view(&dir, cols) {
+                                Ok(lines) => {
+                                    out.println(&format!("[video] {id} — /video nudge {id} <line|zoom-N> <±seconds> moves one"));
+                                    for l in lines {
+                                        out.println(&l);
+                                    }
+                                }
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            }
+                        }
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
+                    "nudge" => {
+                        let args: Vec<&str> = words.collect();
+                        let (found, target, delta) = match args.as_slice() {
+                            [id, t, d] => (pick(Some(id)), *t, d.parse::<f64>().ok()),
+                            [t, d] => (pick(None), *t, d.parse::<f64>().ok()),
+                            _ => (None, "", None),
+                        };
+                        match (found, delta) {
+                            (Some((id, dir)), Some(d)) => match dcode_ai_core::video::render::nudge(&dir, target, d) {
+                                Ok(m) => out.println(&format!("[video] {id}: {m} — /video check, then /video render")),
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            },
+                            _ => out.println("usage: /video nudge [id] <line-id|zoom-N> <±seconds> — e.g. /video nudge intro -1.5"),
+                        }
+                    }
+                    "autoedit" => match pick(words.next()) {
+                        Some((id, dir)) => {
+                            out.println(&format!("[video] {id}: finding where the screen changes…"));
+                            match tokio::task::spawn_blocking(move || dcode_ai_core::video::autoedit::run(&dir)).await {
+                                Ok(Ok(m)) => out.println(&format!("[video] {id}: {m} — /video check, /video render")),
+                                Ok(Err(e)) => out.eprintln(&format!("[video] {e}")),
+                                Err(e) => out.eprintln(&format!("[video] {e}")),
+                            }
+                        }
+                        None => out.println("[video] no recordings yet — /record <what to show>"),
+                    },
                     "brand" => {
                         let project = ws.join(".dcode-ai/brand.json");
                         if words.next() == Some("init") {

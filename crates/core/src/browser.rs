@@ -334,6 +334,13 @@ async fn observe_settled(page: &Page, max: Duration) {
     use crate::video::record;
     let Some(mode) = record::mode() else { return };
     settle(page, max).await;
+    // The visible text, for narration anchored to "where this shows".
+    if let Ok(Value::String(t)) = page
+        .eval("(document.body ? document.body.innerText : '').slice(0, 20000)")
+        .await
+    {
+        record::add_text(t);
+    }
     if let Ok(Value::Array(b)) = page.eval(FOCUS_JS).await
         && let [Some(x), Some(y), Some(w), Some(h)] =
             [0, 1, 2, 3].map(|i| b.get(i).and_then(Value::as_f64))
@@ -1474,6 +1481,11 @@ async fn run_on(
     if result.is_ok() {
         record(action, input, target);
     }
+    // Near the recording's cap: say so where the agent will see it.
+    let result = match (result, crate::video::record::cap_warning()) {
+        (Ok(r), Some(w)) => Ok(format!("{w}\n\n{r}")),
+        (r, _) => r,
+    };
     match (note, result) {
         (Some(n), Ok(text)) => Ok(format!("{n}\n\n{text}")),
         (_, r) => r,

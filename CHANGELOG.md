@@ -1,5 +1,37 @@
 # Changelog
 
+## 1.0.80 — 2026-11-18
+
+### Recording
+- **Smoother screen recording on WSL**: about 15 shots a second (was 5) —
+  one bitmap reused, shots written to a Windows folder instead of across
+  the WSL share; identical shots are dropped, so a still desktop doesn't
+  fill the disk.
+- **Pause and resume**: `record_pause` / `record_resume` keep sign-ins and
+  waiting out of the take; the paused time is cut from everything (frames,
+  steps, private boxes), and a webcam clip stays in step.
+- **The cap is announced**: recordings may run 30 minutes (was 10); under
+  2 minutes left, browser actions and `record_note` say so, and
+  `record_stop` says when the cap cut the take.
+
+### Editing
+- **Automatic cuts and zoom for screen recordings**: where the picture
+  doesn't change is sped up or cut, and a burst of change in a small part
+  of the screen gets a zoom — done when a screen recording stops, or
+  `/video autoedit [id]` for an existing one (narration already written
+  keeps its footage). A real 11-minute demo became about 5 minutes.
+- **Text anchors**: a narration line or zoom can say `"anchor": "Context
+  window"` — it's placed where that text first shows on the page (browser
+  recordings keep each step's visible text), so a re-take needn't have its
+  timestamps redone.
+- **Edit report**: `/video check [id]` (and `video_render` with
+  `check: true`) — final length, narration longer than its footage, lines
+  and zooms in cut-away parts, zooms that merge, anchors not found — before
+  spending minutes on a render.
+- **Timeline**: `/video timeline [id]` draws the edit as a time bar (kept,
+  faster, cut; zooms; narration; cards); `/video nudge [id] <line|zoom-N>
+  <±seconds>` moves one.
+
 ## 1.0.79 — 2026-11-18
 
 ### Fixed
