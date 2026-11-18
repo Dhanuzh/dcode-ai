@@ -1619,8 +1619,44 @@ pub fn run_blocking(
             crossterm::terminal::LeaveAlternateScreen
         );
     }
+    // Leaving the way Claude Code does: whatever of the conversation is
+    // still in the live pane goes to the scrollback, the input box and the
+    // status line are wiped, and the shell prompt comes back right under the
+    // conversation — not in the middle of a half-drawn box.
+    if let Ok(mut g) = state.lock() {
+        if g.flushed_block_count > g.blocks.len() {
+            g.flushed_block_count = 0;
+        }
+        let (from, to) = (g.flushed_block_count, g.blocks.len());
+        if to > from {
+            let term_w = crossterm::terminal::size().map(|(w, _)| w).unwrap_or(80);
+            let lines = crate::tui::transcript::render_blocks_range(&g, from, to, term_w);
+            let n = lines.len().min(u16::MAX as usize) as u16;
+            if n > 0 {
+                let _ = terminal.insert_before(n, |buf| {
+                    let area = buf.area;
+                    Block::default()
+                        .style(Style::default().bg(theme::bg()))
+                        .render(area, buf);
+                    Paragraph::new(Text::from(lines)).render(area, buf);
+                    blank_wide_tails(buf);
+                });
+            }
+            g.flushed_block_count = to;
+        }
+    }
+    let mut viewport_top = None;
+    let _ = terminal.draw(|frame| {
+        let area = frame.area();
+        viewport_top = Some(area.y);
+        frame.render_widget(ClearWidget, area);
+    });
     restore_terminal(mouse_capture);
-    let _ = execute!(stdout(), MoveToColumn(0));
+    if let Some(y) = viewport_top {
+        let _ = execute!(stdout(), crossterm::cursor::MoveTo(0, y));
+    } else {
+        let _ = execute!(stdout(), MoveToColumn(0));
+    }
     // Quitting: hand the herdr pane back.
     if let Some(h) = herdr {
         h.release();

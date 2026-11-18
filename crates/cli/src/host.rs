@@ -231,7 +231,10 @@ mod unix {
         let key_mode: Arc<Mutex<Option<Vec<u8>>>> = Arc::new(Mutex::new(None));
 
         // Screen → the attached terminal (dropped while nobody is attached;
-        // a new terminal gets a full repaint).
+        // a new terminal gets a full repaint). It says when the program's
+        // output has ended, so the last of it (the screen put back, the
+        // "Resume this session" line) reaches the terminal before "exited".
+        let (drained_tx, drained) = std::sync::mpsc::channel::<()>();
         {
             let (client, writer, wants_focus, screen, key_mode) = (
                 client.clone(),
@@ -270,6 +273,7 @@ mod unix {
                         send(&client, OUTPUT, chunk);
                     }
                 }
+                let _ = drained_tx.send(());
             });
         }
 
@@ -380,6 +384,9 @@ mod unix {
 
         let status = child.wait()?;
         let code = status.exit_code() as i32;
+        // Everything the program wrote, before saying it exited (a terminal
+        // that leaves on "exited" would otherwise lose the tail).
+        let _ = drained.recv_timeout(Duration::from_secs(2));
         send(&client, EXITED, &code.to_be_bytes());
         let _ = std::fs::remove_file(&sock);
         let _ = std::fs::remove_file(info_of(id));
@@ -563,13 +570,22 @@ mod unix {
             }
         };
         let _ = terminal::disable_raw_mode();
+        // The terminal back as it was: normal screen, no mouse or paste or
+        // focus reports, the cursor shown — also after a clean exit, in case
+        // the session's own goodbye didn't arrive (harmless when it did).
+        // (Leaving the alternate screen only when the session didn't end on
+        // its own: on a normal screen some terminals would jump the cursor
+        // back to an old saved spot.)
         if ended != Ended::Exited(0) {
-            // The session's screen modes stay with it; give the terminal back.
-            let _ = stdout.write_all(
-                b"\x1b[<u\x1b[?1049l\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?25h\r\n",
-            );
-            let _ = stdout.flush();
+            let _ = stdout.write_all(b"\x1b[?1049l");
         }
+        let _ = stdout.write_all(
+            b"\x1b[<u\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1006l\x1b[?1004l\x1b[?2004l\x1b[?25h",
+        );
+        if ended != Ended::Exited(0) {
+            let _ = stdout.write_all(b"\r\n");
+        }
+        let _ = stdout.flush();
         Ok(ended)
     }
 

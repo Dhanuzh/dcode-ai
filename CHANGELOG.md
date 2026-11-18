@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.0.81 — 2026-11-18
+
+### Fixed — quitting
+- **Leaving dcode-ai left a broken screen**: the session's background host
+  said "exited" before the last of its output reached your terminal, so the
+  screen clean-up and the parting line could be lost. It now waits for the
+  session's output to end first, and the terminal always gets its normal
+  modes back (mouse, paste, focus reports, cursor).
+- **The input box and status line stayed on screen** after quitting, with
+  the shell prompt in the middle of them. Quitting now moves what's left of
+  the conversation into the scrollback, wipes the input box and status line,
+  and puts the prompt right under the conversation — like Claude Code.
+- The parting line comes straight away (before the session finishes
+  saving), with this session's cost: `Session saved · $0.42 this session.
+  Resume it with: dcode-ai --resume <id>`.
+
 ## 1.0.80 — 2026-11-18
 
 ### Recording

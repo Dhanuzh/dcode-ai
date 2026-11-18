@@ -2873,10 +2873,19 @@ impl Repl {
             .iter()
             .any(|m| m.role == dcode_ai_common::message::Role::User);
         let session_id = self.runtime.session_id().to_string();
-        self.runtime.finish(EndReason::UserExit).await;
+        // Said straight away (saving the session can take a moment).
         if worth_resuming {
-            println!("\nResume this session with:\ndcode-ai --resume {session_id}");
+            let (.., cost) = self.runtime.usage_breakdown();
+            let cost = if cost >= 0.01 {
+                format!(" · ${cost:.2} this session")
+            } else {
+                String::new()
+            };
+            println!("Session saved{cost}. Resume it with:\n  dcode-ai --resume {session_id}");
         }
+        use std::io::Write as _;
+        let _ = std::io::stdout().flush();
+        self.runtime.finish(EndReason::UserExit).await;
         Ok(())
     }
 
