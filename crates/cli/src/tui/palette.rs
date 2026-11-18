@@ -245,8 +245,8 @@ pub(crate) fn filter_palette_rows(query: &str, src: &PaletteSources) -> Vec<Pale
             PaletteRow::Found { .. } => {}
         }
     }
-    // Slash commands by name or what they do.
-    let commands: Vec<PaletteRow> = crate::slash_commands::SLASH_COMMANDS
+    // Slash commands by name, then by what they do.
+    let mut matched: Vec<&&str> = crate::slash_commands::SLASH_COMMANDS
         .iter()
         .filter(|c| {
             c.contains(&needle)
@@ -254,6 +254,10 @@ pub(crate) fn filter_palette_rows(query: &str, src: &PaletteSources) -> Vec<Pale
                     .to_ascii_lowercase()
                     .contains(&needle)
         })
+        .collect();
+    matched.sort_by_key(|c| (!c.contains(&needle), !c.starts_with(&format!("/{needle}"))));
+    let commands: Vec<PaletteRow> = matched
+        .into_iter()
         .take(8)
         .map(|c| PaletteRow::Found {
             label: c.to_string(),
@@ -332,6 +336,13 @@ mod search_tests {
         ));
         let rows = filter_palette_rows("pal", &src);
         assert!(rows.iter().any(|r| matches!(r, PaletteRow::Found { insert, .. } if insert == "@crates/cli/src/tui/palette.rs ")));
+        // A name match comes before a description match.
+        let rows = filter_palette_rows("check", &src);
+        let first = rows.iter().find_map(|r| match r {
+            PaletteRow::Found { label, .. } if label.starts_with('/') => Some(label.clone()),
+            _ => None,
+        });
+        assert_eq!(first.as_deref(), Some("/checkpoint"));
         let rows = filter_palette_rows("checkpoint", &src);
         assert!(
             rows.iter()

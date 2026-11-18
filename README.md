@@ -223,6 +223,31 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 <br><sub><code>/office</code>: you and every agent at a desk, live. Teammates who join sit there too.</sub>
 </p>
 
+## 📸 Screenshots
+
+<table>
+<tr>
+<td width="50%" valign="top">
+<img src="docs/assets/slash-options.png" alt="Typing /video in dcode-ai drops down its options — list, open, preview, render, render all, edit, short, script — each with what it does">
+<br><sub>Every <code>/</code> command shows its options as you type.</sub>
+</td>
+<td width="50%" valign="top">
+<img src="docs/assets/command-palette.png" alt="The Ctrl+P palette searching for 'check': /checkpoint first among commands, then matching project files">
+<br><sub><kbd>Ctrl</kbd>+<kbd>P</kbd> searches commands, recent prompts and files.</sub>
+</td>
+</tr>
+<tr>
+<td valign="top">
+<img src="docs/assets/sessions.png" alt="A checkpoint taken, a $5 budget set, a fact pinned and the checkpoint list, in the dcode-ai terminal">
+<br><sub><code>/checkpoint</code>, <code>/budget</code> and <code>/pin</code>: snapshots, a cost limit that asks, facts that survive compaction.</sub>
+</td>
+<td valign="top">
+<img src="docs/assets/recap.png" alt="The /recap card: today's commits, lines added, files changed, sessions, tokens and day streak, with achievement badges">
+<br><sub><code>/recap</code>: your day as a card and a short video, with streaks and achievements.</sub>
+</td>
+</tr>
+</table>
+
 ## 🧰 Features
 
 ### ⌨️ Made for the terminal

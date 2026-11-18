@@ -20,6 +20,27 @@ pub struct Checkpoint {
 fn git(ws: &Path, args: &[&str], index: Option<&Path>) -> Result<String, String> {
     let mut c = Command::new("git");
     c.current_dir(ws).args(args);
+    // Checkpoints are commit objects: without a git identity set up they
+    // would fail, so they fall back to dcode-ai's own.
+    if args.first() == Some(&"commit-tree") {
+        let set = |k: &str| {
+            Command::new("git")
+                .current_dir(ws)
+                .args(["config", k])
+                .output()
+                .is_ok_and(|o| o.status.success() && !o.stdout.trim_ascii().is_empty())
+        };
+        if !set("user.email") || !set("user.name") {
+            for (k, v) in [
+                ("GIT_AUTHOR_NAME", "dcode-ai"),
+                ("GIT_AUTHOR_EMAIL", "dcode-ai@localhost"),
+                ("GIT_COMMITTER_NAME", "dcode-ai"),
+                ("GIT_COMMITTER_EMAIL", "dcode-ai@localhost"),
+            ] {
+                c.env(k, v);
+            }
+        }
+    }
     if let Some(i) = index {
         c.env("GIT_INDEX_FILE", i);
     }
@@ -244,6 +265,24 @@ mod tests {
         assert_eq!(names[0], "midway");
         drop(ws, 1).unwrap();
         assert_eq!(list(ws).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn works_without_a_git_identity() {
+        let d = tempfile::tempdir().unwrap();
+        let g = |a: &[&str]| {
+            Command::new("git")
+                .current_dir(d.path())
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .args(a)
+                .output()
+                .unwrap()
+        };
+        g(&["init", "-q"]);
+        std::fs::write(d.path().join("a.txt"), "x").unwrap();
+        // No user.name/email in this repo (the global one may exist; the
+        // fallback only applies when it's missing).
+        assert!(take(d.path(), "first").is_ok());
     }
 
     #[test]
