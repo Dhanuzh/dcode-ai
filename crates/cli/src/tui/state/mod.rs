@@ -220,6 +220,7 @@ impl TuiSessionState {
             talk_ptt: None,
             finished_jobs: Vec::new(),
             palette_sources: Default::default(),
+            palette_run: None,
             working_style: "bar".into(),
             shimmer: true,
             sounds: false,
@@ -616,6 +617,15 @@ impl TuiSessionState {
         self.command_palette_open = false;
         self.command_palette_query.clear();
         self.palette_index = 0;
+    }
+
+    /// `#text` in the palette: the lines that contain it.
+    fn refresh_palette_text_hits(&mut self) {
+        self.palette_sources.text_hits =
+            match self.command_palette_query.trim_start().strip_prefix('#') {
+                Some(q) => crate::tui::palette::search_text(&self.workspace_root, q),
+                None => Vec::new(),
+            };
     }
 
     fn clamp_palette_index(&mut self) {
@@ -1066,7 +1076,14 @@ impl TuiSessionState {
                             let cmd = palette_command_for_label(label);
                             self.set_input_text(cmd.to_string());
                         }
-                        PaletteRow::Found { insert, .. } => self.set_input_text(insert.clone()),
+                        PaletteRow::Found { insert, run, .. } => {
+                            crate::tui::palette::record_pick(insert);
+                            if *run {
+                                self.palette_run = Some(insert.trim().to_string());
+                            } else {
+                                self.set_input_text(insert.clone());
+                            }
+                        }
                         PaletteRow::Section(_) => {}
                     }
                 }
@@ -1074,10 +1091,12 @@ impl TuiSessionState {
             }
             CommandPaletteKey::Backspace => {
                 self.command_palette_query.pop();
+                self.refresh_palette_text_hits();
                 self.clamp_palette_index();
             }
             CommandPaletteKey::Char(c) => {
                 self.command_palette_query.push(c);
+                self.refresh_palette_text_hits();
                 self.clamp_palette_index();
             }
         }
@@ -1841,6 +1860,31 @@ impl TuiSessionState {
         self.touch_transcript();
     }
 
+    /// Marks tools still shown as running as stopped (the turn ended without
+    /// their result). Returns whether any were.
+    pub fn finish_orphan_tools(&mut self) -> bool {
+        let mut any = false;
+        for block in &mut self.blocks {
+            if let DisplayBlock::ToolRunning {
+                name,
+                input,
+                call_id,
+                ..
+            } = block
+            {
+                *block = DisplayBlock::ToolDone {
+                    name: std::mem::take(name),
+                    call_id: std::mem::take(call_id),
+                    input: std::mem::take(input),
+                    ok: false,
+                    detail: "Stopped".into(),
+                };
+                any = true;
+            }
+        }
+        any
+    }
+
     pub fn clear_active_approval_if_matches(&mut self, call_id: &str) {
         let mut cleared = false;
         if self
@@ -2543,6 +2587,13 @@ impl TuiSessionState {
                 self.set_busy_state(*state);
                 if matches!(state, BusyState::Idle) && self.process_title == "writing response" {
                     self.set_process("idle", "");
+                }
+                // The turn is over: a tool still shown as running was cut
+                // off (Esc, an error, an interrupted talk). Left "running",
+                // it kept every later message out of the scrollback, stuck
+                // in the small live pane with its top hidden.
+                if matches!(state, BusyState::Idle) && self.finish_orphan_tools() {
+                    transcript_dirty = true;
                 }
             }
             AgentEvent::McpStartupUpdate { server, status } => {
@@ -3636,6 +3687,32 @@ mod tests {
         assert!(st.active_question.is_none());
         assert!(!st.question_modal_open);
         assert_eq!(st.question_modal_index, 0);
+    }
+
+    #[test]
+    fn a_tool_left_running_when_the_turn_ends_is_stopped() {
+        let mut st = test_state();
+        st.blocks.push(DisplayBlock::ToolRunning {
+            name: "execute_bash".into(),
+            input: "{}".into(),
+            output: String::new(),
+            call_id: "c1".into(),
+        });
+        st.blocks
+            .push(DisplayBlock::Assistant("a long reply".into()));
+        st.apply_event(&AgentEvent::BusyStateChanged {
+            state: BusyState::Idle,
+        });
+        // Nothing still "running" holds the reply back from the scrollback.
+        assert!(
+            !st.blocks
+                .iter()
+                .any(|b| matches!(b, DisplayBlock::ToolRunning { .. }))
+        );
+        assert!(matches!(
+            st.blocks[st.blocks.len() - 2],
+            DisplayBlock::ToolDone { ok: false, .. }
+        ));
     }
 
     #[test]

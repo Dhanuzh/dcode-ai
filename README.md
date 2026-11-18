@@ -233,7 +233,7 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 </td>
 <td width="50%" valign="top">
 <img src="docs/assets/command-palette.png" alt="The Ctrl+P palette searching for 'check': /checkpoint first among commands, then matching project files">
-<br><sub><kbd>Ctrl</kbd>+<kbd>P</kbd> searches commands, recent prompts and files.</sub>
+<br><sub><kbd>Ctrl</kbd>+<kbd>P</kbd> searches and runs commands, prompts, files, text (<code>#</code>), settings (<code>:</code>), sessions, checkpoints and videos (<code>!</code>) — what you use most comes first.</sub>
 </td>
 </tr>
 <tr>

@@ -447,6 +447,9 @@ pub(super) fn handle_key_event(
         if let Some(k) = mapped {
             g.apply_command_palette_key(k);
         }
+        if let Some(cmd) = g.palette_run.take() {
+            let _ = cmd_tx.send(TuiCmd::Submit(cmd));
+        }
         return KeyFlow::Continue;
     }
 
@@ -1259,10 +1262,15 @@ pub(super) fn handle_key_event(
             g.command_palette_query.clear();
             g.palette_index = 0;
             // It searches slash commands, recent prompts and files too.
-            g.palette_sources = crate::tui::palette::PaletteSources {
-                prompts: composer_history.clone(),
-                files: workspace_files.to_vec(),
-            };
+            // It searches commands, prompts, files, sessions, checkpoints,
+            // videos and settings too.
+            g.palette_sources = crate::tui::palette::gather_sources(
+                &g.workspace_root.clone(),
+                composer_history.clone(),
+                workspace_files.to_vec(),
+                &g.model.clone(),
+                &g.permission_mode.clone(),
+            );
         }
         // Ctrl+] (some terminals send it as Ctrl+5): the diagram viewer.
         (KeyCode::Char(']') | KeyCode::Char('5'), KeyModifiers::CONTROL) => {

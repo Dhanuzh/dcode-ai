@@ -396,6 +396,8 @@ pub struct TuiSessionState {
     pub command_palette_open: bool,
     /// What the palette searches besides its entries (set when it opens).
     pub(crate) palette_sources: crate::tui::palette::PaletteSources,
+    /// A command picked in the palette to run right away.
+    pub palette_run: Option<String>,
     /// Filter text for the command palette.
     pub command_palette_query: String,
     /// Approval request currently waiting for a local TUI answer.

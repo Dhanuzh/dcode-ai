@@ -1345,13 +1345,18 @@ pub fn run_blocking(
                 }
                 let flushed = g.flushed_block_count;
                 let mut flush_target = g.blocks.len();
-                for (i, b) in g.blocks.iter().enumerate().skip(flushed) {
-                    if matches!(
-                        b,
-                        DisplayBlock::ToolRunning { .. } | DisplayBlock::ApprovalPending(_)
-                    ) {
-                        flush_target = i;
-                        break;
+                // While a turn runs, a running tool or a pending approval
+                // holds back what follows (it still changes). Idle, nothing
+                // is still changing: everything goes to the scrollback.
+                if g.busy || g.active_approval.is_some() {
+                    for (i, b) in g.blocks.iter().enumerate().skip(flushed) {
+                        if matches!(
+                            b,
+                            DisplayBlock::ToolRunning { .. } | DisplayBlock::ApprovalPending(_)
+                        ) {
+                            flush_target = i;
+                            break;
+                        }
                     }
                 }
                 if flush_target > flushed {

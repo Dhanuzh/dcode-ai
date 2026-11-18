@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.79 — 2026-11-18
+
+### Fixed
+- **Half a reply hidden in the inline view** ("↑ 285 lines above · Ctrl+O
+  shows the whole reply" long after the turn ended): a tool left marked
+  "running" when a turn was cut off (Esc, an error, an interrupted `/talk`)
+  kept every later message out of the terminal's scrollback, stuck in the
+  small live pane with its top cut. A turn's end now marks such tools
+  stopped, and nothing is held back while idle.
+
+### New — Ctrl+P does more
+- **Picks run**: a command that needs nothing more (`/recap`, `/pins`,
+  `/models`…) runs when picked; one that needs words (`/pin <fact>`) goes
+  to the prompt.
+- **Prefix modes**: `>` commands, `@` files, `#` text inside the project's
+  files, `:` settings (model, permission mode, theme, talk voice and
+  persona, budget…, with current values), `!` history — recent sessions
+  (Enter resumes), checkpoints (restore goes to the prompt) and videos
+  (Enter opens).
+- **Frecency**: what you pick often and lately ranks first; opening the
+  palette shows your recent picks.
+
 ## 1.0.78 — 2026-11-18
 
 ### New
