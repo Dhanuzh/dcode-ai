@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.77 — 2026-11-18
+
+### Fixed
+- `/checkpoint` failed with "Author identity unknown" in a repository
+  without a git user name or email; checkpoints now fall back to a
+  `dcode-ai` identity for their hidden commits.
+- Ctrl+P lists commands whose name matches before ones that only mention
+  the word (searching "check" now puts `/checkpoint` first).
+
+### Docs
+- README screenshots: the `/` options dropdown, Ctrl+P search, session
+  commands and the `/recap` card.
+
 ## 1.0.76 — 2026-11-17
 
 ### Fixed
