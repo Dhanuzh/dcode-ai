@@ -306,29 +306,25 @@ fn btw_box(v: &crate::tui::btw::BtwView, inner_w: usize) -> PromptBox {
         ),
     ])];
     lines.push(Line::default());
-    let body: Vec<String> = if let Some(e) = &v.error {
-        vec![format!("✗ {e}")]
+    // The answer drawn as Markdown (headings, lists, bold, code), like
+    // replies in the conversation.
+    let body: Vec<Line<'static>> = if let Some(e) = &v.error {
+        vec![Line::from(Span::styled(
+            format!("✗ {e}"),
+            Style::default().fg(theme::error()),
+        ))]
     } else if v.answer.trim().is_empty() {
-        vec!["Thinking…".into()]
+        vec![muted("Thinking…")]
     } else {
-        v.answer
-            .trim()
-            .lines()
-            .flat_map(|l| {
-                let w = wrap_text(l, inner_w.saturating_sub(1));
-                if w.is_empty() { vec![String::new()] } else { w }
-            })
-            .collect()
+        crate::tui::markdown::render_markdown_lines_with_hits(
+            v.answer.trim(),
+            false,
+            inner_w.saturating_sub(1).max(16),
+        )
+        .0
     };
     let start = v.scroll.min(body.len().saturating_sub(BTW_ROWS));
-    let style = if v.error.is_some() {
-        Style::default().fg(theme::error())
-    } else {
-        Style::default().fg(theme::text())
-    };
-    for l in body.iter().skip(start).take(BTW_ROWS) {
-        lines.push(Line::from(Span::styled(l.clone(), style)));
-    }
+    lines.extend(body.iter().skip(start).take(BTW_ROWS).cloned());
     lines.push(Line::default());
     let more = if body.len() > BTW_ROWS {
         "↑↓ scroll · "

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.0.88 — 2026-11-19
+
+### Fixed
+- **Side chat answers are formatted**: the split workspace's side chat and
+  the `/btw` panel draw answers as Markdown — headings, numbered and
+  bullet lists, **bold**, `code` — instead of showing `**`, `###` and
+  backticks. Each question is a bold `›` line with a rule between
+  exchanges, "thinking…" while it answers, and the pane title counts the
+  questions ("side chat · 2").
+
 ## 1.0.87 — 2026-11-19
 
 ### Fixed

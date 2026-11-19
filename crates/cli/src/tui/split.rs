@@ -269,6 +269,7 @@ pub fn pane_lines(
     side: &[(String, String)],
     live: Option<(&str, &str)>,
     focused: bool,
+    width: usize,
 ) -> (String, Vec<Line<'static>>) {
     let muted = |t: String| Line::from(Span::styled(t, Style::default().fg(theme::muted())));
     match kind {
@@ -278,7 +279,7 @@ pub fn pane_lines(
                     "agent".into(),
                     vec![
                         muted("waiting for a sub-agent…".into()),
-                        muted("Ctrl+X a shows something else".into()),
+                        muted("Alt+A shows something else".into()),
                     ],
                 );
             };
@@ -322,31 +323,78 @@ pub fn pane_lines(
             (format!("◇ {}", short(id)), lines)
         }
         PaneKind::Side => {
-            let mut lines = Vec::new();
+            let mut lines: Vec<Line<'static>> = Vec::new();
             if side.is_empty() && live.is_none() {
-                lines.push(muted("side chat — questions about the work,".into()));
-                lines.push(muted("answered without interrupting it".into()));
+                lines.push(muted("Ask about the work without".into()));
+                lines.push(muted("interrupting it — the agent keeps going.".into()));
+                lines.push(Line::from(""));
+                lines.push(muted("Answers come from the conversation so far;".into()));
+                lines.push(muted("nothing here is added to it.".into()));
             }
-            let mut qa = |q: &str, a: &str| {
-                lines.push(Line::from(Span::styled(
-                    format!("> {q}"),
-                    Style::default().fg(theme::user()),
-                )));
-                for l in a.lines() {
-                    lines.push(Line::from(l.to_string()));
+            let w = width.max(16);
+            let rule = Line::from(Span::styled(
+                "─".repeat(w.min(60)),
+                Style::default().fg(theme::border()),
+            ));
+            let mut first = true;
+            let mut qa = |q: &str, a: Option<&str>| {
+                if !first {
+                    lines.push(rule.clone());
+                }
+                first = false;
+                // The question, wrapped under a `›` marker.
+                for (i, part) in textwrap::wrap(q.trim(), w.saturating_sub(2).max(8))
+                    .into_iter()
+                    .enumerate()
+                {
+                    lines.push(Line::from(vec![
+                        Span::styled(
+                            if i == 0 { "› " } else { "  " },
+                            Style::default().fg(theme::accent()),
+                        ),
+                        Span::styled(
+                            part.into_owned(),
+                            Style::default()
+                                .fg(theme::text())
+                                .add_modifier(Modifier::BOLD),
+                        ),
+                    ]));
+                }
+                lines.push(Line::from(""));
+                match a {
+                    // The answer as Markdown: headings, lists, bold, code.
+                    Some(a) if !a.trim().is_empty() => {
+                        let (md, _) = crate::tui::markdown::render_markdown_lines_with_hits(
+                            a.trim(),
+                            false,
+                            w,
+                        );
+                        lines.extend(md);
+                    }
+                    _ => lines.push(Line::from(Span::styled(
+                        "thinking…",
+                        Style::default()
+                            .fg(theme::muted())
+                            .add_modifier(Modifier::ITALIC),
+                    ))),
                 }
                 lines.push(Line::from(""));
             };
             for (q, a) in side {
-                qa(q, a);
+                qa(q, Some(a));
             }
             if let Some((q, a)) = live {
-                qa(q, if a.is_empty() { "…" } else { a });
+                qa(q, Some(a).filter(|a| !a.is_empty()));
             }
             if focused {
-                lines.push(muted("type a side question".into()));
+                lines.push(muted("type a side question · Alt+W close".into()));
             }
-            ("side chat".into(), lines)
+            let title = if side.is_empty() {
+                "side chat".to_string()
+            } else {
+                format!("side chat · {}", side.len())
+            };
+            (title, lines)
         }
     }
 }
@@ -361,9 +409,10 @@ pub fn render_pane(
     live: Option<(&str, &str)>,
     focused: bool,
 ) {
-    let (title, lines) = pane_lines(kind, agents, side, live, focused);
-    let block = pane_block(title, focused);
+    let block = pane_block(String::new(), focused);
     let inner = block.inner(rect);
+    let (title, lines) = pane_lines(kind, agents, side, live, focused, inner.width as usize);
+    let block = pane_block(title, focused);
     // Keep the bottom in view: estimate wrapped rows and scroll past the rest.
     let w = inner.width.max(1) as usize;
     let rows: usize = lines.iter().map(|l| l.width().max(1).div_ceil(w)).sum();
@@ -391,6 +440,33 @@ mod tests {
             skill: None,
             log: vec!["read_file src/a.rs".into()],
         }
+    }
+
+    #[test]
+    fn the_side_chat_draws_answers_as_markdown() {
+        let side = vec![(
+            "list the files".to_string(),
+            "### Files **changed**\n1. **`src/a.rs`**\n   - Main host.".to_string(),
+        )];
+        let (title, lines) =
+            pane_lines(&PaneKind::Side, &[], &side, Some(("next?", "")), false, 50);
+        assert_eq!(title, "side chat · 1");
+        let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
+        let all = text.join("\n");
+        assert!(all.contains("› list the files"), "{all}");
+        assert!(
+            !all.contains("**") && !all.contains("###"),
+            "raw markdown: {all}"
+        );
+        assert!(
+            all.contains("Files changed") && all.contains("src/a.rs"),
+            "{all}"
+        );
+        assert!(
+            all.contains("› next?") && all.contains("thinking…"),
+            "{all}"
+        );
+        assert!(all.contains("─"), "a rule between exchanges");
     }
 
     #[test]
@@ -492,6 +568,7 @@ mod tests {
             &[],
             None,
             true,
+            60,
         );
         assert_eq!(title, "◇ 56044093");
         let text: Vec<String> = lines.iter().map(|l| l.to_string()).collect();
