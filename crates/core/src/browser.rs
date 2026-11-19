@@ -1602,6 +1602,8 @@ async fn replay(input: &Value, page: &Page, workspace_root: &Path) -> Result<Str
 
 /// A screenshot of the page once it has settled (JPEG bytes).
 async fn settled_shot(page: &Page) -> Result<Vec<u8>, String> {
+    // A page in a background tab may not paint (headless Chrome): in front.
+    let _ = page.call("Page.bringToFront", json!({})).await;
     settle(page, Duration::from_secs(4)).await;
     let shot = page
         .call(
@@ -1702,10 +1704,21 @@ pub async fn smoke_test(workspace: &Path, name: &str, save: bool) -> Result<Stri
                 }
             }
         }
+        // A link that opens another tab is followed in this one (as in a
+        // recording): the screenshots stay of the page being tested.
+        let before: Vec<String> = if action == "click" {
+            list_tabs(page.port)
+                .await
+                .map(|t| t.into_iter().map(|t| t.id).collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
         if let Err(e) = run_page_action(&action, &step, page, workspace).await {
             report.push(format!("✗ {n}. {what}: {e}"));
             return Ok(finish_report(&dir, save, &report, n, steps.len(), changed));
         }
+        let _ = follow_new_tab(page, &before).await;
         let shot = settled_shot(page).await?;
         if save {
             std::fs::write(dir.join(format!("base-{n}.jpg")), &shot).map_err(|e| e.to_string())?;
