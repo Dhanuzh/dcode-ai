@@ -1,6 +1,10 @@
 # Changelog
 
-## 1.0.82 — 2026-11-19
+## 1.0.83 — 2026-11-19
+
+(1.0.82 was tagged but its build failed — the new pre-commit hook was
+committed without its executable bit — so it was never published; its
+changes ship here.)
 
 ### Fixed
 - **Stray markup in replies**: lines like `<retrieval_document>` that some
