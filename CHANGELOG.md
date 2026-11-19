@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.84 — 2026-11-19
+
+### Changed
+- **A new live web page** (`/watch`, `/invite web`, `/invite phone`):
+  chat bubbles for people's messages, replies drawn as Markdown (lists,
+  bold, links, code blocks with a copy button), tool steps as a compact
+  list with a spinner / ✓ / ✗ (long runs fold into "+N earlier steps"),
+  a "working…" indicator, coloured avatars for the people here, and an
+  approval card that glows and stays in reach. A message box that grows,
+  Enter sends and Shift+Enter makes a new line; a "↓ latest" button when
+  you've scrolled up. Light and dark follow the system.
+- **Collapsible side panel**: Activity, Here now, Shared to-dos and Files
+  touched each fold (a folded card shows a one-line summary), and the ◧
+  button hides the whole panel; both are remembered in the browser.
+- **On a phone**: the page fits the screen, the side panel opens as a
+  sheet from the bottom (◧), approval cards sit right above the message
+  box with big Allow / Deny buttons, and your name is set in the sheet.
+
 ## 1.0.83 — 2026-11-19
 
 (1.0.82 was tagged but its build failed — the new pre-commit hook was
