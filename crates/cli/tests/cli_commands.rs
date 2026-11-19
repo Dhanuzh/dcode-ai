@@ -573,7 +573,8 @@ model = "gpt-4.1"
     let provider_models = payload["provider_models"]
         .as_array()
         .expect("provider_models array");
-    assert_eq!(provider_models.len(), 2);
+    // Claude, Copilot and the local model server.
+    assert_eq!(provider_models.len(), 3);
     assert!(provider_models.iter().any(|entry| {
         entry["provider"] == "GitHub Copilot"
             && entry["model"] == "gpt-4.1"
@@ -620,7 +621,13 @@ model = "claude-sonnet-5-5"
     assert_eq!(payload["provider"], "Claude");
     assert_eq!(payload["default_model"], "claude-sonnet-5-5");
     let providers = payload["providers"].as_array().expect("providers array");
-    assert_eq!(providers.len(), 2);
+    // Claude, Copilot and the local model server.
+    assert_eq!(providers.len(), 3);
+    assert!(
+        providers
+            .iter()
+            .any(|entry| entry["provider"] == "Local model")
+    );
     // api_key_present depends on the test environment having ANTHROPIC_API_KEY set.
     // We only assert the shape (provider + selected flag), not the key presence.
     assert!(
