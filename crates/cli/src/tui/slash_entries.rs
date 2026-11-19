@@ -249,6 +249,16 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
         &[("open", false, "the files panel full screen (Esc returns)")],
     ),
     (
+        "/split",
+        &[
+            ("right", false, "a pane to the right (Alt+\\)"),
+            ("below", false, "a pane below (Alt+-)"),
+            ("next", false, "write to the next pane (Alt+O)"),
+            ("show", false, "change what the focused pane shows (Alt+A)"),
+            ("close", false, "close the focused pane (Alt+W)"),
+        ],
+    ),
+    (
         "/dashboard",
         &[
             (
@@ -795,6 +805,7 @@ pub(crate) fn command_group(cmd: &str) -> (u8, &'static str) {
                 "/doctor",
                 "/dashboard",
                 "/dash",
+                "/split",
                 "/transcript",
             ],
         ),
@@ -877,6 +888,7 @@ mod tests {
             include_str!("../repl/cmd_work.rs"),
             include_str!("app.rs"),
             include_str!("app/keys.rs"),
+            include_str!("split.rs"),
         ]
         .concat();
         let mut missing = Vec::new();

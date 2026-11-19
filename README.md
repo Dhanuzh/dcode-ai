@@ -279,7 +279,7 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 | `Alt+7` **scratch** | What the agent made along the way, live: test logs, screenshots, API responses, previewed (pictures as colour thumbnails) |
 | `Alt+8` **swarm** | The swarm board: what each sub-agent claimed, its findings and questions, and workflow progress |
 
-**Split workspace:** `Ctrl+X` then `|` (right) or `-` (below) opens a pane next to the conversation — a sub-agent at work, or a side chat. The message box writes to the focused pane (`Ctrl+X o` or click to move, `Ctrl+X a` changes what it shows, `Ctrl+X x` closes it); the layout is remembered.
+**Split workspace:** `Alt+\` (right) or `Alt+-` (below) opens a pane next to the conversation — a sub-agent at work, or a side chat. The message box writes to the focused pane (`Alt+O` or click to move, `Alt+A` changes what it shows, `Alt+W` closes it); the layout is remembered. `/split right|below|next|show|close` does the same (and `Ctrl+X` then `|` where the terminal doesn't take Ctrl+X).
 
 Click, scroll, drag to select and copy, and resize the side panels. `/timeline` scrubs through the session step by step.
 

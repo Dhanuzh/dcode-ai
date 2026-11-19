@@ -151,6 +151,24 @@ or missing, the fix, and how to check it.
   barge-in stops speech within 300 ms; works with the fake audio device in
   tests.
 
+## 5c-fix. Split workspace keys don't work (reported 2026-11-19, v1.0.86)
+
+- **W1-fix (done v1.0.87). Replace Ctrl+X as the split key** — found: Ctrl+X `|` works in a plain PTY (test added), so the user's terminal takes Ctrl+X; kept as a fallback, Alt keys + `/split` added — the user pressed Ctrl+X then
+  `|` and nothing happened. Ctrl+X is likely taken before dcode-ai sees it
+  (the terminal's or VS Code's "cut", the composer's own Ctrl+X, or the vim
+  layer), so the leader never arms. Change to keys that reach the app in
+  every terminal, and keep a command that always works:
+  - `Alt+|` (or `Alt+\`) split right, `Alt+-` split below, `Alt+O` next
+    pane, `Alt+W` close pane, `Alt+A` change what it shows (dashboard only;
+    Alt+1–8 are already the tabs);
+  - `/split right|below|close|next|show <agent|side>` as the always-works
+    way, listed in `/` and Ctrl+P;
+  - footer hint in the dashboard while split ("Alt+O next pane · Alt+W close");
+  - first find out why Ctrl+X didn't arm (log key events in a PTY test on
+    WSL / Windows Terminal / VS Code) so the old leader is either fixed or
+    removed, not left half-working; update README, CHANGELOG, `?` help.
+  *Check:* PTY test that Alt+| opens a pane and `/split close` closes it.
+
 ## 5d. Free entry: local models and model routing (2026-11-19)
 
 Changes an earlier decision: since 2026-10-13 Claude and Copilot are the

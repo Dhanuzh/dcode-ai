@@ -1020,9 +1020,9 @@ impl Repl {
                 return self.cmd_session(input, command, rest, parts, out).await;
             }
             "/help" | "/keymaps" | "/status" | "/context" | "/diff" | "/copy" | "/dashboard"
-            | "/dash" | "/transcript" | "/cost" | "/usage" | "/release-notes" | "/goals"
-            | "/todos" | "/stats" | "/doctor" | "/map" | "/feedback" | "/bugreport" | "/budget"
-            | "/pin" | "/pins" | "/unpin" | "/recap" => {
+            | "/split" | "/dash" | "/transcript" | "/cost" | "/usage" | "/release-notes"
+            | "/goals" | "/todos" | "/stats" | "/doctor" | "/map" | "/feedback" | "/bugreport"
+            | "/budget" | "/pin" | "/pins" | "/unpin" | "/recap" => {
                 return self.cmd_info(input, command, rest, parts, out).await;
             }
             "/agent" | "/update" | "/vim" | "/permissions" | "/permission-bypass" | "/models"

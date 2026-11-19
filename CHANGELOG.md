@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.87 — 2026-11-19
+
+### Fixed
+- **Split workspace keys**: Ctrl+X is taken as "cut" by many terminals and
+  editors (VS Code, Windows Terminal setups), so Ctrl+X `|` did nothing.
+  The split now uses **Alt+\\** (or Alt+|) for a pane to the right,
+  **Alt+-** below, and with panes open **Alt+O** next pane, **Alt+A**
+  change what it shows, **Alt+W** close — from the normal view too (it
+  opens the dashboard). **`/split right|below|next|prev|show|close`**
+  always works and is in the `/` menu; Ctrl+X `|` still works where the
+  terminal passes Ctrl+X through.
+- The dashboard's tab hint says Alt+1-8 (the swarm tab is Alt+8).
+
 ## 1.0.86 — 2026-11-19
 
 ### Fixed

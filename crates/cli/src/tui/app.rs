@@ -1829,6 +1829,7 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "".into(),
         "─── Tools ────────────────────────────────────────────".into(),
         "  Ctrl+O             Fold / unfold tool output".into(),
+        "  Alt+\\ / Alt+-      Split: a pane right / below (Alt+O next, Alt+A change, Alt+W close; /split)".into(),
         "  Ctrl+X V           Full-screen transcript (expand/scroll/raw)".into(),
         "  Ctrl+X T           Toggle latest tool block collapsed/expanded".into(),
         "  Ctrl+X X           Ctrl+X leader (prefix for shortcuts below)".into(),

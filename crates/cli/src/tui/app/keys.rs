@@ -229,6 +229,33 @@ pub(super) fn handle_key_event(
         && !g.command_palette_open
         && g.active_approval.is_none()
         && g.active_question.is_none();
+    // The split workspace on Alt keys (Ctrl+X is taken by many terminals
+    // and editors as "cut"): Alt+\\ or Alt+| right, Alt+- below, and with
+    // panes open Alt+O next, Alt+W close, Alt+A change what it shows.
+    let split_free = !list_nav_active
+        && !g.command_palette_open
+        && g.active_approval.is_none()
+        && g.active_question.is_none();
+    if split_free
+        && key.modifiers.contains(KeyModifiers::ALT)
+        && !key.modifiers.contains(KeyModifiers::CONTROL)
+    {
+        use crate::tui::split::SplitAction as A;
+        let open = g.split.is_split() && g.view_mode == crate::tui::state::ViewMode::Dashboard;
+        let action = match key.code {
+            KeyCode::Char('\\') | KeyCode::Char('|') => Some(A::Right),
+            KeyCode::Char('-') | KeyCode::Char('_') => Some(A::Below),
+            KeyCode::Char('o') | KeyCode::Char('O') if open => Some(A::Next),
+            KeyCode::Char('w') | KeyCode::Char('W') if open => Some(A::Close),
+            KeyCode::Char('a') | KeyCode::Char('A') if open => Some(A::Show),
+            _ => None,
+        };
+        if let Some(a) = action {
+            let msg = g.split_action(a);
+            g.show_toast(msg, crate::tui::state::ToastKind::Info);
+            return KeyFlow::Continue;
+        }
+    }
     if dashboard_free && key.code == KeyCode::Char('d') && key.modifiers == KeyModifiers::CONTROL {
         g.toggle_changes_focus();
         return KeyFlow::Continue;
@@ -1196,51 +1223,32 @@ pub(super) fn handle_key_event(
                 g.transcript_overlay_open = true;
                 g.transcript_overlay_scroll = usize::MAX; // start at bottom
             }
-            // The split workspace: `|` right, `-` below, `x` close, `o` /
-            // arrows move focus, `a` change what the pane shows.
+            // The split workspace (also Alt+\\ / Alt+- and `/split`).
             KeyCode::Char('|') | KeyCode::Char('\\') | KeyCode::Char('-') => {
-                let below = key.code == KeyCode::Char('-');
-                if g.view_mode != crate::tui::state::ViewMode::Dashboard {
-                    g.toggle_view_mode();
-                }
-                let agents = g.subagents.clone();
-                let msg = if g.split.split(below, &agents) {
-                    "Split — type to write to the focused pane · Ctrl+X o moves · Ctrl+X x closes"
+                use crate::tui::split::SplitAction as A;
+                let a = if key.code == KeyCode::Char('-') {
+                    A::Below
                 } else {
-                    "At most three panes — Ctrl+X x closes one"
+                    A::Right
                 };
-                g.show_toast(msg.to_string(), crate::tui::state::ToastKind::Info);
-                g.rail_focus = false;
-                g.save_split();
-                g.touch_transcript();
+                let msg = g.split_action(a);
+                g.show_toast(msg, crate::tui::state::ToastKind::Info);
             }
             KeyCode::Char('x') if g.split.is_split() => {
-                if g.split.close_focused() {
-                    g.save_split();
-                } else {
-                    g.show_toast(
-                        "The conversation can't be closed — focus a pane first (Ctrl+X o)"
-                            .to_string(),
-                        crate::tui::state::ToastKind::Info,
-                    );
-                }
-                g.touch_transcript();
+                let msg = g.split_action(crate::tui::split::SplitAction::Close);
+                g.show_toast(msg, crate::tui::state::ToastKind::Info);
             }
             KeyCode::Char('o') | KeyCode::Right | KeyCode::Down if g.split.is_split() => {
-                g.split.move_focus(1);
-                g.rail_focus = false;
-                g.touch_transcript();
+                let msg = g.split_action(crate::tui::split::SplitAction::Next);
+                g.show_toast(msg, crate::tui::state::ToastKind::Info);
             }
             KeyCode::Left | KeyCode::Up if g.split.is_split() => {
-                g.split.move_focus(-1);
-                g.rail_focus = false;
-                g.touch_transcript();
+                let msg = g.split_action(crate::tui::split::SplitAction::Prev);
+                g.show_toast(msg, crate::tui::state::ToastKind::Info);
             }
             KeyCode::Char('a') if g.split.focus > 0 => {
-                let agents = g.subagents.clone();
-                g.split.cycle_focused(&agents);
-                g.save_split();
-                g.touch_transcript();
+                let msg = g.split_action(crate::tui::split::SplitAction::Show);
+                g.show_toast(msg, crate::tui::state::ToastKind::Info);
             }
             _ => {}
         }

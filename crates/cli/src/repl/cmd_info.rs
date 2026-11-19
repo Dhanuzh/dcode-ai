@@ -387,6 +387,21 @@ impl Repl {
                     out.println("[copy] available in TUI mode");
                 }
             }
+            "/split" => {
+                if let ReplOutput::Tui(st) = &out {
+                    match crate::tui::split::SplitAction::parse(rest) {
+                        Some(a) => {
+                            if let Ok(mut g) = st.lock() {
+                                let msg = g.split_action(a);
+                                g.show_toast(msg, crate::tui::state::ToastKind::Info);
+                            }
+                        }
+                        None => out.println("usage: /split [right|below|next|prev|show|close] — panes beside the conversation (keys: Alt+\\ right, Alt+- below, Alt+O next, Alt+A change, Alt+W close)"),
+                    }
+                } else {
+                    out.println("[split] the split workspace is in the full-screen terminal UI");
+                }
+            }
             "/dashboard" | "/dash" => {
                 if let ReplOutput::Tui(st) = &out {
                     let words: Vec<&str> = rest.split_whitespace().collect();

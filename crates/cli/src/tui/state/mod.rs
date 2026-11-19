@@ -1795,6 +1795,63 @@ impl TuiSessionState {
         true
     }
 
+    /// One split-workspace action (Alt keys, the Ctrl+X leader, `/split`).
+    /// Returns what to tell the user.
+    pub fn split_action(&mut self, action: crate::tui::split::SplitAction) -> String {
+        use crate::tui::split::SplitAction as A;
+        let agents = self.subagents.clone();
+        let msg = match action {
+            A::Right | A::Below => {
+                if self.view_mode != ViewMode::Dashboard {
+                    self.toggle_view_mode();
+                }
+                self.rail_focus = false;
+                if self.split.split(action == A::Below, &agents) {
+                    "Split — the message box writes to the focused pane · Alt+O next · Alt+A change · Alt+W close".to_string()
+                } else {
+                    "At most three panes — Alt+W closes one".to_string()
+                }
+            }
+            A::Close if self.split.close_focused() => "Pane closed".to_string(),
+            A::Close if self.split.is_split() => {
+                "The conversation can't be closed — Alt+O to a pane first".to_string()
+            }
+            A::Close => "No panes open — Alt+\\ splits right, Alt+- below".to_string(),
+            A::Next | A::Prev if self.split.is_split() => {
+                self.split
+                    .move_focus(if action == A::Next { 1 } else { -1 });
+                self.rail_focus = false;
+                match self.split.focused() {
+                    None => "Writing to the conversation".to_string(),
+                    Some(crate::tui::split::PaneKind::Side) => {
+                        "Writing to the side chat".to_string()
+                    }
+                    Some(crate::tui::split::PaneKind::Agent(id)) => {
+                        format!(
+                            "Writing to agent {}",
+                            id.chars()
+                                .rev()
+                                .take(8)
+                                .collect::<String>()
+                                .chars()
+                                .rev()
+                                .collect::<String>()
+                        )
+                    }
+                }
+            }
+            A::Show if self.split.focus > 0 => {
+                self.split.cycle_focused(&agents);
+                "Pane shows the next agent (or the side chat)".to_string()
+            }
+            A::Show => "Alt+O to a pane first, then Alt+A changes what it shows".to_string(),
+            _ => "No panes open — Alt+\\ splits right, Alt+- below".to_string(),
+        };
+        self.save_split();
+        self.touch_transcript();
+        msg
+    }
+
     /// Saves the split layout for next time.
     pub fn save_split(&self) {
         let mut p = crate::tui::dash_prefs::load();

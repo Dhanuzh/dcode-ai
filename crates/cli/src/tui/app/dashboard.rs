@@ -465,7 +465,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
             if focused {
                 " ←/→ tabs · Esc back "
             } else {
-                " Alt+1-7 · Ctrl+D focus "
+                " Alt+1-8 · Ctrl+D focus "
             },
             Style::default().fg(theme::muted()),
         )))

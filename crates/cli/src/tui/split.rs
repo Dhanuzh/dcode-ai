@@ -17,6 +17,32 @@ use crate::tui::theme;
 /// Panes beside the conversation, at most.
 pub const MAX_PANES: usize = 3;
 
+/// What a split key or `/split` asks for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitAction {
+    Right,
+    Below,
+    Close,
+    Next,
+    Prev,
+    Show,
+}
+
+impl SplitAction {
+    /// `/split <word>`.
+    pub fn parse(word: &str) -> Option<Self> {
+        Some(match word.trim().to_ascii_lowercase().as_str() {
+            "" | "right" | "r" | "|" => Self::Right,
+            "below" | "down" | "b" | "-" => Self::Below,
+            "close" | "x" | "off" => Self::Close,
+            "next" | "n" | "o" => Self::Next,
+            "prev" | "previous" | "p" => Self::Prev,
+            "show" | "a" | "change" => Self::Show,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PaneKind {
     /// A sub-agent's live activity (by id).
@@ -365,6 +391,16 @@ mod tests {
             skill: None,
             log: vec!["read_file src/a.rs".into()],
         }
+    }
+
+    #[test]
+    fn split_words_parse() {
+        assert_eq!(SplitAction::parse(""), Some(SplitAction::Right));
+        assert_eq!(SplitAction::parse("below"), Some(SplitAction::Below));
+        assert_eq!(SplitAction::parse("CLOSE"), Some(SplitAction::Close));
+        assert_eq!(SplitAction::parse("next"), Some(SplitAction::Next));
+        assert_eq!(SplitAction::parse("show"), Some(SplitAction::Show));
+        assert_eq!(SplitAction::parse("sideways"), None);
     }
 
     #[test]

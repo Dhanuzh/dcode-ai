@@ -255,9 +255,9 @@ fn typing_pasting_modes_and_dashboard() {
 
     // Ctrl+\ opens the dashboard and closes it again.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-7");
+    tui.wait_for("Alt+1-8");
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-7"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-8"));
 
     // Ctrl+C twice quits.
     tui.send(b"\x03");
@@ -313,7 +313,7 @@ fn the_board_and_the_scratch_tab() {
 
     // The dashboard's scratch tab (Alt+7).
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-7");
+    tui.wait_for("Alt+1-8");
     tui.send(b"\x1b7");
     tui.wait_for("nothing yet");
 }
@@ -951,7 +951,7 @@ fn see_and_share_a_session() {
 
     // The dashboard's files tab shows it too.
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-7");
+    tui.wait_for("Alt+1-8");
     tui.send(b"\x1b4");
     // The project explorer, with what the agent touched marked.
     tui.wait_until("the files tab", |t| {
@@ -964,7 +964,7 @@ fn see_and_share_a_session() {
     });
     tui.send(b"t");
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-7"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-8"));
 
     run(&mut tui, "/office");
     tui.wait_until("the office", |t| {
@@ -1410,7 +1410,7 @@ fn a_local_join_gets_the_interface_and_the_call() {
     mate.wait_for("hi team");
     host.send(b"\x1b");
     host.send(b"\x1c");
-    host.wait_until("back to the inline view", |t| !t.contains("Alt+1-7"));
+    host.wait_until("back to the inline view", |t| !t.contains("Alt+1-8"));
 
     run(&mut mate, "/hangup");
     host.wait_for("Kiran left the call");
@@ -1539,7 +1539,7 @@ fn the_mouse_scrolls_the_dashboard() {
     tui.wait_for("? for shortcuts");
 
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-7");
+    tui.wait_for("Alt+1-8");
     tui.wait_for("line 70 of the long answer");
     // Wheel up over the conversation (SGR mouse: button 64 = wheel up).
     for _ in 0..12 {
@@ -1633,12 +1633,12 @@ fn office_screenshots() {
     tui.send(b"\r");
     tui.wait_for("part0");
     tui.send(b"\x1c");
-    tui.wait_for("Alt+1-7");
+    tui.wait_for("Alt+1-8");
     tui.send(b"\x1b5");
     std::thread::sleep(Duration::from_millis(900));
     shots.push(tui.cells_json());
     tui.send(b"\x1c");
-    tui.wait_until("the inline view", |t| !t.contains("Alt+1-7"));
+    tui.wait_until("the inline view", |t| !t.contains("Alt+1-8"));
     tui.wait_for("? for shortcuts");
     // Waiting for an approval.
     tui.send(b"please create the note");
@@ -1665,4 +1665,34 @@ fn office_screenshots() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/office-screens.json");
     std::fs::write(path, serde_json::to_string(&shots).unwrap()).unwrap();
+}
+
+#[test]
+fn split_panes_open_and_close() {
+    let (_dir, home, ws) = setup();
+    let mut tui = Tui::start(&home, &ws);
+    tui.wait_for("? for shortcuts");
+    // Ctrl+X then `|`: a pane next to the conversation (the dashboard opens).
+    tui.send(b"\x18");
+    std::thread::sleep(Duration::from_millis(150));
+    tui.send(b"|");
+    tui.wait_for("side chat");
+    // Alt+W closes the focused pane.
+    tui.send(b"\x1bw");
+    tui.wait_until("the pane closed", |t| !t.contains("side chat"));
+    // Alt+| opens one again (terminals that take Ctrl+X as "cut").
+    tui.send(b"\x1b|");
+    tui.wait_for("side chat");
+    tui.send(b"\x1bw");
+    tui.wait_until("the pane closed again", |t| !t.contains("side chat"));
+    // Alt+\ (sent as ESC \) works too.
+    tui.send(b"\x1b\\");
+    tui.wait_for("side chat");
+    tui.send(b"\x1bw");
+    tui.wait_until("closed after Alt+\\", |t| !t.contains("side chat"));
+    // `/split below` always works.
+    tui.send(b"/split below");
+    std::thread::sleep(Duration::from_millis(300));
+    tui.send(b"\r");
+    tui.wait_for("side chat");
 }
