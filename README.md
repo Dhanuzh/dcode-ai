@@ -246,6 +246,12 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 <br><sub><code>/recap</code>: your day as a card and a short video, with streaks and achievements.</sub>
 </td>
 </tr>
+<tr>
+<td colspan="2" valign="top">
+<img src="docs/assets/split-side-chat.png" alt="The dashboard split: the conversation in the middle, a side chat pane answering a question with formatted text, and the Agent Office on the right">
+<br><sub>The split workspace (<kbd>Alt</kbd>+<kbd>\</kbd>): a side chat — or a sub-agent at work — next to the conversation. Side answers are formatted and never interrupt the agent.</sub>
+</td>
+</tr>
 </table>
 
 ## 🧰 Features
