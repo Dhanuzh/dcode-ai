@@ -112,6 +112,71 @@ or missing, the fix, and how to check it.
     then the fix.
 22. Replace `chrono` with `jiff` (unmaintained advisory ignored for now).
 
+## 5b. Multi-agent (from the Antigravity comparison, 2026-11-19)
+
+- **A1. Swarm board** — sub-agents of a `/fleet` (or any parent) post to
+  and read from one shared board: claims ("taking: auth tests"), findings,
+  questions, done. A `board_post` / `board_read` tool pair; the head agent
+  and every worker see new posts between steps. Live view in the dashboard
+  (a rail tab, Alt+8) with who posted what and when; `/fleet board` inline.
+  *Check:* two sub-agents on a split task avoid duplicate work by claiming
+  on the board (test with the mock provider).
+- **A2. Workflow fan-out** — a `run_workflow` tool (or `run_script` mode
+  `workflow: true`): a script maps a list of items to sub-agent tasks
+  (`agents.run(task, {worktree})`), runs N at a time, gathers their
+  reports; no 60 s cap (hours, with a budget), progress shown live
+  ("12/40 done · 2 failed · ~6 min left") in the dashboard and inline,
+  stoppable with Esc, resumable. Approvals still apply to the workers.
+  *Check:* a 20-item fan-out with a mock provider finishes, reports per
+  item, respects the parallel limit and the budget.
+
+## 5c. From the Codex comparison (2026-11-19)
+
+- **W1. Split terminal workspace** — several conversations side by side in
+  one terminal: panes (split right/below) and tabs, each a session or a
+  side chat (`/btw` as a pane instead of a popup). A leader key (Ctrl+X by
+  default, `/keymap`) then a letter: `|` split right, `-` split below,
+  `t` new tab, arrows move focus, `x` close. Layout saved per project.
+  Builds on the dashboard's rails and the session picker; each pane keeps
+  its own composer, scroll and status. *Check:* two panes run two turns at
+  once; resize and focus by keys and mouse; layout restored on restart.
+- **W2. Realtime voice calls with the agent** — talk and be answered as a
+  conversation, not turn by turn: speech streamed in (Whisper on rolling
+  chunks), the reply spoken as it is written (sentence by sentence through
+  the Piper/Windows voice), barge-in (speaking cuts the reply off), and the
+  agent's tool work narrated briefly ("reading main.rs…"). Mic and speaker
+  pick in `/talk devices`; `/talk call` starts it, Esc ends. Builds on
+  `/talk loop` and `/call` (people's calls already stream audio).
+  *Check:* first spoken word under ~1.5 s after the reply starts streaming;
+  barge-in stops speech within 300 ms; works with the fake audio device in
+  tests.
+
+## 5d. Free entry: local models and model routing (2026-11-19)
+
+Changes an earlier decision: since 2026-10-13 Claude and Copilot are the
+only providers (AGENTS.md). Local models come back as a third, opt-in
+provider, chosen by the user on 2026-11-19 as the main step to free entry.
+
+- **M1. Local models (Ollama, LM Studio)** — a `local` provider speaking the
+  OpenAI-compatible chat API both expose (`http://localhost:11434/v1`,
+  `http://localhost:1234/v1`). Found automatically at start (a quick probe
+  of both ports); `/models` lists the installed models with size and
+  context; `/model local:qwen3-coder` picks one; tool calls through the
+  native tool API when the model supports it, else the `<tool_call>` text
+  protocol already used for the claude-code backend. Onboarding offers it
+  when no Claude or Copilot sign-in exists ("Use a free local model"). No
+  downloads by dcode-ai — it points to `ollama pull …`.
+  *Check:* mock OpenAI-compatible server in tests (tool calls native and
+  text); the empty-completion rule still fails loudly.
+- **M2. Automatic model routing** — `model = "auto"`: each turn goes to a
+  model by what it needs — quick questions, reads and small edits to a
+  cheap/fast one (Haiku, a Copilot mini model, or a local model), planning,
+  long edits and hard failures to a strong one (Opus/Sonnet, GPT); a
+  failed or empty answer retries one tier up. Rules visible and editable
+  (`[model.routing]`), the chosen model shown on each turn, `/cost` shows
+  savings. *Check:* routing table tests; a mock run where a failing cheap
+  answer escalates.
+
 ## 6. Code health (found reading the code)
 
 23. **Split the biggest files** — `jira_sync.rs` 4.6k lines,
@@ -133,5 +198,5 @@ or missing, the fix, and how to check it.
 
 ## Order
 
-1 → 2 → 3 → 4 → 5 → 24 → 26 → 6 → 7 → 8 → 11 → 12 → 19 → 23, the rest
-as asked.
+1 → 2 → 3 → 4 → 5 → 24 → 26 → 6 → 7 → 8 → M1 → M2 → A1 → A2 → W1 → W2 → 11 → 12 → 19 → 23,
+the rest as asked.
