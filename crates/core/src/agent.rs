@@ -369,6 +369,9 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         self.cancel_flag.store(false, Ordering::SeqCst);
         self.compacted_this_turn = None;
         self.pruned_this_turn = false;
+        // A run stopped mid-tool may have left calls without results; the
+        // API refuses the whole history until each has one.
+        dcode_ai_common::message::close_unanswered_tool_calls(&mut self.messages);
         // The user message is pushed next, at this history index.
         self.undo.begin_turn(self.messages.len());
         let user_msg = if attachments.is_empty() {
@@ -516,6 +519,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 self.maybe_compact(workspace_root).await;
             }
             self.maybe_trim_context().await;
+            dcode_ai_common::message::close_unanswered_tool_calls(&mut self.messages);
             self.provider
                 .prepare_messages_for_request(&mut self.messages, workspace_root)
                 .await?;

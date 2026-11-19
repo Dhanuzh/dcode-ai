@@ -1790,6 +1790,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "gif",
+ "ignore",
  "image",
  "object",
  "pdf-extract",

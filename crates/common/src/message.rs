@@ -410,9 +410,84 @@ pub struct MessageToolCall {
     pub arguments: Value,
 }
 
+/// What a tool call that never got its result is answered with.
+pub const CANCELLED_TOOL_RESULT: &str =
+    "Cancelled — the run was stopped before this finished; no result.";
+
+/// Gives every tool call without a result a "cancelled" one, right after the
+/// results it does have. A run stopped mid-tool (Esc, a guest's new message,
+/// a crash) used to leave such calls behind, and the API then refused every
+/// later request ("tool_use ids were found without tool_result blocks").
+/// Returns how many were added.
+pub fn close_unanswered_tool_calls(messages: &mut Vec<Message>) -> usize {
+    let mut added = 0;
+    let mut i = 0;
+    while i < messages.len() {
+        let calls: Vec<String> = match (&messages[i].role, &messages[i].tool_calls) {
+            (Role::Assistant, Some(calls)) if !calls.is_empty() => {
+                calls.iter().map(|c| c.id.clone()).collect()
+            }
+            _ => {
+                i += 1;
+                continue;
+            }
+        };
+        // The results that follow it.
+        let mut end = i + 1;
+        let mut answered = std::collections::HashSet::new();
+        while end < messages.len() && messages[end].role == Role::Tool {
+            if let Some(id) = &messages[end].tool_call_id {
+                answered.insert(id.clone());
+            }
+            end += 1;
+        }
+        for id in calls.into_iter().filter(|id| !answered.contains(id)) {
+            messages.insert(end, Message::tool(id, CANCELLED_TOOL_RESULT));
+            end += 1;
+            added += 1;
+        }
+        i = end;
+    }
+    added
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn call(id: &str) -> MessageToolCall {
+        MessageToolCall {
+            id: id.into(),
+            name: "repo_map".into(),
+            arguments: Value::Null,
+        }
+    }
+
+    #[test]
+    fn unanswered_tool_calls_get_a_cancelled_result_in_place() {
+        let mut asst = Message::assistant("looking");
+        asst.tool_calls = Some(vec![call("a"), call("b")]);
+        let mut msgs = vec![
+            Message::user("hi"),
+            asst,
+            Message::tool("a", "ok"),
+            // The run was stopped before `b` finished; a new message came.
+            Message::user("(from Raju) Whatsup"),
+        ];
+        assert_eq!(close_unanswered_tool_calls(&mut msgs), 1);
+        assert_eq!(msgs.len(), 5);
+        assert_eq!(msgs[3].role, Role::Tool);
+        assert_eq!(msgs[3].tool_call_id.as_deref(), Some("b"));
+        assert_eq!(msgs[4].role, Role::User);
+        // Already whole: nothing changes.
+        assert_eq!(close_unanswered_tool_calls(&mut msgs), 0);
+        // A call at the very end.
+        let mut last = Message::assistant("");
+        last.tool_calls = Some(vec![call("c")]);
+        msgs.push(last);
+        assert_eq!(close_unanswered_tool_calls(&mut msgs), 1);
+        assert_eq!(msgs.last().unwrap().tool_call_id.as_deref(), Some("c"));
+    }
 
     #[test]
     fn serde_legacy_string_content_roundtrips() {

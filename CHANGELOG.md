@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.0.86 — 2026-11-19
+
+### Fixed
+- **"`tool_use` ids were found without `tool_result`"**: stopping a run
+  while a tool was working (or a guest's message arriving then) left that
+  call without a result, and the API refused every later request. Each
+  unanswered call now gets a "cancelled" result before the next request —
+  sessions already stuck this way work again.
+- **`repo_map` taking minutes**: it now follows `.gitignore`, skips files
+  over 256 KB, reads in parallel and stops reading after 20 s (slow disks
+  and WSL `/mnt` drives).
+- **QR codes that wouldn't scan** (`/invite`, `/watch`): drawn pure black
+  on white with a quiet border whatever the theme, never wrapped or cut;
+  a window too narrow says how many columns it needs.
+- **Web page**: a guest's message showed twice; a stopped run left a
+  spinner and "working…"; API errors showed as raw JSON.
+
+### Added
+- **`/` commands on the web page**: type `/` for a menu — `/chat`, `/todo`,
+  `/stop` (stops the agent), `/approve`, `/deny`, `/name`, `/clear`,
+  `/help` — with arrow keys, Enter or Tab. Host commands (`/review`…) say
+  they run only in the host's terminal. A hint line under the box, a
+  softer focus ring, and send errors that say what happened.
+
 ## 1.0.85 — 2026-11-19
 
 ### Added

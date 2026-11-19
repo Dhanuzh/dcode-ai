@@ -421,11 +421,9 @@ pub(crate) async fn serve(
         }
         ("/act", Some(chat)) => {
             // Approve / deny a tool call, or answer a question — only for a
-            // driver on an invite that allows it.
-            if chat.guest(guest_token).is_none()
-                || !chat.can_drive(guest_token)
-                || !chat.let_approve
-            {
+            // driver on an invite that allows it. Stopping the run needs only
+            // a driver (as `/stop` from `dcode-ai join`).
+            if chat.guest(guest_token).is_none() || !chat.can_drive(guest_token) {
                 return respond(&mut write, "403 Forbidden", "text/plain", "not allowed").await;
             }
             let mut body = vec![0u8; body_len.min(4000)];
@@ -433,6 +431,9 @@ pub(crate) async fn serve(
             let Some(cmd) = act_command(&body) else {
                 return respond(&mut write, "400 Bad Request", "text/plain", "bad action").await;
             };
+            if !chat.let_approve && !matches!(cmd, dcode_ai_common::event::AgentCommand::Cancel) {
+                return respond(&mut write, "403 Forbidden", "text/plain", "not allowed").await;
+            }
             let ipc = dcode_ai_runtime::ipc::IpcClient::new(chat.socket.clone());
             let ok = ipc.send_command(&cmd).await.is_ok();
             respond(
@@ -513,6 +514,7 @@ pub(crate) fn act_command(body: &[u8]) -> Option<dcode_ai_common::event::AgentCo
                 (None, None) => QuestionSelection::Suggested,
             },
         },
+        "stop" => AgentCommand::Cancel,
         _ => return None,
     })
 }
@@ -640,6 +642,10 @@ mod tests {
         assert!(matches!(
             super::act_command(br#"{"action":"answer","question_id":"q","option_id":"o2"}"#),
             Some(AgentCommand::AnswerQuestion { selection: QuestionSelection::Option { option_id }, .. }) if option_id == "o2"
+        ));
+        assert!(matches!(
+            super::act_command(br#"{"action":"stop"}"#),
+            Some(AgentCommand::Cancel)
         ));
         assert!(super::act_command(br#"{"action":"approve"}"#).is_none());
         assert!(super::act_command(br#"{"action":"shutdown"}"#).is_none());

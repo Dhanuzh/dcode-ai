@@ -1205,6 +1205,23 @@ fn render_block(
                 )),
                 None,
             );
+            // Too wide to show whole (a QR code cut off can't be scanned):
+            // say how wide the window needs to be instead.
+            let need = rows.first().map_or(0, |r| r.len());
+            if need > w {
+                push_transcript_line(
+                    lines,
+                    hits,
+                    Line::from(Span::styled(
+                        format!(
+                            "  (the code needs {need} columns — widen this window and run the command again, or open the link)"
+                        ),
+                        Style::default().fg(theme::warn()),
+                    )),
+                    None,
+                );
+                return;
+            }
             for row in rows {
                 let spans: Vec<Span> = row
                     .iter()

@@ -174,7 +174,21 @@
   .composer { max-width: 1240px; margin: 0 auto; display: flex; gap: 10px; align-items: flex-end; }
   .composer .box { flex: 1; display: flex; align-items: flex-end; gap: 8px; background: var(--card); border: 1px solid var(--line);
     border-radius: 18px; padding: 8px 8px 8px 14px; box-shadow: var(--shadow); min-width: 0; }
-  .composer .box:focus-within { border-color: var(--accent); }
+  .composer .box:focus-within { border-color: color-mix(in srgb, var(--accent) 70%, var(--line));
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent), var(--shadow); }
+  .composer .wrap { position: relative; flex: 1; min-width: 0; }
+  .slash { position: absolute; left: 0; width: min(560px, 100%); bottom: calc(100% + 8px); background: var(--card); border: 1px solid var(--line);
+    border-radius: 14px; box-shadow: var(--shadow); padding: 6px; max-height: 300px; overflow: auto; z-index: 20; }
+  .slash .it { display: flex; gap: 10px; align-items: baseline; padding: 8px 10px; border-radius: 10px; cursor: pointer; }
+  .slash .it.on, .slash .it:hover { background: var(--card2); }
+  .slash .c { font: 600 13.5px var(--mono); color: var(--accent2); flex: none; }
+  .slash .a { font: 12.5px var(--mono); color: var(--faint); flex: none; }
+  .slash .d { color: var(--muted); font-size: 13px; margin-left: auto; text-align: right; }
+  .slash .head { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--faint); padding: 4px 10px 6px; }
+  .tip { max-width: 1240px; margin: 6px auto 0; font-size: 12px; color: var(--faint); display: flex; gap: 14px; flex-wrap: wrap; padding-left: 6px; }
+  .tip kbd { font: 11px var(--mono); background: var(--card); border: 1px solid var(--line); border-bottom-width: 2px; border-radius: 5px; padding: 0 5px; color: var(--muted); }
+  .step.stop .st::before { content: "■"; color: var(--faint); font-size: 10px; }
+  .step.stop { opacity: .7; }
   #say { flex: 1; min-width: 0; resize: none; border: 0; outline: none; background: transparent; color: var(--text);
     font: 15px/1.45 var(--sans); max-height: 160px; padding: 6px 0; }
   .send { width: 40px; height: 40px; border-radius: 12px; border: 0; background: var(--accent); color: #fff; cursor: pointer;
@@ -185,8 +199,6 @@
   .knock .t { color: var(--muted); font-size: 13.5px; }
   .primary { background: var(--accent); color: #fff; border: 0; border-radius: 12px; padding: 10px 18px; font-weight: 650; cursor: pointer; min-height: 44px; }
   .primary:disabled { opacity: .6; }
-  .hints { max-width: 1240px; margin: 6px auto 0; display: flex; gap: 6px; flex-wrap: wrap; }
-  .chip { font-size: 12px; color: var(--muted); background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 3px 10px; cursor: pointer; }
   footer.ro { max-width: 1240px; margin: 0 auto; text-align: center; font-size: 12.5px; color: var(--muted);
     background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 8px 14px; box-shadow: var(--shadow); }
   #jump { position: fixed; right: 22px; bottom: 96px; z-index: 16; display: none; border: 1px solid var(--line); background: var(--card);
@@ -265,15 +277,15 @@
     </div>
   </div>
   <div class="composer" id="sendbar" hidden>
-    <div class="box">
-      <textarea id="say" rows="1" placeholder="Message the agent…" maxlength="4000"></textarea>
-      <button id="send" class="send" type="button" aria-label="send">➤</button>
+    <div class="wrap">
+      <div class="slash" id="slash" hidden role="listbox" aria-label="commands"></div>
+      <div class="box">
+        <textarea id="say" rows="1" placeholder="Message the agent…" maxlength="4000" aria-autocomplete="list"></textarea>
+        <button id="send" class="send" type="button" aria-label="send">➤</button>
+      </div>
     </div>
   </div>
-  <div class="hints" id="hints" hidden>
-    <span class="chip" data-p="/chat ">/chat people</span>
-    <span class="chip" data-p="/todo ">/todo add</span>
-  </div>
+  <div class="tip" id="tip" hidden><span><kbd>Enter</kbd> send</span><span><kbd>Shift</kbd>+<kbd>Enter</kbd> new line</span><span><kbd>/</kbd> commands</span></div>
   <footer class="ro" id="foot">Read-only live view of a dcode-ai session · nothing here can change it</footer>
 </div>
 <script>
@@ -342,11 +354,20 @@
   }
 
   // ── conversation pieces ─────────────────────────────────
-  function userMsg(text) {
+  // A guest's message shows the moment they send it (PersonSaid); the copy
+  // the agent receives later ("(from X) …") is then not shown again.
+  const shownSaid = [];
+  function userMsg(text, fromSaid) {
     endSteps();
     let from = '', body = text;
     const m = body.match(/^\(from ([^)]+)\)\s*([\s\S]*)$/);
     if (m) { from = m[1]; body = m[2]; }
+    const key = from + '\n' + body.trim();
+    if (fromSaid) shownSaid.push(key);
+    else if (from) {
+      const i = shownSaid.indexOf(key);
+      if (i >= 0) { shownSaid.splice(i, 1); return; }
+    }
     const row = elc('div', 'row user'); const b = elc('div', 'bubble');
     if (from) b.append(elc('div', 'from', from));
     b.append(document.createTextNode(body)); row.append(b); add(row);
@@ -357,6 +378,18 @@
   }
   function event(text, cls) { endSteps(); const d = elc('div', 'event' + (cls ? ' ' + cls : '')); d.append(elc('span', '', text)); add(d); }
   function endSteps() { steps = null; stepCount = 0; }
+  // A run that stopped (cancelled, failed, idle) leaves no spinner behind.
+  function stopRunning() {
+    tools.forEach((d) => { if (d.classList.contains('run')) { d.classList.remove('run'); d.classList.add('stop'); d.title = 'stopped'; } });
+    thinking(false);
+  }
+  // API errors arrive as raw JSON: show their message.
+  function friendly(msg) {
+    const m = String(msg || '').match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    let t = m ? m[1].replace(/\\"/g, '"') : String(msg || 'something went wrong');
+    if (/tool_use.*without.*tool_result/i.test(t)) t = 'The last run was stopped mid-step; the next message continues normally.';
+    return t.length > 240 ? t.slice(0, 240) + '…' : t;
+  }
   const ICONS = { read_file: '📄', list_directory: '📁', search_code: '🔎', search: '🔎', grep: '🔎', execute_bash: '⌘', bash: '⌘',
     write_file: '✎', edit_file: '✎', apply_patch: '✎', replace_match: '✎', fetch_url: '🌐', web_search: '🌐', browser: '🌐',
     browser_task: '🌐', spawn_subagent: '◇', update_plan: '☰', run_script: '⚙' };
@@ -470,16 +503,19 @@
       case 'QuestionResolved': closeCard('question-' + ev.question_id); break;
       case 'ContextCompaction': if (ev.phase === 'completed') event('⟳ ' + ev.message); break;
       case 'ChildSessionSpawned': event('◇ sub-agent: ' + (ev.task || '')); break;
-      case 'Error': event('✗ ' + ev.message, 'err'); break;
+      case 'Error':
+        if (/cancel/i.test(ev.message || '')) { stopRunning(); event('■ stopped'); }
+        else { stopRunning(); event('✗ ' + friendly(ev.message), 'err'); }
+        break;
       case 'CostUpdated':
         $('tokens').textContent = human((ev.input_tokens || 0) + (ev.output_tokens || 0));
         if (ev.context_tokens) $('ctx').textContent = human(ev.context_tokens);
         break;
       case 'BusyStateChanged':
-        if (ev.state === 'idle') { setState('live', 'on'); thinking(false); }
+        if (ev.state === 'idle') { setState('live', 'on'); stopRunning(); }
         else { setState(ev.state === 'thinking' ? 'thinking' : 'working', 'busy'); if (!typing) thinking(true); }
         break;
-      case 'SessionEnded': setState('session ended', ''); thinking(false); break;
+      case 'SessionEnded': setState('session ended', ''); stopRunning(); break;
       case 'PersonJoined':
         if (ev.role !== 'owner') { people.set(ev.person, { name: ev.name, role: ev.role }); renderPeople();
           event((ev.role === 'watch' ? '👀 ' : '⇢ ') + ev.name + (ev.role === 'watch' ? ' is watching' : ' joined')); }
@@ -487,7 +523,8 @@
       case 'PersonLeft':
         if (people.delete(ev.person)) { renderPeople(); if (ev.name) event('⇠ ' + ev.name + ' left'); }
         break;
-      case 'PersonSaid': case 'PersonChat': {
+      case 'PersonSaid': userMsg('(from ' + ev.name + ') ' + (ev.text || ''), true); break;
+      case 'PersonChat': {
         endSteps();
         const row = elc('div', 'chat'); row.append(avatar(ev.name));
         const b = elc('div', 'b'); const n = elc('div', 'n', ev.name); n.style.color = colorOf(ev.name); b.append(n);
@@ -593,7 +630,7 @@
   let watching = false;
   try { watching = !!sessionStorage.getItem('dcode-ai-watching'); } catch (_) {}
   function joined() {
-    $('knockbar').hidden = true; $('sendbar').hidden = false; $('hints').hidden = watching;
+    $('knockbar').hidden = true; $('sendbar').hidden = false; $('tip').hidden = false;
     sayIn.placeholder = watching ? 'Message the people here…' : 'Message the agent…';
   }
   if (CHAT) {
@@ -614,24 +651,110 @@
       knockBtn.disabled = false;
     });
     const grow = () => { sayIn.style.height = 'auto'; sayIn.style.height = Math.min(sayIn.scrollHeight, 160) + 'px'; sendBtn.disabled = !sayIn.value.trim(); };
-    sayIn.addEventListener('input', grow); grow();
-    const send = async () => {
+    // What a guest can do here. Host commands (/review, /model…) run only
+    // in the host's terminal; ask the agent in words instead.
+    const COMMANDS = [
+      { c: '/chat', a: '<message>', d: 'Message the people here, not the agent', ins: true, ok: () => true },
+      { c: '/todo', a: '<task>', d: 'Add to the shared to-do list', ins: true, ok: () => !watching },
+      { c: '/stop', a: '', d: 'Stop what the agent is doing', ok: () => !watching },
+      { c: '/approve', a: '', d: 'Allow what the agent is waiting on', ok: () => canAct() },
+      { c: '/deny', a: '', d: 'Refuse what the agent is waiting on', ok: () => canAct() },
+      { c: '/name', a: '<your name>', d: 'Change the name others see', ins: true, ok: () => true },
+      { c: '/clear', a: '', d: 'Clear this page (the session keeps it)', ok: () => true },
+      { c: '/help', a: '', d: 'What you can do here', ok: () => true },
+    ];
+    const slash = $('slash');
+    let menu = [], pick = 0;
+    function showMenu() {
+      const v = sayIn.value;
+      const m = v.match(/^\/(\S*)$/);
+      if (!m) { slash.hidden = true; menu = []; return; }
+      const q = m[1].toLowerCase();
+      menu = COMMANDS.filter((x) => x.ok() && x.c.slice(1).startsWith(q));
+      if (!menu.length) { slash.hidden = true; return; }
+      pick = Math.min(pick, menu.length - 1);
+      slash.textContent = '';
+      slash.append(elc('div', 'head', 'Commands'));
+      menu.forEach((x, i) => {
+        const it = elc('div', 'it' + (i === pick ? ' on' : '')); it.setAttribute('role', 'option');
+        it.append(elc('span', 'c', x.c), elc('span', 'a', x.a), elc('span', 'd', x.d));
+        it.addEventListener('mousedown', (e) => { e.preventDefault(); choose(i); });
+        slash.append(it);
+      });
+      slash.hidden = false;
+    }
+    function choose(i) {
+      const x = menu[i]; if (!x) return;
+      slash.hidden = true;
+      if (x.ins) { sayIn.value = x.c + ' '; grow(); sayIn.focus(); }
+      else { sayIn.value = x.c; send(); }
+    }
+    const note = (t, cls) => event(t, cls);
+    async function act(body) {
+      try {
+        const r = await fetch('/act?t=__TOKEN__&p=' + encodeURIComponent(guest), { method: 'POST', body: JSON.stringify(body) });
+        return r.ok;
+      } catch (_) { return false; }
+    }
+    // A local command, handled here. True when it was one.
+    async function command(text) {
+      const [cmd, ...rest] = text.split(/\s+/);
+      const arg = rest.join(' ').trim();
+      switch (cmd) {
+        case '/stop': note(await act({ action: 'stop' }) ? '■ asked the agent to stop' : '✗ only people let in to drive can stop it', 'warn'); return true;
+        case '/approve': case '/deny': {
+          const card = [...document.querySelectorAll('.ask[id^="approval-"]')].pop();
+          if (!card) { note('Nothing is waiting for approval.'); return true; }
+          const ok = await act({ action: cmd === '/approve' ? 'approve' : 'deny', call_id: card.id.slice('approval-'.length) });
+          if (!ok) note('✗ not allowed here', 'err');
+          return true;
+        }
+        case '/name': if (arg) setName(arg); else note('usage: /name <your name>'); return true;
+        case '/clear': log.textContent = ''; endSteps(); return true;
+        case '/help':
+          note('Here: ' + COMMANDS.filter((x) => x.ok()).map((x) => x.c + (x.a ? ' ' + x.a : '')).join(' · ') + ' — anything else goes to the agent');
+          return true;
+      }
+      if (/^\/[a-z][\w:-]*$/i.test(cmd) && !['/chat', '/todo'].includes(cmd)) {
+        note(cmd + ' runs only in the host\'s terminal — ask the agent in words, or type / to see what works here', 'warn');
+        return true;
+      }
+      return false;
+    }
+    sayIn.addEventListener('input', () => { grow(); pick = 0; showMenu(); }); grow();
+    sayIn.addEventListener('blur', () => setTimeout(() => { slash.hidden = true; }, 120));
+    async function send() {
       const text = sayIn.value.trim();
       if (!text || !guest) return;
+      slash.hidden = true;
+      if (text.startsWith('/') && await command(text)) { sayIn.value = ''; grow(); sayIn.focus(); return; }
       sendBtn.disabled = true;
       try {
         let route = watching ? '/chat' : '/say', body = text;
-        if (text.startsWith('/chat ')) { route = '/chat'; body = text.slice(6); }
-        else if (text.startsWith('/todo ')) { route = '/todo'; body = text.slice(6); }
+        if (/^\/chat(\s|$)/.test(text)) { route = '/chat'; body = text.slice(5).trim(); }
+        else if (/^\/todo(\s|$)/.test(text)) { route = '/todo'; body = text.slice(5).trim(); }
+        if (!body) { note('Type something after ' + text.split(' ')[0]); sendBtn.disabled = false; return; }
         const r = await fetch(route + '?t=__TOKEN__&p=' + encodeURIComponent(guest), { method: 'POST', body });
         if (r.ok) { sayIn.value = ''; grow(); }
-        else { $('knockbar').hidden = false; $('sendbar').hidden = true; chatNote.textContent = 'Not let in any more.'; }
-      } catch (_) {}
+        else {
+          const why = await r.text().catch(() => '');
+          if (/not let in/.test(why)) { $('knockbar').hidden = false; $('sendbar').hidden = true; $('tip').hidden = true; chatNote.textContent = 'You\'re no longer let in — ask again.'; }
+          else if (/watching/.test(why)) note('You\'re watching — /chat messages the people here', 'warn');
+          else note('✗ couldn\'t send (' + r.status + ')', 'err');
+        }
+      } catch (_) { note('✗ couldn\'t reach the host — check the connection', 'err'); }
       sendBtn.disabled = !sayIn.value.trim(); sayIn.focus();
-    };
+    }
     sendBtn.addEventListener('click', send);
-    sayIn.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); } });
-    document.querySelectorAll('.chip').forEach((c) => c.addEventListener('click', () => { sayIn.value = c.dataset.p; sayIn.focus(); grow(); }));
+    sayIn.addEventListener('keydown', (e) => {
+      if (!slash.hidden && menu.length) {
+        if (e.key === 'ArrowDown') { e.preventDefault(); pick = (pick + 1) % menu.length; showMenu(); return; }
+        if (e.key === 'ArrowUp') { e.preventDefault(); pick = (pick - 1 + menu.length) % menu.length; showMenu(); return; }
+        if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) { e.preventDefault(); choose(pick); return; }
+        if (e.key === 'Escape') { e.preventDefault(); slash.hidden = true; return; }
+      }
+      if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); send(); }
+    });
   }
   const setName = (v) => {
     myName = v.trim().slice(0, 24); me.value = me2.value = myName;

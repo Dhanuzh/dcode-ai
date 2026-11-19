@@ -8,7 +8,7 @@
 //! surface the hub files of an unfamiliar codebase.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Directories never worth walking.
 const SKIP_DIRS: &[&str] = &[
@@ -38,6 +38,11 @@ const GENERIC_STEMS: &[&str] = &[
 
 /// Hard cap on files scanned, to bound work on huge trees.
 const MAX_SCAN: usize = 5_000;
+/// Files bigger than this are generated or bundled: not worth reading.
+const MAX_FILE_BYTES: u64 = 256 * 1024;
+/// Reading stops after this long (slow disks, network or WSL mounts) and
+/// the map is made from what was read.
+const READ_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// PageRank damping factor and iteration count (standard values).
 const PAGERANK_DAMPING: f64 = 0.85;
@@ -81,28 +86,39 @@ pub fn build_repo_map(root: &Path, max_files: usize) -> Vec<RankedFile> {
 
     // Directed edges: referrer -> referenced (distinct targets), plus inbound
     // reference counts (the displayed `score`).
-    let mut out_edges: Vec<Vec<usize>> = vec![Vec::new(); n];
-    let mut inbound: Vec<usize> = vec![0; n];
-    for (i, rel) in files.iter().enumerate() {
-        let full = root.join(rel);
-        let Ok(content) = std::fs::read_to_string(&full) else {
-            continue;
-        };
-        let mut targets: Vec<usize> = Vec::new();
-        for stem in identifier_tokens(&content) {
-            if GENERIC_STEMS.contains(&stem.as_str()) {
-                continue;
+    // Files are read in parallel (slow mounts are latency-bound) within a
+    // time budget; each file's token set becomes its distinct targets.
+    use rayon::prelude::*;
+    let started = std::time::Instant::now();
+    let out_edges: Vec<Vec<usize>> = files
+        .par_iter()
+        .enumerate()
+        .map(|(i, rel)| {
+            if started.elapsed() > READ_BUDGET {
+                return Vec::new();
             }
-            if let Some(idxs) = stem_to_idxs.get(&stem) {
-                for &t in idxs {
-                    if t != i && !targets.contains(&t) {
-                        targets.push(t);
-                        inbound[t] += 1;
-                    }
+            let Ok(content) = std::fs::read_to_string(root.join(rel)) else {
+                return Vec::new();
+            };
+            let mut targets: HashSet<usize> = HashSet::new();
+            for stem in identifier_tokens(&content) {
+                if GENERIC_STEMS.contains(&stem.as_str()) {
+                    continue;
+                }
+                if let Some(idxs) = stem_to_idxs.get(&stem) {
+                    targets.extend(idxs.iter().copied().filter(|&t| t != i));
                 }
             }
+            let mut v: Vec<usize> = targets.into_iter().collect();
+            v.sort_unstable();
+            v
+        })
+        .collect();
+    let mut inbound: Vec<usize> = vec![0; n];
+    for outs in &out_edges {
+        for &t in outs {
+            inbound[t] += 1;
         }
-        out_edges[i] = targets;
     }
 
     let rank = pagerank(&out_edges, n);
@@ -184,44 +200,40 @@ fn identifier_tokens(content: &str) -> HashSet<String> {
     out
 }
 
-/// Walk `root` collecting workspace-relative paths of source files, skipping
-/// ignored directories and hidden entries. Bounded by [`MAX_SCAN`].
+/// Walk `root` collecting workspace-relative paths of source files: what
+/// git would track (`.gitignore` respected), no hidden or build folders, no
+/// huge generated files. Bounded by [`MAX_SCAN`].
 fn collect_source_files(root: &Path) -> Vec<String> {
     let mut out = Vec::new();
-    let mut stack: Vec<PathBuf> = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
+    let walker = ignore::WalkBuilder::new(root)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(false)
+        .git_exclude(true)
+        .require_git(false)
+        .filter_entry(|e| {
+            !(e.file_type().is_some_and(|t| t.is_dir())
+                && SKIP_DIRS.contains(&e.file_name().to_string_lossy().as_ref()))
+        })
+        .build();
+    for entry in walker.flatten() {
         if out.len() >= MAX_SCAN {
             break;
         }
-        let Ok(entries) = std::fs::read_dir(&dir) else {
+        let path = entry.path();
+        if !entry.file_type().is_some_and(|t| t.is_file())
+            || !path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| CODE_EXTS.contains(&ext))
+            || entry.metadata().is_ok_and(|m| m.len() > MAX_FILE_BYTES)
+        {
             continue;
-        };
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let name = entry.file_name();
-            let name = name.to_string_lossy();
-            if name.starts_with('.') {
-                continue;
-            }
-            let file_type = match entry.file_type() {
-                Ok(t) => t,
-                Err(_) => continue,
-            };
-            if file_type.is_dir() {
-                if SKIP_DIRS.contains(&name.as_ref()) {
-                    continue;
-                }
-                stack.push(path);
-            } else if file_type.is_file()
-                && path
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|ext| CODE_EXTS.contains(&ext))
-                && let Ok(rel) = path.strip_prefix(root)
-                && let Some(rel) = rel.to_str()
-            {
-                out.push(rel.replace('\\', "/"));
-            }
+        }
+        if let Ok(rel) = path.strip_prefix(root)
+            && let Some(rel) = rel.to_str()
+        {
+            out.push(rel.replace('\\', "/"));
         }
     }
     out

@@ -1717,22 +1717,25 @@ fn spawn_knock_prompts(
 
 /// A link's QR code as one block (so its rows stay together and aligned).
 fn print_qr(out: &ReplOutput<'_>, label: &str, url: &str) {
-    let qr = dcode_ai_cli::people::qr_lines(url);
-    if qr.is_empty() {
+    // Exact black on white (not the theme's colours), drawn as a picture so
+    // it is never wrapped or cut: phones scan it reliably.
+    let rows = dcode_ai_cli::people::qr_picture(url);
+    if rows.is_empty() {
         return;
     }
     match out {
         ReplOutput::Tui(st) => {
             if let Ok(mut g) = st.lock() {
-                g.push_block(crate::tui::state::DisplayBlock::System(format!(
-                    "{label}\n{}",
-                    qr.join("\n")
-                )));
+                g.push_block(crate::tui::state::DisplayBlock::Picture {
+                    title: label.to_string(),
+                    rows,
+                });
+                g.touch_transcript();
             }
         }
         _ => {
             out.println(label);
-            for l in qr {
+            for l in dcode_ai_cli::people::qr_ansi_lines(url) {
                 out.println(&l);
             }
         }
