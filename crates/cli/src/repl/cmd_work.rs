@@ -63,6 +63,7 @@ pub(crate) fn fleet_prompt(n: usize) -> String {
 1. Look just enough (read, search, or a quick `spawn_subagent` with explore) to split the task into self-contained work items — each a clear deliverable that touches its own files, with what it depends on. Show them with `update_plan`. If the task is too small to split, do it yourself instead.
 2. Start every item whose dependencies are done as a background sub-agent (`spawn_subagent` with run_in_background true, its own worktree), several in one turn, at most {n} running at once. Give each a complete task: the goal, the files, what done means, how to check it.
 3. When one finishes: review its report. If it needs a fix, continue it with `send_message` (it keeps its history) rather than starting a new agent. When it's good, merge its branch into the current branch (`git merge --no-ff <branch>`; resolve conflicts carefully), mark it done in the plan, then start the items that were waiting on it — they branch from the merged work.
+   The agents share a swarm board: they claim their piece, post findings and ask each other questions there (`swarm_read` shows it; `swarm_post` to answer a question or redirect them all at once).
 4. Keep going until every item is merged or clearly blocked. Run the project's checks once at the end.
 Finish with a short report: what each agent did, what was merged, what failed or is left for the user.
 
@@ -743,6 +744,29 @@ impl Repl {
                     rest.trim()
                 };
                 self.run_preset(TOUR_PROMPT, focus, out).await?;
+            }
+            "/fleet" if rest.trim() == "board" => {
+                let path = dcode_ai_common::swarm::board_path(
+                    self.runtime.workspace_root(),
+                    self.runtime.session_id(),
+                );
+                let posts = dcode_ai_common::swarm::load(&path);
+                if posts.is_empty() {
+                    out.println("The swarm board is empty — sub-agents post claims, findings and questions here (dashboard: Alt+8).");
+                } else {
+                    let open = dcode_ai_common::swarm::open_claims(&posts);
+                    if !open.is_empty() {
+                        out.println("Working on:");
+                        for p in open {
+                            out.println(&format!("  ⚑ {}: {}", p.who, p.text));
+                        }
+                    }
+                    let skip = posts.len().saturating_sub(30);
+                    out.println(&format!("Board ({} posts{}):", posts.len(), if skip > 0 { ", latest 30" } else { "" }));
+                    for p in &posts[skip..] {
+                        out.println(&format!("  {}", dcode_ai_common::swarm::one_line(p)));
+                    }
+                }
             }
             "/fleet" => {
                 // `/fleet [n] <task>`: n agents at a time (default 3, max 8).

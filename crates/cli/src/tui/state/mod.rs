@@ -186,6 +186,7 @@ impl TuiSessionState {
             model_picker_entries: Vec::new(),
             model_picker_scroll: 0,
             leader_pending: false,
+            split: Default::default(),
             permission_picker_open: false,
             permission_picker_index: 0,
             agent_picker_open: false,
@@ -295,6 +296,7 @@ impl TuiSessionState {
             theme_picker_original: None,
             statusline_text: None,
             transcript_overlay_scroll: 0,
+            transcript_jump: None,
             diff_overlay_open: false,
             diff_overlay_scroll: 0,
             transcript_overlay_raw: false,
@@ -961,6 +963,7 @@ impl TuiSessionState {
                     block_idx,
                     text,
                     index: 0,
+                    preview: None,
                 });
                 None
             }
@@ -1075,6 +1078,12 @@ impl TuiSessionState {
                         PaletteRow::Entry { label, .. } => {
                             let cmd = palette_command_for_label(label);
                             self.set_input_text(cmd.to_string());
+                        }
+                        PaletteRow::Found { insert, .. }
+                            if crate::tui::palette::jump_target(insert).is_some() =>
+                        {
+                            self.transcript_jump = crate::tui::palette::jump_target(insert);
+                            self.transcript_overlay_open = true;
                         }
                         PaletteRow::Found { insert, run, .. } => {
                             crate::tui::palette::record_pick(insert);
@@ -1571,7 +1580,7 @@ impl TuiSessionState {
 
     /// Next/previous right-rail tab, keeping keyboard focus on the rail.
     pub fn cycle_rail_tab(&mut self, step: i32) {
-        const TABS: [RailTab; 7] = [
+        const TABS: [RailTab; 8] = [
             RailTab::Context,
             RailTab::Changes,
             RailTab::Agents,
@@ -1579,6 +1588,7 @@ impl TuiSessionState {
             RailTab::Office,
             RailTab::Team,
             RailTab::Scratch,
+            RailTab::Swarm,
         ];
         let tabs: Vec<RailTab> = TABS
             .into_iter()
@@ -1707,6 +1717,91 @@ impl TuiSessionState {
     }
 
     /// Open the `/btw` panel and send the question to the worker.
+    /// The side chat is open as a pane (answers go there, not to a popup).
+    pub fn side_pane_open(&self) -> bool {
+        self.split
+            .panes
+            .contains(&crate::tui::split::PaneKind::Side)
+    }
+
+    /// A finished side answer joins the side-chat pane's thread.
+    pub fn settle_side_answer(&mut self) {
+        if !self.side_pane_open() {
+            return;
+        }
+        if let Some(v) = &self.btw
+            && v.done
+        {
+            let answer = match &v.error {
+                Some(e) => format!("✗ {e}"),
+                None => v.answer.clone(),
+            };
+            self.split.side.push((v.question.clone(), answer));
+            if self.split.side.len() > 50 {
+                self.split.side.remove(0);
+            }
+            self.btw = None;
+        }
+    }
+
+    /// Enter with a pane focused: a message for that sub-agent, or a side
+    /// question. False when the conversation has focus (send as usual).
+    pub fn send_to_focused_pane(&mut self, text: &str) -> bool {
+        use crate::tui::split::PaneKind;
+        let Some(kind) = self.split.focused().cloned() else {
+            return false;
+        };
+        match kind {
+            PaneKind::Side => {
+                self.settle_side_answer();
+                self.ask_btw(text);
+            }
+            PaneKind::Agent(id) => {
+                let delivered = !id.is_empty()
+                    && self.agents_registry.as_ref().is_some_and(|reg| {
+                        reg.lock().is_ok_and(|m| {
+                            m.get(&id).is_some_and(|r| {
+                                r.status == "running"
+                                    && r.steer.as_ref().is_some_and(|inbox| {
+                                        inbox.lock().is_ok_and(|mut q| {
+                                            q.push(format!("Message from the user: {text}"));
+                                            true
+                                        })
+                                    })
+                            })
+                        })
+                    });
+                let msg = if delivered {
+                    "Sent — the agent reads it at its next step".to_string()
+                } else {
+                    "That agent isn't running — /agents to continue it".to_string()
+                };
+                self.show_toast(
+                    msg,
+                    if delivered {
+                        crate::tui::state::ToastKind::Info
+                    } else {
+                        crate::tui::state::ToastKind::Error
+                    },
+                );
+                if let Some(row) = self.subagents.iter_mut().find(|r| r.id == id)
+                    && delivered
+                {
+                    row.log.push(format!("you: {text}"));
+                }
+            }
+        }
+        self.touch_transcript();
+        true
+    }
+
+    /// Saves the split layout for next time.
+    pub fn save_split(&self) {
+        let mut p = crate::tui::dash_prefs::load();
+        p.split = self.split.prefs();
+        crate::tui::dash_prefs::save(&p);
+    }
+
     pub fn ask_btw(&mut self, question: &str) {
         let question = question.trim().to_string();
         let mut view = crate::tui::btw::BtwView {

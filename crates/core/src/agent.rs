@@ -154,6 +154,10 @@ pub struct AgentLoop {
     auto_verdicts: std::collections::HashMap<String, bool>,
     /// Models to try, in order, when the model is overloaded or unavailable.
     pub fallback_models: Vec<String>,
+    /// `model = "auto"`: the cheap and strong models picked per request.
+    pub routing: Option<crate::routing::Routing>,
+    /// The tier this run is on (auto routing).
+    route_tier: crate::routing::Tier,
 }
 
 impl AgentLoop {
@@ -202,12 +206,33 @@ impl AgentLoop {
             cost_budget: CostBudget::default(),
             auto_verdicts: std::collections::HashMap::new(),
             fallback_models: Vec::new(),
+            routing: None,
+            route_tier: crate::routing::Tier::Strong,
         }
     }
 
     /// The next fallback model to try after `error`, if the error means the
     /// model itself is the problem (overloaded, rate-limited, unavailable,
     /// unknown). Advances `next`.
+    /// The model the next request goes to: the routed one in auto mode.
+    pub fn current_model(&self) -> String {
+        match &self.routing {
+            Some(r) => r.model(self.route_tier).to_string(),
+            None => self.model.clone(),
+        }
+    }
+
+    /// Auto mode on the cheap model: move this run up to the strong one.
+    /// Returns it, or `None` when there's nowhere to go.
+    fn escalate(&mut self) -> Option<String> {
+        let r = self.routing.as_ref()?;
+        if self.route_tier == crate::routing::Tier::Strong || r.cheap == r.strong {
+            return None;
+        }
+        self.route_tier = crate::routing::Tier::Strong;
+        Some(r.strong.clone())
+    }
+
     fn next_fallback(&self, error: &str, current: &str, next: &mut usize) -> Option<String> {
         if !fallback_worthy(error) {
             return None;
@@ -245,7 +270,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         let model = self
             .utility_model
             .clone()
-            .unwrap_or_else(|| self.model.clone());
+            .unwrap_or_else(|| self.current_model());
         let verdict = async {
             let mut rx = self
                 .provider
@@ -378,6 +403,15 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             content: preview,
         })
         .await;
+        // Auto routing: this request's tier.
+        if self.routing.is_some() {
+            let (tier, why) = crate::routing::classify(user_input);
+            self.route_tier = tier;
+            self.emit(AgentEvent::Notice {
+                message: format!("auto → {} ({why})", self.current_model()),
+            })
+            .await;
+        }
 
         let mut turn = 0_u32;
         let mut empty_retries = 0_u32;
@@ -497,7 +531,7 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             let mut stream_attempt: u32 = 0;
             // Fallback models replace the model for the rest of this request
             // when it is overloaded or unavailable.
-            let mut model = self.model.clone();
+            let mut model = self.current_model();
             let mut next_fallback = 0usize;
             let (assistant_text, assistant_reasoning, tool_calls, got_usage, replay_blocks) = loop {
                 stream_attempt += 1;
@@ -516,6 +550,17 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                 {
                     Ok(stream) => stream,
                     Err(e) => {
+                        if !self.is_cancelled()
+                            && let Some(up) = self.escalate()
+                        {
+                            self.emit(AgentEvent::Notice {
+                                message: format!("{model} failed ({e}); auto → {up}"),
+                            })
+                            .await;
+                            model = up;
+                            stream_attempt = 0;
+                            continue;
+                        }
                         if let Some(next) =
                             self.next_fallback(&e.to_string(), &model, &mut next_fallback)
                         {
@@ -715,6 +760,15 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                     tokio::time::sleep(delay).await;
                     continue;
                 }
+                if let Some(up) = self.escalate() {
+                    self.emit(AgentEvent::Notice {
+                        message: format!("{model} failed ({message}); auto → {up}"),
+                    })
+                    .await;
+                    model = up;
+                    stream_attempt = 0;
+                    continue;
+                }
                 if recoverable
                     && let Some(next) = self.next_fallback(&message, &model, &mut next_fallback)
                 {
@@ -744,8 +798,16 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
 
             if tool_calls.is_empty() {
                 if assistant_text.trim().is_empty() {
+                    // Auto routing: an empty cheap answer goes up a tier first.
+                    if let Some(up) = self.escalate() {
+                        self.emit(AgentEvent::Notice {
+                            message: format!("{model} answered nothing; auto → {up}"),
+                        })
+                        .await;
+                        continue;
+                    }
                     empty_retries += 1;
-                    let detail = empty_completion_detail(&self.model, got_usage);
+                    let detail = empty_completion_detail(&model, got_usage);
                     if empty_retries <= MAX_EMPTY_RETRIES {
                         self.emit(AgentEvent::Error {
                             message: format!(
@@ -1137,6 +1199,15 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                     last_failed_tool = tool_name.clone();
                     consecutive_tool_failures = 1;
                 }
+                // Auto routing: a cheap model stuck on a tool moves up.
+                if consecutive_tool_failures >= 2
+                    && let Some(up) = self.escalate()
+                {
+                    self.emit(AgentEvent::Notice {
+                        message: format!("{tool_name} keeps failing; auto → {up}"),
+                    })
+                    .await;
+                }
             } else {
                 consecutive_tool_failures = 0;
                 last_failed_tool.clear();
@@ -1291,7 +1362,12 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
         let tools = self.tool_definitions();
         let r = self
             .provider
-            .keep_warm(&self.messages, &tools, &self.model, workspace_root)
+            .keep_warm(
+                &self.messages,
+                &tools,
+                &self.current_model(),
+                workspace_root,
+            )
             .await?;
         if let Some(k) = r {
             self.last_request_at = Some(std::time::Instant::now());
@@ -1546,6 +1622,11 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
 
     /// Restore files to before the turn at message `pos` of history
     /// `epoch` (from before a compaction).
+    /// What rewinding files to `(epoch, pos)` would change, per file.
+    pub fn rewind_preview_at(&self, epoch: u32, pos: usize) -> Vec<(std::path::PathBuf, String)> {
+        self.undo.rewind_preview_at(epoch, pos)
+    }
+
     pub fn rewind_files_to_at(&mut self, epoch: u32, pos: usize) -> Result<usize, String> {
         self.undo.rewind_to_at(epoch, pos)
     }
@@ -2156,6 +2237,86 @@ mod tests {
             });
             Ok(rx)
         }
+    }
+
+    /// Answers by model: nothing from `cheap`, "done" from anything else;
+    /// records which models were asked.
+    struct TierProvider {
+        asked: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl Provider for TierProvider {
+        async fn chat(
+            &self,
+            _messages: &[Message],
+            _tools: &[ToolDefinition],
+            model: &str,
+            _workspace_root: &Path,
+        ) -> Result<tokio::sync::mpsc::Receiver<StreamChunk>, ProviderError> {
+            self.asked.lock().unwrap().push(model.to_string());
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            let empty = model == "cheap";
+            tokio::spawn(async move {
+                if !empty {
+                    let _ = tx.send(StreamChunk::TextDelta("done".into())).await;
+                }
+                let _ = tx.send(StreamChunk::Done).await;
+            });
+            Ok(rx)
+        }
+    }
+
+    #[tokio::test]
+    async fn auto_routing_sends_quick_ones_cheap_and_moves_up_on_an_empty_answer() {
+        let asked = Arc::new(Mutex::new(Vec::new()));
+        let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(64);
+        let mut agent = AgentLoop::new(
+            Box::new(TierProvider {
+                asked: asked.clone(),
+            }),
+            ToolRegistry::new(),
+            ApprovalPolicy::new(PermissionConfig::default()),
+            "auto".into(),
+            event_tx,
+            5,
+            3,
+            1,
+            None,
+        );
+        agent.routing = Some(crate::routing::Routing {
+            cheap: "cheap".into(),
+            strong: "strong".into(),
+        });
+        let temp = tempfile::tempdir().expect("tempdir");
+        let out = agent
+            .run_turn("what does main do?", temp.path(), &[])
+            .await
+            .expect("answered by the strong model");
+        assert_eq!(out, "done");
+        assert_eq!(*asked.lock().unwrap(), vec!["cheap", "strong"]);
+        let mut notices = Vec::new();
+        while let Ok(e) = event_rx.try_recv() {
+            if let AgentEvent::Notice { message } = e {
+                notices.push(message);
+            }
+        }
+        assert!(
+            notices.iter().any(|n| n == "auto → cheap (a quick one)"),
+            "{notices:?}"
+        );
+        assert!(
+            notices
+                .iter()
+                .any(|n| n.contains("answered nothing; auto → strong"))
+        );
+        // Real work starts on the strong model.
+        asked.lock().unwrap().clear();
+        agent
+            .run_turn("refactor the parser", temp.path(), &[])
+            .await
+            .unwrap();
+        assert_eq!(*asked.lock().unwrap(), vec!["strong"]);
     }
 
     /// A mid-stream drop before anything reached the user is retried up to

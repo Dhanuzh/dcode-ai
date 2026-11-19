@@ -443,6 +443,14 @@ impl Repl {
                         "  Copilot:     {}",
                         config.provider.base_url_for(ProviderKind::Copilot)
                     ),
+                    format!(
+                        "  Local:       {}",
+                        if config.provider.local.base_url.is_empty() {
+                            "Ollama or LM Studio, found automatically"
+                        } else {
+                            config.provider.local.base_url.as_str()
+                        }
+                    ),
                 ];
                 if let ReplOutput::Tui(st) = &out {
                     if let Ok(mut g) = st.lock() {

@@ -15,6 +15,7 @@ pub fn build_provider(config: &DcodeAiConfig) -> Result<Box<dyn Provider>, Provi
             AnthropicBackend::Api => Ok(Box::new(AnthropicProvider::from_config(config)?)),
         },
         ProviderKind::Copilot => Ok(Box::new(CopilotProvider::from_config(config)?)),
+        ProviderKind::Local => Ok(Box::new(super::local::LocalProvider::from_config(config)?)),
     }
 }
 

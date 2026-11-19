@@ -299,8 +299,9 @@ impl DcodeAiConfig {
     pub fn set_provider_api_key(&mut self, provider: ProviderKind, key: impl Into<String>) {
         match provider {
             ProviderKind::Anthropic => self.provider.anthropic.api_key = Some(key.into()),
-            // Copilot authenticates with a GitHub login, not a stored key.
-            ProviderKind::Copilot => {}
+            // Copilot authenticates with a GitHub login, not a stored key;
+            // local models need none.
+            ProviderKind::Copilot | ProviderKind::Local => {}
         }
     }
 
@@ -931,7 +932,44 @@ pub struct ProviderConfig {
     pub anthropic: AnthropicConfig,
     #[serde(default)]
     pub copilot: CopilotConfig,
+    /// Ollama / LM Studio on this machine.
+    #[serde(default)]
+    pub local: LocalConfig,
 }
+
+/// A local model server speaking the OpenAI chat API: Ollama
+/// (`http://127.0.0.1:11434/v1`) or LM Studio (`http://127.0.0.1:1234/v1`).
+/// Free, private, works offline; dcode-ai never downloads models itself.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LocalConfig {
+    /// The server's OpenAI-compatible base URL; empty finds Ollama, then LM
+    /// Studio, on their usual ports.
+    pub base_url: String,
+    /// Model name as the server lists it (`qwen3-coder:30b`); empty uses
+    /// the first one it has.
+    pub model: String,
+    pub temperature: f32,
+    /// Most tokens per reply.
+    pub max_tokens: u32,
+}
+
+impl Default for LocalConfig {
+    fn default() -> Self {
+        Self {
+            base_url: String::new(),
+            model: String::new(),
+            temperature: 0.2,
+            max_tokens: 8192,
+        }
+    }
+}
+
+/// Where local model servers usually listen: Ollama, then LM Studio.
+pub const LOCAL_SERVERS: [(&str, &str); 2] = [
+    ("Ollama", "http://127.0.0.1:11434/v1"),
+    ("LM Studio", "http://127.0.0.1:1234/v1"),
+];
 
 /// GitHub Copilot (signed in with GitHub device login).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1040,6 +1078,7 @@ impl Default for ProviderConfig {
             default: ProviderKind::Anthropic,
             anthropic: AnthropicConfig::default(),
             copilot: CopilotConfig::default(),
+            local: LocalConfig::default(),
         }
     }
 }
@@ -1052,6 +1091,9 @@ impl ProviderConfig {
         }
         if let Some(copilot) = partial.copilot {
             self.copilot.merge(copilot);
+        }
+        if let Some(local) = partial.local {
+            self.local = local;
         }
         if let Some(default) = partial.default.as_deref() {
             match ProviderKind::from_cli_name(default) {
@@ -1097,6 +1139,7 @@ impl ProviderConfig {
         match provider {
             ProviderKind::Anthropic => self.anthropic.model = model,
             ProviderKind::Copilot => self.copilot.model = model,
+            ProviderKind::Local => self.local.model = model,
         }
     }
 
@@ -1104,6 +1147,7 @@ impl ProviderConfig {
         match provider {
             ProviderKind::Anthropic => &self.anthropic.model,
             ProviderKind::Copilot => &self.copilot.model,
+            ProviderKind::Local => &self.local.model,
         }
     }
 
@@ -1111,6 +1155,7 @@ impl ProviderConfig {
         match provider {
             ProviderKind::Anthropic => &self.anthropic.base_url,
             ProviderKind::Copilot => &self.copilot.base_url,
+            ProviderKind::Local => &self.local.base_url,
         }
     }
 
@@ -1118,6 +1163,7 @@ impl ProviderConfig {
         match provider {
             ProviderKind::Anthropic => &self.anthropic.api_key_env,
             ProviderKind::Copilot => &self.copilot.api_key_env,
+            ProviderKind::Local => "",
         }
     }
 
@@ -1127,6 +1173,8 @@ impl ProviderConfig {
         match provider {
             ProviderKind::Anthropic => self.anthropic.resolve_api_key().is_some(),
             ProviderKind::Copilot => self.copilot.resolve_github_token().is_some(),
+            // Nothing to sign in to; whether a server runs is checked when used.
+            ProviderKind::Local => false,
         }
     }
 
@@ -1142,16 +1190,23 @@ impl ProviderConfig {
 pub enum ProviderKind {
     Anthropic,
     Copilot,
+    /// A model on this machine: Ollama or LM Studio (OpenAI-compatible API).
+    Local,
 }
 
 impl ProviderKind {
-    pub const ALL: [ProviderKind; 2] = [ProviderKind::Anthropic, ProviderKind::Copilot];
+    pub const ALL: [ProviderKind; 3] = [
+        ProviderKind::Anthropic,
+        ProviderKind::Copilot,
+        ProviderKind::Local,
+    ];
 
     /// Parse user/CLI input (slash commands, TUI pickers, env, config).
     pub fn from_cli_name(value: &str) -> Option<Self> {
         match value.trim().to_ascii_lowercase().as_str() {
             "anthropic" | "claude" => Some(Self::Anthropic),
             "copilot" | "github-copilot" | "github" | "gh" => Some(Self::Copilot),
+            "local" | "ollama" | "lmstudio" | "lm-studio" => Some(Self::Local),
             _ => None,
         }
     }
@@ -1160,6 +1215,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Anthropic => "Claude",
             ProviderKind::Copilot => "GitHub Copilot",
+            ProviderKind::Local => "Local model",
         }
     }
 
@@ -1167,6 +1223,7 @@ impl ProviderKind {
         match self {
             ProviderKind::Anthropic => "anthropic",
             ProviderKind::Copilot => "copilot",
+            ProviderKind::Local => "local",
         }
     }
 
@@ -1303,6 +1360,26 @@ pub struct ModelConfig {
     /// overloaded or unavailable (Claude Code's `fallbackModel`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fallback_models: Vec<String>,
+    /// `model = "auto"`: the cheap and strong models it picks between
+    /// (empty: the provider's usual pair).
+    #[serde(default, skip_serializing_if = "ModelRouting::is_empty")]
+    pub routing: ModelRouting,
+}
+
+/// `[model.routing]`: what `model = "auto"` chooses between.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ModelRouting {
+    /// Quick questions, look-ups, small edits.
+    pub cheap: String,
+    /// Planning, debugging, building; and where a cheap answer fails.
+    pub strong: String,
+}
+
+impl ModelRouting {
+    pub fn is_empty(&self) -> bool {
+        self.cheap.trim().is_empty() && self.strong.trim().is_empty()
+    }
 }
 
 /// Convenient shorthands that map to full model IDs.
@@ -1327,12 +1404,16 @@ impl Default for ModelConfig {
             compact_model: None,
             subagent_model: None,
             fallback_models: Vec::new(),
+            routing: ModelRouting::default(),
         }
     }
 }
 
 impl ModelConfig {
     fn merge(&mut self, partial: PartialModelConfig) {
+        if let Some(r) = partial.routing {
+            self.routing = r;
+        }
         if let Some(m) = partial.compact_model {
             self.compact_model = Some(m).filter(|m| !m.trim().is_empty());
         }
@@ -2299,6 +2380,7 @@ struct PartialProviderConfig {
     openai: Option<PartialLegacyOpenAiConfig>,
     anthropic: Option<PartialAnthropicConfig>,
     copilot: Option<PartialCopilotConfig>,
+    local: Option<LocalConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -2344,6 +2426,7 @@ struct PartialModelConfig {
     compact_model: Option<String>,
     subagent_model: Option<String>,
     fallback_models: Option<Vec<String>>,
+    routing: Option<ModelRouting>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]

@@ -21,6 +21,7 @@ pub mod replace_match;
 pub mod repo_map;
 pub mod run_script;
 pub mod run_validation;
+pub mod run_workflow;
 pub mod search;
 pub mod spawn_subagent;
 pub mod tool_search;

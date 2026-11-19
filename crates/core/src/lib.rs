@@ -18,6 +18,7 @@ pub mod nested_instructions;
 pub mod plugin_installer;
 pub mod provider;
 pub mod repetition;
+pub mod routing;
 pub mod skill_installer;
 pub mod skills;
 pub mod tools;

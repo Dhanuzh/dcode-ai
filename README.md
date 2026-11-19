@@ -4,7 +4,7 @@
 
 ### The Rust-native coding agent for your terminal
 
-One binary · your Claude or GitHub Copilot sign-in · no API keys, no Electron, no Node
+One binary · your Claude or GitHub Copilot sign-in, or a free local model · no API keys, no Electron, no Node
 
 [![Release](https://img.shields.io/github/v/release/Dhanuzh/dcode-ai?style=for-the-badge&color=d97757&labelColor=211d1b)](https://github.com/Dhanuzh/dcode-ai/releases)
 [![CI](https://img.shields.io/github/actions/workflow/status/Dhanuzh/dcode-ai/ci.yml?branch=main&style=for-the-badge&label=CI&labelColor=211d1b)](https://github.com/Dhanuzh/dcode-ai/actions)
@@ -28,7 +28,7 @@ One binary · your Claude or GitHub Copilot sign-in · no API keys, no Electron,
 <td width="50%" valign="top">
 
 ### 💳 Uses what you already pay for
-Your **Claude plan** (through your own signed-in `claude`) or your **GitHub Copilot** subscription. OAuth sign-in only, no API keys to paste.
+Your **Claude plan** (through your own signed-in `claude`) or your **GitHub Copilot** subscription. OAuth sign-in only, no API keys to paste. Or **free and offline** with a local model in Ollama or LM Studio (`/provider local`). `model = "auto"` sends quick questions to a cheap model and real work to a strong one.
 
 </td>
 <td width="50%" valign="top">
@@ -277,6 +277,9 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 | `Alt+5` **office** | The Agent Office. Teams are drawn small so everyone fits |
 | `Alt+6` **team** | Chat with the people on the session (paste a screenshot with `Ctrl+V`), plus the shared to-do list |
 | `Alt+7` **scratch** | What the agent made along the way, live: test logs, screenshots, API responses, previewed (pictures as colour thumbnails) |
+| `Alt+8` **swarm** | The swarm board: what each sub-agent claimed, its findings and questions, and workflow progress |
+
+**Split workspace:** `Ctrl+X` then `|` (right) or `-` (below) opens a pane next to the conversation — a sub-agent at work, or a side chat. The message box writes to the focused pane (`Ctrl+X o` or click to move, `Ctrl+X a` changes what it shows, `Ctrl+X x` closes it); the layout is remembered.
 
 Click, scroll, drag to select and copy, and resize the side panels. `/timeline` scrubs through the session step by step.
 
@@ -347,6 +350,8 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 
 - **Sub-agents** in isolated git worktrees, with parent/child lineage. Merge, keep or discard their changes. They can run in the background while you keep chatting, within a token and time budget (`[harness] subagent_max_tokens`, `subagent_max_minutes`); `x` in the sub-agents list stops one.
 - **Continue, fork, fleet:** the agent continues a sub-agent with `send_message` (history intact, same worktree) instead of starting over; `fork: true` gives a helper the whole conversation; **`/fleet [n] <task>`** splits a task into parallel sub-agents with dependencies and merges their branches as they finish.
+- **Swarm board:** sub-agents share a board (`swarm_post` / `swarm_read`): they claim their piece so nobody duplicates it, post findings and ask each other questions; new posts reach the others at their next step. `/fleet board` or the dashboard's swarm tab shows it.
+- **Workflow fan-out (`run_workflow`):** the agent runs a list of tasks (or one task per item: every file, every module, every failing test) with up to 8 sub-agents at a time, up to 100 tasks, each up to 2 hours, and gets every report back; progress (`12/40 done · 2 failed · ~6 min left`) shows on the swarm board, and cancelling stops them.
 - **Agent files the Claude Code way:** `agents/*.md` with `tools`, `disallowedTools`, `model`, `permissionMode`, `maxTurns`, `effort`, `skills`, `isolation`, `background`.
 - **`/goal <objective>`** keeps working across turns until it's done, within a budget you set.
 - **Fallback models** take over when the main one is overloaded. **`/btw`** answers a side question without derailing the turn.
@@ -363,6 +368,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **Video quality:** `/record --stills` takes one sharp, settled still per step with a slow camera move (dashboards, reports; immune to covered windows); every recording waits for the page to settle, outlines what is clicked, and **blurs private data** (emails, ticket ids, tokens, password fields, names you list). `/video setup voice [name]` installs Piper for a natural draft voice and `/video voices` lists, previews (`try`) and picks (`use`) voices, `respell` fixes pronunciation, `/video translate <language>` makes another-language version, `/video preview` is a quick draft, `/video note` / `/video apply` turn review notes into edits, and code and terminal cards show commands and source.
 - **Edited like a pro screen recorder:** the recording sits on a gradient background with padding, rounded corners and a shadow; the camera zooms and pans on a spring (staying in between nearby clicks) with motion blur; a smoothed cursor and click sounds; word-by-word captions in a pill; crossfades between cards and footage; long waits cut, not fast-forwarded. Pages are recorded at a standard 1440×810 viewport in 1920×1080, so text stays sharp and readable however the browser window is sized or zoomed, and each click is marked on a still taken just before it. The camera frames the page's main content, `/video redo <step>` re-records one bad step in place, `/record --screen` records the whole desktop (on WSL, the Windows desktop; it checks for a first screenshot before the take starts) and `--webcam` adds you in a corner bubble; `/video show` draws stills and the contact sheet right in the terminal, and renders show percent done and time left.
 - **Browser flows as smoke tests:** `/browser test save` / `run` replays saved steps and compares screenshots to a baseline; `/browser remember` keeps a site's sign-in for recordings; recordings follow links into new tabs.
+- **Find and jump:** `Ctrl+P` then `?word` searches this conversation and opens the transcript at the message; `path:line` in replies is clickable and opens VS Code or your JetBrains IDE there; `/rewind` lists the files that would come back (`+3 −10`) before you confirm; `/recap` opens its card sharp in your picture viewer.
 - **Comfortable to read:** long tool output shows its start and end, code blocks have labels, copy (`/copy code`) and line numbers, prose wraps at a readable width, stray model markup is hidden, and the status line never cuts off the model name.
 - **A dashboard your way:** resize panels with Alt+←/→ (or drag), hide them with `/dashboard left|right off`, zoom any panel with Alt+Z, side-by-side diffs on wide screens, and `[`/`]` to jump between prompts in the transcript view.
 - **Editing screen recordings:** cuts and zooms come from where the screen changes (`/video autoedit`), `/video check` reports narration that overruns its footage before you render, `/video timeline` draws the edit as a time bar and `/video nudge` moves a line or zoom; narration can be anchored to text on the page. `record_pause` / `record_resume` keep sign-ins and waiting out of the take; WSL screen recording runs at about 15 frames a second; recordings may run 30 minutes.
@@ -405,11 +411,19 @@ Rarely used tools load on demand through `tool_search`, which keeps every reques
 ```toml
 # ~/.dcode-ai/config.toml     (per project: .dcode.toml, shared · .dcode-ai/config.local.toml, yours)
 [provider]
-default = "anthropic"          # anthropic | copilot
+default = "anthropic"          # anthropic | copilot | local
 
 [provider.anthropic]
 backend = "claude-code"        # your Claude account; "api" = Console OAuth via `ant`
-model = "claude-sonnet-5-5"
+model = "claude-sonnet-5-5"    # or "auto": cheap model for quick ones, strong for real work
+
+# [model.routing]              # what "auto" picks between (defaults per provider)
+# cheap = "claude-haiku-5-5"
+# strong = "claude-opus-5-5"
+
+# [provider.local]             # free, offline: Ollama or LM Studio (found automatically)
+# model = "qwen3-coder:30b"    # empty = the server's first model; dcode-ai never downloads one
+# base_url = "http://127.0.0.1:11434/v1"
 
 [session]
 # max_cost_usd = 5.0           # a cost budget per session: asks before going over (/budget changes it)

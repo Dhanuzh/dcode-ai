@@ -1881,6 +1881,22 @@ impl Repl {
             idle_compacted = false;
 
             match cmd {
+                TuiCmd::RewindPreview {
+                    user_index_from_end,
+                    text,
+                } => {
+                    let lines = self
+                        .runtime
+                        .rewind_preview(user_index_from_end, &text)
+                        .unwrap_or_else(|e| vec![format!("can't tell: {e}")]);
+                    if let Ok(mut g) = tui_state.lock()
+                        && let Some(p) = g.rewind_pending.as_mut()
+                        && p.user_index_from_end == user_index_from_end
+                    {
+                        p.preview = Some(lines);
+                        g.touch_transcript();
+                    }
+                }
                 TuiCmd::Backtrack {
                     user_index_from_end,
                     text,
@@ -3570,6 +3586,7 @@ fn persist_model_choice(
     auth.preferred_provider = Some(match kind {
         ProviderKind::Anthropic => dcode_ai_common::auth::LoggedProvider::Anthropic,
         ProviderKind::Copilot => dcode_ai_common::auth::LoggedProvider::Copilot,
+        ProviderKind::Local => dcode_ai_common::auth::LoggedProvider::Local,
     });
     auth.save().map_err(|e| e.to_string())
 }

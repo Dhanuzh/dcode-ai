@@ -181,6 +181,18 @@ pub async fn fetch_provider_model_ids(
     config: &DcodeAiConfig,
 ) -> Result<Vec<String>, ModelCatalogError> {
     let provider = config.provider.default;
+    // A local server's models change with every `ollama pull`: ask it each
+    // time (it's on this machine).
+    if provider == ProviderKind::Local {
+        let ids = dcode_ai_core::provider::local::list_local_models(&config.provider.local)
+            .await
+            .map(|(_, ids)| ids)
+            .map_err(|e| ModelCatalogError::Request {
+                provider: provider.display_name(),
+                message: e.to_string(),
+            })?;
+        return finish_catalog(provider.display_name(), ids);
+    }
     let cache_tag = disk_cache_tag(config);
     if let Some(ids) = disk_cache_read(&cache_tag) {
         tracing::debug!(provider = %provider.display_name(), "model catalog loaded from disk cache");
@@ -189,6 +201,7 @@ pub async fn fetch_provider_model_ids(
     let ids = match provider {
         ProviderKind::Anthropic => fetch_claude_model_ids(config).await?,
         ProviderKind::Copilot => fetch_copilot_model_ids(config).await?,
+        ProviderKind::Local => unreachable!("handled above"),
     };
     let ids = finish_catalog(provider.display_name(), ids)?;
     disk_cache_write(&cache_tag, &ids);
@@ -310,6 +323,7 @@ fn disk_cache_tag(config: &DcodeAiConfig) -> String {
             })
             .map(|k| secret_tag(&k))
             .unwrap_or(0),
+        ProviderKind::Local => secret_tag(&config.provider.local.base_url),
         ProviderKind::Anthropic => secret_tag(&format!(
             "{:?}/{}",
             config.provider.anthropic.backend,

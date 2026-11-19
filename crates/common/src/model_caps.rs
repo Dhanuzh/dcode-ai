@@ -29,6 +29,14 @@ pub fn model_accepts_native_images(kind: ProviderKind, model: &str) -> bool {
                 || m.starts_with("o3")
                 || m.starts_with("o4")
         }
+        // Local vision models (llava, qwen-vl, gemma3, llama3.2-vision…).
+        ProviderKind::Local => {
+            m.contains("llava")
+                || m.contains("-vl")
+                || m.contains("vision")
+                || m.contains("gemma3")
+                || m.contains("minicpm-v")
+        }
     }
 }
 

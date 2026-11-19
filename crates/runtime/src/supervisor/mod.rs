@@ -325,6 +325,7 @@ impl Supervisor {
             )));
         }
         let (spawn_tx, spawn_rx) = mpsc::channel::<SpawnRequest>(16);
+        let workflow_spawn_tx = spawn_tx.clone();
         let mode_cell: dcode_ai_core::approval::ModeCell =
             Arc::new(std::sync::RwLock::new(config.permissions.mode));
         // Who answers approval prompts: the UI (interactive), or the handler
@@ -465,6 +466,31 @@ impl Supervisor {
             config.harness.skill_directories.clone(),
         )));
         let session_id = cfg.session_id.unwrap_or_else(generate_session_id);
+        // The swarm board this session leads (its sub-agents get their own
+        // handles to the same board in `spawn_child_session`).
+        if !cfg.safe_mode {
+            let board = dcode_ai_common::swarm::board_path(&workspace_root, &session_id);
+            tools.register(Box::new(crate::swarm_tool::SwarmPostTool::new(
+                board.clone(),
+                "lead",
+                Some((background_agents.clone(), "lead".into())),
+            )));
+            tools.register(Box::new(crate::swarm_tool::SwarmReadTool::new(
+                board.clone(),
+            )));
+            tools.register(Box::new(
+                dcode_ai_core::tools::run_workflow::RunWorkflowTool::new(
+                    workflow_spawn_tx,
+                    background_agents.clone(),
+                    Some(mode_cell.clone()),
+                    prompt_handler.clone().filter(|_| cfg.interactive_approvals),
+                    Some(board),
+                ),
+            ));
+            // The lead rarely needs them before it starts a team.
+            tools
+                .defer_behind_search(|n| matches!(n, "swarm_post" | "swarm_read" | "run_workflow"));
+        }
         let session_store = SessionStore::new(workspace_root.join(&config.session.history_dir));
 
         // IPC is best-effort: a bind failure (port exhaustion, stale
@@ -509,6 +535,22 @@ impl Supervisor {
         agent.cost_budget.set(config.session.max_cost_usd);
         agent.messages_mirror = Some(messages_mirror.clone());
         agent.fallback_models = config.model.fallback_models.clone();
+        // `model = "auto"`: route each request to a cheap or strong model.
+        if dcode_ai_core::routing::is_auto(&config.model.default_model) {
+            let mut r = dcode_ai_core::routing::defaults_for(
+                config.provider.default.to_config_key(),
+                &config.provider.local.model,
+            );
+            if !config.model.routing.cheap.trim().is_empty() {
+                r.cheap = config.model.routing.cheap.trim().to_string();
+            }
+            if !config.model.routing.strong.trim().is_empty() {
+                r.strong = config.model.routing.strong.trim().to_string();
+            }
+            // Costs are estimated at the strong model's prices (an upper bound).
+            agent.cost_tracker = dcode_ai_core::cost::CostTracker::for_model(r.strong.clone());
+            agent.routing = Some(r);
+        }
         let mut system_prompt =
             build_system_prompt(&config, &workspace_root, cfg.orchestration_context.as_ref());
         if let Some(section) = memory_prompt_section(&config, &workspace_root) {
@@ -2389,6 +2431,9 @@ fn ensure_private_gitignore(workspace_root: &Path) {
 /// are dotted or provider-native (`claude-sonnet-5`, `gpt-5-mini`).
 fn model_fits_provider(model: &str, provider: dcode_ai_common::config::ProviderKind) -> bool {
     use dcode_ai_common::config::ProviderKind;
+    if dcode_ai_core::routing::is_auto(model) {
+        return true;
+    }
     let m = model.to_ascii_lowercase();
     let claude_api_id = matches!(m.as_str(), "opus" | "sonnet" | "haiku" | "fable")
         || (m.starts_with("claude-")
@@ -2399,6 +2444,8 @@ fn model_fits_provider(model: &str, provider: dcode_ai_common::config::ProviderK
     match provider {
         ProviderKind::Anthropic => m.starts_with("claude") || claude_api_id,
         ProviderKind::Copilot => !claude_api_id,
+        // Whatever the server has; Claude API ids are never local.
+        ProviderKind::Local => !claude_api_id && !m.starts_with("claude"),
     }
 }
 

@@ -22,6 +22,8 @@ pub struct AuthStore {
 pub enum LoggedProvider {
     Anthropic,
     Copilot,
+    /// A model on this machine (Ollama / LM Studio).
+    Local,
     /// A provider that is no longer supported.
     #[serde(other)]
     Other,

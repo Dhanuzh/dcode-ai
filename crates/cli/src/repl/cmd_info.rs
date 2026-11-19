@@ -417,6 +417,7 @@ impl Repl {
                                 &crate::tui::dash_prefs::DashPrefs::default(),
                             );
                             if let Ok(mut g) = st.lock() {
+                                g.split = Default::default();
                                 g.dash_hits.left_w = 0;
                                 g.dash_hits.right_w = 0;
                                 g.dash_hits.hide_left = false;
@@ -689,7 +690,17 @@ impl Repl {
                                 for f in &files {
                                     out.println(&format!("[recap] {}", f.display()));
                                 }
-                                if let Some(png) = files.first()
+                                // The card opens sharp in the picture viewer;
+                                // the terminal's half-block preview only when
+                                // it can't (no desktop, over SSH).
+                                let opened = !rest.split_whitespace().any(|w| w == "--inline")
+                                    && files.first().is_some_and(|png| {
+                                        std::env::var_os("SSH_CONNECTION").is_none()
+                                            && dcode_ai_cli::ffmpeg_setup::open(png).is_ok()
+                                    });
+                                if opened {
+                                    out.println("[recap] opened the card in your picture viewer (/recap --inline shows it here)");
+                                } else if let Some(png) = files.first()
                                     && let ReplOutput::Tui(st) = out
                                     && let Some(rows) = super::cmd_work::picture_rows(png, 100)
                                     && let Ok(mut g) = st.lock()

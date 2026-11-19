@@ -214,6 +214,57 @@ impl UndoManager {
 
     /// [`Self::rewind_to`] for message `pos` of `epoch` (possibly from
     /// before a compaction).
+    /// What [`Self::rewind_to_at`] would do to each file, without doing it:
+    /// `(path, "+3 −10")`, `"comes back (deleted since)"`, `"removed (made
+    /// after)"` or `"folder restored"`. Files already as they were are left
+    /// out. Sorted by path.
+    pub fn rewind_preview_at(&self, epoch: u32, pos: usize) -> Vec<(PathBuf, String)> {
+        // The oldest snapshot of each path among the turns being undone.
+        let mut before: HashMap<&PathBuf, &NodeSnapshot> = HashMap::new();
+        for e in self
+            .undo_stack
+            .iter()
+            .rev()
+            .take_while(|e| at_or_after(e, epoch, pos))
+        {
+            for (p, s) in &e.before {
+                before.insert(p, s);
+            }
+        }
+        let mut out: Vec<(PathBuf, String)> = before
+            .into_iter()
+            .filter_map(|(path, snap)| {
+                let now = fs::read(path).ok();
+                let what = match (snap, now) {
+                    (NodeSnapshot::Absent, None) => return None,
+                    (NodeSnapshot::Absent, Some(_)) => "removed (made after)".to_string(),
+                    (NodeSnapshot::File(_), None) if path.is_dir() => "folder restored".into(),
+                    (NodeSnapshot::File(_), None) => "comes back (deleted since)".into(),
+                    (NodeSnapshot::File(old), Some(cur)) => {
+                        if *old == cur {
+                            return None;
+                        }
+                        let (a, b) = (String::from_utf8_lossy(&cur), String::from_utf8_lossy(old));
+                        let diff = similar::TextDiff::from_lines(a.as_ref(), b.as_ref());
+                        let (mut add, mut del) = (0, 0);
+                        for c in diff.iter_all_changes() {
+                            match c.tag() {
+                                similar::ChangeTag::Insert => add += 1,
+                                similar::ChangeTag::Delete => del += 1,
+                                similar::ChangeTag::Equal => {}
+                            }
+                        }
+                        format!("+{add} −{del}")
+                    }
+                    (NodeSnapshot::Dir { .. }, _) => "folder restored".into(),
+                };
+                Some((path.clone(), what))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
     pub fn rewind_to_at(&mut self, epoch: u32, pos: usize) -> Result<usize, String> {
         let mut restored: Vec<PathBuf> = Vec::new();
         while self
@@ -941,6 +992,29 @@ mod tests {
         // The first turn is untouched and still undoable.
         mgr.undo_last().expect("undo");
         assert_eq!(fs::read_to_string(&path).expect("read"), "v0");
+    }
+
+    #[test]
+    fn a_rewind_preview_lists_changes_without_touching_files() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("a.txt");
+        fs::write(&path, "v0").expect("seed");
+        let mut mgr = UndoManager::default();
+        write_turn(&mut mgr, tmp.path(), 1, "c1", "v1");
+        mgr.finalize_turn().expect("finalize");
+        write_turn(&mut mgr, tmp.path(), 5, "c2", "v2");
+        mgr.finalize_turn().expect("finalize");
+        let p = mgr.rewind_preview_at(0, 1);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].0, path);
+        assert_eq!(p[0].1, "+1 −1");
+        assert_eq!(fs::read_to_string(&path).unwrap(), "v2", "nothing changed");
+        assert!(mgr.rewind_preview_at(0, 9).is_empty(), "no turns after");
+        fs::remove_file(&path).unwrap();
+        assert_eq!(
+            mgr.rewind_preview_at(0, 1)[0].1,
+            "comes back (deleted since)"
+        );
     }
 
     #[test]

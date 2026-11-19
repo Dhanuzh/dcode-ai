@@ -1,5 +1,52 @@
 # Changelog
 
+## 1.0.85 — 2026-11-19
+
+### Added
+- **Swarm board**: sub-agents share a message board (`swarm_post`,
+  `swarm_read`). They claim their piece before starting so nobody
+  duplicates it, post findings, and ask and answer each other; a new post
+  reaches every other running sub-agent at its next step. The dashboard's
+  new **swarm** tab (Alt+8) and `/fleet board` show it; `/fleet` uses it.
+- **Workflow fan-out (`run_workflow`)**: the agent runs a list of tasks —
+  or a template once per item (every file, module, failing test) — with
+  up to 8 sub-agents at a time (up to 100 tasks, each up to 2 hours) and
+  gets every report back in one result. Progress (`12/40 done · 2 failed
+  · ~6 min left`) is posted to the swarm board; cancelling the turn stops
+  the agents it started.
+- **Split workspace**: in the dashboard, `Ctrl+X |` (right) or `Ctrl+X -`
+  (below) opens up to three panes next to the conversation — a sub-agent's
+  live activity, or a side chat. The message box writes to the focused
+  pane: a message for that agent (read at its next step) or a side
+  question (`/btw`, kept as a thread). `Ctrl+X o` / arrows / a click move
+  focus, `Ctrl+X a` changes what a pane shows, `Ctrl+X x` closes it; the
+  layout is remembered.
+- **Local models (free, offline)**: `/provider local` (or "Local model" at
+  first start) uses Ollama or LM Studio, found automatically on their usual
+  ports (`[provider.local] base_url` for another). `/models` lists what the
+  server has. dcode-ai never downloads a model — it says which
+  `ollama pull` to run, and says so plainly when a model can't call tools.
+- **Automatic model routing**: `model = "auto"` sends quick questions,
+  look-ups and small edits to a cheap model and planning, debugging and
+  building to a strong one (`[model.routing] cheap`, `strong`; defaults per
+  provider). A cheap answer that fails, comes back empty or keeps failing
+  a tool moves the run up to the strong model. Each request says which it
+  took ("auto → claude-haiku-5-5 (a quick one)").
+- **Search this conversation**: `Ctrl+P` then `?word` finds messages in
+  this conversation (also without `?` for 3+ letters) and opens the
+  transcript at the one you pick.
+- **Clickable `path:line`**: a project file named in a reply opens in VS
+  Code (`code -g`), your JetBrains IDE (inside its terminal), or the system
+  opener, at that line.
+- **`/rewind` shows what comes back**: before you choose, it lists the
+  files restoring the code would change (`src/a.rs  +3 −10`, "comes back
+  (deleted since)").
+
+### Changed
+- **`/recap`** opens its card sharp in your picture viewer instead of a
+  blurry preview in the terminal (`/recap --inline` for the old way; over
+  SSH it stays inline).
+
 ## 1.0.84 — 2026-11-19
 
 ### Changed

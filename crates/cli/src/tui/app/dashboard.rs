@@ -99,6 +99,32 @@ pub(super) fn draw_dashboard_frame(
     if zoom_right {
         return;
     }
+    // The split workspace: panes beside or below the conversation.
+    g.settle_side_answer();
+    if !g.dash_hits.zoom && g.split.is_split() {
+        let agents = g.subagents.clone();
+        g.split.fill_placeholders(&agents);
+        let (main, panes) = crate::tui::split::layout(centre, &g.split);
+        let live = g
+            .btw
+            .as_ref()
+            .filter(|v| !v.done)
+            .map(|v| (v.question.clone(), v.answer.clone()));
+        let kinds = g.split.panes.clone();
+        for (i, (rect, kind)) in panes.iter().zip(kinds.iter()).enumerate() {
+            crate::tui::split::render_pane(
+                frame,
+                *rect,
+                kind,
+                &g.subagents,
+                &g.split.side,
+                live.as_ref().map(|(q, a)| (q.as_str(), a.as_str())),
+                g.split.focus == i + 1,
+            );
+            g.dash_hits.targets.push((*rect, DashTarget::Pane(i)));
+        }
+        centre = main;
+    }
     draw_session_pane(
         frame,
         centre,
@@ -365,6 +391,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
         (RailTab::Office, "office"),
         (RailTab::Team, "team"),
         (RailTab::Scratch, "scratch"),
+        (RailTab::Swarm, "swarm"),
     ];
     // A narrow rail gets short names, so every tab stays clickable.
     let full: usize = tabs
@@ -380,6 +407,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
         RailTab::Office => "office",
         RailTab::Team => "team",
         RailTab::Scratch => "scr",
+        RailTab::Swarm => "swm",
     };
     // The team tab only once people can be here (`/invite`, joined).
     let team = g.team_visible();
@@ -540,6 +568,7 @@ fn render_right_rail(frame: &mut ratatui::Frame<'_>, rect: Rect, g: &mut TuiSess
         }
         RailTab::Team => render_team(frame, body, g),
         RailTab::Scratch => render_scratch(frame, body, g),
+        RailTab::Swarm => render_swarm(frame, body, g),
         RailTab::Files if g.explorer.touched_only => frame.render_widget(
             Paragraph::new(Text::from(files_lines(
                 &g.file_map,
@@ -734,6 +763,106 @@ fn render_team(frame: &mut ratatui::Frame<'_>, body: Rect, g: &TuiSessionState) 
         ),
         rows[2],
     );
+}
+
+thread_local! {
+    /// The swarm board as last read: (file, modified time, posts).
+    static SWARM_CACHE: std::cell::RefCell<(
+        std::path::PathBuf,
+        Option<std::time::SystemTime>,
+        Vec<dcode_ai_common::swarm::Post>,
+    )> = Default::default();
+}
+
+/// The swarm board's posts, read again only when the file changed.
+pub(crate) fn swarm_posts(path: &std::path::Path) -> Vec<dcode_ai_common::swarm::Post> {
+    let mtime = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+    SWARM_CACHE.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != path || c.1 != mtime {
+            *c = (
+                path.to_path_buf(),
+                mtime,
+                dcode_ai_common::swarm::load(path),
+            );
+        }
+        c.2.clone()
+    })
+}
+
+/// The swarm board lines for a panel `w` wide and `h` high: open claims,
+/// then the newest posts (wrapped), newest at the bottom.
+pub(crate) fn swarm_lines(
+    posts: &[dcode_ai_common::swarm::Post],
+    w: usize,
+    h: usize,
+) -> Vec<Line<'static>> {
+    use dcode_ai_common::swarm;
+    if posts.is_empty() {
+        return vec![
+            muted("no posts yet"),
+            muted("sub-agents claim work, share findings"),
+            muted("and ask each other questions here"),
+        ];
+    }
+    let mut lines = Vec::new();
+    let open = swarm::open_claims(posts);
+    if !open.is_empty() {
+        lines.push(Line::from(Span::styled(
+            format!("working on ({})", open.len()),
+            Style::default().fg(theme::accent()),
+        )));
+        for p in open.iter().take(6) {
+            let t = format!("⚑ {}: {}", p.who, p.text);
+            lines.push(Line::from(truncate_cols(&t, w)));
+        }
+        lines.push(Line::from(""));
+    }
+    let mut body: Vec<Line<'static>> = Vec::new();
+    for p in posts {
+        let color = match p.kind.as_str() {
+            "claim" => theme::accent(),
+            "finding" => theme::tool(),
+            "question" => theme::warn(),
+            "done" => theme::success(),
+            _ => theme::muted(),
+        };
+        let head = format!("{} {} ", swarm::icon(&p.kind), p.who);
+        let indent = 2;
+        let room = w.saturating_sub(head.chars().count()).max(8);
+        let mut rest: Vec<char> = p.text.chars().collect();
+        let first: String = rest.drain(..rest.len().min(room)).collect();
+        body.push(Line::from(vec![
+            Span::styled(head, Style::default().fg(color)),
+            Span::raw(first),
+        ]));
+        while !rest.is_empty() {
+            let take = rest.len().min(w.saturating_sub(indent).max(8));
+            let chunk: String = rest.drain(..take).collect();
+            body.push(Line::from(format!("{}{chunk}", " ".repeat(indent))));
+        }
+    }
+    let room = h.saturating_sub(lines.len());
+    let skip = body.len().saturating_sub(room);
+    lines.extend(body.into_iter().skip(skip));
+    lines
+}
+
+fn truncate_cols(s: &str, w: usize) -> String {
+    if s.chars().count() <= w {
+        s.to_string()
+    } else {
+        let mut t: String = s.chars().take(w.saturating_sub(1)).collect();
+        t.push('…');
+        t
+    }
+}
+
+fn render_swarm(frame: &mut ratatui::Frame<'_>, body: Rect, g: &mut TuiSessionState) {
+    let path = dcode_ai_common::swarm::board_path(&g.workspace_root, &g.session_id);
+    let posts = swarm_posts(&path);
+    let lines = swarm_lines(&posts, body.width as usize, body.height as usize);
+    frame.render_widget(Paragraph::new(Text::from(lines)), body);
 }
 
 /// The scratch tab: the agent's working files (its sub-agents' too), newest

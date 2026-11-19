@@ -15,6 +15,9 @@ pub struct DashPrefs {
     pub hide_left: bool,
     #[serde(default)]
     pub hide_right: bool,
+    /// The split workspace's panes (Ctrl+X | / -).
+    #[serde(default)]
+    pub split: crate::tui::split::SplitPrefs,
 }
 
 fn file() -> Option<std::path::PathBuf> {
@@ -62,6 +65,11 @@ mod tests {
             right_w: 50,
             hide_left: true,
             hide_right: false,
+            split: crate::tui::split::SplitPrefs {
+                agent_panes: 1,
+                side_pane: true,
+                below: false,
+            },
         };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<DashPrefs>(&s).unwrap(), p);

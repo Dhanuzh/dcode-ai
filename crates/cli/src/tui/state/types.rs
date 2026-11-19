@@ -201,6 +201,8 @@ pub enum RailTab {
     Team,
     /// What the agent made along the way (`.dcode-ai/scratch/`).
     Scratch,
+    /// The swarm board: claims, findings and questions between agents.
+    Swarm,
 }
 
 /// Something clickable in the dashboard, recorded while drawing.
@@ -213,6 +215,8 @@ pub enum DashTarget {
     ReviewItem(usize),
     /// Row `i` of the files tab's project explorer.
     ExplorerRow(usize),
+    /// Split-workspace pane `i` (focus it).
+    Pane(usize),
 }
 
 /// Click geometry of the last dashboard frame.
@@ -480,6 +484,8 @@ pub struct TuiSessionState {
     pub model_picker_scroll: usize,
     /// Ctrl+X leader key pending (next keypress is dispatched as shortcut).
     pub leader_pending: bool,
+    /// Panes beside the conversation in the dashboard (Ctrl+X | / -).
+    pub split: crate::tui::split::SplitWorkspace,
     /// Permission mode picker popup.
     pub permission_picker_open: bool,
     pub permission_picker_index: usize,
@@ -649,6 +655,8 @@ pub struct TuiSessionState {
     pub transcript_overlay_open: bool,
     /// Scroll offset (from top, in lines) for the transcript overlay.
     pub transcript_overlay_scroll: usize,
+    /// Open the transcript at this block (a `?` search pick).
+    pub transcript_jump: Option<usize>,
     /// Full-screen diff view (changes tab Enter / `/diff`).
     pub diff_overlay_open: bool,
     pub diff_overlay_scroll: usize,
@@ -847,6 +855,8 @@ pub struct RewindPending {
     pub text: String,
     /// Selected row in [`RewindScope::ALL`].
     pub index: usize,
+    /// The files a code rewind would change (`None` while it's worked out).
+    pub preview: Option<Vec<String>>,
 }
 
 /// A key event for the session picker overlay (crossterm-decoupled).

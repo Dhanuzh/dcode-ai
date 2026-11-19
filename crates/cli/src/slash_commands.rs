@@ -218,7 +218,7 @@ pub fn slash_command_description(command: &str) -> &'static str {
         }
         "/tour" => "a guided tour of this codebase for a newcomer: /tour [area or question]",
         "/fleet" => {
-            "split a task into parallel sub-agents (each in its own worktree), merge as they finish: /fleet [n] <task>"
+            "split a task into parallel sub-agents (each in its own worktree), merge as they finish: /fleet [n] <task> · /fleet board (what the agents posted)"
         }
         "/schedule" => {
             "run a prompt on a schedule: /schedule add \"weekdays 09:00\" [--auto] <what to do> · list · run|pause|resume|rm <n>"
@@ -280,7 +280,7 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/import" => "import Claude Code CLAUDE.md (or /import chats)",
         "/feedback" => "report a bug or request a feature",
         "/recap" => {
-            "today in a card (and a short video): commits, lines, sessions, tokens, streaks and achievements"
+            "today in a card (and a short video): commits, lines, sessions, tokens, streaks and achievements — opens the picture; --inline shows it here"
         }
         "/pin" => "keep a fact word for word through every compaction: /pin <fact>",
         "/pins" => "the pinned facts",

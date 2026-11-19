@@ -19,7 +19,8 @@ use super::theme;
 struct OAuthChoice {
     title: &'static str,
     subtitle: &'static str,
-    login: OAuthProvider,
+    /// The sign-in to run (`None`: nothing to sign in to — a local model).
+    login: Option<OAuthProvider>,
     provider: ProviderKind,
 }
 
@@ -28,14 +29,20 @@ const OAUTH_CHOICES: &[OAuthChoice] = &[
     OAuthChoice {
         title: "Claude",
         subtitle: "Your Claude account via Claude Code (`claude`)",
-        login: OAuthProvider::Anthropic,
+        login: Some(OAuthProvider::Anthropic),
         provider: ProviderKind::Anthropic,
     },
     OAuthChoice {
         title: "GitHub Copilot",
         subtitle: "GitHub device login",
-        login: OAuthProvider::Copilot,
+        login: Some(OAuthProvider::Copilot),
         provider: ProviderKind::Copilot,
+    },
+    OAuthChoice {
+        title: "Local model",
+        subtitle: "Free, on this machine: Ollama or LM Studio",
+        login: None,
+        provider: ProviderKind::Local,
     },
 ];
 
@@ -82,9 +89,19 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
             }
             (KeyCode::Enter, _) => {
                 let choice = OAUTH_CHOICES[selected];
-                restore_terminal(mouse_capture);
-                let res = crate::oauth_login::login(choice.login).await;
-                terminal = setup_terminal(mouse_capture)?;
+                let res = match choice.login {
+                    Some(login) => {
+                        restore_terminal(mouse_capture);
+                        let r = crate::oauth_login::login(login).await;
+                        terminal = setup_terminal(mouse_capture)?;
+                        r
+                    }
+                    // Nothing to sign in to: is a server running?
+                    None if dcode_ai_core::provider::local::local_server_running().await => Ok(()),
+                    None => Err(anyhow::anyhow!(
+                        "no Ollama or LM Studio running — install Ollama (ollama.com), run `ollama pull qwen3-coder`, then choose this again"
+                    )),
+                };
                 match res {
                     Ok(()) => {
                         config.set_default_provider(choice.provider);
@@ -98,7 +115,11 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
                         return Ok(config);
                     }
                     Err(e) => {
-                        status = Some(format!("Login failed: {e}"));
+                        status = Some(if choice.login.is_some() {
+                            format!("Login failed: {e}")
+                        } else {
+                            e.to_string()
+                        });
                     }
                 }
             }
@@ -109,7 +130,7 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
 
 fn render(f: &mut Frame, selected: usize, status: Option<&str>) {
     let area = f.area();
-    let popup = centered_rect(74, 12, area);
+    let popup = centered_rect(74, 13, area);
     f.render_widget(Clear, popup);
 
     let block = super::render_helpers::popup_block("Sign in");

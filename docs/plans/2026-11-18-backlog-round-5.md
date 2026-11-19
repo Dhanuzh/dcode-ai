@@ -198,5 +198,14 @@ provider, chosen by the user on 2026-11-19 as the main step to free entry.
 
 ## Order
 
-1 → 2 → 3 → 4 → 5 → 24 → 26 → 6 → 7 → 8 → M1 → M2 → A1 → A2 → W1 → W2 → 11 → 12 → 19 → 23,
+**Done (v1.0.85, 2026-11-19):** A1 swarm board, A2 workflow fan-out
+(declarative `tasks` / `items`+`template`, not a JS script), W1 split
+workspace (panes beside the conversation in the dashboard; one composer
+routed to the focused pane), TUI 6–9, M1 local models (native tool calls
+only — a model without tool support gets a clear error; the `<tool_call>`
+text fallback is not built), M2 auto routing (no `/cost` savings figure;
+costs are estimated at the strong model's prices). **On hold** (user, 2026-11-19): everything else — TUI 6–9, M1,
+M2, W2, video 11–15, talk 16–18, agent 19–22, code health 23, 25–28.
+
+Earlier order: 1 → 2 → 3 → 4 → 5 → 24 → 26 → 6 → 7 → 8 → M1 → M2 → A1 → A2 → W1 → W2 → 11 → 12 → 19 → 23,
 the rest as asked.

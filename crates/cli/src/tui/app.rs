@@ -99,6 +99,9 @@ pub(crate) enum LineClickHit {
     OpenLink(String),
     /// Toggle collapse/expand of an assistant response block.
     ToggleAssistant(usize),
+    /// A project file mentioned as `path` or `path:line`: open it in the
+    /// editor at that line.
+    OpenFile(std::path::PathBuf, Option<u32>),
 }
 
 /// Per flattened transcript line: click action (same indices as `transcript_lines`).
@@ -114,6 +117,11 @@ pub enum TuiCmd {
         user_index_from_end: usize,
         text: String,
         scope: crate::tui::state::RewindScope,
+    },
+    /// Work out which files a rewind to that message would change.
+    RewindPreview {
+        user_index_from_end: usize,
+        text: String,
     },
     /// Answer for the current `ask_question` (from question mode or `/auto-answer`).
     QuestionAnswer(dcode_ai_common::event::QuestionSelection),
@@ -792,6 +800,7 @@ pub fn run_blocking(
         g.dash_hits.right_w = p.right_w;
         g.dash_hits.hide_left = p.hide_left;
         g.dash_hits.hide_right = p.hide_right;
+        g.split = crate::tui::split::SplitWorkspace::restore(&p.split);
     }
     // The inline view leaves the mouse to the terminal (its scrollback holds
     // the conversation: native wheel scroll and selection) unless the user
@@ -1683,6 +1692,84 @@ pub fn office_tick() -> u64 {
 }
 
 /// Open a URL in the default browser or a file path in the system editor.
+/// Whether `name` is a program on PATH.
+fn on_path(name: &str) -> bool {
+    let exts: &[&str] = if cfg!(windows) {
+        &["", ".exe", ".cmd", ".bat"]
+    } else {
+        &[""]
+    };
+    std::env::var_os("PATH").is_some_and(|p| {
+        std::env::split_paths(&p)
+            .any(|d| exts.iter().any(|e| d.join(format!("{name}{e}")).is_file()))
+    })
+}
+
+/// The editor command that opens `path` at `line`: VS Code (or Cursor)
+/// when the terminal is inside it or `code` is installed, a JetBrains IDE
+/// inside one, else `None` (the system opener).
+pub(crate) fn editor_open_command(
+    path: &std::path::Path,
+    line: Option<u32>,
+    term_program: &str,
+    terminal_emulator: &str,
+    has: &dyn Fn(&str) -> bool,
+) -> Option<(String, Vec<String>)> {
+    let p = path.display().to_string();
+    let at = match line {
+        Some(n) => format!("{p}:{n}"),
+        None => p.clone(),
+    };
+    if term_program == "vscode" || has("code") {
+        let bin = if has("cursor") && !has("code") {
+            "cursor"
+        } else {
+            "code"
+        };
+        return Some((bin.into(), vec!["-g".into(), at]));
+    }
+    if terminal_emulator.contains("JetBrains") {
+        for ide in [
+            "idea",
+            "rustrover",
+            "pycharm",
+            "webstorm",
+            "goland",
+            "clion",
+        ] {
+            if has(ide) {
+                let mut args = Vec::new();
+                if let Some(n) = line {
+                    args.push("--line".into());
+                    args.push(n.to_string());
+                }
+                args.push(p);
+                return Some((ide.into(), args));
+            }
+        }
+    }
+    None
+}
+
+/// Opens a project file in the editor at `line` (see [`editor_open_command`]).
+pub(crate) fn open_file_in_editor(
+    path: &std::path::Path,
+    line: Option<u32>,
+) -> std::io::Result<()> {
+    let tp = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let te = std::env::var("TERMINAL_EMULATOR").unwrap_or_default();
+    match editor_open_command(path, line, &tp, &te, &on_path) {
+        Some((bin, args)) => std::process::Command::new(bin)
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .map(|_| ()),
+        None => crate::ffmpeg_setup::open(path),
+    }
+}
+
 pub(crate) fn open_link_in_system(target: &str) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
@@ -2522,5 +2609,34 @@ mod approval_parse_tests {
             .collect::<Vec<_>>()
             .join("\n---\n");
         insta::assert_snapshot!("diff_hunks", text);
+    }
+}
+
+#[cfg(test)]
+mod editor_open_tests {
+    use super::editor_open_command;
+
+    #[test]
+    fn files_open_in_the_editor_the_terminal_is_in() {
+        let p = std::path::Path::new("/w/src/a.rs");
+        let none = |_: &str| false;
+        let code = |n: &str| n == "code";
+        assert_eq!(
+            editor_open_command(p, Some(7), "vscode", "", &none),
+            Some(("code".into(), vec!["-g".into(), "/w/src/a.rs:7".into()]))
+        );
+        assert_eq!(
+            editor_open_command(p, None, "", "", &code).map(|c| c.1),
+            Some(vec!["-g".into(), "/w/src/a.rs".into()])
+        );
+        let rr = |n: &str| n == "rustrover";
+        assert_eq!(
+            editor_open_command(p, Some(3), "", "JetBrains-JediTerm", &rr),
+            Some((
+                "rustrover".into(),
+                vec!["--line".into(), "3".into(), "/w/src/a.rs".into()]
+            ))
+        );
+        assert_eq!(editor_open_command(p, Some(3), "", "", &none), None);
     }
 }

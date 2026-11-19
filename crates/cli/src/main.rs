@@ -3040,6 +3040,7 @@ async fn probe_provider_health(config: &DcodeAiConfig, kind: ProviderKind) -> St
             config.provider.api_key_present_for(kind)
                 || AuthStore::load().unwrap_or_default().copilot.is_some()
         }
+        ProviderKind::Local => dcode_ai_core::provider::local::local_server_running().await,
     };
     if !signed_in {
         return "skipped (not signed in)".to_string();
@@ -3536,6 +3537,8 @@ fn default_provider_ready(config: &DcodeAiConfig) -> bool {
         ProviderKind::Anthropic => {
             store.anthropic.is_some() || anthropic_signed_in(&config.provider.anthropic)
         }
+        // Nothing to sign in to; a missing server is reported when used.
+        ProviderKind::Local => true,
     }
 }
 

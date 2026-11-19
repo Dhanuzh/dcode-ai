@@ -15,7 +15,7 @@ then the environment variable named by `api_key_env`, then the OAuth auth store.
 
 ```toml
 [provider]
-default = "anthropic"   # anthropic | copilot
+default = "anthropic"   # anthropic | copilot | local
 
 [provider.anthropic]
 backend       = "claude-code"       # claude-code (your Claude account, default) | api
@@ -30,7 +30,20 @@ model          = "gpt-4.1"          # any id from /models (e.g. claude-sonnet-5)
 api_key_env    = "COPILOT_GITHUB_TOKEN"  # optional GitHub token for CI
 # editor_version / editor_plugin_version / integration_id / user_agent:
 # client identity headers sent to the Copilot API (override if needed)
+
+[provider.local]                    # Ollama / LM Studio on this machine — free, offline
+base_url    = ""                    # empty: Ollama (127.0.0.1:11434), then LM Studio (127.0.0.1:1234)
+model       = ""                    # e.g. "qwen3-coder:30b"; empty = the server's first model
+temperature = 0.2
+max_tokens  = 8192
 ```
+
+**`default = "local"`** talks to a model server on this machine through its
+OpenAI-compatible API (`/v1/chat/completions`, `/v1/models`). There is nothing to
+sign in to and nothing leaves the machine. dcode-ai never downloads a model: with
+none installed it says which `ollama pull` to run. The model must support tool
+calls (qwen3-coder, qwen2.5-coder, llama3.1, mistral-small, gpt-oss…); one that
+doesn't gets a clear error.
 
 Older configs that name removed providers (`openai`, `openrouter`, `opencodezen`,
 `antigravity`, …) still load: those sections are ignored and the default falls back
@@ -75,6 +88,19 @@ max_tokens      = 8192
 enable_thinking = true        # stream extended-thinking tokens
 thinking_budget = 4096
 aliases         = { fast = "claude-haiku-4-5-20251001" }   # /model fast
+```
+
+**`model = "auto"`** (in a provider's section, or `default_model`) routes each
+request: quick questions, look-ups and small edits go to the cheap model;
+planning, debugging, building and long or open-ended requests to the strong one.
+A cheap answer that fails, comes back empty or keeps failing a tool moves the run
+up to the strong model. Each request reports its pick ("auto → … (a quick one)").
+Costs are estimated at the strong model's prices.
+
+```toml
+[model.routing]               # defaults: haiku-5-5 / opus-5-5 (Claude),
+cheap  = "claude-haiku-5-5"   # gpt-5-mini / claude-sonnet-5 (Copilot),
+strong = "claude-opus-5-5"    # the one model (local)
 ```
 
 Aliases and configured defaults are user-owned configuration. Available model

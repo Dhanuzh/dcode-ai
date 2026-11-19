@@ -292,6 +292,7 @@ pub(super) fn handle_key_event(
             KeyCode::Char('5') => Some(RailTab::Office),
             KeyCode::Char('6') => Some(RailTab::Team),
             KeyCode::Char('7') => Some(RailTab::Scratch),
+            KeyCode::Char('8') => Some(RailTab::Swarm),
             _ => None,
         };
         if let Some(tab) = tab {
@@ -655,7 +656,9 @@ pub(super) fn handle_key_event(
 
     // The `/btw` answer panel: Esc/Enter/Space close it, ↑↓ scroll; any
     // other key closes it and goes on to the composer.
-    if let Some(view) = g.btw.as_mut() {
+    if !g.side_pane_open()
+        && let Some(view) = g.btw.as_mut()
+    {
         let consumed = match key.code {
             KeyCode::Up => {
                 view.scroll = view.scroll.saturating_sub(1);
@@ -907,6 +910,15 @@ pub(super) fn handle_key_event(
         };
         if let Some(k) = mapped {
             g.apply_backtrack_key(k);
+            // The scope step opened: ask which files would come back.
+            if let Some(p) = &g.rewind_pending
+                && p.preview.is_none()
+            {
+                let _ = cmd_tx.send(TuiCmd::RewindPreview {
+                    user_index_from_end: p.user_index_from_end,
+                    text: p.text.clone(),
+                });
+            }
         }
         return KeyFlow::Continue;
     }
@@ -1146,7 +1158,7 @@ pub(super) fn handle_key_event(
             KeyCode::Char('b') | KeyCode::Char('B') => {
                 let _ = cmd_tx.send(TuiCmd::OpenStatus);
             }
-            KeyCode::Char('a') | KeyCode::Char('A') => {
+            KeyCode::Char('a') | KeyCode::Char('A') if g.split.focus == 0 => {
                 let _ = cmd_tx.send(TuiCmd::OpenAgentPicker);
             }
             KeyCode::Char('h') | KeyCode::Char('H') => {
@@ -1183,6 +1195,52 @@ pub(super) fn handle_key_event(
             KeyCode::Char('v') | KeyCode::Char('V') => {
                 g.transcript_overlay_open = true;
                 g.transcript_overlay_scroll = usize::MAX; // start at bottom
+            }
+            // The split workspace: `|` right, `-` below, `x` close, `o` /
+            // arrows move focus, `a` change what the pane shows.
+            KeyCode::Char('|') | KeyCode::Char('\\') | KeyCode::Char('-') => {
+                let below = key.code == KeyCode::Char('-');
+                if g.view_mode != crate::tui::state::ViewMode::Dashboard {
+                    g.toggle_view_mode();
+                }
+                let agents = g.subagents.clone();
+                let msg = if g.split.split(below, &agents) {
+                    "Split — type to write to the focused pane · Ctrl+X o moves · Ctrl+X x closes"
+                } else {
+                    "At most three panes — Ctrl+X x closes one"
+                };
+                g.show_toast(msg.to_string(), crate::tui::state::ToastKind::Info);
+                g.rail_focus = false;
+                g.save_split();
+                g.touch_transcript();
+            }
+            KeyCode::Char('x') if g.split.is_split() => {
+                if g.split.close_focused() {
+                    g.save_split();
+                } else {
+                    g.show_toast(
+                        "The conversation can't be closed — focus a pane first (Ctrl+X o)"
+                            .to_string(),
+                        crate::tui::state::ToastKind::Info,
+                    );
+                }
+                g.touch_transcript();
+            }
+            KeyCode::Char('o') | KeyCode::Right | KeyCode::Down if g.split.is_split() => {
+                g.split.move_focus(1);
+                g.rail_focus = false;
+                g.touch_transcript();
+            }
+            KeyCode::Left | KeyCode::Up if g.split.is_split() => {
+                g.split.move_focus(-1);
+                g.rail_focus = false;
+                g.touch_transcript();
+            }
+            KeyCode::Char('a') if g.split.focus > 0 => {
+                let agents = g.subagents.clone();
+                g.split.cycle_focused(&agents);
+                g.save_split();
+                g.touch_transcript();
             }
             _ => {}
         }
@@ -1319,6 +1377,16 @@ pub(super) fn handle_key_event(
                 &g.model.clone(),
                 &g.permission_mode.clone(),
             );
+            g.palette_sources.convo = g
+                .blocks
+                .iter()
+                .enumerate()
+                .filter_map(|(i, b)| match b {
+                    DisplayBlock::User(t) => Some((i, true, t.clone())),
+                    DisplayBlock::Assistant(t) => Some((i, false, t.clone())),
+                    _ => None,
+                })
+                .collect();
         }
         // Ctrl+] (some terminals send it as Ctrl+5): the diagram viewer.
         (KeyCode::Char(']') | KeyCode::Char('5'), KeyModifiers::CONTROL) => {
@@ -1939,6 +2007,13 @@ pub(super) fn handle_key_event(
             }
             *composer_history_index = None;
             composer_history_draft.clear();
+            // A focused pane takes the message (commands still go to the
+            // session).
+            if !matches!(expanded.trim_start().chars().next(), Some('/' | '!' | '#'))
+                && g.send_to_focused_pane(&expanded)
+            {
+                return KeyFlow::Continue;
+            }
             let busy_turn = g.busy || g.current_busy_state.is_active();
             if busy_turn {
                 // Enter: the agent reads it at its next step. Alt+Enter, and

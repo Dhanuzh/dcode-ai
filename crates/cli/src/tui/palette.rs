@@ -57,6 +57,36 @@ pub(crate) struct PaletteSources {
     pub text_hits: Vec<(String, usize, String)>,
     /// How often and how lately each pick was used: insert → (count, unix secs).
     pub frecency: std::collections::HashMap<String, (u32, i64)>,
+    /// This conversation's messages: (block index, yours, text).
+    pub convo: Vec<(usize, bool, String)>,
+}
+
+/// A pick that jumps to message `n` of this conversation is `JUMP` + n.
+pub(crate) const JUMP: &str = "\u{1}jump:";
+
+/// The message block a pick jumps to, if it is one.
+pub(crate) fn jump_target(insert: &str) -> Option<usize> {
+    insert.strip_prefix(JUMP)?.parse().ok()
+}
+
+/// `text` around the first match of `needle` (lowercase), on one line.
+fn snippet(text: &str, needle: &str, width: usize) -> String {
+    let flat: String = text
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .collect();
+    let lower = flat.to_lowercase();
+    let at_byte = lower.find(needle).unwrap_or(0);
+    let at = lower[..at_byte].chars().count();
+    let start = at.saturating_sub(width / 3);
+    let mut s: String = flat.chars().skip(start).take(width).collect();
+    if start > 0 {
+        s.insert(0, '…');
+    }
+    if flat.chars().count() > start + width {
+        s.push('…');
+    }
+    s
 }
 
 /// A pick's rank from use: often and recent first (a week halves it).
@@ -227,6 +257,7 @@ pub(crate) fn gather_sources(
         settings,
         text_hits: Vec::new(),
         frecency: load_frecency(),
+        convo: Vec::new(),
     }
 }
 
@@ -462,7 +493,7 @@ pub(crate) fn filter_palette_rows(query: &str, src: &PaletteSources) -> Vec<Pale
     // : settings, ! history (sessions, checkpoints, videos).
     let q = query.trim_start();
     let (mode, rest) = match q.chars().next() {
-        Some(c @ ('>' | '@' | '#' | ':' | '!')) => (Some(c), &q[c.len_utf8()..]),
+        Some(c @ ('>' | '@' | '#' | ':' | '!' | '?')) => (Some(c), &q[c.len_utf8()..]),
         _ => (None, q),
     };
     let needle = rest.trim().to_ascii_lowercase();
@@ -501,7 +532,7 @@ pub(crate) fn filter_palette_rows(query: &str, src: &PaletteSources) -> Vec<Pale
             })
             .collect();
         result.push(PaletteRow::Section(
-            "type to search · > commands  @ files  # text  : settings  ! sessions, checkpoints, videos",
+            "type to search · > commands  @ files  # text  : settings  ! sessions, checkpoints, videos  ? this conversation",
         ));
         section("Recent", rows, &mut result);
         result.extend(PALETTE_CATALOG.iter().cloned());
@@ -617,6 +648,26 @@ pub(crate) fn filter_palette_rows(query: &str, src: &PaletteSources) -> Vec<Pale
             .collect();
         section("Videos", rows, &mut result);
     }
+    // This conversation: messages that mention it, newest first; Enter
+    // jumps there in the transcript.
+    if (mode == Some('?') && !needle.is_empty()) || (mode.is_none() && needle.len() >= 3) {
+        let rows: Vec<PaletteRow> = src
+            .convo
+            .iter()
+            .rev()
+            .filter(|(_, _, t)| t.to_lowercase().contains(&needle))
+            .take(if mode == Some('?') { 20 } else { 3 })
+            .map(|(i, yours, t)| {
+                PaletteRow::found(
+                    snippet(t, &needle, 70),
+                    if *yours { "you said" } else { "reply" },
+                    format!("{JUMP}{i}"),
+                    true,
+                )
+            })
+            .collect();
+        section("In this conversation", rows, &mut result);
+    }
     if mode.is_none() && !needle.is_empty() {
         // Recent prompts, newest first, each once.
         let mut seen = std::collections::HashSet::new();
@@ -686,6 +737,41 @@ pub(crate) fn palette_selectable_indices(rows: &[PaletteRow]) -> Vec<usize> {
 #[cfg(test)]
 mod search_tests {
     use super::*;
+
+    #[test]
+    fn question_mark_searches_this_conversation_and_jumps() {
+        let src = PaletteSources {
+            convo: vec![
+                (0, true, "why does the login fail?".into()),
+                (
+                    3,
+                    false,
+                    "The token expiry check used < instead of <=.".into(),
+                ),
+                (7, true, "thanks".into()),
+            ],
+            ..Default::default()
+        };
+        let rows = filter_palette_rows("?expiry", &src);
+        let hits: Vec<(&String, &String)> = rows
+            .iter()
+            .filter_map(|r| match r {
+                PaletteRow::Found { label, insert, .. } => Some((label, insert)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(hits.len(), 1);
+        assert!(hits[0].0.contains("expiry check"));
+        assert_eq!(jump_target(hits[0].1), Some(3));
+        // Without the prefix a longer query also finds messages.
+        let rows = filter_palette_rows("login", &src);
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, PaletteRow::Section("In this conversation")))
+        );
+        assert_eq!(jump_target("/resume x"), None);
+        assert_eq!(snippet("aaaa needle bbbb", "needle", 8), "…a needle…");
+    }
 
     #[test]
     fn the_palette_finds_commands_prompts_and_files() {

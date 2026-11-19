@@ -52,7 +52,9 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
     {
         return Some(question_box(g, q, inner_w));
     }
-    if let Some(v) = &g.btw {
+    if let Some(v) = &g.btw
+        && !g.side_pane_open()
+    {
         return Some(btw_box(v, inner_w));
     }
     if g.theme_picker_open {
@@ -109,6 +111,28 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
             )),
             Line::default(),
         ];
+        // What restoring the code would change.
+        match &pending.preview {
+            None => lines.push(muted("checking which files would change…")),
+            Some(p) if p.is_empty() => lines.push(muted("no file changes since then")),
+            Some(p) => {
+                lines.push(muted(format!(
+                    "Restoring the code changes {} file{}:",
+                    p.len(),
+                    if p.len() == 1 { "" } else { "s" }
+                )));
+                for l in p.iter().take(6) {
+                    lines.push(Line::from(Span::styled(
+                        format!("  {}", truncate_chars(l, inner_w.saturating_sub(4))),
+                        Style::default().fg(theme::text()),
+                    )));
+                }
+                if p.len() > 6 {
+                    lines.push(muted(format!("  … {} more", p.len() - 6)));
+                }
+            }
+        }
+        lines.push(Line::default());
         let labels: Vec<String> = RewindScope::ALL
             .iter()
             .map(|s| s.label().to_string())

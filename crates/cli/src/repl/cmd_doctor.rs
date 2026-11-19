@@ -127,6 +127,21 @@ fn system_checks(
                 out.push(problem("GitHub Copilot: not signed in — run /login", None));
             }
         }
+        ProviderKind::Local => {
+            out.push(ok(format!(
+                "Local model: {} ({}) — the server is checked when used",
+                if config.provider.local.model.is_empty() {
+                    "the server's first model"
+                } else {
+                    config.provider.local.model.as_str()
+                },
+                if config.provider.local.base_url.is_empty() {
+                    "Ollama or LM Studio, found automatically"
+                } else {
+                    config.provider.local.base_url.as_str()
+                }
+            )));
+        }
     }
     match version_of("git") {
         Some(v) => out.push(ok(v)),

@@ -15,6 +15,25 @@ use tokio::sync::mpsc;
 
 use super::{AutoDenyHandler, Supervisor, SupervisorConfig, spawn_event_fanout};
 
+/// How a sub-agent works with its siblings.
+const SWARM_NOTE: &str = "Other agents may be working in parallel with you. Before starting, \
+`swarm_read` the shared board; `swarm_post` a `claim` for your piece, `finding`s others need, \
+and `done` when finished. Posts from other agents arrive as messages at your next step — don't \
+redo work someone has claimed.";
+
+/// The short form of a session id shown on the swarm board.
+fn short_id(id: &str) -> String {
+    // As the dashboard shows it: the last 8 characters of the longest
+    // part with digits (`session-1791887456044093-0` → `56044093`).
+    let seg = id
+        .split('-')
+        .filter(|s| s.chars().any(|c| c.is_ascii_digit()))
+        .max_by_key(|s| s.len())
+        .unwrap_or(id);
+    let n = seg.chars().count();
+    seg.chars().skip(n.saturating_sub(8)).collect()
+}
+
 pub fn truncate_child_detail(s: &str, max_chars: usize) -> String {
     let t = s.trim();
     if t.chars().count() <= max_chars {
@@ -915,6 +934,7 @@ pub async fn spawn_child_session(
                 | "update_goal"
                 | "browser_task"
                 | "send_message"
+                | "run_workflow"
         )
     });
 
@@ -945,6 +965,37 @@ pub async fn spawn_child_session(
             .count();
         msgs.truncate(keep);
         msgs.extend(history.iter().cloned());
+    }
+    // The lead's swarm board, not one of its own: post as this agent and
+    // tell its running siblings.
+    sup.agent_mut()
+        .tools
+        .retain_by_name(|name| !matches!(name, "swarm_post" | "swarm_read"));
+    {
+        let board = dcode_ai_common::swarm::board_path(&cfg.workspace_root, &cfg.parent_session_id);
+        let who = cfg
+            .agent
+            .as_ref()
+            .map(|a| format!("{}-{}", a.name, short_id(&child_id)))
+            .unwrap_or_else(|| short_id(&child_id));
+        let me = cfg
+            .registry
+            .as_ref()
+            .map(|(_, id)| id.clone())
+            .unwrap_or_else(|| child_id.clone());
+        sup.agent_mut()
+            .tools
+            .register(Box::new(crate::swarm_tool::SwarmPostTool::new(
+                board.clone(),
+                who,
+                cfg.registry.as_ref().map(|(reg, _)| (reg.clone(), me)),
+            )));
+        sup.agent_mut()
+            .tools
+            .register(Box::new(crate::swarm_tool::SwarmReadTool::new(board)));
+        // Loaded up front for sub-agents (the lead keeps them deferred).
+        sup.agent_mut().tools.activate("swarm_post");
+        sup.agent_mut().tools.activate("swarm_read");
     }
     if cfg.browser_task {
         // The browser (loaded, not behind a search) and reading files.
@@ -999,12 +1050,12 @@ and stop. End with a short report for the parent agent — what you did, the dat
 300 words; don't paste whole pages."
             .to_string(),
         Some(agent) => format!(
-            "You are the `{}` agent, spawned by a parent session.\n\n## Agent Instructions\n{}",
+            "You are the `{}` agent, spawned by a parent session.\n\n{SWARM_NOTE}\n\n## Agent Instructions\n{}",
             agent.name, agent.prompt
         ),
-        None => {
-            "You are a sub-agent spawned by a parent session to handle a specific task.".to_string()
-        }
+        None => format!(
+            "You are a sub-agent spawned by a parent session to handle a specific task.\n\n{SWARM_NOTE}"
+        ),
     };
     let mut context_prompt = if cfg.resume {
         format!(

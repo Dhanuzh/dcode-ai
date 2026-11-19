@@ -20,6 +20,7 @@ pub mod sandbox;
 pub mod service;
 pub mod session_store;
 pub mod supervisor;
+pub mod swarm_tool;
 pub mod tmux;
 pub mod token_count;
 pub mod usage_log;

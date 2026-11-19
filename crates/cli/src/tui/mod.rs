@@ -48,6 +48,7 @@ pub mod scratch;
 pub mod scroll_buffer;
 pub mod setup_picker;
 pub mod slash_entries;
+pub mod split;
 pub mod state;
 pub mod statusline;
 pub mod sudo_prompt;

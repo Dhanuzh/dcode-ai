@@ -806,6 +806,7 @@ fn fallback_models(kind: ProviderKind) -> Vec<&'static str> {
             vec!["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"]
         }
         ProviderKind::Copilot => vec!["gpt-4.1", "claude-sonnet-5", "gpt-5-mini"],
+        ProviderKind::Local => vec!["qwen3-coder", "qwen2.5-coder", "llama3.1"],
     }
 }
 
@@ -869,6 +870,7 @@ fn active_provider_temperature(config: &DcodeAiConfig) -> f32 {
     match config.provider.default {
         ProviderKind::Anthropic => config.provider.anthropic.temperature,
         ProviderKind::Copilot => config.provider.copilot.temperature,
+        ProviderKind::Local => config.provider.local.temperature,
     }
 }
 
@@ -1729,6 +1731,7 @@ async fn handle_http(stream: TcpStream, state: &AppState, token: &str) -> std::i
                     match cfg.provider.default {
                         ProviderKind::Anthropic => cfg.provider.anthropic.temperature = t,
                         ProviderKind::Copilot => cfg.provider.copilot.temperature = t,
+                        ProviderKind::Local => cfg.provider.local.temperature = t,
                     }
                 }
             }

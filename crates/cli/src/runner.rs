@@ -333,6 +333,27 @@ impl SessionRuntime {
     /// edited since (restored from turn snapshots), or both. Works across
     /// compactions: the history from before one is kept on disk. Returns
     /// the number of files restored.
+    /// The files a code rewind to before that message would change, as
+    /// `relative/path  +3 −10` lines.
+    pub fn rewind_preview(
+        &self,
+        user_index_from_end: usize,
+        expected_text: &str,
+    ) -> Result<Vec<String>, String> {
+        let point = self.locate_user_message(user_index_from_end, expected_text)?;
+        let root = self.supervisor.workspace_root.clone();
+        Ok(self
+            .supervisor
+            .agent()
+            .rewind_preview_at(point.epoch, point.pos)
+            .into_iter()
+            .map(|(p, what)| {
+                let rel = p.strip_prefix(&root).unwrap_or(&p).display().to_string();
+                format!("{rel}  {what}")
+            })
+            .collect())
+    }
+
     pub fn rewind_to_user_message(
         &mut self,
         user_index_from_end: usize,

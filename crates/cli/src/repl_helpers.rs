@@ -29,6 +29,8 @@ fn provider_connected(
             ProviderKind::Anthropic => {
                 auth.anthropic.is_some() || anthropic_backend_available(&config.provider.anthropic)
             }
+            // Chosen on purpose (`/provider local`); no sign-in.
+            ProviderKind::Local => config.provider.default == ProviderKind::Local,
         }
 }
 

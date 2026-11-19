@@ -3,6 +3,7 @@ pub mod anthropic_compat;
 pub mod claude_code;
 pub mod copilot;
 pub mod factory;
+pub mod local;
 pub mod openai_compat;
 pub mod retry;
 #[cfg(test)]

@@ -1,7 +1,7 @@
 ## Learned User Preferences
 
 - Always use Rust-native solutions; no JavaScript, Node.js, or Electron involvement
-- Claude (Anthropic) and GitHub Copilot are the ONLY providers (decided 2026-10-12; all others removed 2026-10-13)
+- Claude (Anthropic) and GitHub Copilot are the cloud providers (decided 2026-10-12; all others removed 2026-10-13). A third, opt-in **local** provider (Ollama / LM Studio over their OpenAI-compatible API, no sign-in, never downloads models) was added 2026-11-19 at the user's request for free entry; `model = "auto"` routes between a cheap and a strong model
 - Sign-in is OAuth only — no API-key onboarding. Claude defaults to the user's Claude account through their own signed-in `claude` binary (`[provider.anthropic] backend = "claude-code"`), used as a model only with dcode-ai's tools via a `<tool_call>` text protocol — no MCP. `backend = "api"` = Console OAuth via `ant`. Copilot uses GitHub device login. Never extract or reuse Claude.ai tokens or another product's OAuth client
 - TUI redesign direction: hybrid — inline (scrollback) by default, Ctrl+\ toggles a full-screen dashboard (agents rail, transcript, diff/context panel)
 - **CLI (`dcode-ai`) is the product surface**—terminal UX, JSON/NDJSON streams, and Unix-socket IPC

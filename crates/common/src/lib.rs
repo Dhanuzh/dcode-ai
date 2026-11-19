@@ -20,5 +20,6 @@ pub mod redact;
 pub mod scratch;
 pub mod session;
 pub mod shell;
+pub mod swarm;
 pub mod tool;
 pub mod workspace_scope;

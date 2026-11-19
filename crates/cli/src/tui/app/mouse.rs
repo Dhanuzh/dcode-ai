@@ -280,6 +280,25 @@ fn activate_line_hit(hit: LineClickHit, g: &mut TuiSessionState) {
             }
             g.touch_transcript();
         }
+        LineClickHit::OpenFile(path, line) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            match crate::tui::app::open_file_in_editor(&path, line) {
+                Ok(()) => g.show_toast(
+                    format!(
+                        "↗ Opening {name}{}",
+                        line.map(|n| format!(":{n}")).unwrap_or_default()
+                    ),
+                    crate::tui::state::ToastKind::Info,
+                ),
+                Err(e) => g.show_toast(
+                    format!("✗ Couldn't open {name}: {e}"),
+                    crate::tui::state::ToastKind::Error,
+                ),
+            }
+        }
         LineClickHit::OpenLink(target) => {
             let _ = open_link_in_system(&target);
             g.show_toast(
@@ -505,6 +524,11 @@ pub(super) fn handle_dashboard_mouse(
                     }
                     g.file_map = files;
                 }
+                Some(DashTarget::Pane(i)) => {
+                    g.split.focus = i + 1;
+                    g.rail_focus = false;
+                    g.touch_transcript();
+                }
                 Some(DashTarget::Subagent(idx)) => {
                     g.open_subagent_modal();
                     g.subagent_modal_index = idx.min(g.subagents.len().saturating_sub(1));
@@ -518,6 +542,7 @@ pub(super) fn handle_dashboard_mouse(
                     }
                     // Clicking the conversation returns keys to the composer.
                     g.rail_focus = false;
+                    g.split.focus = 0;
                     let inner_w = tr.width.saturating_sub(2).max(10);
                     let (_lines, hits, _) = transcript_cache.get_or_rebuild(g, inner_w);
                     let line = start + (m.row - tr.y) as usize;

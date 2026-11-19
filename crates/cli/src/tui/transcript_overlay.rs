@@ -64,6 +64,12 @@ pub(crate) fn run_transcript_overlay(state: &Arc<Mutex<TuiSessionState>>) -> any
             let prompts = prompt_rows(&lines);
             let scroll = {
                 let mut g = state.lock().map_err(|e| anyhow::anyhow!("lock: {e}"))?;
+                // A `?` search pick: start at that message.
+                if let Some(b) = g.transcript_jump.take() {
+                    let n = b.min(g.blocks.len());
+                    g.transcript_overlay_scroll =
+                        crate::tui::transcript::render_blocks_range(&g, 0, n, width).len();
+                }
                 g.transcript_overlay_scroll = g.transcript_overlay_scroll.min(max_scroll);
                 g.transcript_overlay_scroll
             };

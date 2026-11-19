@@ -429,6 +429,8 @@ pub(crate) fn transcript_lines_and_hits_from(
             let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
             if let Some(url) = extract_first_url(&text) {
                 *hit = Some(LineClickHit::OpenLink(url));
+            } else if let Some((path, line)) = extract_first_file(&text, &state.workspace_root) {
+                *hit = Some(LineClickHit::OpenFile(path, line));
             }
         }
     }
@@ -1357,6 +1359,43 @@ fn collapse_blank_runs(
     (out_lines, out_hits)
 }
 
+/// The first `path` or `path:line[:col]` on a line that names an existing
+/// file in the project (relative to `root`, or absolute inside it).
+pub(crate) fn extract_first_file(
+    text: &str,
+    root: &std::path::Path,
+) -> Option<(std::path::PathBuf, Option<u32>)> {
+    for word in text.split_whitespace() {
+        let w = word.trim_matches(|c: char| {
+            matches!(
+                c,
+                '(' | ')' | '[' | ']' | '<' | '>' | '"' | '\'' | ',' | '`' | ';' | '*'
+            )
+        });
+        let w = w.trim_end_matches(['.', ':']);
+        // Something path-like: a separator or an extension.
+        if w.len() < 3 || w.contains("://") || !(w.contains('/') || w.contains('.')) {
+            continue;
+        }
+        let mut parts = w.splitn(3, ':');
+        let file = parts.next().unwrap_or("");
+        let line = parts.next().and_then(|n| n.parse::<u32>().ok());
+        if file.is_empty() || file.chars().all(|c| c.is_ascii_digit() || c == '.') {
+            continue;
+        }
+        let p = std::path::Path::new(file);
+        let full = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        };
+        if full.starts_with(root) && full.is_file() {
+            return Some((full, line));
+        }
+    }
+    None
+}
+
 fn extract_first_url(text: &str) -> Option<String> {
     for word in text.split_whitespace() {
         let trimmed = word.trim_matches(|c: char| {
@@ -1437,6 +1476,26 @@ fn elapsed_label(secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_paths_with_lines_are_found() {
+        let root = std::env::temp_dir().join(format!("dcode-paths-{}", std::process::id()));
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+        let (p, line) =
+            extract_first_file("The bug is in `src/main.rs:42` — see there.", &root).unwrap();
+        assert_eq!(p, root.join("src/main.rs"));
+        assert_eq!(line, Some(42));
+        let (_, line) = extract_first_file("edit src/main.rs.", &root).unwrap();
+        assert_eq!(line, None);
+        assert!(extract_first_file("version 1.2.3 and src/missing.rs:3", &root).is_none());
+        assert!(extract_first_file("https://x.dev/src/main.rs", &root).is_none());
+        assert!(
+            extract_first_file("/etc/hosts", &root).is_none(),
+            "outside the project"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
     use std::path::PathBuf;
 
     fn state_with_assistant_block(content: &str) -> TuiSessionState {
