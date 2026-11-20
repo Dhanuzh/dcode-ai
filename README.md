@@ -21,6 +21,16 @@ One binary · your Claude or GitHub Copilot sign-in, or a free local model · no
 
 <br>
 
+<div align="center">
+
+### 🎬 Watch the 5-minute demo
+
+<a href="docs/assets/demo.mp4"><img src="docs/assets/demo-poster.png" alt="Watch the dcode-ai demo video: parallel agents in git worktrees, the dashboard, the Agent Office and more" width="640"></a>
+
+<sub>Real sessions, no mock-ups: a fix from a failing test, parallel sub-agents in git worktrees, the dashboard and office, checkpoints, the board and invites.</sub>
+
+</div>
+
 ## ✨ Why dcode-ai
 
 <table>
