@@ -21,18 +21,6 @@ One binary · your Claude or GitHub Copilot sign-in, or a free local model · no
 
 <br>
 
-<div align="center">
-
-### 🎬 Watch the 5-minute demo
-
-<img src="docs/assets/demo-preview.gif" alt="dcode-ai demo preview: the agent finds and fixes a failing test" width="720">
-
-<a href="docs/assets/demo.mp4">⬇️ Download the full 5-minute demo (MP4, 13 MB)</a>
-
-<sub>Real sessions, no mock-ups: a fix from a failing test, parallel sub-agents in git worktrees, the dashboard and office, checkpoints, the board and invites.</sub>
-
-</div>
-
 ## ✨ Why dcode-ai
 
 <table>
