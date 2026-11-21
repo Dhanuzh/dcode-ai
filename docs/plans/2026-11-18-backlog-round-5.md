@@ -46,6 +46,17 @@ or missing, the fix, and how to check it.
    `voice-persona`. *Fix:* tests that touch `~/.dcode-ai` run with a
    temporary home.
 
+### 1b. Reported 2026-11-22
+
+- **B1. Broken pipe panics** — `dcode-ai plugin search rust | head -8`
+  crashes with "failed printing to stdout: Broken pipe" (`println!`
+  panics when the reader closes early). Seen while recording the demo.
+  *Fix:* subcommand output goes through a writer that treats `EPIPE` as
+  "stop quietly, exit 0" (not a global `SIGPIPE` reset — the runtime
+  writes to hook/MCP pipes and must keep getting `EPIPE` errors there).
+  *Check:* `dcode-ai plugin search rust | head -1` exits 0 with no
+  message; a test pipes a few subcommands into a closed reader.
+
 ## 2. TUI
 
 6. Search this conversation from Ctrl+P (`?`), jump to the message.
