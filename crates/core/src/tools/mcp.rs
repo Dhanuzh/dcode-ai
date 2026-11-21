@@ -930,9 +930,64 @@ impl HttpMcpClient {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
-            return Err(format!("MCP HTTP error {status}: {body}"));
+            return Err(http_error_text(status, &body));
         }
         Ok(resp)
+    }
+}
+
+/// A JSON-RPC error object as one line: `message (code N)`.
+fn rpc_error_text(error: &Value) -> String {
+    match error.get("message").and_then(|m| m.as_str()) {
+        Some(msg) => match error.get("code").and_then(|c| c.as_i64()) {
+            Some(code) => format!("{msg} (code {code})"),
+            None => msg.to_string(),
+        },
+        None => error.to_string(),
+    }
+}
+
+/// What a refusing HTTP MCP server said: its JSON-RPC error message when it
+/// sent one (the "Server message"), else the start of the body as text.
+fn http_error_text(status: reqwest::StatusCode, body: &str) -> String {
+    let body = body.trim();
+    if let Ok(v) = serde_json::from_str::<Value>(body) {
+        let message = v
+            .get("error")
+            .map(|e| match e {
+                Value::String(s) => s.clone(),
+                other => rpc_error_text(other),
+            })
+            .or_else(|| v.get("message").and_then(|m| m.as_str()).map(String::from));
+        if let Some(m) = message {
+            return format!("HTTP {status} — server message: {m}");
+        }
+    }
+    // HTML error pages: drop the tags, keep a readable start.
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in body.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => {
+                in_tag = false;
+                text.push(' ');
+            }
+            c if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if text.is_empty() {
+        format!("HTTP {status}")
+    } else {
+        let short: String = text.chars().take(200).collect();
+        let more = if text.chars().count() > 200 {
+            "…"
+        } else {
+            ""
+        };
+        format!("HTTP {status}: {short}{more}")
     }
 }
 
@@ -989,7 +1044,7 @@ impl McpTransport for HttpMcpClient {
 impl HttpMcpClient {
     fn result_from(&self, value: &Value) -> Result<Value, String> {
         if let Some(error) = value.get("error") {
-            return Err(format!("MCP error: {error}"));
+            return Err(format!("MCP error: {}", rpc_error_text(error)));
         }
         Ok(value
             .get("result")
@@ -1236,5 +1291,25 @@ mod content_tests {
         assert!(pdf.starts_with(b"%PDF"));
         // Without saving, only named.
         assert!(res.format_output().contains("[Image: image/png]"));
+    }
+
+    #[test]
+    fn http_errors_show_the_server_message() {
+        let s = reqwest::StatusCode::FORBIDDEN;
+        assert_eq!(
+            http_error_text(
+                s,
+                r#"{"jsonrpc":"2.0","error":{"code":-32001,"message":"Organization not allowed"},"id":1}"#
+            ),
+            "HTTP 403 Forbidden — server message: Organization not allowed (code -32001)"
+        );
+        let html = format!(
+            "<html><body><h1>Bad Gateway</h1>{}</body></html>",
+            "x ".repeat(300)
+        );
+        let t = http_error_text(reqwest::StatusCode::BAD_GATEWAY, &html);
+        assert!(t.starts_with("HTTP 502 Bad Gateway: Bad Gateway x"), "{t}");
+        assert!(t.ends_with('…') && t.len() < 260, "{t}");
+        assert_eq!(http_error_text(s, ""), "HTTP 403 Forbidden");
     }
 }
