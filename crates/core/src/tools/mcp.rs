@@ -35,6 +35,11 @@ impl McpConnectionManager {
         }
     }
 
+    /// The workspace the servers run in.
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
     pub async fn get_or_connect(
         self: &Arc<Self>,
         server_config: &McpServerConfig,
@@ -262,7 +267,10 @@ impl ToolExecutor for McpTool {
                     Ok(res) => ToolResult {
                         call_id: call.id.clone(),
                         success: !res.is_error,
-                        output: res.format_output(),
+                        output: res.format_output_saving(
+                            self.manager.workspace_root(),
+                            &format!("{}-{}", self.server_config.name, call.id),
+                        ),
                         error: None,
                     },
                     Err(_) => {
@@ -324,41 +332,273 @@ pub enum McpContent {
     },
     Image {
         data: String,
-        #[serde(rename = "mimeType")]
+        #[serde(rename = "mimeType", default)]
+        mime_type: String,
+    },
+    Audio {
+        data: String,
+        #[serde(rename = "mimeType", default)]
         mime_type: String,
     },
     Resource {
         resource: Value,
     },
+    #[serde(rename = "resource_link")]
+    ResourceLink {
+        uri: String,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(rename = "mimeType", default)]
+        mime_type: Option<String>,
+    },
+    /// A content type this client doesn't know: noted, not a failed call.
+    #[serde(other)]
+    Unknown,
 }
 
 impl McpCallToolResult {
+    /// The result as text, without saving anything (images and files are
+    /// only named).
     pub fn format_output(&self) -> String {
-        let mut out = String::new();
-        for item in &self.content {
-            match item {
-                McpContent::Text { text } => {
-                    if !out.is_empty() {
-                        out.push_str("\n\n");
+        self.render(None)
+    }
+
+    /// The result as text; images, audio and binary resources are saved
+    /// under `<workspace>/.dcode-ai/mcp-files/` and named by path, so the
+    /// agent can read them (`Saved an image to …` lets a model that sees
+    /// images look at it).
+    pub fn format_output_saving(&self, workspace_root: &Path, prefix: &str) -> String {
+        self.render(Some((workspace_root, prefix)))
+    }
+
+    fn render(&self, save: Option<(&Path, &str)>) -> String {
+        let mut parts: Vec<String> = Vec::new();
+        for (i, item) in self.content.iter().enumerate() {
+            let saved = |data: &str, mime: &str, uri: Option<&str>, kind: &str| -> String {
+                let Some((root, prefix)) = save else {
+                    return format!(
+                        "[{kind}: {}]",
+                        if mime.is_empty() {
+                            "unknown type"
+                        } else {
+                            mime
+                        }
+                    );
+                };
+                match save_blob(root, &format!("{prefix}-{i}"), data, mime, uri) {
+                    Ok((rel, mime, len)) if kind == "Image" => {
+                        format!("Saved an image to {rel} ({mime}, {})", human_size(len))
                     }
-                    out.push_str(text);
+                    Ok((rel, mime, len)) => format!(
+                        "Saved a file to {rel} ({mime}, {}) — read it with read_file",
+                        human_size(len)
+                    ),
+                    Err(e) => format!("[{kind} not saved: {e}]"),
                 }
-                McpContent::Image { mime_type, .. } => {
-                    if !out.is_empty() {
-                        out.push_str("\n\n");
+            };
+            parts.push(match item {
+                McpContent::Text { text } => text.clone(),
+                McpContent::Image { data, mime_type } => saved(data, mime_type, None, "Image"),
+                McpContent::Audio { data, mime_type } => saved(data, mime_type, None, "Audio"),
+                McpContent::Resource { resource } => {
+                    let uri = resource["uri"].as_str();
+                    let mime = resource["mimeType"].as_str().unwrap_or_default();
+                    if let Some(text) = resource["text"].as_str() {
+                        match uri {
+                            Some(u) => format!("[Resource {u}]\n{text}"),
+                            None => text.to_string(),
+                        }
+                    } else if let Some(blob) = resource["blob"].as_str() {
+                        let kind = if mime.starts_with("image/") {
+                            "Image"
+                        } else {
+                            "File"
+                        };
+                        saved(blob, mime, uri, kind)
+                    } else {
+                        format!("[Resource {}]", uri.unwrap_or("(no uri)"))
                     }
-                    out.push_str(&format!("[Image: {}]", mime_type));
                 }
-                McpContent::Resource { .. } => {
-                    if !out.is_empty() {
-                        out.push_str("\n\n");
+                McpContent::ResourceLink {
+                    uri,
+                    name,
+                    mime_type,
+                } => {
+                    let mut s = format!("[Resource link: {uri}");
+                    if let Some(n) = name {
+                        s.push_str(&format!(" — {n}"));
                     }
-                    out.push_str("[Resource]");
+                    if let Some(m) = mime_type {
+                        s.push_str(&format!(" ({m})"));
+                    }
+                    s.push(']');
+                    s
                 }
+                McpContent::Unknown => "[content of a type dcode-ai doesn't show]".to_string(),
+            });
+        }
+        parts.join("\n\n")
+    }
+}
+
+fn human_size(len: usize) -> String {
+    match len {
+        n if n >= 1 << 20 => format!("{:.1} MB", n as f64 / (1 << 20) as f64),
+        n if n >= 1 << 10 => format!("{} KB", n >> 10),
+        n => format!("{n} B"),
+    }
+}
+
+/// Decodes base64 `data` and saves it as `.dcode-ai/mcp-files/<stem>.<ext>`;
+/// returns the path (relative to the workspace), the type and the size.
+fn save_blob(
+    root: &Path,
+    stem: &str,
+    data: &str,
+    mime: &str,
+    uri: Option<&str>,
+) -> Result<(String, String, usize), String> {
+    use base64::Engine as _;
+    let cleaned: String = data.chars().filter(|c| !c.is_whitespace()).collect();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(cleaned.as_bytes())
+        .or_else(|_| base64::engine::general_purpose::STANDARD_NO_PAD.decode(cleaned.as_bytes()))
+        .map_err(|e| format!("bad base64: {e}"))?;
+    let (ext, mime) = file_kind(&bytes, mime, uri);
+    let stem: String = stem
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    let rel = format!(".dcode-ai/mcp-files/{stem}.{ext}");
+    let path = root.join(&rel);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    }
+    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+    Ok((rel, mime, bytes.len()))
+}
+
+/// The file extension (and a better type) for `bytes`: from the declared
+/// type when it's specific, else from the bytes themselves — servers often
+/// send PDFs, images and Office files as `application/octet-stream`.
+pub fn file_kind(bytes: &[u8], mime: &str, uri: Option<&str>) -> (&'static str, String) {
+    let mime = mime
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let by_mime = match mime.as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        "image/svg+xml" => Some("svg"),
+        "application/pdf" => Some("pdf"),
+        "application/json" => Some("json"),
+        "text/plain" => Some("txt"),
+        "text/csv" => Some("csv"),
+        "text/html" => Some("html"),
+        "text/markdown" => Some("md"),
+        "audio/mpeg" | "audio/mp3" => Some("mp3"),
+        "audio/wav" | "audio/x-wav" => Some("wav"),
+        "audio/ogg" => Some("ogg"),
+        "application/zip" => Some("zip"),
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => Some("docx"),
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => Some("xlsx"),
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation" => Some("pptx"),
+        _ => None,
+    };
+    if let Some(ext) = by_mime {
+        return (ext, mime);
+    }
+    let sniffed: Option<(&'static str, &'static str)> = if bytes.starts_with(b"%PDF") {
+        Some(("pdf", "application/pdf"))
+    } else if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("png", "image/png"))
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some(("jpg", "image/jpeg"))
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some(("gif", "image/gif"))
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(("webp", "image/webp"))
+    } else if bytes.len() >= 12 && &bytes[..4] == b"RIFF" && &bytes[8..12] == b"WAVE" {
+        Some(("wav", "audio/wav"))
+    } else if bytes.starts_with(b"OggS") {
+        Some(("ogg", "audio/ogg"))
+    } else if bytes.starts_with(b"ID3") {
+        Some(("mp3", "audio/mpeg"))
+    } else if bytes.starts_with(b"PK\x03\x04") {
+        let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+        Some(if has(b"word/") {
+            (
+                "docx",
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
+        } else if has(b"xl/") {
+            (
+                "xlsx",
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        } else if has(b"ppt/") {
+            (
+                "pptx",
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+        } else {
+            ("zip", "application/zip")
+        })
+    } else {
+        None
+    };
+    if let Some((ext, m)) = sniffed {
+        return (ext, m.to_string());
+    }
+    // The resource's own name, when it has a plain extension.
+    if let Some(ext) = uri
+        .and_then(|u| u.rsplit('/').next())
+        .and_then(|n| n.rsplit_once('.'))
+        .map(|(_, e)| e.to_ascii_lowercase())
+    {
+        for known in [
+            "txt", "csv", "json", "md", "html", "xml", "yaml", "yml", "log",
+        ] {
+            if ext == known {
+                return (
+                    known,
+                    if mime.is_empty() {
+                        "text/plain".into()
+                    } else {
+                        mime
+                    },
+                );
             }
         }
-        out
     }
+    if std::str::from_utf8(bytes).is_ok() {
+        return (
+            "txt",
+            if mime.is_empty() {
+                "text/plain".into()
+            } else {
+                mime
+            },
+        );
+    }
+    (
+        "bin",
+        if mime.is_empty() {
+            "application/octet-stream".into()
+        } else {
+            mime
+        },
+    )
 }
 
 #[async_trait::async_trait]
@@ -916,5 +1156,85 @@ mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("dcode-ai mcp login remote"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod content_tests {
+    use super::*;
+    use base64::Engine as _;
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn file_kind_sniffs_octet_stream() {
+        assert_eq!(
+            file_kind(b"%PDF-1.7 ...", "application/octet-stream", None).0,
+            "pdf"
+        );
+        assert_eq!(file_kind(b"\x89PNG\r\n\x1a\nxx", "", None).0, "png");
+        assert_eq!(
+            file_kind(&[0xFF, 0xD8, 0xFF, 0xE0], "application/octet-stream", None).0,
+            "jpg"
+        );
+        assert_eq!(
+            file_kind(
+                b"PK\x03\x04....word/document.xml",
+                "application/octet-stream",
+                None
+            )
+            .0,
+            "docx"
+        );
+        assert_eq!(
+            file_kind(b"PK\x03\x04....xl/workbook.xml", "", None).0,
+            "xlsx"
+        );
+        assert_eq!(file_kind(b"PK\x03\x04....ppt/slides", "", None).0, "pptx");
+        assert_eq!(
+            file_kind(b"a,b\n1,2", "", Some("file:///x/data.csv")).0,
+            "csv"
+        );
+        assert_eq!(file_kind(&[0, 159, 146, 150], "", None).0, "bin");
+        // A specific declared type wins.
+        assert_eq!(file_kind(b"%PDF", "image/png", None).0, "png");
+    }
+
+    #[test]
+    fn content_is_saved_and_unknown_types_dont_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "hello"},
+                {"type": "image", "data": b64(b"\x89PNG\r\n\x1a\nimg"), "mimeType": "image/png"},
+                {"type": "resource", "resource": {"uri": "file:///r/report", "mimeType": "application/octet-stream", "blob": b64(b"%PDF-1.4 body")}},
+                {"type": "resource", "resource": {"uri": "file:///r/notes.md", "text": "# notes"}},
+                {"type": "resource_link", "uri": "https://x/y", "name": "Y"},
+                {"type": "hologram", "data": "zzz"}
+            ]
+        });
+        let res: McpCallToolResult = serde_json::from_value(raw).expect("lenient parse");
+        let out = res.format_output_saving(dir.path(), "srv-c1");
+        assert!(out.starts_with("hello"), "{out}");
+        assert!(
+            out.contains("Saved an image to .dcode-ai/mcp-files/srv-c1-1.png (image/png"),
+            "{out}"
+        );
+        assert!(
+            out.contains("Saved a file to .dcode-ai/mcp-files/srv-c1-2.pdf (application/pdf"),
+            "{out}"
+        );
+        assert!(
+            out.contains("[Resource file:///r/notes.md]\n# notes"),
+            "{out}"
+        );
+        assert!(out.contains("[Resource link: https://x/y — Y]"), "{out}");
+        assert!(out.contains("doesn't show"), "{out}");
+        let pdf = std::fs::read(dir.path().join(".dcode-ai/mcp-files/srv-c1-2.pdf")).unwrap();
+        assert!(pdf.starts_with(b"%PDF"));
+        // Without saving, only named.
+        assert!(res.format_output().contains("[Image: image/png]"));
     }
 }

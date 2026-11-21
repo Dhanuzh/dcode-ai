@@ -1226,12 +1226,10 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
                          holds their selection. Read it before editing it again.",
                     );
                 }
-                // A browser screenshot: let a model that can see images see it.
-                if sees_images
-                    && result.success
-                    && let Some(path) = result.output.strip_prefix("Saved a screenshot to ")
-                {
-                    screenshots.push(path.trim().to_string());
+                // A browser screenshot or an image an MCP tool sent: let a
+                // model that can see images see it.
+                if sees_images && result.success {
+                    screenshots.extend(image_paths_in(&result.output));
                 }
                 if result.success
                     && let Some(capped) =
@@ -1274,10 +1272,16 @@ or if you are not sure. Reply with exactly one word: SAFE or ASK.",
             for path in screenshots {
                 self.messages.push(Message::user_with_parts(vec![
                     dcode_ai_common::message::ContentPart::Text {
-                        text: "The browser screenshot you just took:".into(),
+                        text: format!("The image saved to {path}:"),
                     },
                     dcode_ai_common::message::ContentPart::Image {
-                        media_type: "image/png".into(),
+                        media_type: match path.rsplit('.').next() {
+                            Some("jpg" | "jpeg") => "image/jpeg",
+                            Some("gif") => "image/gif",
+                            Some("webp") => "image/webp",
+                            _ => "image/png",
+                        }
+                        .into(),
                         path,
                     },
                 ]));
@@ -2065,6 +2069,27 @@ Take it into account now and continue with the task."
     }
 }
 
+/// Images a tool result points at: a browser screenshot (the whole output)
+/// or `Saved an image to <path> (…)` lines (MCP images); at most 4.
+fn image_paths_in(output: &str) -> Vec<String> {
+    if let Some(path) = output.strip_prefix("Saved a screenshot to ") {
+        return vec![path.trim().to_string()];
+    }
+    output
+        .lines()
+        .filter_map(|l| l.strip_prefix("Saved an image to "))
+        .filter_map(|rest| rest.split(" (").next())
+        .map(|p| p.trim().to_string())
+        .filter(|p| {
+            p.starts_with(".dcode-ai/mcp-files/")
+                && [".png", ".jpg", ".jpeg", ".gif", ".webp"]
+                    .iter()
+                    .any(|e| p.ends_with(e))
+        })
+        .take(4)
+        .collect()
+}
+
 fn cleanup_processed_attachments(
     messages: &mut [Message],
     workspace_root: &Path,
@@ -2364,6 +2389,18 @@ mod tests {
     use std::collections::VecDeque;
     use std::path::Path;
     use std::sync::Mutex;
+
+    #[test]
+    fn image_paths_from_tool_output() {
+        assert_eq!(
+            image_paths_in("Saved a screenshot to .dcode-ai/screenshots/a.png"),
+            [".dcode-ai/screenshots/a.png"]
+        );
+        let out = "text\nSaved an image to .dcode-ai/mcp-files/s-1-0.jpg (image/jpeg, 3 KB)\n\
+                   Saved an image to .dcode-ai/mcp-files/s-1-1.svg (image/svg+xml, 1 KB)\n\
+                   Saved an image to /etc/passwd (x, 1 B)";
+        assert_eq!(image_paths_in(out), [".dcode-ai/mcp-files/s-1-0.jpg"]);
+    }
 
     #[test]
     fn a_compaction_must_free_thirty_percent() {
