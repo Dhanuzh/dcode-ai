@@ -14,12 +14,35 @@ pub struct FolderChoice {
     /// MCP servers turned off in `/mcp` for this folder.
     #[serde(default, skip_serializing_if = "std::collections::BTreeSet::is_empty")]
     pub disabled_mcp: std::collections::BTreeSet<String>,
+    /// Folder trust: may this folder's own settings run commands (hooks,
+    /// MCP servers, status line, permission rules)? `None` = not asked yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trusted: Option<bool>,
 }
 
 impl FolderChoice {
     fn is_empty(&self) -> bool {
-        self.permission.is_none() && self.disabled_mcp.is_empty()
+        self.permission.is_none() && self.disabled_mcp.is_empty() && self.trusted.is_none()
     }
+}
+
+/// Whether `folder` was trusted (`Some(true)`), refused (`Some(false)`) or
+/// not asked yet (`None`).
+pub fn trust_for(folder: &Path) -> Option<bool> {
+    let path = store_path()?;
+    FolderChoices::load_from(&path)
+        .folders
+        .get(&key(folder))?
+        .trusted
+}
+
+/// Remember the trust answer for `folder` (`None` forgets it: asked again).
+pub fn remember_trust(folder: &Path, trusted: Option<bool>) -> Result<(), String> {
+    let path = store_path().ok_or("no home directory")?;
+    let mut all = FolderChoices::load_from(&path);
+    all.folders.entry(key(folder)).or_default().trusted = trusted;
+    all.folders.retain(|_, c| !c.is_empty());
+    all.save_to(&path)
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]

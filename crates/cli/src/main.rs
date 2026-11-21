@@ -868,6 +868,14 @@ async fn try_main() -> anyhow::Result<()> {
 
     tracing::info!("dcode-ai starting");
     let mut config = DcodeAiConfig::load()?;
+    // Folder trust: before anything from this folder runs (MCP servers,
+    // hooks, the status line), ask once if its own files would run commands.
+    if tui_owns_terminal && cli.prompt.is_none() && !cli.pipe {
+        let cwd = std::env::current_dir()?;
+        if ask_folder_trust(&cwd) {
+            config = DcodeAiConfig::load()?;
+        }
+    }
     // An interactive session runs in a background host, so it outlives this
     // terminal; this process just shows it.
     #[cfg(unix)]
@@ -3686,6 +3694,51 @@ fn classify_exit_code(error: &anyhow::Error) -> ExitCode {
     };
 
     ExitCode::from(code)
+}
+
+/// Folder trust (`dcode_ai_common::trust`): asked once per folder whose own
+/// files would run commands or skip approval. Returns `true` when refused
+/// (the config must be loaded again, without them).
+fn ask_folder_trust(folder: &std::path::Path) -> bool {
+    use dcode_ai_common::{folders, trust};
+    use std::io::Write as _;
+    if folders::trust_for(folder).is_some() {
+        return false;
+    }
+    let risks = trust::folder_risks(folder);
+    if risks.is_empty() {
+        return false;
+    }
+    let mut err = std::io::stderr();
+    let _ = writeln!(
+        err,
+        "\n  This folder's own settings would run commands on your computer:\n"
+    );
+    for r in risks.iter().take(12) {
+        let _ = writeln!(err, "    • {}  ({})", r.what, r.file);
+    }
+    if risks.len() > 12 {
+        let _ = writeln!(err, "    • … and {} more", risks.len() - 12);
+    }
+    let _ = write!(
+        err,
+        "\n  Only trust folders whose files you know (a cloned repository can contain these).\n  Trust {}? [y/N] ",
+        folder.display()
+    );
+    let _ = err.flush();
+    let mut answer = String::new();
+    let _ = std::io::stdin().read_line(&mut answer);
+    let yes = matches!(answer.trim().to_ascii_lowercase().as_str(), "y" | "yes");
+    if let Err(e) = folders::remember_trust(folder, Some(yes)) {
+        tracing::warn!("couldn't save the folder trust answer: {e}");
+    }
+    if !yes {
+        let _ = writeln!(
+            err,
+            "  Starting without this folder's hooks, MCP servers, status line and permission rules — `/trust on` allows them.\n"
+        );
+    }
+    !yes
 }
 
 #[cfg(test)]

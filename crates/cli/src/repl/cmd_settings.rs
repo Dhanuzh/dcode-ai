@@ -694,6 +694,48 @@ impl Repl {
                 let _ = rest;
                 out.println("[sidebar] removed in fullscreen TUI. Use /status, /config, /sessions, and /mcp for context.");
             }
+            "/trust" => {
+                use dcode_ai_common::{folders, trust};
+                let ws = self.runtime.workspace_root().to_path_buf();
+                let set = match rest.trim() {
+                    "on" | "yes" => Some(Some(true)),
+                    "off" | "no" => Some(Some(false)),
+                    "reset" => Some(None),
+                    _ => None,
+                };
+                if let Some(v) = set {
+                    match folders::remember_trust(&ws, v) {
+                        Ok(()) => out.println(&format!(
+                            "[trust] {} — restart dcode-ai here to apply",
+                            match v {
+                                Some(true) =>
+                                    "this folder's hooks, MCP servers and rules are allowed",
+                                Some(false) => "this folder's hooks, MCP servers and rules are off",
+                                None => "forgotten; asked again on the next start",
+                            }
+                        )),
+                        Err(e) => out.eprintln(&format!("[trust] couldn't save: {e}")),
+                    }
+                    return Ok(true);
+                }
+                let risks = trust::folder_risks(&ws);
+                let state = match folders::trust_for(&ws) {
+                    Some(true) => "trusted",
+                    Some(false) => {
+                        "not trusted (its hooks, MCP servers, status line and rules are off)"
+                    }
+                    None => "not asked",
+                };
+                out.println(&format!("[trust] {}: {state}", ws.display()));
+                if risks.is_empty() {
+                    out.println("  its files run nothing on start");
+                } else {
+                    for r in &risks {
+                        out.println(&format!("  • {}  ({})", r.what, r.file));
+                    }
+                }
+                out.println("  /trust on · /trust off · /trust reset");
+            }
             "/quiet" => {
                 let _ = rest;
                 let mut cfg = self.runtime.config().clone();

@@ -1027,10 +1027,10 @@ impl Repl {
             }
             "/agent" | "/update" | "/vim" | "/permissions" | "/permission-bypass" | "/models"
             | "/config" | "/login" | "/connect" | "/logout" | "/auth" | "/sidebar" | "/quiet"
-            | "/settings" | "/theme" | "/title" | "/raw" | "/mention" | "/output-style"
-            | "/output-styles" | "/personality" | "/keymap" | "/statusline" | "/provider"
-            | "/apikey" | "/editor" | "/set-editor" | "/auto-answer" | "/thinking" | "/effort"
-            | "/terminal-setup" | "/project-config" => {
+            | "/trust" | "/settings" | "/theme" | "/title" | "/raw" | "/mention"
+            | "/output-style" | "/output-styles" | "/personality" | "/keymap" | "/statusline"
+            | "/provider" | "/apikey" | "/editor" | "/set-editor" | "/auto-answer"
+            | "/thinking" | "/effort" | "/terminal-setup" | "/project-config" => {
                 return self.cmd_settings(input, command, rest, parts, out).await;
             }
             "/reload" | "/add-dir" | "/skills" | "/memory" | "/browser" | "/checkpoint"

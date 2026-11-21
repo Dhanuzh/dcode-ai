@@ -57,22 +57,42 @@ impl DcodeAiConfig {
 
         // Project-level config: `.dcode.toml` at workspace root.
         // Intended to be committed to git so teammates share the same defaults.
+        // A folder you refused to trust keeps its harmless settings only.
+        let trusted = crate::trust::folder_settings_allowed(workspace_root);
+        let load_folder_file = |path: &Path| {
+            if trusted {
+                load_partial(path)
+            } else {
+                load_partial_untrusted(path)
+            }
+        };
         let project_path = project_config_path(workspace_root);
         if project_path.exists() {
-            let partial = load_partial(&project_path)?;
+            let partial = load_folder_file(&project_path)?;
             config.merge(partial);
         }
 
         let local_path = workspace_config_path(workspace_root);
         if local_path.exists() {
-            let partial = load_partial(&local_path)?;
+            let partial = load_folder_file(&local_path)?;
             config.merge(partial);
         }
 
-        config.add_mcp_json_servers(workspace_root);
+        if trusted {
+            config.add_mcp_json_servers(workspace_root);
+        } else {
+            for server in
+                crate::mcp_json::load_scope(crate::mcp_json::McpScope::User, workspace_root)
+            {
+                config.add_mcp_server_if_new(server);
+            }
+        }
         config.add_plugin_contributions(&crate::plugins::enabled_plugins());
         config.apply_disabled_mcp(&crate::folders::disabled_mcp(workspace_root));
         for path in PolicyRules::paths(workspace_root) {
+            if !trusted && path.starts_with(workspace_root) {
+                continue;
+            }
             config.permissions.policy.load_file(&path)?;
         }
         config.apply_env();
@@ -863,6 +883,29 @@ pub fn global_config_file() -> Option<PathBuf> {
 
 pub fn workspace_config_path(workspace_root: &Path) -> PathBuf {
     workspace_root.join(".dcode-ai").join("config.local.toml")
+}
+
+/// A folder's own config file in a folder you refused to trust: everything
+/// but what runs commands or skips approval (hooks, MCP servers, permission
+/// rules, the status line command).
+fn load_partial_untrusted(path: &Path) -> Result<PartialDcodeAiConfig, ConfigError> {
+    let raw = std::fs::read_to_string(path).map_err(|source| ConfigError::ReadFile {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let parse_err = |source| ConfigError::ParseToml {
+        path: path.to_path_buf(),
+        source,
+    };
+    let mut doc: toml::Table = toml::from_str(&raw).map_err(parse_err)?;
+    for section in crate::trust::UNTRUSTED_TOML_SECTIONS {
+        doc.remove(section);
+    }
+    if let Some(ui) = doc.get_mut("ui").and_then(|u| u.as_table_mut()) {
+        ui.remove("statusline_command");
+    }
+    let text = toml::to_string(&doc).unwrap_or_default();
+    toml::from_str(&text).map_err(parse_err)
 }
 
 fn load_partial(path: &Path) -> Result<PartialDcodeAiConfig, ConfigError> {
@@ -2610,6 +2653,33 @@ fn default_skill_directories() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A refused folder's own config keeps its harmless settings only.
+    #[test]
+    fn untrusted_folder_config_drops_what_runs_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".dcode.toml");
+        std::fs::write(
+            &path,
+            "[ui]\ntheme = \"claude\"\nstatusline_command = \"evil\"\n\
+             [[hooks.session_start]]\ncommand = \"./x.sh\"\n\
+             [permissions]\nmode = \"bypass-permissions\"\n\
+             [[mcp.servers]]\nname = \"db\"\ncommand = \"npx\"\n",
+        )
+        .unwrap();
+        let mut config = DcodeAiConfig::default();
+        config.merge(load_partial_untrusted(&path).unwrap());
+        assert_eq!(config.ui.theme.as_deref(), Some("claude"));
+        assert!(config.ui.statusline_command.is_none());
+        assert!(config.hooks.session_start.is_empty());
+        assert!(config.mcp.servers.is_empty());
+        assert_ne!(config.permissions.mode, PermissionMode::BypassPermissions);
+        // Trusted, the same file applies in full.
+        let mut full = DcodeAiConfig::default();
+        full.merge(load_partial(&path).unwrap());
+        assert_eq!(full.hooks.session_start.len(), 1);
+        assert_eq!(full.permissions.mode, PermissionMode::BypassPermissions);
+    }
 
     /// A config that exists but can't be read is never rewritten with only
     /// the new key (it used to start from an empty table on any error).

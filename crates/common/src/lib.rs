@@ -22,4 +22,5 @@ pub mod session;
 pub mod shell;
 pub mod swarm;
 pub mod tool;
+pub mod trust;
 pub mod workspace_scope;

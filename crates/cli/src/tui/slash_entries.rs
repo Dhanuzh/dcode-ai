@@ -789,6 +789,7 @@ pub(crate) fn command_group(cmd: &str) -> (u8, &'static str) {
                 "/permissions",
                 "/mode",
                 "/vim",
+                "/trust",
                 "/sounds",
                 "/speak",
                 "/terminal-setup",
