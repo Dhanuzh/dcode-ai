@@ -97,6 +97,43 @@ pub fn build_key_bindings(keymap: &std::collections::BTreeMap<String, String>) -
         .collect()
 }
 
+/// How a key combination is written in hints (`Ctrl+O`, `Alt+Enter`, `F5`).
+pub fn combo_label((code, mods): KeyCombo) -> String {
+    let mut out = String::new();
+    if mods.contains(KeyModifiers::CONTROL) {
+        out.push_str("Ctrl+");
+    }
+    if mods.contains(KeyModifiers::ALT) {
+        out.push_str("Alt+");
+    }
+    if mods.contains(KeyModifiers::SHIFT) {
+        out.push_str("Shift+");
+    }
+    match code {
+        KeyCode::Char(' ') => out.push_str("Space"),
+        KeyCode::Char(c) => out.push(c.to_ascii_uppercase()),
+        KeyCode::Enter => out.push_str("Enter"),
+        KeyCode::Tab => out.push_str("Tab"),
+        KeyCode::Esc => out.push_str("Esc"),
+        KeyCode::F(n) => out.push_str(&format!("F{n}")),
+        other => out.push_str(&format!("{other:?}")),
+    }
+    out
+}
+
+/// The key that runs `action` now (the user's remap, else the default), as
+/// shown in hints — so help text never names a key that no longer works.
+pub fn action_label(action: &str, bindings: &[KeyBinding]) -> String {
+    let Some(default) = default_action_key(action) else {
+        return action.to_string();
+    };
+    let effective = bindings
+        .iter()
+        .find(|b| b.default == default)
+        .map_or(default, |b| b.effective);
+    combo_label(effective)
+}
+
 /// Translate an incoming key through the user's remap:
 /// - if it's an action's *effective* key, rewrite it to that action's default
 ///   key so the (unchanged) key handler fires the action;
@@ -116,4 +153,20 @@ pub(crate) fn translate_key(key: KeyEvent, bindings: &[KeyBinding]) -> Option<Ke
         }
     }
     Some(key)
+}
+
+#[cfg(test)]
+mod label_tests {
+    use super::*;
+
+    #[test]
+    fn hints_follow_the_remap() {
+        assert_eq!(action_label("expand", &[]), "Ctrl+O");
+        let mut map = std::collections::BTreeMap::new();
+        map.insert("expand".to_string(), "alt+e".to_string());
+        let b = build_key_bindings(&map);
+        assert_eq!(action_label("expand", &b), "Alt+E");
+        assert_eq!(action_label("palette", &b), "Ctrl+P");
+        assert_eq!(combo_label((KeyCode::F(5), KeyModifiers::NONE)), "F5");
+    }
 }

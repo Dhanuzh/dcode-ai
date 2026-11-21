@@ -147,8 +147,9 @@ pub(super) fn draw_session_pane(
     if !dashboard && start > 0 && !visible.is_empty() {
         visible[0] = ratatui::text::Line::from(ratatui::text::Span::styled(
             format!(
-                "  ↑ {} lines above · Ctrl+O shows the whole reply",
-                start + 1
+                "  ↑ {} lines above · {} shows the whole reply",
+                start + 1,
+                crate::tui::keymap::action_label("expand", &g.key_bindings)
             ),
             ratatui::style::Style::default().fg(crate::tui::theme::muted()),
         ));

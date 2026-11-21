@@ -1788,8 +1788,10 @@ pub(crate) fn open_link_in_system(target: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-fn keybindings_cheatsheet() -> Vec<String> {
-    vec![
+fn keybindings_cheatsheet(bindings: &[crate::tui::keymap::KeyBinding]) -> Vec<String> {
+    // Remappable keys (`/keymap`) are shown as they are now.
+    let k = |action: &str| format!("{:<18}", crate::tui::keymap::action_label(action, bindings));
+    let lines: Vec<String> = vec![
         "─── Essentials ───────────────────────────────────────".into(),
         "  Shift+Tab          Cycle mode: default → accept edits → plan".into(),
         "  Esc                Interrupt the running turn".into(),
@@ -1805,7 +1807,7 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "  ↑ / ↓              Scroll transcript one line".into(),
         "  PgUp / PgDn        Scroll transcript one page".into(),
         "  Home / End         Jump to top / bottom of transcript".into(),
-        "  Ctrl+F             Open transcript search".into(),
+        format!("  {}Open transcript search", k("search")),
         "  n / N              Next / previous search match".into(),
         "  Ctrl+G             Go to bottom (follow tail)".into(),
         "".into(),
@@ -1816,7 +1818,7 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "  Tab / Alt+Enter    Queue for after the turn (when busy)".into(),
         "  ↑ (empty, busy)    Take back unsent messages to edit".into(),
         "  ↑ / ↓              History prev/next (or move line when multiline)".into(),
-        "  Ctrl+R             History search".into(),
+        format!("  {}History search", k("history")),
         "  Ctrl+A / Home      Move to line start".into(),
         "  Ctrl+E / End       Move to line end".into(),
         "  Alt+B / Ctrl+←     Word backward".into(),
@@ -1828,17 +1830,17 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "  Ctrl+U             Kill to start of line".into(),
         "".into(),
         "─── Tools ────────────────────────────────────────────".into(),
-        "  Ctrl+O             Fold / unfold tool output".into(),
+        format!("  {}Fold / unfold tool output", k("expand")),
         "  Alt+\\ / Alt+-      Split: a pane right / below (Alt+O next, Alt+A change, Alt+W close; /split)".into(),
         "  Ctrl+X V           Full-screen transcript (expand/scroll/raw)".into(),
         "  Ctrl+X T           Toggle latest tool block collapsed/expanded".into(),
         "  Ctrl+X X           Ctrl+X leader (prefix for shortcuts below)".into(),
         "".into(),
         "─── Session ──────────────────────────────────────────".into(),
-        "  Ctrl+L             Clear transcript".into(),
-        "  Ctrl+T             Expand / collapse thinking".into(),
-        "  Ctrl+K             Pin latest response (when composer empty)".into(),
-        "  Ctrl+P             Open command palette".into(),
+        format!("  {}Clear transcript", k("clear")),
+        format!("  {}Expand / collapse thinking", k("thinking")),
+        format!("  {}Pin latest response (when composer empty)", k("pin")),
+        format!("  {}Open command palette", k("palette")),
         "  Ctrl+C             Cancel current turn / exit (double-tap)".into(),
         "  Esc                Cancel / close modal".into(),
         "".into(),
@@ -1861,7 +1863,7 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "".into(),
         "─── Modals & Overlays ────────────────────────────────".into(),
         "  F1                 This keybindings cheatsheet".into(),
-        "  Ctrl+P             Command palette".into(),
+        format!("  {}Command palette", k("palette")),
         "  /theme             Theme picker".into(),
         "  /models            Model picker".into(),
         "  /connect           Provider connect modal".into(),
@@ -1885,7 +1887,8 @@ fn keybindings_cheatsheet() -> Vec<String> {
         "  /cost              Show token cost summary".into(),
         "  /thinking          Toggle extended thinking".into(),
         "  /plan              Switch to plan mode".into(),
-    ]
+    ];
+    lines
 }
 
 #[cfg(test)]

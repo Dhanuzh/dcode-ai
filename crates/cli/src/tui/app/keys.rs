@@ -1557,13 +1557,15 @@ pub(super) fn handle_key_event(
             }
         }
         (KeyCode::F(1), _) => {
-            g.open_info_modal("Keybindings", keybindings_cheatsheet());
+            let sheet = keybindings_cheatsheet(&g.key_bindings);
+            g.open_info_modal("Keybindings", sheet);
         }
         // `?` on an empty prompt shows the shortcuts (footer hint).
         (KeyCode::Char('?'), KeyModifiers::NONE | KeyModifiers::SHIFT)
             if g.input_buffer.is_empty() && !g.busy =>
         {
-            g.open_info_modal("Shortcuts", keybindings_cheatsheet());
+            let sheet = keybindings_cheatsheet(&g.key_bindings);
+            g.open_info_modal("Shortcuts", sheet);
         }
         (KeyCode::F(2), KeyModifiers::NONE) => {
             let _ = cmd_tx.send(TuiCmd::CycleModel(true));
