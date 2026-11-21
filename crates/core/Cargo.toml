@@ -39,6 +39,9 @@ flate2 = "1"
 sha2 = "0.10"
 rand = "0.8"
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 proptest = "1"
 tiny_http = "0.12.0"

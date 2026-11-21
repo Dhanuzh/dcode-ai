@@ -1792,6 +1792,7 @@ dependencies = [
  "gif",
  "ignore",
  "image",
+ "libc",
  "object",
  "pdf-extract",
  "proptest",

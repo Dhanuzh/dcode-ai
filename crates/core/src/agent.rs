@@ -1755,11 +1755,7 @@ Take it into account now and continue with the task."
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let code = code.to_string();
-        let spawned = std::thread::Builder::new()
-            .name("run_script".into())
-            .stack_size(16 * 1024 * 1024)
-            .spawn(move || rs::run(code, tx));
-        if let Err(e) = spawned {
+        if let Err(e) = rs::spawn(code, tx) {
             return fail(format!("couldn't start the script: {e}"));
         }
         let mut n = 0u32;
@@ -1768,6 +1764,11 @@ Take it into account now and continue with the task."
             let msg = tokio::select! {
                 m = rx.recv() => m,
                 _ = self.cancelled() => return fail("cancelled".into()),
+                // Computing past the limit with no tool calls: stopped
+                // (dropping `rx` ends a script child).
+                _ = tokio::time::sleep_until(deadline.into()) => {
+                    return fail(format!("the script ran past {}s", rs::MAX_TIME.as_secs()));
+                }
             };
             match msg {
                 Some(ScriptMsg::Calls { calls, reply }) => {

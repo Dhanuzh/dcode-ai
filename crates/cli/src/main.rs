@@ -684,6 +684,11 @@ impl CliPermissionMode {
 }
 
 fn main() -> ExitCode {
+    // A Code Mode script child (see `run_script::child_main`): nothing else.
+    if std::env::args().nth(1).as_deref() == Some(dcode_ai_core::tools::run_script::CHILD_ARG) {
+        dcode_ai_core::tools::run_script::child_main();
+    }
+    dcode_ai_core::tools::run_script::enable_subprocess();
     // Load .env file from the current directory (if present) so that secrets
     // configured via environment variables are available without requiring
     // users to `source` the file manually.

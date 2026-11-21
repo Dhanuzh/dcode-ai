@@ -278,6 +278,264 @@ pub fn run(code: String, tx: tokio::sync::mpsc::UnboundedSender<ScriptMsg>) {
     BRIDGE.with(|b| *b.borrow_mut() = None);
 }
 
+// ── Running a script in its own process ─────────────────────────────────
+//
+// Boa has no heap limit and no way to stop a running script, so a script
+// that builds a huge array could fill the machine's memory, and one stopped
+// with Esc kept computing on its thread. The `dcode-ai` binary runs each
+// script in a child copy of itself (memory-capped on Unix, killed when the
+// run is stopped), speaking JSON lines over stdin/stdout:
+//   parent → child  {"code": "..."}
+//   child  → parent {"calls": [["read_file", {...}], ...]}
+//   parent → child  {"results": [{"ok": "..."} | {"err": "..."}], "waited_ms": 0}
+//   child  → parent {"done": {"ok": "..."} | {"err": "..."}}
+
+/// The hidden argument that makes `dcode-ai` a script child.
+pub const CHILD_ARG: &str = "__dcode-run-script";
+/// Address-space cap for a script child (Unix).
+pub const CHILD_MEMORY_LIMIT: u64 = 4 << 30;
+
+static SUBPROCESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Called by the `dcode-ai` binary: scripts run in child processes. (Tests
+/// and other embedders run them on a thread.)
+pub fn enable_subprocess() {
+    SUBPROCESS.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Starts `code`; its tool calls and end arrive on `tx` as [`ScriptMsg`].
+pub fn spawn(
+    code: String,
+    tx: tokio::sync::mpsc::UnboundedSender<ScriptMsg>,
+) -> Result<(), String> {
+    if SUBPROCESS.load(std::sync::atomic::Ordering::SeqCst)
+        && let Ok(exe) = std::env::current_exe()
+        && spawn_child(&exe, &code, tx.clone()).is_ok()
+    {
+        return Ok(());
+    }
+    std::thread::Builder::new()
+        .name("run_script".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || run(code, tx))
+        .map(|_| ())
+        .map_err(|e| e.to_string())
+}
+
+fn result_json(r: &Result<String, String>) -> serde_json::Value {
+    match r {
+        Ok(s) => serde_json::json!({ "ok": s }),
+        Err(e) => serde_json::json!({ "err": e }),
+    }
+}
+
+fn result_from_json(v: &serde_json::Value) -> Result<String, String> {
+    if let Some(s) = v.get("ok").and_then(|s| s.as_str()) {
+        Ok(s.to_string())
+    } else {
+        Err(v
+            .get("err")
+            .and_then(|s| s.as_str())
+            .unwrap_or("bad answer")
+            .to_string())
+    }
+}
+
+/// Runs `code` in a child `exe` (see [`CHILD_ARG`]).
+pub fn spawn_child(
+    exe: &std::path::Path,
+    code: &str,
+    tx: tokio::sync::mpsc::UnboundedSender<ScriptMsg>,
+) -> Result<(), String> {
+    use std::io::{BufRead, Write};
+    use std::process::{Command, Stdio};
+    let mut child = Command::new(exe)
+        .arg(CHILD_ARG)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let mut stdin = child.stdin.take().ok_or("no stdin")?;
+    let stdout = child.stdout.take().ok_or("no stdout")?;
+    writeln!(stdin, "{}", serde_json::json!({ "code": code })).map_err(|e| e.to_string())?;
+    let child = std::sync::Arc::new(std::sync::Mutex::new(child));
+    // Stopped run (the agent dropped its end): kill the child.
+    {
+        let (child, tx) = (child.clone(), tx.clone());
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(100));
+                let mut c = child.lock().unwrap_or_else(|e| e.into_inner());
+                if matches!(c.try_wait(), Ok(Some(_)) | Err(_)) {
+                    return;
+                }
+                if tx.is_closed() {
+                    let _ = c.kill();
+                    let _ = c.wait();
+                    return;
+                }
+            }
+        });
+    }
+    std::thread::spawn(move || {
+        let kill = |child: &std::sync::Arc<std::sync::Mutex<std::process::Child>>| {
+            let mut c = child.lock().unwrap_or_else(|e| e.into_inner());
+            let _ = c.kill();
+            let _ = c.wait();
+        };
+        for line in std::io::BufReader::new(stdout).lines() {
+            let Ok(line) = line else { break };
+            let Ok(msg) = serde_json::from_str::<serde_json::Value>(&line) else {
+                continue;
+            };
+            if let Some(done) = msg.get("done") {
+                let _ = tx.send(ScriptMsg::Done(result_from_json(done)));
+                let _ = child.lock().map(|mut c| c.wait());
+                return;
+            }
+            let Some(list) = msg.get("calls").and_then(|c| c.as_array()) else {
+                continue;
+            };
+            let calls = list
+                .iter()
+                .map(|c| {
+                    (
+                        c[0].as_str().unwrap_or_default().to_string(),
+                        c.get(1).cloned().unwrap_or(serde_json::json!({})),
+                    )
+                })
+                .collect();
+            let (reply_tx, reply_rx) = std::sync::mpsc::channel();
+            if tx
+                .send(ScriptMsg::Calls {
+                    calls,
+                    reply: reply_tx,
+                })
+                .is_err()
+            {
+                return kill(&child);
+            }
+            let Ok((results, waited)) = reply_rx.recv() else {
+                return kill(&child);
+            };
+            let answer = serde_json::json!({
+                "results": results.iter().map(result_json).collect::<Vec<_>>(),
+                "waited_ms": waited.as_millis() as u64,
+            });
+            if writeln!(stdin, "{answer}").is_err() {
+                break;
+            }
+        }
+        // Ended without a result: killed, crashed or out of memory.
+        let status = child.lock().ok().and_then(|mut c| c.wait().ok());
+        let why = match status {
+            Some(s) if s.success() => "the script process ended without a result".to_string(),
+            _ => format!(
+                "the script stopped: it ran out of memory (limit {} GiB) or crashed",
+                CHILD_MEMORY_LIMIT >> 30
+            ),
+        };
+        let _ = tx.send(ScriptMsg::Done(Err(why)));
+    });
+    Ok(())
+}
+
+/// The script child's `main`: reads the script, runs it, relays its tool
+/// calls to the parent and exits with its result. Never returns.
+pub fn child_main() -> ! {
+    use std::io::{BufRead, Write};
+    #[cfg(unix)]
+    unsafe {
+        // SAFETY: plain libc call on a struct we own.
+        let lim = libc::rlimit {
+            rlim_cur: CHILD_MEMORY_LIMIT as libc::rlim_t,
+            rlim_max: CHILD_MEMORY_LIMIT as libc::rlim_t,
+        };
+        libc::setrlimit(libc::RLIMIT_AS, &lim);
+        // Die with the parent: a crashed or killed dcode-ai mustn't leave a
+        // script computing on its own.
+        #[cfg(target_os = "linux")]
+        libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL);
+    }
+    #[cfg(all(unix, not(target_os = "linux")))]
+    {
+        // No parent-death signal here: notice the parent is gone (we get
+        // re-parented) and stop.
+        // SAFETY: getppid has no preconditions.
+        let parent = unsafe { libc::getppid() };
+        std::thread::spawn(move || {
+            loop {
+                std::thread::sleep(Duration::from_millis(500));
+                if unsafe { libc::getppid() } != parent {
+                    std::process::exit(1);
+                }
+            }
+        });
+    }
+    let stdin = std::io::stdin();
+    let mut input = stdin.lock();
+    let mut first = String::new();
+    let _ = input.read_line(&mut first);
+    let code = serde_json::from_str::<serde_json::Value>(&first)
+        .ok()
+        .and_then(|v| v["code"].as_str().map(String::from))
+        .unwrap_or_default();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let started = std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || run(code, tx));
+    let mut out = std::io::stdout();
+    if started.is_err() {
+        let _ = writeln!(
+            out,
+            "{}",
+            serde_json::json!({"done": {"err": "couldn't start the script"}})
+        );
+        std::process::exit(1);
+    }
+    while let Some(msg) = rx.blocking_recv() {
+        match msg {
+            ScriptMsg::Calls { calls, reply } => {
+                let line = serde_json::json!({
+                    "calls": calls.iter().map(|(n, a)| serde_json::json!([n, a])).collect::<Vec<_>>()
+                });
+                if writeln!(out, "{line}").and_then(|_| out.flush()).is_err() {
+                    std::process::exit(1);
+                }
+                let mut answer = String::new();
+                if input.read_line(&mut answer).unwrap_or(0) == 0 {
+                    std::process::exit(1);
+                }
+                let v: serde_json::Value = serde_json::from_str(&answer).unwrap_or_default();
+                let results = v["results"]
+                    .as_array()
+                    .map(|a| a.iter().map(result_from_json).collect())
+                    .unwrap_or_default();
+                let waited = Duration::from_millis(v["waited_ms"].as_u64().unwrap_or(0));
+                let _ = reply.send((results, waited));
+            }
+            ScriptMsg::Done(r) => {
+                // Boa reports a refused allocation as a RangeError: say why.
+                let r = r.map_err(|e| {
+                    if e.contains("while allocating") || e.contains("memory allocation") {
+                        format!(
+                            "the script ran out of memory (limit {} GiB): {e}",
+                            CHILD_MEMORY_LIMIT >> 30
+                        )
+                    } else {
+                        e
+                    }
+                });
+                let _ = writeln!(out, "{}", serde_json::json!({ "done": result_json(&r) }));
+                let _ = out.flush();
+                std::process::exit(0);
+            }
+        }
+    }
+    std::process::exit(1);
+}
+
 /// The `run_script` definition. The agent runs it itself (it needs the
 /// session's other tools); `execute` here only answers if called directly.
 pub struct RunScriptTool;
