@@ -140,16 +140,37 @@ fn late_tools_note(names: &[String]) -> String {
     )
 }
 
+/// Tells the model which MCP servers failed to load, so it doesn't take
+/// one for a server with no tools (and can say why its tools are missing).
+fn mcp_failure_note(errors: &[(String, String)]) -> Option<String> {
+    if errors.is_empty() {
+        return None;
+    }
+    let list = errors
+        .iter()
+        .map(|(server, error)| {
+            let error: String = error.chars().take(200).collect();
+            format!("`{server}` ({error})")
+        })
+        .collect::<Vec<_>>()
+        .join("; ");
+    Some(format!(
+        "(Note from dcode-ai: these MCP servers failed to load, so their tools are not available: \
+         {list}. If the user asks for something they provide, say the server isn't connected \
+         — `/mcp` shows it, `dcode-ai mcp login <server>` signs in — instead of guessing.)"
+    ))
+}
+
 /// Register loaded MCP tools, deferring them behind `tool_search` when there
-/// are many.
+/// are many. Returns a note for the model when servers failed.
 fn register_mcp_tools(
     tools: &mut ToolRegistry,
     loaded: Vec<Box<dyn dcode_ai_core::tools::ToolExecutor>>,
     errors: Vec<(String, String)>,
     threshold: usize,
-) {
+) -> Option<String> {
     tracing::info!("loaded {} MCP tool(s)", loaded.len());
-    for (server, error) in errors {
+    for (server, error) in &errors {
         tracing::warn!("MCP server `{server}` failed: {error}");
     }
     for tool in loaded {
@@ -160,6 +181,7 @@ fn register_mcp_tools(
         let n = tools.defer_behind_search(|name| name.starts_with("mcp__"));
         tracing::info!("deferred {n} MCP tool(s) behind tool_search");
     }
+    mcp_failure_note(&errors)
 }
 
 /// Configuration for creating a new supervised session.
@@ -282,6 +304,7 @@ impl Supervisor {
         });
 
         let mut pending_mcp: Option<McpLoad> = None;
+        let mut mcp_note: Option<String> = None;
         if !config.mcp.servers.is_empty() && (!cfg.safe_mode || config.mcp.expose_in_safe_mode) {
             let mcp_servers = config.mcp.servers.clone();
             let manager = Arc::clone(&mcp_manager);
@@ -293,7 +316,12 @@ impl Supervisor {
                 tokio::spawn(async move { load_mcp_tools_tolerant(&manager, &mcp_servers).await });
             match tokio::time::timeout(MCP_STARTUP_WAIT, &mut load).await {
                 Ok(Ok((loaded, errors))) => {
-                    register_mcp_tools(&mut tools, loaded, errors, config.mcp.tool_search_threshold)
+                    mcp_note = register_mcp_tools(
+                        &mut tools,
+                        loaded,
+                        errors,
+                        config.mcp.tool_search_threshold,
+                    )
                 }
                 Ok(Err(e)) => tracing::warn!("MCP load task failed: {e}"),
                 Err(_) => pending_mcp = Some(load),
@@ -630,7 +658,7 @@ impl Supervisor {
             background_default,
             cost_budget,
             window_override: None,
-            late_tools_note: None,
+            late_tools_note: mcp_note,
             last_cache_hit: None,
             background_agents: background_agents.clone(),
             warms_this_idle: 0,
@@ -903,8 +931,11 @@ impl Supervisor {
                     // The model has seen the tool list: adding tools to it
                     // would make the next request a full prompt-cache miss.
                     // They go behind `tool_search` instead, announced once.
-                    for (server, error) in errors {
+                    for (server, error) in &errors {
                         tracing::warn!("MCP server `{server}` failed: {error}");
+                    }
+                    if let Some(note) = mcp_failure_note(&errors) {
+                        self.add_turn_note(note);
                     }
                     for tool in loaded {
                         self.agent.tools.register(tool);
@@ -915,12 +946,16 @@ impl Supervisor {
                         self.add_turn_note(late_tools_note(&names));
                     }
                 }
-                Ok((loaded, errors)) => register_mcp_tools(
-                    &mut self.agent.tools,
-                    loaded,
-                    errors,
-                    self.config.mcp.tool_search_threshold,
-                ),
+                Ok((loaded, errors)) => {
+                    if let Some(note) = register_mcp_tools(
+                        &mut self.agent.tools,
+                        loaded,
+                        errors,
+                        self.config.mcp.tool_search_threshold,
+                    ) {
+                        self.add_turn_note(note);
+                    }
+                }
                 Err(e) => tracing::warn!("MCP load task failed: {e}"),
             }
         }
@@ -2317,6 +2352,9 @@ impl Supervisor {
             tool_count = tools.len();
             for tool in tools {
                 self.agent.tools.register(tool);
+            }
+            if let Some(note) = mcp_failure_note(&errors) {
+                self.add_turn_note(note);
             }
             failed = errors;
         }
@@ -4121,6 +4159,14 @@ mod tests {
             fallback,
             "Earlier conversation context was compacted due to token limits."
         );
+    }
+
+    #[test]
+    fn mcp_failures_become_a_note_for_the_model() {
+        assert!(mcp_failure_note(&[]).is_none());
+        let note = mcp_failure_note(&[("jira".into(), "401 Unauthorized".into())]).unwrap();
+        assert!(note.contains("`jira` (401 Unauthorized)"), "{note}");
+        assert!(note.contains("not available"), "{note}");
     }
 
     #[test]
