@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.91 — 2026-11-22
+
+### Changed
+- **Code Mode scripts run in their own process**: a script building a huge
+  array could fill the machine's memory, and one stopped with Esc kept
+  computing. Each script now runs in a child `dcode-ai` — capped at 4 GiB
+  on Linux (a script that hits it gets "out of memory", nothing crashes),
+  killed when you stop the run or it passes its 10-minute limit, and gone
+  if dcode-ai itself exits.
+- **Default `max_tokens` is 16,384** (was 8,192): room for a whole file in
+  one tool call; a reply only costs what it uses.
+
+### Fixed
+- **`[model] max_tokens` in your config was ignored**: the `--max-tokens`
+  flag's default always replaced it. Only an explicit flag overrides now.
+- **`-t` reset a configured thinking budget** to 5,120.
+- **`dcode-ai plugin search rust | head -8` crashed** with "failed printing
+  to stdout: Broken pipe" (and wrote a crash report). Output piped into a
+  reader that closes early now ends quietly.
+- **MCP servers that refuse to connect** show their own error message
+  instead of their raw response (which could be a whole HTML page).
+
 ## 1.0.90 — 2026-11-22
 
 ### Security
