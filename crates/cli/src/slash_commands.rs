@@ -74,6 +74,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/sessions",
     "/resume",
     "/bashes",
+    "/tasks",
     "/output-style",
     "/release-notes",
     "/vim",
@@ -269,6 +270,9 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/sessions" => "browse and resume saved sessions",
         "/resume" => "resume a conversation (picker, or /resume <id>)",
         "/bashes" => "background shells the agent started (/bashes kill <id>)",
+        "/tasks" => {
+            "everything running: shells, jobs, sub-agents, schedules, goal (/tasks stop <ref>)"
+        }
         "/output-style" => "how replies are written: default, explanatory, learning, custom",
         "/release-notes" => "what's new in this version",
         "/vim" => "toggle vim keys in the prompt (Esc NORMAL, i INSERT)",

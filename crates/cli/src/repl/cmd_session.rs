@@ -56,6 +56,172 @@ impl Repl {
                     ));
                 }
             }
+            "/tasks" => {
+                // Everything running for this session in one list: shells the
+                // agent started, your /run-bg jobs, sub-agents, scheduled
+                // runs and the goal. `/tasks stop <ref>` stops one.
+                use dcode_ai_common::event::BackgroundJobStatus as S;
+                let arg = rest.trim();
+                let agent_jobs = self.runtime.background_jobs();
+                let ws = self.runtime.workspace_root().to_path_buf();
+                if let Some(target) = arg
+                    .strip_prefix("stop")
+                    .or_else(|| arg.strip_prefix("kill"))
+                    .map(str::trim)
+                {
+                    let msg = if let Some(n) = target
+                        .strip_prefix("sh")
+                        .and_then(|n| n.parse::<u32>().ok())
+                    {
+                        if agent_jobs.stop(n) {
+                            if let ReplOutput::Tui(st) = &out
+                                && let Ok(mut g) = st.lock()
+                            {
+                                g.background_shells.remove(&n);
+                            }
+                            Ok(format!("stopped shell sh{n}"))
+                        } else {
+                            Err(format!("no running shell sh{n}"))
+                        }
+                    } else if let Some(n) = target
+                        .strip_prefix("job")
+                        .and_then(|n| n.parse::<u32>().ok())
+                    {
+                        match self.background_jobs.iter().position(|j| j.id == n) {
+                            Some(pos) => {
+                                let job = self.background_jobs.remove(pos);
+                                job.handle.abort();
+                                Ok(format!("stopped job{n} ({})", job.cmd))
+                            }
+                            None => Err(format!("no job{n}")),
+                        }
+                    } else if let Some(n) =
+                        target.strip_prefix('#').and_then(|n| n.parse::<u32>().ok())
+                    {
+                        let mut list = dcode_ai_cli::schedule::Schedules::load(&ws);
+                        match list.items.iter_mut().find(|s| s.id == n) {
+                            Some(item) => {
+                                item.paused = true;
+                                list.save(&ws)
+                                    .map(|_| {
+                                        format!("paused scheduled run #{n} (/schedule resume {n})")
+                                    })
+                                    .map_err(|e| e.to_string())
+                            }
+                            None => Err(format!("no scheduled run #{n}")),
+                        }
+                    } else if target == "goal" {
+                        let cell = self.runtime.goal_cell();
+                        let mut g = cell.lock().unwrap_or_else(|e| e.into_inner());
+                        match g.as_mut() {
+                            Some(goal) => {
+                                goal.status = dcode_ai_runtime::goal::GoalStatus::Paused;
+                                Ok("goal paused (/goal resume)".to_string())
+                            }
+                            None => Err("no goal set".to_string()),
+                        }
+                    } else {
+                        Err("usage: /tasks stop sh<N> | job<N> | #<N> | goal".to_string())
+                    };
+                    match msg {
+                        Ok(m) => out.println(&format!("[tasks] {m}")),
+                        Err(e) => out.eprintln(&format!("[tasks] {e}")),
+                    }
+                    return Ok(true);
+                }
+                let mut lines: Vec<String> = Vec::new();
+                let mut running = 0usize;
+                let shells = agent_jobs.list();
+                if !shells.is_empty() {
+                    lines.push("Shells (agent)".into());
+                    for job in &shells {
+                        let status = match (job.status, job.exit_code) {
+                            (S::Running, _) => {
+                                running += 1;
+                                "running".to_string()
+                            }
+                            (S::Stopped, _) => "stopped".to_string(),
+                            (_, Some(c)) => format!("exited {c}"),
+                            (_, None) => "failed".to_string(),
+                        };
+                        lines.push(format!("  sh{:<4} {status:<10} $ {}", job.id, job.command));
+                    }
+                }
+                if !self.background_jobs.is_empty() {
+                    lines.push("Jobs (/run-bg)".into());
+                    for job in &self.background_jobs {
+                        let live = !job.done.load(std::sync::atomic::Ordering::SeqCst);
+                        running += live as usize;
+                        lines.push(format!(
+                            "  job{:<3} {:<10} $ {}",
+                            job.id,
+                            if live { "running" } else { "done" },
+                            job.cmd
+                        ));
+                    }
+                }
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(g) = st.lock()
+                    && !g.subagents.is_empty()
+                {
+                    lines.push("Sub-agents".into());
+                    for a in &g.subagents {
+                        running += a.running as usize;
+                        let task: String = a.task.chars().take(60).collect();
+                        lines.push(format!(
+                            "  {:<12} {:<10} {task}",
+                            a.id.chars().take(12).collect::<String>(),
+                            if a.running { a.phase.as_str() } else { "done" }
+                        ));
+                    }
+                }
+                let schedules = dcode_ai_cli::schedule::Schedules::load(&ws);
+                if !schedules.items.is_empty() {
+                    lines.push("Scheduled".into());
+                    for item in &schedules.items {
+                        let state = if item.paused {
+                            "paused".to_string()
+                        } else {
+                            item.next_run
+                                .map(|t| format!("next {}", t.format("%a %H:%M")))
+                                .unwrap_or_else(|| "waiting".into())
+                        };
+                        let prompt: String = item.prompt.chars().take(50).collect();
+                        lines.push(format!(
+                            "  #{:<4} {state:<14} {} — {prompt}",
+                            item.id, item.when
+                        ));
+                    }
+                }
+                if let Ok(g) = self.runtime.goal_cell().lock()
+                    && let Some(goal) = g.as_ref()
+                {
+                    let objective: String = goal.objective.chars().take(60).collect();
+                    lines.push("Goal".into());
+                    lines.push(format!(
+                        "  goal   {:<10} {objective} ({} turns)",
+                        goal.status.label(),
+                        goal.turns
+                    ));
+                }
+                if lines.is_empty() {
+                    out.println("[tasks] nothing running — background shells, /run-bg jobs, sub-agents, /schedule runs and /goal show here");
+                    return Ok(true);
+                }
+                lines.insert(0, format!("{running} running"));
+                lines.insert(1, String::new());
+                lines.push(String::new());
+                lines.push("/tasks stop sh<N> · job<N> · #<N> (pause) · goal".into());
+                if let ReplOutput::Tui(st) = &out
+                    && let Ok(mut g) = st.lock()
+                {
+                    g.open_info_modal("tasks", lines);
+                } else {
+                    for l in &lines {
+                        out.println(l);
+                    }
+                }
+            }
             "/bashes" => {
                 use dcode_ai_common::event::BackgroundJobStatus as S;
                 let jobs = self.runtime.background_jobs();

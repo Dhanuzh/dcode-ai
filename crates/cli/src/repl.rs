@@ -1012,11 +1012,11 @@ impl Repl {
 
         match command {
             "/q" | "/quit" | "/exit" => return Ok(false),
-            "/stop" | "/run-bg" | "/bashes" | "/ps" | "/session-name" | "/rename" | "/rewind"
-            | "/clear" | "/undo" | "/redo" | "/fork" | "/approve" | "/input" | "/side"
-            | "/delete" | "/compact" | "/logs" | "/attach" | "/sessions" | "/sessions-clean"
-            | "/new" | "/export" | "/share" | "/retry" | "/cd" | "/project" | "/import"
-            | "/history" => {
+            "/stop" | "/run-bg" | "/bashes" | "/tasks" | "/ps" | "/session-name" | "/rename"
+            | "/rewind" | "/clear" | "/undo" | "/redo" | "/fork" | "/approve" | "/input"
+            | "/side" | "/delete" | "/compact" | "/logs" | "/attach" | "/sessions"
+            | "/sessions-clean" | "/new" | "/export" | "/share" | "/retry" | "/cd" | "/project"
+            | "/import" | "/history" => {
                 return self.cmd_session(input, command, rest, parts, out).await;
             }
             "/help" | "/keymaps" | "/status" | "/context" | "/diff" | "/copy" | "/dashboard"

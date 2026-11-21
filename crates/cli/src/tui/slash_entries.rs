@@ -343,6 +343,10 @@ pub(crate) const SUBCOMMANDS: &[(&str, Options)] = &[
     ),
     ("/bashes", &[("kill", true, "stop one: <id>")]),
     (
+        "/tasks",
+        &[("stop", true, "stop one: sh<N> · job<N> · #<N> · goal")],
+    ),
+    (
         "/memory",
         &[
             ("forget", true, "remove a note: <id>"),
@@ -760,6 +764,7 @@ pub(crate) fn command_group(cmd: &str) -> (u8, &'static str) {
                 "/fleet",
                 "/tour",
                 "/bashes",
+                "/tasks",
                 "/ps",
                 "/diff",
                 "/diagram",
