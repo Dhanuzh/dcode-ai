@@ -106,7 +106,11 @@ pub async fn run_onboarding(mut config: DcodeAiConfig) -> anyhow::Result<DcodeAi
                     Ok(()) => {
                         config.set_default_provider(choice.provider);
                         config.ui.onboarding_completed = true;
-                        if let Err(e) = config.save_global() {
+                        let provider = choice.provider;
+                        if let Err(e) = DcodeAiConfig::update_global(|g| {
+                            g.set_default_provider(provider);
+                            g.ui.onboarding_completed = true;
+                        }) {
                             status =
                                 Some(format!("Login succeeded, but saving config failed: {e}"));
                             continue;

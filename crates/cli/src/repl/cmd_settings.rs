@@ -701,7 +701,9 @@ impl Repl {
                 cfg.ui.quiet_startup = new_val;
                 match self.runtime.apply_dcode_ai_config(cfg) {
                     Ok(()) => {
-                        if let Err(e) = self.runtime.config().save_global() {
+                        if let Err(e) = dcode_ai_common::config::DcodeAiConfig::update_global(|g| {
+                            g.ui.quiet_startup = new_val
+                        }) {
                             out.eprintln(&format!(
                                 "[quiet] toggled for this session, but global save failed: {e}"
                             ));

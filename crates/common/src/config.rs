@@ -153,6 +153,16 @@ impl DcodeAiConfig {
         Ok(config)
     }
 
+    /// Change only the user's global config file — never the merged session
+    /// config, which also holds workspace settings and command-line flags.
+    /// A file that can't be read or parsed is left alone (an error), so a
+    /// bad read can't reset it to defaults.
+    pub fn update_global(f: impl FnOnce(&mut Self)) -> Result<(), ConfigError> {
+        let mut global = Self::load_global_file()?;
+        f(&mut global);
+        global.save_global()
+    }
+
     /// Save the full config as the user's global defaults.
     pub fn save_global(&self) -> Result<(), ConfigError> {
         let path = global_config_path().ok_or(ConfigError::NoHomeDir)?;
@@ -694,7 +704,10 @@ pub fn set_toml_value(
 ) -> Result<(), String> {
     let mut doc: toml::Table = match std::fs::read_to_string(path) {
         Ok(raw) => toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?,
-        Err(_) => toml::Table::new(),
+        // Only a missing file starts empty: any other read error (a lock,
+        // a stall, permissions) must not turn into "rewrite with one key".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     doc.entry(section)
         .or_insert_with(|| toml::Value::Table(toml::Table::new()))
@@ -705,7 +718,7 @@ pub fn set_toml_value(
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let text = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-    std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))
+    write_atomically(path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))
 }
 
 pub fn edit_permission_rule(
@@ -719,7 +732,10 @@ pub fn edit_permission_rule(
     }
     let mut doc: toml::Table = match std::fs::read_to_string(path) {
         Ok(raw) => toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?,
-        Err(_) => toml::Table::new(),
+        // Only a missing file starts empty: any other read error (a lock,
+        // a stall, permissions) must not turn into "rewrite with one key".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let perms = doc
         .entry("permissions")
@@ -746,7 +762,7 @@ pub fn edit_permission_rule(
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let text = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-        std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        write_atomically(path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(changed)
 }
@@ -797,7 +813,10 @@ pub fn edit_hook(path: &Path, event: &str, hook: &HookCommand, add: bool) -> Res
     }
     let mut doc: toml::Table = match std::fs::read_to_string(path) {
         Ok(raw) => toml::from_str(&raw).map_err(|e| format!("{}: {e}", path.display()))?,
-        Err(_) => toml::Table::new(),
+        // Only a missing file starts empty: any other read error (a lock,
+        // a stall, permissions) must not turn into "rewrite with one key".
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
     };
     let hooks = doc
         .entry("hooks")
@@ -832,7 +851,7 @@ pub fn edit_hook(path: &Path, event: &str, hook: &HookCommand, add: bool) -> Res
             std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
         }
         let text = toml::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-        std::fs::write(path, text).map_err(|e| format!("{}: {e}", path.display()))?;
+        write_atomically(path, text.as_bytes()).map_err(|e| format!("{}: {e}", path.display()))?;
     }
     Ok(changed)
 }
@@ -892,11 +911,33 @@ fn save_config_to_path(config: &DcodeAiConfig, path: &Path) -> Result<(), Config
         source,
     })?;
 
-    std::fs::write(path, raw).map_err(|source| ConfigError::Io {
+    write_atomically(path, raw.as_bytes()).map_err(|source| ConfigError::Io {
         action: "write config file",
         path: path.to_path_buf(),
         source,
     })
+}
+
+/// Writes `bytes` to a temporary file next to `path`, flushes it, then
+/// renames it into place: a crash or full disk mid-write leaves the old file,
+/// never a half-written one.
+pub fn write_atomically(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "config".into());
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let result = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2569,6 +2610,33 @@ fn default_skill_directories() -> Vec<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A config that exists but can't be read is never rewritten with only
+    /// the new key (it used to start from an empty table on any error).
+    #[test]
+    fn unreadable_config_is_not_reset() {
+        let dir = tempfile::tempdir().unwrap();
+        // A directory where the file should be: read fails, not "missing".
+        let path = dir.path().join("config.toml");
+        std::fs::create_dir(&path).unwrap();
+        let r = set_toml_value(&path, "ui", "theme", toml::Value::String("x".into()));
+        assert!(r.is_err(), "{r:?}");
+        assert!(path.is_dir());
+        // A missing file starts empty; the write is atomic (no temp left).
+        let path = dir.path().join("new.toml");
+        set_toml_value(&path, "ui", "theme", toml::Value::String("x".into())).unwrap();
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("theme = \"x\"")
+        );
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty());
+    }
 
     #[test]
     fn permission_rules_edit_keeps_the_rest_of_the_file() {

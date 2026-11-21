@@ -259,7 +259,9 @@ impl NewServer {
 fn read_doc(path: &Path) -> Result<Value, String> {
     match std::fs::read_to_string(path) {
         Ok(text) => serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display())),
-        Err(_) => Ok(json!({ "mcpServers": {} })),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(json!({ "mcpServers": {} })),
+        // Unreadable but there: refuse rather than overwrite it with one entry.
+        Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
 
@@ -268,7 +270,8 @@ fn write_doc(path: &Path, doc: &Value) -> Result<(), String> {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     }
     let text = serde_json::to_string_pretty(doc).map_err(|e| e.to_string())?;
-    std::fs::write(path, text + "\n").map_err(|e| format!("{}: {e}", path.display()))
+    crate::config::write_atomically(path, (text + "\n").as_bytes())
+        .map_err(|e| format!("{}: {e}", path.display()))
 }
 
 /// Add (or replace) `name` in `scope`'s file, keeping everything else in it.

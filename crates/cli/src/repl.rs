@@ -2602,7 +2602,9 @@ impl Repl {
                 TuiCmd::CompleteOnboarding => {
                     let mut cfg = self.runtime.config().clone();
                     cfg.ui.onboarding_completed = true;
-                    if let Err(e) = cfg.save_global() {
+                    if let Err(e) = dcode_ai_common::config::DcodeAiConfig::update_global(|g| {
+                        g.ui.onboarding_completed = true
+                    }) {
                         tracing::warn!("onboarding flag save failed: {e}");
                     }
                     if let Err(e) = self.runtime.apply_dcode_ai_config(cfg) {
