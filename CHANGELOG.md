@@ -1,5 +1,31 @@
 # Changelog
 
+## 1.0.89 — 2026-11-21
+
+### Added — Code Mode 2
+- **Scripts ask instead of failing**: a call inside `run_script` that needs
+  approval now asks you (or the auto-mode check) like any call — "always
+  allow" and partial hunk approval work too. A denial throws inside the
+  script so it can carry on. Time spent waiting for you doesn't count
+  against the script's limit.
+- **You see what a script does**: every tool call a script makes shows in
+  the transcript, the event log, `--json` streams and the web page, so
+  edits that finished before Esc are visible.
+- **`parallel([...])`**: run several calls at once from a script
+  (read-only ones together); results come back in order as
+  `{ok, text}` / `{ok: false, error}`.
+- **`log`, `preview(value, n)`, `sleep(ms)`** built-ins; a script may
+  declare its own names instead.
+- **Longer scripts**: 10 minutes and 200 tool calls (was 60 s and 50).
+
+### Fixed
+- **No duplicate side chats**: splitting again with no sub-agents running
+  opened another copy of the same side chat; now it says there's nothing
+  more to show (sub-agents get panes when they run).
+
+### Changed
+- README: a screenshot of the split workspace with the side chat.
+
 ## 1.0.88 — 2026-11-19
 
 ### Fixed
