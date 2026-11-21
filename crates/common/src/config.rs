@@ -1480,7 +1480,9 @@ impl Default for ModelConfig {
     fn default() -> Self {
         Self {
             default_model: "claude-opus-5-5".into(),
-            max_tokens: 8192,
+            // Room for a whole file in one tool call; a reply only costs
+            // what it uses.
+            max_tokens: 16_384,
             enable_thinking: false,
             thinking_budget: 5120,
             aliases: BTreeMap::new(),

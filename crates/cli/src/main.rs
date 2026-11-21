@@ -97,9 +97,9 @@ struct Cli {
     #[arg(long, default_value = "5120")]
     thinking_budget: u32,
 
-    /// Max response tokens
-    #[arg(long, default_value = "8192")]
-    max_tokens: u32,
+    /// Max response tokens (default: `[model] max_tokens` in config)
+    #[arg(long)]
+    max_tokens: Option<u32>,
 
     /// Verbose debug logging
     #[arg(short, long)]
@@ -905,7 +905,11 @@ async fn try_main() -> anyhow::Result<()> {
         config.apply_model_override(model);
     }
 
-    config.model.max_tokens = cli.max_tokens;
+    // Only an explicit flag overrides `[model] max_tokens` (the flag's old
+    // default of 8192 silently replaced the configured value).
+    if let Some(n) = cli.max_tokens {
+        config.model.max_tokens = n;
+    }
     if cli.enable_thinking {
         config.model.enable_thinking = true;
         config.model.thinking_budget = cli.thinking_budget;
