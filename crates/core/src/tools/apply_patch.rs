@@ -101,7 +101,7 @@ impl ToolExecutor for ApplyPatchTool {
             };
         }
 
-        let mut content = match tokio::fs::read_to_string(&canonical).await {
+        let raw = match tokio::fs::read_to_string(&canonical).await {
             Ok(content) => content,
             Err(err) => {
                 return ToolResult {
@@ -112,6 +112,8 @@ impl ToolExecutor for ApplyPatchTool {
                 };
             }
         };
+        // Match on `\n` text; write back with the file's own BOM and endings.
+        let (format, mut content) = super::text_format::TextFormat::split(&raw);
         let original_content = content.clone();
 
         let Some(edits) = call.input["edits"].as_array() else {
@@ -124,8 +126,10 @@ impl ToolExecutor for ApplyPatchTool {
         };
 
         for edit in edits {
-            let old_text = edit["old_text"].as_str().unwrap_or("");
-            let new_text = edit["new_text"].as_str().unwrap_or("");
+            let old_text = format.normalize(edit["old_text"].as_str().unwrap_or(""));
+            let old_text = old_text.as_ref();
+            let new_text = format.normalize(edit["new_text"].as_str().unwrap_or(""));
+            let new_text = new_text.as_ref();
             let replace_all = edit["replace_all"].as_bool().unwrap_or(false);
 
             if old_text.is_empty() {
@@ -172,7 +176,7 @@ impl ToolExecutor for ApplyPatchTool {
         }
 
         let diff = format_diff(&original_content, &content, &canonical);
-        match tokio::fs::write(&canonical, &content).await {
+        match tokio::fs::write(&canonical, format.join(&content)).await {
             Ok(()) => {
                 self.freshness.note(&canonical);
                 ToolResult {

@@ -24,6 +24,7 @@ pub mod run_validation;
 pub mod run_workflow;
 pub mod search;
 pub mod spawn_subagent;
+pub mod text_format;
 pub mod tool_search;
 pub mod types;
 pub mod update_plan;

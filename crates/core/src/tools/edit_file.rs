@@ -95,7 +95,7 @@ impl ToolExecutor for EditFileTool {
             };
         }
 
-        let content = match tokio::fs::read_to_string(&canonical).await {
+        let raw = match tokio::fs::read_to_string(&canonical).await {
             Ok(content) => content,
             Err(err) => {
                 return ToolResult {
@@ -115,6 +115,12 @@ impl ToolExecutor for EditFileTool {
                 error: Some("old_text must not be empty".into()),
             };
         }
+        // Match on `\n` text; write back with the file's own BOM and endings.
+        let (format, content) = super::text_format::TextFormat::split(&raw);
+        let old_text = format.normalize(old_text);
+        let old_text = old_text.as_ref();
+        let new_text = format.normalize(new_text);
+        let new_text = new_text.as_ref();
 
         let occurrence_count = content.matches(old_text).count();
         if occurrence_count == 0 {
@@ -151,7 +157,7 @@ impl ToolExecutor for EditFileTool {
         };
 
         let diff = format_diff(&content, &updated, &canonical);
-        match tokio::fs::write(&canonical, &updated).await {
+        match tokio::fs::write(&canonical, format.join(&updated)).await {
             Ok(()) => {
                 self.freshness.note(&canonical);
                 ToolResult {
@@ -245,6 +251,27 @@ mod tests {
         // File content untouched.
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, "alpha // user changed this\n");
+    }
+
+    /// A Windows file (CRLF, BOM) matches `\n` text and keeps its format.
+    #[tokio::test]
+    async fn edit_file_keeps_crlf_and_bom() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.cs");
+        std::fs::write(&path, "\u{feff}class A\r\n{\r\n  int x;\r\n}\r\n").unwrap();
+        let tool = EditFileTool::new(dir.path().to_path_buf());
+        let result = tool
+            .execute(&make_call(serde_json::json!({
+                "path": "a.cs",
+                "old_text": "{\n  int x;\n}",
+                "new_text": "{\n  int x;\n  int y;\n}"
+            })))
+            .await;
+        assert!(result.success, "{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "\u{feff}class A\r\n{\r\n  int x;\r\n  int y;\r\n}\r\n"
+        );
     }
 
     #[tokio::test]

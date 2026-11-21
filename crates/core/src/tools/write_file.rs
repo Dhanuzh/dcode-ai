@@ -116,14 +116,19 @@ impl ToolExecutor for WriteFileTool {
             };
         }
 
-        let old = tokio::fs::read_to_string(&full_path)
+        let old_raw = tokio::fs::read_to_string(&full_path)
             .await
             .unwrap_or_default();
+        // Overwriting a file keeps its own BOM and line endings when the new
+        // content is plain `\n` text.
+        let (format, old) = super::text_format::TextFormat::split(&old_raw);
+        let new_text = format.normalize(content);
+        let bytes = format.join(&new_text);
 
-        match tokio::fs::write(&full_path, content).await {
+        match tokio::fs::write(&full_path, &bytes).await {
             Ok(()) => {
                 self.freshness.note(&canonical_target);
-                let diff = format_diff(&old, content);
+                let diff = format_diff(&old, &new_text);
                 // Keep output machine- and human-friendly. The CLI can render this as-is.
                 let output = if diff.trim().is_empty() {
                     format!("Wrote {} (no changes)", full_path.display())
