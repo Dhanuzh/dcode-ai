@@ -1,5 +1,50 @@
 # Changelog
 
+## 1.0.90 — 2026-11-22
+
+### Security
+- **Folder trust**: a folder's own files could make dcode-ai run commands
+  the moment it started there — hooks and `statusline_command` in
+  `.dcode.toml`, MCP servers in `.mcp.json`, permission rules that skip
+  asking. Now the first interactive start in such a folder lists exactly
+  what would run and asks; a refused folder starts without them (its other
+  settings still apply). Asked once per folder; `/trust` shows the list,
+  `/trust on|off|reset` changes it.
+
+### Added
+- **`/tasks`**: everything running for the session in one list — shells the
+  agent started, your `/run-bg` jobs, sub-agents, scheduled runs and the
+  goal. `/tasks stop sh<N> | job<N> | #<N> | goal` stops (or pauses) one.
+- **MCP files and images**: images, audio, PDFs and other files an MCP tool
+  sends are saved under `.dcode-ai/mcp-files/` with the right extension —
+  also when the server calls them `application/octet-stream` (the type is
+  read from the file) — and a model that sees images sees them. Text
+  resources come back inline, resource links by address. A content type
+  dcode-ai doesn't know no longer fails the whole call.
+- **The model knows when an MCP server failed to load** (at start, late
+  and after `/reload`), instead of taking it for a server with no tools.
+
+### Fixed
+- **A config that couldn't be read was reset**: changing one setting
+  (`/theme`, `/vim`, permission rules, hooks, `.mcp.json` servers) while
+  the file was locked or unreadable rewrote it with only that setting.
+  Unreadable files are now left alone, and every settings file is written
+  atomically (a crash mid-save keeps the old one).
+- **Project settings leaked into your global config**: finishing
+  onboarding and `/quiet` saved the whole session config — this folder's
+  settings and command-line flags included — as `~/.dcode-ai/config.toml`.
+- **Windows files**: `edit_file` and `apply_patch` couldn't match text in
+  files with `\r\n` line endings; edits now match and keep the file's
+  line endings and byte-order mark (`write_file` too, when overwriting).
+- **A status line command that prints without end** (`yes`) could use
+  gigabytes of memory; output is now cut off at the first line.
+- **Hooks**: a non-blocking hook that couldn't start stopped the tool call
+  it watched; a hung hook hung the agent (now stopped after 60 s); endless
+  hook output was kept in memory.
+- **After `/resume`**, a permission question cut off by the session ending
+  no longer shows "Waiting for permission…".
+- **Help and hints show your `/keymap` keys** instead of the defaults.
+
 ## 1.0.89 — 2026-11-21
 
 ### Added — Code Mode 2
