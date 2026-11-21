@@ -722,3 +722,32 @@ fn index_show_and_build_json_status() {
     assert!(status["path"].as_str().unwrap().contains("cli-index.json"));
     assert!(status["workspace_id"].as_str().unwrap().len() > 10);
 }
+
+/// `dcode-ai … | head`: the reader closing early is not a crash (B1).
+#[cfg(unix)]
+#[test]
+fn piping_into_a_reader_that_closes_early_exits_quietly() {
+    let temp = tempdir().expect("tempdir");
+    let bin = assert_cmd::cargo::cargo_bin("dcode-ai");
+    for args in [&["completion", "bash"][..], &["--help"][..]] {
+        let mut child = StdCommand::new(&bin)
+            .args(args)
+            .current_dir(temp.path())
+            .env("HOME", temp.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        // Close the pipe right away, like a reader that has had enough.
+        drop(child.stdout.take());
+        let out = child.wait_with_output().expect("wait");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+        assert!(!stderr.contains("Broken pipe"), "{args:?}: {stderr}");
+        assert!(out.status.success(), "{args:?}: {:?} {stderr}", out.status);
+    }
+    assert!(
+        !temp.path().join(".dcode-ai/crashes").exists(),
+        "no crash report"
+    );
+}

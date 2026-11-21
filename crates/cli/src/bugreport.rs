@@ -17,6 +17,11 @@ pub fn install_crash_hook() {
     HOOK.call_once(|| {
         let previous = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
+            // `dcode-ai … | head`: the reader closed the pipe early. Not a
+            // crash — stop quietly, as Unix tools do on SIGPIPE.
+            if is_closed_output_pipe(&panic_text(info)) {
+                std::process::exit(0);
+            }
             let _ = write_crash(&format!(
                 "{info}\n\nthread: {}\n\nbacktrace:\n{}",
                 std::thread::current().name().unwrap_or("?"),
@@ -25,6 +30,26 @@ pub fn install_crash_hook() {
             previous(info);
         }));
     });
+}
+
+fn panic_text(info: &std::panic::PanicHookInfo<'_>) -> String {
+    let payload = info.payload();
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_default()
+}
+
+/// A write to our own output after the reader went away (`| head`). Only
+/// when stdout is a pipe: in the terminal UI a broken pipe is a real bug.
+pub fn is_closed_output_pipe(message: &str) -> bool {
+    use std::io::IsTerminal;
+    mentions_broken_pipe(message) && !std::io::stdout().is_terminal()
+}
+
+pub fn mentions_broken_pipe(message: &str) -> bool {
+    message.contains("Broken pipe") || message.contains("BrokenPipe")
 }
 
 fn write_crash(text: &str) -> std::io::Result<PathBuf> {

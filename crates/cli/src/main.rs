@@ -707,6 +707,8 @@ fn main() -> ExitCode {
                 .block_on(async {
                     match try_main().await {
                         Ok(()) => ExitCode::SUCCESS,
+                        // `dcode-ai … | head` closed the pipe: done, not failed.
+                        Err(error) if is_broken_pipe(&error) => ExitCode::SUCCESS,
                         Err(error) => {
                             eprintln!("Error: {error}");
                             print_connect_hint_if_missing_provider_auth(&error);
@@ -717,6 +719,17 @@ fn main() -> ExitCode {
         })
         .expect("spawn main thread");
     result.join().unwrap_or(ExitCode::FAILURE)
+}
+
+/// An error from writing our output to a reader that closed early.
+fn is_broken_pipe(error: &anyhow::Error) -> bool {
+    use std::io::IsTerminal;
+    !std::io::stdout().is_terminal()
+        && error.chain().any(|e| {
+            e.downcast_ref::<std::io::Error>()
+                .is_some_and(|io| io.kind() == std::io::ErrorKind::BrokenPipe)
+                || dcode_ai_cli::bugreport::mentions_broken_pipe(&e.to_string())
+        })
 }
 
 /// "1 session is running here in the background — attach?" (Enter = yes).
