@@ -392,13 +392,14 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 
 - **Starter packs:** `dcode-ai setup` installs plugins for your role (Backend, UI/UX, DevOps, Automation, Data, Security) and languages. You can share them as a team file.
 - **Plugins and marketplaces:** the `/plugins` browser comes with Anthropic's official, community and knowledge-work marketplaces built in.
-- **MCP:** `.mcp.json` (local, project and user scopes), plus a `/mcp` panel with OAuth sign-in, reconnect and per-folder on/off. `dcode-ai mcp serve` shares dcode-ai's tools with other agents.
+- **MCP:** `.mcp.json` (local, project and user scopes), plus a `/mcp` panel with OAuth sign-in, reconnect and per-folder on/off. Images, PDFs and other files a server sends are saved under `.dcode-ai/mcp-files/` with the right type (models that see images see them). `dcode-ai mcp serve` shares dcode-ai's tools with other agents.
 - **Skills, commands, agents, hooks:** `SKILL.md`, `commands/**/*.md`, `agents/*.md`, `hooks.json`, and a status-line command.
 - **Language servers:** picked per project (rust-analyzer, typescript, pyright, gopls, clangd) or set in `.lsp.json`.
 
 ### 🛡️ Safe by default
 
 - Permission modes from *plan* (read-only) to *bypass*. Edits and unfamiliar commands ask first.
+- **Folder trust:** a folder whose own files would run commands (hooks, MCP servers, a status line, permission rules in `.dcode.toml` or `.mcp.json`) is asked about once, listing exactly what would run; a refused folder starts without them. `/trust` shows and changes it.
 - Shell commands are parsed, not substring-matched: read-only ones just run, destructive ones are refused.
 - `policy.toml` allow / ask / deny rules, testable with `dcode-ai policy test execute_bash "git push"`.
 - Optional shell sandbox: Landlock on Linux, Seatbelt on macOS.
