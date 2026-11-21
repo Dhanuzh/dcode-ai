@@ -48,7 +48,7 @@ or missing, the fix, and how to check it.
 
 ### 1b. Reported 2026-11-22
 
-- **B1. Broken pipe panics** — `dcode-ai plugin search rust | head -8`
+- **B1 (done v1.0.91). Broken pipe panics** — `dcode-ai plugin search rust | head -8`
   crashes with "failed printing to stdout: Broken pipe" (`println!`
   panics when the reader closes early). Seen while recording the demo.
   *Fix:* subcommand output goes through a writer that treats `EPIPE` as
