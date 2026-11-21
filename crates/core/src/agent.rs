@@ -11,7 +11,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::approval::{ApprovalPolicy, ApprovalVerdict};
 use crate::cost::CostTracker;
@@ -1735,8 +1735,9 @@ Take it into account now and continue with the task."
     }
 
     /// Runs a `run_script` call: the script on its own thread, each tool it
-    /// calls here — only if the session allows it without asking, through
-    /// hooks, undo checkpoints and redaction like any call.
+    /// calls here — through the permission checks (asking the user when the
+    /// mode needs it), hooks, undo checkpoints, redaction and events like any
+    /// call. Read-only batches from `parallel()` run at once.
     async fn run_script(&mut self, call: &ToolCall, workspace_root: &Path) -> ToolResult {
         use crate::tools::run_script::{self as rs, ScriptMsg};
         let fail = |e: String| ToolResult {
@@ -1758,25 +1759,49 @@ Take it into account now and continue with the task."
             return fail(format!("couldn't start the script: {e}"));
         }
         let mut n = 0u32;
+        let mut deadline = Instant::now() + rs::MAX_TIME;
         loop {
             let msg = tokio::select! {
                 m = rx.recv() => m,
                 _ = self.cancelled() => return fail("cancelled".into()),
             };
             match msg {
-                Some(ScriptMsg::Call { name, args, reply }) => {
-                    n += 1;
-                    self.script_stats.1 += 1;
-                    let inner = ToolCall {
-                        id: format!("{}.{n}", call.id),
-                        name,
-                        input: args,
-                    };
-                    let answer = self.script_tool_call(&inner, workspace_root).await;
-                    self.script_stats.2 += match &answer {
-                        Ok(t) | Err(t) => t.chars().count() as u64,
-                    };
-                    let _ = reply.send(answer);
+                Some(ScriptMsg::Calls { calls, reply }) => {
+                    let mut waited = Duration::ZERO;
+                    // Permission checks one by one (they may ask the user).
+                    let mut ready: Vec<Result<ToolCall, String>> = Vec::with_capacity(calls.len());
+                    let mut ids = Vec::with_capacity(calls.len());
+                    for (name, args) in calls {
+                        n += 1;
+                        self.script_stats.1 += 1;
+                        let inner = ToolCall {
+                            id: format!("{}.{n}", call.id),
+                            name,
+                            input: args,
+                        };
+                        ids.push(inner.id.clone());
+                        let (prepared, w) = self.script_prepare(inner, workspace_root).await;
+                        waited += w;
+                        ready.push(prepared);
+                        if self.is_cancelled() {
+                            return fail("cancelled".into());
+                        }
+                    }
+                    deadline += waited;
+                    let left = deadline.saturating_duration_since(Instant::now());
+                    let results = self.script_execute(&ready, left).await;
+                    if self.is_cancelled() {
+                        return fail("cancelled".into());
+                    }
+                    let mut answers = Vec::with_capacity(results.len());
+                    for ((id, prepared), result) in ids.iter().zip(&ready).zip(results) {
+                        let answer = self.script_finish(id, prepared, result).await;
+                        self.script_stats.2 += match &answer {
+                            Ok(t) | Err(t) => t.chars().count() as u64,
+                        };
+                        answers.push(answer);
+                    }
+                    let _ = reply.send((answers, waited));
                 }
                 Some(ScriptMsg::Done(Ok(out))) => {
                     self.script_stats.0 += 1;
@@ -1800,23 +1825,95 @@ Take it into account now and continue with the task."
         }
     }
 
-    /// One tool call from inside a script → its text, or why it can't run.
-    async fn script_tool_call(
+    /// Before one of a script's calls runs: shown as started, permission
+    /// checked (asking the user if needed), PreToolUse hooks, undo
+    /// checkpoint. Returns the call to run (maybe with an edited input) or
+    /// why it can't, and how long the user took to answer.
+    async fn script_prepare(
         &mut self,
-        call: &ToolCall,
+        call: ToolCall,
         workspace_root: &Path,
-    ) -> Result<String, String> {
+    ) -> (Result<ToolCall, String>, Duration) {
+        let mut waited = Duration::ZERO;
+        self.emit(AgentEvent::ToolCallStarted {
+            call_id: call.id.clone(),
+            tool: call.name.clone(),
+            input: call.input.clone(),
+        })
+        .await;
         if call.name == "run_script" {
-            return Err("scripts can't start scripts".into());
+            return (Err("scripts can't start scripts".into()), waited);
         }
-        match self.approval.check(&call.name, &call.input.to_string()) {
+        let mut tier = self.approval.check(&call.name, &call.input.to_string());
+        if tier == PermissionTier::Ask
+            && let Some(command) = self
+                .approval
+                .auto_review(&call.name, &call.input.to_string())
+            && self.auto_mode_safe(&command, workspace_root).await
+        {
+            tier = PermissionTier::Allowed;
+        }
+        let mut call = call;
+        match tier {
             PermissionTier::Allowed => {}
-            PermissionTier::Denied => return Err(format!("tool `{}` denied by policy", call.name)),
+            PermissionTier::Denied => {
+                return (
+                    Err(format!("tool `{}` denied by policy", call.name)),
+                    waited,
+                );
+            }
             PermissionTier::Ask => {
-                return Err(format!(
-                    "`{}` needs your approval in this mode — call it directly, not from a script",
-                    call.name
-                ));
+                let description = format!("Tool `{}` (from a script) requires approval", call.name);
+                self.emit(AgentEvent::ApprovalRequested {
+                    call_id: call.id.clone(),
+                    tool: call.name.clone(),
+                    description: description.clone(),
+                })
+                .await;
+                let asked = Instant::now();
+                let verdict = self.approval.resolve(&call, &description).await;
+                waited = asked.elapsed();
+                if let Some(hooks) = &self.hooks {
+                    hooks
+                        .run_best_effort(
+                            HookEventKind::ApprovalRequested,
+                            Some(&call.name),
+                            &json!({"call_id": call.id, "tool": call.name,
+                                    "input": call.input, "description": description}),
+                        )
+                        .await;
+                }
+                let approved = verdict.is_approved();
+                self.emit(AgentEvent::ApprovalResolved {
+                    call_id: call.id.clone(),
+                    approved,
+                })
+                .await;
+                match verdict {
+                    ApprovalVerdict::AllowPattern(pattern) => {
+                        self.approval.add_session_allow(pattern)
+                    }
+                    ApprovalVerdict::ApprovedModified(input) => {
+                        call.input = input;
+                        if let Some(obj) = call.input.as_object_mut()
+                            && obj.remove(PARTIAL_WRITE_MARKER).is_some()
+                        {
+                            call.name = "write_file".into();
+                        }
+                    }
+                    _ => {}
+                }
+                if !approved {
+                    let why = if self.approval.should_fail_on_ask() {
+                        format!(
+                            "`{}` needs approval and this run is headless; use a mode such as `dont-ask` or `bypass-permissions`",
+                            call.name
+                        )
+                    } else {
+                        format!("`{}` needs approval; the request was denied", call.name)
+                    };
+                    return (Err(why), waited);
+                }
             }
         }
         if let Some(hooks) = &self.hooks
@@ -1828,10 +1925,102 @@ Take it into account now and continue with the task."
                 )
                 .await
         {
-            return Err(reason);
+            return (Err(reason), waited);
         }
-        self.undo.record_tool_call(call, workspace_root);
-        let mut result = self.tools.execute(call).await;
+        self.undo.record_tool_call(&call, workspace_root);
+        (Ok(call), waited)
+    }
+
+    /// One script call, failed when it runs past what's left of the deadline.
+    async fn script_call_timed(&self, call: &ToolCall, left: Duration) -> ToolResult {
+        match tokio::time::timeout(left, self.tools.execute(call)).await {
+            Ok(r) => r,
+            Err(_) => ToolResult {
+                call_id: call.id.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "the script ran past {}s",
+                    crate::tools::run_script::MAX_TIME.as_secs()
+                )),
+            },
+        }
+    }
+
+    /// Runs a script's prepared calls — all at once when every one is
+    /// read-only, else in order — each bounded by `left`.
+    async fn script_execute(
+        &self,
+        ready: &[Result<ToolCall, String>],
+        left: Duration,
+    ) -> Vec<Option<ToolResult>> {
+        let timed = |call| self.script_call_timed(call, left);
+        let mut results: Vec<Option<ToolResult>> = (0..ready.len()).map(|_| None).collect();
+        let parallel = ready
+            .iter()
+            .all(|r| r.as_ref().map_or(true, |c| concurrency_safe(&c.name)));
+        if parallel {
+            let mut futures: FuturesUnordered<_> = ready
+                .iter()
+                .enumerate()
+                .filter_map(|(i, r)| r.as_ref().ok().map(|c| (i, c)))
+                .map(|(i, c)| {
+                    let fut = timed(c);
+                    async move { (i, fut.await) }
+                })
+                .collect();
+            loop {
+                tokio::select! {
+                    next = futures.next() => match next {
+                        Some((i, r)) => results[i] = Some(r),
+                        None => break,
+                    },
+                    _ = self.cancelled() => break,
+                }
+            }
+        } else {
+            for (i, r) in ready.iter().enumerate() {
+                let Ok(c) = r else { continue };
+                tokio::select! {
+                    r = timed(c) => results[i] = Some(r),
+                    _ = self.cancelled() => break,
+                }
+            }
+        }
+        results
+    }
+
+    /// After one of a script's calls: redaction, undo bookkeeping,
+    /// PostToolUse hooks, the completed event. Returns what the script sees.
+    async fn script_finish(
+        &mut self,
+        id: &str,
+        prepared: &Result<ToolCall, String>,
+        result: Option<ToolResult>,
+    ) -> Result<String, String> {
+        let call = match prepared {
+            Ok(c) => c,
+            Err(e) => {
+                // Refused before running: shown as a failed call.
+                self.emit(AgentEvent::ToolCallCompleted {
+                    call_id: id.to_string(),
+                    output: ToolResult {
+                        call_id: id.to_string(),
+                        success: false,
+                        output: String::new(),
+                        error: Some(e.clone()),
+                    },
+                })
+                .await;
+                return Err(e.clone());
+            }
+        };
+        let mut result = result.unwrap_or_else(|| ToolResult {
+            call_id: call.id.clone(),
+            success: false,
+            output: String::new(),
+            error: Some("cancelled".into()),
+        });
         dcode_ai_common::redact::redact_tool_result(&mut result);
         self.undo
             .note_results(std::slice::from_ref(call), std::slice::from_ref(&result));
@@ -1850,13 +2039,21 @@ Take it into account now and continue with the task."
                 )
                 .await;
         }
-        if result.success {
-            Ok(result.output)
+        let answer = if result.success {
+            Ok(result.output.clone())
         } else {
             Err(result
                 .error
+                .clone()
                 .unwrap_or_else(|| format!("`{}` failed", call.name)))
-        }
+        };
+        result.output = cap_tool_output(&result.output);
+        self.emit(AgentEvent::ToolCallCompleted {
+            call_id: result.call_id.clone(),
+            output: result,
+        })
+        .await;
+        answer
     }
 
     /// Returns a future that completes when cancellation is requested.
@@ -2432,7 +2629,7 @@ mod tests {
     }
 
     /// Code Mode: a script's calls run through the agent; one that needs
-    /// approval fails inside the script instead of prompting.
+    /// approval asks (no handler here = denied) and throws inside the script.
     #[tokio::test]
     async fn run_script_calls_allowed_tools_and_refuses_the_rest() {
         let (event_tx, _event_rx) = tokio::sync::mpsc::channel(64);
@@ -2466,8 +2663,89 @@ mod tests {
             "{}",
             r.output
         );
-        assert!(r.output.contains("needs your approval"), "{}", r.output);
+        assert!(r.output.contains("the request was denied"), "{}", r.output);
         assert!(!temp.path().join("z").exists());
+    }
+
+    struct ApproveAll;
+
+    #[async_trait]
+    impl crate::approval::ApprovalHandler for ApproveAll {
+        async fn resolve(&self, _call: &ToolCall, _description: &str) -> ApprovalVerdict {
+            ApprovalVerdict::Approved
+        }
+    }
+
+    /// A fake `write_file` that only answers.
+    struct FakeWrite;
+
+    #[async_trait]
+    impl crate::tools::ToolExecutor for FakeWrite {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "write_file".into(),
+                description: String::new(),
+                parameters: json!({}),
+            }
+        }
+        async fn execute(&self, call: &ToolCall) -> ToolResult {
+            ToolResult {
+                call_id: call.id.clone(),
+                success: true,
+                output: format!("wrote {}", call.input["path"].as_str().unwrap_or("")),
+                error: None,
+            }
+        }
+    }
+
+    /// Code Mode 2: a call that needs approval asks the user mid-script and
+    /// runs when approved; every inner call is shown (started + completed);
+    /// `parallel` reads run together and come back in order.
+    #[tokio::test]
+    async fn run_script_asks_and_shows_inner_calls() {
+        let (event_tx, mut events) = tokio::sync::mpsc::channel(256);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(EchoRead));
+        tools.register(Box::new(FakeWrite));
+        let mut agent = AgentLoop::new(
+            Box::new(ChunkProvider {
+                chunks: Mutex::new(VecDeque::new()),
+            }),
+            tools,
+            ApprovalPolicy::new(PermissionConfig::default()).with_handler(Arc::new(ApproveAll)),
+            "test-model".into(),
+            event_tx,
+            3,
+            3,
+            1,
+            None,
+        );
+        let temp = tempfile::tempdir().expect("tempdir");
+        let call = ToolCall {
+            id: "s2".into(),
+            name: "run_script".into(),
+            input: json!({"code": "const w = tools.write_file({path: 'z', content: ''});\n\
+                const r = parallel([{tool: 'read_file', args: {path: 'a'}}, {tool: 'read_file', args: {path: 'b'}}]);\n\
+                return [w, ...r.map(x => x.text)].join('|');"}),
+        };
+        let r = agent.run_script(&call, temp.path()).await;
+        assert!(r.success, "{r:?}");
+        assert_eq!(r.output, "wrote z|read a|read b");
+        let (mut started, mut completed, mut asked) = (Vec::new(), Vec::new(), Vec::new());
+        while let Ok(e) = events.try_recv() {
+            match e {
+                AgentEvent::ToolCallStarted { call_id, .. } => started.push(call_id),
+                AgentEvent::ToolCallCompleted { call_id, output } => {
+                    assert!(output.success, "{output:?}");
+                    completed.push(call_id)
+                }
+                AgentEvent::ApprovalRequested { call_id, .. } => asked.push(call_id),
+                _ => {}
+            }
+        }
+        assert_eq!(started, ["s2.1", "s2.2", "s2.3"]);
+        assert_eq!(completed, ["s2.1", "s2.2", "s2.3"]);
+        assert_eq!(asked, ["s2.1"], "only the write asks");
     }
 
     /// A reply stuck repeating one line is stopped and kept to one copy.
