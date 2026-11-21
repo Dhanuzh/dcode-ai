@@ -726,15 +726,15 @@ impl Repl {
                     }
                     None => "not asked",
                 };
-                out.println(&format!("[trust] {}: {state}", ws.display()));
+                let mut text = format!("[trust] {}: {state}", ws.display());
                 if risks.is_empty() {
-                    out.println("  its files run nothing on start");
-                } else {
-                    for r in &risks {
-                        out.println(&format!("  • {}  ({})", r.what, r.file));
-                    }
+                    text.push_str("\n  its files run nothing on start");
                 }
-                out.println("  /trust on · /trust off · /trust reset");
+                for r in &risks {
+                    text.push_str(&format!("\n  • {}  ({})", r.what, r.file));
+                }
+                text.push_str("\n  /trust on · /trust off · /trust reset");
+                out.println(&text);
             }
             "/quiet" => {
                 let _ = rest;
