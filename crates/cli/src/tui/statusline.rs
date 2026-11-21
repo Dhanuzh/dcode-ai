@@ -10,13 +10,16 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::{Value, json};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::state::TuiSessionState;
 
 const INTERVAL: Duration = Duration::from_secs(1);
 const TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_CHARS: usize = 120;
+/// Most output read from one run: a command that prints without end (`yes`)
+/// is cut off here and stopped instead of filling memory.
+const MAX_READ: usize = 64 * 1024;
 
 /// What the command receives on stdin.
 pub(crate) fn session_json(g: &TuiSessionState) -> Value {
@@ -46,14 +49,33 @@ async fn run_once(command: &str, input: Value) -> Option<String> {
         .stderr(std::process::Stdio::null())
         .kill_on_drop(true);
     let mut child = cmd.spawn().ok()?;
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.to_string().as_bytes()).await;
-    }
-    let out = tokio::time::timeout(TIMEOUT, child.wait_with_output())
-        .await
-        .ok()?
-        .ok()?;
-    first_line(&out.stdout)
+    let mut stdout = child.stdout.take()?;
+    let stdin = child.stdin.take();
+    let read = async move {
+        if let Some(mut stdin) = stdin {
+            // A command that never reads stdin mustn't hold us up.
+            let _ = stdin.write_all(input.to_string().as_bytes()).await;
+        }
+        let mut buf = Vec::new();
+        let mut chunk = [0u8; 4096];
+        while buf.len() < MAX_READ {
+            match stdout.read(&mut chunk).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            }
+            // The first non-empty line is all we show.
+            if let Some(end) = buf.iter().rposition(|&b| b == b'\n')
+                && first_line(&buf[..end]).is_some()
+            {
+                break;
+            }
+        }
+        buf
+    };
+    let buf = tokio::time::timeout(TIMEOUT, read).await.ok()?;
+    // Stopped either way (kill_on_drop); don't wait for a runaway one.
+    let _ = child.start_kill();
+    first_line(&buf)
 }
 
 /// Keep `statusline_text` fresh while the session runs.
@@ -102,5 +124,18 @@ mod tests {
         )
         .await;
         assert_eq!(out.as_deref(), Some("claude-x"));
+    }
+
+    /// A command that prints without end is cut off quickly, not buffered.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn endless_output_is_cut_off() {
+        let started = std::time::Instant::now();
+        let out = run_once("yes 'branch main'", json!({})).await;
+        assert_eq!(out.as_deref(), Some("branch main"));
+        assert!(started.elapsed() < TIMEOUT, "{:?}", started.elapsed());
+        // No newline ever: stops at the read cap.
+        let out = run_once("tr -d '\\n' < /dev/zero | tr '\\0' x", json!({})).await;
+        assert!(out.is_none_or(|s| s.len() <= MAX_CHARS));
     }
 }
