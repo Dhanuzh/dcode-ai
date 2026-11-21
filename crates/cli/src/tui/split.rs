@@ -117,6 +117,11 @@ impl SplitWorkspace {
             return false;
         }
         let kind = self.next_kind(agents);
+        // Nothing new to show: no sub-agent without a pane, and the side
+        // chat is already open (a second copy of it helps nobody).
+        if self.panes.contains(&kind) {
+            return false;
+        }
         self.below = below;
         self.panes.push(kind);
         self.focus = self.panes.len();
@@ -492,6 +497,11 @@ mod tests {
         assert!(ws.below);
         assert_eq!(ws.focus, 3);
         assert!(!ws.split(false, &agents), "at most three");
+        // With no sub-agents, one side chat — not three copies of it.
+        let mut solo = SplitWorkspace::default();
+        assert!(solo.split(false, &[]));
+        assert!(!solo.split(false, &[]), "no duplicate side chat");
+        assert_eq!(solo.panes, vec![PaneKind::Side]);
     }
 
     #[test]

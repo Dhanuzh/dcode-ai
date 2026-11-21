@@ -1808,8 +1808,10 @@ impl TuiSessionState {
                 self.rail_focus = false;
                 if self.split.split(action == A::Below, &agents) {
                     "Split — the message box writes to the focused pane · Alt+O next · Alt+A change · Alt+W close".to_string()
-                } else {
+                } else if self.split.panes.len() >= crate::tui::split::MAX_PANES {
                     "At most three panes — Alt+W closes one".to_string()
+                } else {
+                    "Nothing more to show — the side chat is open; sub-agents get panes when they run".to_string()
                 }
             }
             A::Close if self.split.close_focused() => "Pane closed".to_string(),
