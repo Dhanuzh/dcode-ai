@@ -2009,6 +2009,16 @@ impl TuiSessionState {
                     ok: false,
                     detail: "Interrupted".into(),
                 };
+            } else if let DisplayBlock::ApprovalPending(req) = block {
+                // Asked when the session ended: neither approved nor
+                // denied, and not "Waiting for permission…" forever.
+                *block = DisplayBlock::ToolDone {
+                    name: std::mem::take(&mut req.tool),
+                    call_id: std::mem::take(&mut req.call_id),
+                    input: std::mem::take(&mut req.input),
+                    ok: false,
+                    detail: "Not answered — the session ended before you chose".into(),
+                };
             }
         }
         self.touch_transcript();
@@ -3760,10 +3770,21 @@ mod tests {
             ..Default::default()
         });
 
+        st.push_block(DisplayBlock::ApprovalPending(ApprovalRequest {
+            call_id: "call-1".into(),
+            tool: "execute_bash".into(),
+            description: "approve".into(),
+            input: "{}".into(),
+        }));
+
         st.clear_replayed_interaction_state();
 
         assert!(st.active_approval.is_none());
         assert!(st.active_question.is_none());
+        assert!(matches!(
+            st.blocks.last(),
+            Some(DisplayBlock::ToolDone { ok: false, detail, .. }) if detail.starts_with("Not answered")
+        ));
     }
 
     #[test]
