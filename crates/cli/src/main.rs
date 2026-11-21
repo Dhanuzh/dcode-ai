@@ -93,9 +93,9 @@ struct Cli {
     #[arg(short = 't', long)]
     enable_thinking: bool,
 
-    /// Token budget for extended thinking
-    #[arg(long, default_value = "5120")]
-    thinking_budget: u32,
+    /// Token budget for extended thinking (default: `[model] thinking_budget`)
+    #[arg(long)]
+    thinking_budget: Option<u32>,
 
     /// Max response tokens (default: `[model] max_tokens` in config)
     #[arg(long)]
@@ -912,7 +912,9 @@ async fn try_main() -> anyhow::Result<()> {
     }
     if cli.enable_thinking {
         config.model.enable_thinking = true;
-        config.model.thinking_budget = cli.thinking_budget;
+    }
+    if let Some(budget) = cli.thinking_budget {
+        config.model.thinking_budget = budget;
     }
     // Extra working folders: `[permissions] additional_directories`, then
     // `--add-dir` (relative to the current directory; `~` expanded).
