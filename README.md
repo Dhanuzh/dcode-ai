@@ -287,7 +287,7 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 
 **Split workspace:** `Alt+\` (right) or `Alt+-` (below) opens a pane next to the conversation — a sub-agent at work, or a side chat. The message box writes to the focused pane (`Alt+O` or click to move, `Alt+A` changes what it shows, `Alt+W` closes it); the layout is remembered. `/split right|below|next|show|close` does the same (and `Ctrl+X` then `|` where the terminal doesn't take Ctrl+X).
 
-**Terminal pane:** `/term` (or `Alt+T`) opens your shell in a pane beside the conversation, in the workspace folder, so you can run commands without leaving dcode-ai. From the inline view it switches to the dashboard first. While the pane has focus every key goes to the shell, including Ctrl+C, Tab and arrows, so vim, htop and the like work. `Alt+Z` gives it the whole screen, `Shift+PgUp` or the mouse wheel scrolls its history, `Alt+O` returns to the conversation and `Alt+W` ends the shell. `Ctrl+\` back to inline keeps the shell running.
+**Terminal pane:** `/term` (or `Alt+T`) opens your shell (PowerShell on Windows; `DCODE_AI_SHELL` picks another) in a pane beside the conversation, in the workspace folder, so you can run commands without leaving dcode-ai. From the inline view it switches to the dashboard first. While the pane has focus every key goes to the shell, including Ctrl+C, Tab and arrows, so vim, htop and the like work. `Alt+Z` gives it the whole screen, `Shift+PgUp` or the mouse wheel scrolls its history, `Alt+O` returns to the conversation and `Alt+W` ends the shell. `Ctrl+\` back to inline keeps the shell running.
 
 Click, scroll, drag to select and copy, and resize the side panels. `/timeline` scrubs through the session step by step.
 

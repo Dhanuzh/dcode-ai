@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixed
+- **Terminal pane blank on Windows**: Windows' console host asks the
+  terminal where the cursor is when a shell starts and shows nothing until
+  it hears back; the pane now answers (any program asking gets an answer).
+- **Terminal pane opened cmd.exe on Windows**: it now opens PowerShell 7
+  (`pwsh`), else Windows PowerShell, else `%COMSPEC%`. `DCODE_AI_SHELL`
+  picks any shell, on every system.
+
 ## 1.0.93 — 2026-11-25
 
 ### New

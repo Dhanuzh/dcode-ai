@@ -20,7 +20,7 @@ const SCROLLBACK: usize = 2_000;
 
 pub struct TermSession {
     parser: Arc<Mutex<vt100::Parser>>,
-    writer: Mutex<Box<dyn Write + Send>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
     master: Mutex<Box<dyn MasterPty + Send>>,
     child: Mutex<Box<dyn Child + Send + Sync>>,
     exited: Arc<AtomicBool>,
@@ -40,11 +40,22 @@ impl std::fmt::Debug for TermSession {
     }
 }
 
-/// The user's shell: `$SHELL`, else bash/sh; `%COMSPEC%` on Windows.
+/// The user's shell: `DCODE_AI_SHELL` if set; else `$SHELL`, bash or sh;
+/// on Windows PowerShell 7 (`pwsh`), Windows PowerShell, then `%COMSPEC%`.
 pub fn default_shell() -> String {
+    if let Ok(s) = std::env::var("DCODE_AI_SHELL")
+        && !s.trim().is_empty()
+    {
+        return s;
+    }
     #[cfg(windows)]
     {
-        std::env::var("COMSPEC").unwrap_or_else(|_| "powershell.exe".into())
+        ["pwsh.exe", "powershell.exe"]
+            .into_iter()
+            .find(|exe| on_path(exe))
+            .map(str::to_string)
+            .or_else(|| std::env::var("COMSPEC").ok())
+            .unwrap_or_else(|| "cmd.exe".into())
     }
     #[cfg(not(windows))]
     {
@@ -59,6 +70,31 @@ pub fn default_shell() -> String {
                 }
             })
     }
+}
+
+#[cfg(windows)]
+fn on_path(exe: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(exe).is_file()))
+}
+
+/// Cursor-position requests (`ESC [ 6 n`) in `chunk`, with `tail` the end
+/// of the previous chunk (a request can be split across reads). Windows'
+/// ConPTY sends one at start and shows nothing until it is answered.
+fn cursor_requests(tail: &mut Vec<u8>, chunk: &[u8]) -> usize {
+    const Q: &[u8] = b"\x1b[6n";
+    let mut joined = std::mem::take(tail);
+    let skip = joined.len();
+    joined.extend_from_slice(chunk);
+    let n = joined
+        .windows(Q.len())
+        .enumerate()
+        // Count a request once: it must end inside this chunk.
+        .filter(|(i, w)| *w == Q && i + Q.len() > skip)
+        .count();
+    let keep = joined.len().saturating_sub(Q.len() - 1);
+    *tail = joined[keep..].to_vec();
+    n
 }
 
 impl TermSession {
@@ -77,23 +113,44 @@ impl TermSession {
         cmd.env("COLORTERM", "truecolor");
         let child = pty.slave.spawn_command(cmd)?;
         drop(pty.slave);
-        let writer = pty.master.take_writer()?;
+        let writer: Arc<Mutex<Box<dyn Write + Send>>> =
+            Arc::new(Mutex::new(pty.master.take_writer()?));
         let mut reader = pty.master.try_clone_reader()?;
         let parser = Arc::new(Mutex::new(vt100::Parser::new(rows, cols, SCROLLBACK)));
         let exited = Arc::new(AtomicBool::new(false));
         let generation = Arc::new(AtomicU64::new(0));
         {
-            let (parser, exited, generation) = (parser.clone(), exited.clone(), generation.clone());
+            let (parser, exited, generation, writer) = (
+                parser.clone(),
+                exited.clone(),
+                generation.clone(),
+                writer.clone(),
+            );
             std::thread::Builder::new()
                 .name("term-pane".into())
                 .spawn(move || {
                     let mut buf = [0u8; 16 * 1024];
+                    let mut tail = Vec::new();
                     loop {
                         match reader.read(&mut buf) {
                             Ok(0) | Err(_) => break,
                             Ok(n) => {
+                                let asks = cursor_requests(&mut tail, &buf[..n]);
+                                let mut at = (0, 0);
                                 if let Ok(mut p) = parser.lock() {
                                     p.process(&buf[..n]);
+                                    at = p.screen().cursor_position();
+                                }
+                                // Answer as a terminal would: where the
+                                // cursor is, 1-based.
+                                if asks > 0
+                                    && let Ok(mut w) = writer.lock()
+                                {
+                                    let reply = format!("\x1b[{};{}R", at.0 + 1, at.1 + 1);
+                                    for _ in 0..asks {
+                                        let _ = w.write_all(reply.as_bytes());
+                                    }
+                                    let _ = w.flush();
                                 }
                                 generation.fetch_add(1, Ordering::Relaxed);
                             }
@@ -105,7 +162,7 @@ impl TermSession {
         }
         Ok(Arc::new(Self {
             parser,
-            writer: Mutex::new(writer),
+            writer,
             master: Mutex::new(pty.master),
             child: Mutex::new(child),
             exited,
@@ -392,6 +449,51 @@ mod tests {
             key_bytes(&k(KeyCode::Char('é'), none), false),
             "é".as_bytes()
         );
+    }
+
+    #[test]
+    fn cursor_requests_are_found_even_split_across_reads() {
+        let mut tail = Vec::new();
+        assert_eq!(cursor_requests(&mut tail, b"hi\x1b[6n there \x1b[6n"), 2);
+        assert_eq!(cursor_requests(&mut tail, b"\x1b["), 0);
+        assert_eq!(cursor_requests(&mut tail, b"6n"), 1, "split request");
+        assert_eq!(cursor_requests(&mut tail, b"plain"), 0, "not counted twice");
+        assert_eq!(cursor_requests(&mut tail, b"\x1b[6"), 0);
+        assert_eq!(cursor_requests(&mut tail, b"m"), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_program_asking_for_the_cursor_gets_an_answer() {
+        // `read` waits for the reply, as ConPTY does at start.
+        if !Path::new("/bin/bash").exists() {
+            return;
+        }
+        let t = TermSession::spawn("/bin/bash", &std::env::temp_dir(), 40, 5).expect("spawn");
+        t.write(b"printf '\\033[6n'; IFS= read -rsd R pos; echo got${pos#*[}\r");
+        let area = Rect::new(0, 0, 40, 5);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let mut buf = Buffer::empty(area);
+            t.render(area, &mut buf, false);
+            let text: String = (0..5)
+                .flat_map(|y| (0..40).map(move |x| (x, y)))
+                .map(|p| buf[p].symbol().to_string())
+                .collect();
+            // "got<row>;<col>" — digits, not the echoed command line.
+            let answered = text.match_indices("got").any(|(i, _)| {
+                let rest = &text[i + 3..];
+                let row: String = rest.chars().take_while(char::is_ascii_digit).collect();
+                !row.is_empty()
+                    && rest[row.len()..].starts_with(';')
+                    && rest[row.len() + 1..].starts_with(|c: char| c.is_ascii_digit())
+            });
+            if answered {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "no reply: {text}");
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
     }
 
     #[test]
