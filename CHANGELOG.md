@@ -1,5 +1,23 @@
 # Changelog
 
+## 1.0.92 — 2026-11-25
+
+### Fixed
+- **Permission choices hidden at the bottom**: when an approval's preview
+  was taller than the space left, the question and its Yes/No choices were
+  cut off. The preview now shortens ("… 17 more lines above the choices")
+  and the choices always show; Ctrl+O still shows the whole change.
+- **New files previewed in two columns** with an empty left half: approvals
+  use one column; the full diff view goes side by side only when lines are
+  removed.
+- **Edit approvals lost their line numbers** for tools sending
+  `old_text`/`new_text`; both spellings are read now.
+- **Dashboard agents tab cut tasks mid-word**: a sub-agent's task wraps to
+  two lines on word boundaries.
+
+### New
+- `/diff open` opens the full-screen diff view (same as bare `/diff`).
+
 ## 1.0.91 — 2026-11-22
 
 ### Changed

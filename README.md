@@ -267,7 +267,7 @@ Edits and unfamiliar commands ask first. Commands are parsed, not pattern-matche
 | **Find** | `Ctrl+F` searches the whole conversation, with highlighted matches |
 | **Context** | `@` fuzzy file search, `[Image #N]` paste (`Ctrl+V`, or `Alt+V` on Windows/WSL) — scaled to what the model uses before sending, `!` shell mode, `# note` memory |
 | **Commands** | The `/` menu puts your recent commands first, groups the rest, and finds a command by a word in its description |
-| **Diffs** | Approvals show a line-numbered diff; `/diff` opens a full-screen viewer with hunk revert |
+| **Diffs** | Approvals show a line-numbered diff (the choices always stay on screen); `/diff` or `/diff open` opens a full-screen viewer with hunk revert |
 | **Insight** | `/context` grid with the window and compaction points, `/usage` token breakdown with cache hit rate, `/cost today\|week\|month` history by day, model and sub-agent, a note when the prompt cache misses and why, `/effort`, `Ctrl+T` thinking |
 | **Looks** | Claude's dark, light, colorblind-friendly and ANSI themes with a live `/theme` preview, plus `tokyonight`, `catppuccin`, `gruvbox`, `dracula`, `nord` … |
 | **Comfort** | Desktop notifications, `/sounds` and `/speak`, `/terminal-setup` for Shift+Enter, `/vim` keys, `--plain` for screen readers |

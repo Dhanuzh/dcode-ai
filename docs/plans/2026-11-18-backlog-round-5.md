@@ -69,6 +69,9 @@ or missing, the fix, and how to check it.
 
 ### UI picks (chosen 2026-11-18)
 
+*Status 2026-11-25:* TUI 10 and U1–U11 all shipped (v1.0.85–1.0.86;
+U1 agents-tab wrap and U11 `/diff open` finished in v1.0.92).
+
 - **U1. Clipped right panel** — dashboard right rail cuts long lines
   mid-word ("ddhanus…", "arepoint"). Wrap text in rail panels (word wrap,
   `Paragraph::wrap`), or a readable one-line summary with Enter to expand.

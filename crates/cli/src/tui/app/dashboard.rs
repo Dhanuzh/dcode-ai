@@ -1099,8 +1099,8 @@ pub(super) fn agents_lines(
     }
     let mut order: Vec<&crate::tui::state::SubagentRow> = agents.iter().collect();
     order.sort_by_key(|a| !a.running);
-    // Header (+ task line + gap) per agent; the rest is shared by logs.
-    let fixed = order.len() * 3;
+    // Header (+ up to two task lines + gap) per agent; the rest is logs.
+    let fixed = order.len() * 4;
     let per_log = (height.saturating_sub(fixed) / order.len()).max(1);
     let mut lines = Vec::new();
     for a in order {
@@ -1122,10 +1122,16 @@ pub(super) fn agents_lines(
                 Style::default().fg(theme::muted()),
             ),
         ]));
-        lines.push(Line::from(Span::styled(
-            truncate_chars(&a.task, width),
-            Style::default().fg(theme::text()),
-        )));
+        // The task wraps to two lines (words kept whole), not cut mid-word.
+        lines.extend(
+            wrapped(
+                &truncate_chars(&a.task, width.saturating_mul(2)),
+                width,
+                Style::default().fg(theme::text()),
+            )
+            .into_iter()
+            .take(2),
+        );
         let start = a.log.len().saturating_sub(per_log);
         for entry in &a.log[start..] {
             lines.push(Line::from(Span::styled(
@@ -1346,6 +1352,27 @@ mod tests {
         assert!(running < done, "{text}");
         assert!(text.contains("four") && !text.contains("  one"), "{text}");
         assert!(text_of(&agents_lines(&[], 30, 10)).contains("no sub-agents"));
+    }
+
+    #[test]
+    fn agents_tab_wraps_a_long_task_on_word_boundaries() {
+        let agents = vec![crate::tui::state::SubagentRow {
+            id: "child-cccc3333".into(),
+            task: "review the sharepoint connector and the release notes".into(),
+            phase: String::new(),
+            detail: String::new(),
+            running: true,
+            skill: None,
+            log: Vec::new(),
+        }];
+        let lines = agents_lines(&agents, 24, 20);
+        let task: Vec<String> = lines[1..3]
+            .iter()
+            .map(|l| l.spans.iter().map(|s| s.content.as_ref()).collect())
+            .collect();
+        assert_eq!(task[0].trim_end(), "review the sharepoint");
+        assert!(task[1].starts_with("connector"), "{task:?}");
+        assert!(lines[3].spans.iter().all(|s| s.content.trim().is_empty()));
     }
 
     #[test]

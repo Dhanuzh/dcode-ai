@@ -236,8 +236,8 @@ impl Repl {
                     }
                 }
             }
-            // In the TUI, bare `/diff` opens the full-screen diff view.
-            "/diff" if rest.trim().is_empty() && matches!(out, ReplOutput::Tui(_)) => {
+            // In the TUI, bare `/diff` (or `/diff open`) opens the full-screen diff view.
+            "/diff" if matches!(rest.trim(), "" | "open") && matches!(out, ReplOutput::Tui(_)) => {
                 if let ReplOutput::Tui(st) = &out
                     && let Ok(mut g) = st.lock()
                 {
