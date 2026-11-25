@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.93 — 2026-11-25
 
 ### New
 - **Terminal pane** (`/term`, Alt+T): your shell in a pane beside the
