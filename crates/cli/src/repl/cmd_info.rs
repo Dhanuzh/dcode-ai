@@ -387,6 +387,16 @@ impl Repl {
                     out.println("[copy] available in TUI mode");
                 }
             }
+            "/term" | "/terminal" => {
+                if let ReplOutput::Tui(st) = &out {
+                    if let Ok(mut g) = st.lock() {
+                        let msg = g.split_action(crate::tui::split::SplitAction::Term);
+                        g.show_toast(msg, crate::tui::state::ToastKind::Info);
+                    }
+                } else {
+                    out.println("[term] the terminal pane is in the full-screen terminal UI");
+                }
+            }
             "/split" => {
                 if let ReplOutput::Tui(st) = &out {
                     match crate::tui::split::SplitAction::parse(rest) {
@@ -396,7 +406,7 @@ impl Repl {
                                 g.show_toast(msg, crate::tui::state::ToastKind::Info);
                             }
                         }
-                        None => out.println("usage: /split [right|below|next|prev|show|close] — panes beside the conversation (keys: Alt+\\ right, Alt+- below, Alt+O next, Alt+A change, Alt+W close)"),
+                        None => out.println("usage: /split [right|below|next|prev|show|term|close] — panes beside the conversation (keys: Alt+\\ right, Alt+- below, Alt+T terminal, Alt+O next, Alt+A change, Alt+W close)"),
                     }
                 } else {
                     out.println("[split] the split workspace is in the full-screen terminal UI");

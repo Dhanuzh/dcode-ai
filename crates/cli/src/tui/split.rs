@@ -26,6 +26,8 @@ pub enum SplitAction {
     Next,
     Prev,
     Show,
+    /// A shell in a pane (`/term`, Alt+T).
+    Term,
 }
 
 impl SplitAction {
@@ -38,6 +40,7 @@ impl SplitAction {
             "next" | "n" | "o" => Self::Next,
             "prev" | "previous" | "p" => Self::Prev,
             "show" | "a" | "change" => Self::Show,
+            "term" | "terminal" | "shell" | "t" => Self::Term,
             _ => return None,
         })
     }
@@ -49,6 +52,8 @@ pub enum PaneKind {
     Agent(String),
     /// The side chat.
     Side,
+    /// A shell (`SplitWorkspace::term`).
+    Terminal,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -60,6 +65,9 @@ pub struct SplitWorkspace {
     pub focus: usize,
     /// The side chat so far: (question, answer).
     pub side: Vec<(String, String)>,
+    /// The shell behind a terminal pane; kept while the pane shows
+    /// something else, ended when the pane closes.
+    pub term: Option<std::sync::Arc<crate::tui::term_pane::TermSession>>,
 }
 
 /// What's kept between runs (`~/.dcode-ai/tui.json`): how many panes of
@@ -111,6 +119,26 @@ impl SplitWorkspace {
         })
     }
 
+    /// Shows the terminal pane and focuses it: the one already open, a
+    /// free slot, or the focused pane (else the last) turned into it.
+    pub fn show_terminal(&mut self, below: bool) {
+        if let Some(i) = self.panes.iter().position(|p| *p == PaneKind::Terminal) {
+            self.focus = i + 1;
+            return;
+        }
+        if self.panes.len() < MAX_PANES {
+            if self.panes.is_empty() {
+                self.below = below;
+            }
+            self.panes.push(PaneKind::Terminal);
+            self.focus = self.panes.len();
+            return;
+        }
+        let i = self.focus.checked_sub(1).unwrap_or(self.panes.len() - 1);
+        self.panes[i] = PaneKind::Terminal;
+        self.focus = i + 1;
+    }
+
     /// Adds a pane (right, or below) and focuses it. False when full.
     pub fn split(&mut self, below: bool, agents: &[SubagentRow]) -> bool {
         if self.panes.len() >= MAX_PANES {
@@ -136,7 +164,9 @@ impl SplitWorkspace {
         if i >= self.panes.len() {
             return false;
         }
-        self.panes.remove(i);
+        if self.panes.remove(i) == PaneKind::Terminal {
+            self.term = None;
+        }
         self.focus = self.focus.min(self.panes.len());
         true
     }
@@ -161,6 +191,9 @@ impl SplitWorkspace {
             .map(|a| PaneKind::Agent(a.id.clone()))
             .collect();
         choices.push(PaneKind::Side);
+        if self.term.is_some() && !self.panes.contains(&PaneKind::Terminal) {
+            choices.push(PaneKind::Terminal);
+        }
         let at = choices.iter().position(|c| *c == cur).unwrap_or(0);
         self.panes[i] = choices[(at + 1) % choices.len()].clone();
     }
@@ -327,6 +360,10 @@ pub fn pane_lines(
             }
             (format!("◇ {}", short(id)), lines)
         }
+        PaneKind::Terminal => (
+            "terminal".into(),
+            vec![muted("the shell has ended — /term starts a new one".into())],
+        ),
         PaneKind::Side => {
             let mut lines: Vec<Line<'static>> = Vec::new();
             if side.is_empty() && live.is_none() {
@@ -431,6 +468,47 @@ pub fn render_pane(
     );
 }
 
+/// A terminal pane: the shell's screen inside the pane border, its name
+/// and what the keys do in the title.
+pub fn render_terminal(
+    frame: &mut ratatui::Frame<'_>,
+    rect: Rect,
+    t: &crate::tui::term_pane::TermSession,
+    focused: bool,
+) {
+    let name = std::path::Path::new(&t.shell)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| t.shell.clone());
+    let exited = t.exited();
+    let mut title = format!("▣ {name}");
+    if exited {
+        title.push_str(" · ended — Enter restarts");
+    } else if focused {
+        title.push_str(" · Alt+O leave · Alt+Z full screen · Shift+PgUp history");
+    }
+    // No side padding: programs expect every column.
+    let block = pane_block(title.clone(), focused).padding(Padding::ZERO);
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+    let scrolled = t.render(inner, frame.buffer_mut(), focused && !exited);
+    if scrolled {
+        let tag = " history · type to return ";
+        let w = tag.chars().count() as u16;
+        if inner.width > w {
+            frame.buffer_mut().set_string(
+                inner.x + inner.width - w,
+                inner.y,
+                tag,
+                Style::default().fg(theme::bg()).bg(theme::accent()),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -472,6 +550,38 @@ mod tests {
             "{all}"
         );
         assert!(all.contains("─"), "a rule between exchanges");
+    }
+
+    #[test]
+    fn the_terminal_takes_a_slot_once_and_closing_it_ends_the_shell() {
+        let mut ws = SplitWorkspace::default();
+        ws.show_terminal(false);
+        assert_eq!(ws.panes, vec![PaneKind::Terminal]);
+        assert_eq!(ws.focus, 1);
+        ws.move_focus(1);
+        ws.show_terminal(false);
+        assert_eq!(ws.panes, vec![PaneKind::Terminal], "not a second one");
+        assert_eq!(ws.focus, 1, "focuses the one that's open");
+        // Full: the focused pane turns into the terminal.
+        let mut full = SplitWorkspace::default();
+        let agents = [agent("a", true), agent("b", true)];
+        full.split(false, &agents);
+        full.split(false, &agents);
+        full.split(false, &agents);
+        full.focus = 2;
+        full.show_terminal(false);
+        assert_eq!(full.panes[1], PaneKind::Terminal);
+        assert_eq!(full.focus, 2);
+        assert_eq!(SplitAction::parse("term"), Some(SplitAction::Term));
+        #[cfg(unix)]
+        {
+            ws.term = Some(
+                crate::tui::term_pane::TermSession::spawn("/bin/sh", &std::env::temp_dir(), 20, 5)
+                    .unwrap(),
+            );
+            assert!(ws.close_focused());
+            assert!(ws.term.is_none(), "closing the pane ends the shell");
+        }
     }
 
     #[test]

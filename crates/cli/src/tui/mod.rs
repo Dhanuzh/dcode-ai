@@ -53,6 +53,7 @@ pub mod state;
 pub mod statusline;
 pub mod sudo_prompt;
 pub mod team;
+pub mod term_pane;
 pub mod terminal;
 pub mod theme;
 pub mod thumbnail;

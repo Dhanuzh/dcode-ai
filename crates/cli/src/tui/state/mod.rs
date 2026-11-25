@@ -1752,6 +1752,8 @@ impl TuiSessionState {
             return false;
         };
         match kind {
+            // Keys reach the shell directly; Enter never gets here.
+            PaneKind::Terminal => return false,
             PaneKind::Side => {
                 self.settle_side_answer();
                 self.ask_btw(text);
@@ -1795,6 +1797,32 @@ impl TuiSessionState {
         true
     }
 
+    /// Shows the terminal pane, starting a shell in the workspace when none
+    /// is running (or the last one ended).
+    pub fn open_terminal(&mut self) -> anyhow::Result<()> {
+        if self.split.term.as_ref().is_none_or(|t| t.exited()) {
+            let (cols, rows) = crossterm::terminal::size().unwrap_or((120, 40));
+            let shell = crate::tui::term_pane::default_shell();
+            self.split.term = Some(crate::tui::term_pane::TermSession::spawn(
+                &shell,
+                &self.workspace_root,
+                cols / 2,
+                rows.saturating_sub(6),
+            )?);
+        }
+        self.split.show_terminal(false);
+        Ok(())
+    }
+
+    /// The terminal pane has focus in the dashboard (keys and pastes go to
+    /// the shell); with zoom on it fills the screen.
+    pub fn terminal_focused(&self) -> bool {
+        self.view_mode == ViewMode::Dashboard
+            && !self.rail_focus
+            && self.split.focused() == Some(&crate::tui::split::PaneKind::Terminal)
+            && self.split.term.is_some()
+    }
+
     /// One split-workspace action (Alt keys, the Ctrl+X leader, `/split`).
     /// Returns what to tell the user.
     pub fn split_action(&mut self, action: crate::tui::split::SplitAction) -> String {
@@ -1814,6 +1842,17 @@ impl TuiSessionState {
                     "Nothing more to show — the side chat is open; sub-agents get panes when they run".to_string()
                 }
             }
+            A::Term => {
+                if self.view_mode != ViewMode::Dashboard {
+                    self.toggle_view_mode();
+                }
+                self.rail_focus = false;
+                self.dash_hits.zoom = false;
+                match self.open_terminal() {
+                    Ok(()) => "Terminal — keys go to the shell · Alt+O back to the conversation · Alt+W ends it".to_string(),
+                    Err(e) => format!("Couldn't start a shell: {e}"),
+                }
+            }
             A::Close if self.split.close_focused() => "Pane closed".to_string(),
             A::Close if self.split.is_split() => {
                 "The conversation can't be closed — Alt+O to a pane first".to_string()
@@ -1827,6 +1866,9 @@ impl TuiSessionState {
                     None => "Writing to the conversation".to_string(),
                     Some(crate::tui::split::PaneKind::Side) => {
                         "Writing to the side chat".to_string()
+                    }
+                    Some(crate::tui::split::PaneKind::Terminal) => {
+                        "Typing in the terminal · Alt+O leaves".to_string()
                     }
                     Some(crate::tui::split::PaneKind::Agent(id)) => {
                         format!(

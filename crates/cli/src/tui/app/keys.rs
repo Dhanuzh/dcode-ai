@@ -73,6 +73,7 @@ pub(super) fn handle_key_event(
     // scroll buffer models the scrollback viewport, not this pane).
     if g.view_mode == crate::tui::state::ViewMode::Dashboard
         && matches!(key.code, KeyCode::PageUp | KeyCode::PageDown)
+        && !g.terminal_focused()
     {
         let page = terminal_size
             .map(|s| s.height.saturating_sub(8).max(4) as usize)
@@ -248,6 +249,7 @@ pub(super) fn handle_key_event(
             KeyCode::Char('o') | KeyCode::Char('O') if open => Some(A::Next),
             KeyCode::Char('w') | KeyCode::Char('W') if open => Some(A::Close),
             KeyCode::Char('a') | KeyCode::Char('A') if open => Some(A::Show),
+            KeyCode::Char('t') | KeyCode::Char('T') => Some(A::Term),
             _ => None,
         };
         if let Some(a) = action {
@@ -255,6 +257,29 @@ pub(super) fn handle_key_event(
             g.show_toast(msg, crate::tui::state::ToastKind::Info);
             return KeyFlow::Continue;
         }
+    }
+    // The terminal pane has focus: every other key is the shell's.
+    let zoom_key = key.modifiers == KeyModifiers::ALT
+        && matches!(key.code, KeyCode::Char('z') | KeyCode::Char('Z'));
+    if split_free && g.terminal_focused() && !zoom_key {
+        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        let term = g.split.term.clone();
+        if let Some(t) = term {
+            match key.code {
+                KeyCode::PageUp if shift => t.scroll_by(10),
+                KeyCode::PageDown if shift => t.scroll_by(-10),
+                KeyCode::Enter if t.exited() => {
+                    let msg = match g.open_terminal() {
+                        Ok(()) => "New shell".to_string(),
+                        Err(e) => format!("Couldn't start a shell: {e}"),
+                    };
+                    g.show_toast(msg, crate::tui::state::ToastKind::Info);
+                }
+                _ if t.exited() => {}
+                _ => t.send_key(&key),
+            }
+        }
+        return KeyFlow::Continue;
     }
     if dashboard_free && key.code == KeyCode::Char('d') && key.modifiers == KeyModifiers::CONTROL {
         g.toggle_changes_focus();

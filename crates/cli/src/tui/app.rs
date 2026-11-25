@@ -1434,6 +1434,11 @@ pub fn run_blocking(
         } else if let Ok(g) = state.lock() {
             if g.busy || g.current_busy_state.is_active() {
                 Duration::from_millis(40)
+            } else if g.split.term.is_some()
+                && g.view_mode == crate::tui::state::ViewMode::Dashboard
+            {
+                // A shell's output shows as it comes.
+                Duration::from_millis(30)
             } else if g.connect_modal_open {
                 // Tick fast enough to drive the modal's animation.
                 Duration::from_millis(80)
@@ -1521,7 +1526,11 @@ pub fn run_blocking(
                     );
                 }
                 Event::Paste(pasted) => {
-                    if g.team_typing
+                    if g.terminal_focused()
+                        && let Some(t) = g.split.term.clone()
+                    {
+                        t.paste(&pasted);
+                    } else if g.team_typing
                         && g.rail_tab == crate::tui::state::RailTab::Team
                         && g.view_mode == crate::tui::state::ViewMode::Dashboard
                     {

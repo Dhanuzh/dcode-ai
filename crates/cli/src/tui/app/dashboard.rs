@@ -61,6 +61,16 @@ pub(super) fn draw_dashboard_frame(
         area,
     );
 
+    // Alt+Z on the terminal pane: the shell gets the whole screen.
+    if g.dash_hits.zoom
+        && g.terminal_focused()
+        && let Some(t) = g.split.term.clone()
+    {
+        g.dash_hits.targets.clear();
+        g.dash_hits.transcript = None;
+        crate::tui::split::render_terminal(frame, area, &t, true);
+        return;
+    }
     let (mut left, mut centre, mut right) =
         dashboard_columns(area, g.dash_hits.left_w, g.dash_hits.right_w);
     // Panels switched off give their room to the centre.
@@ -112,15 +122,21 @@ pub(super) fn draw_dashboard_frame(
             .map(|v| (v.question.clone(), v.answer.clone()));
         let kinds = g.split.panes.clone();
         for (i, (rect, kind)) in panes.iter().zip(kinds.iter()).enumerate() {
-            crate::tui::split::render_pane(
-                frame,
-                *rect,
-                kind,
-                &g.subagents,
-                &g.split.side,
-                live.as_ref().map(|(q, a)| (q.as_str(), a.as_str())),
-                g.split.focus == i + 1,
-            );
+            let focused = g.split.focus == i + 1;
+            match (kind, g.split.term.as_deref()) {
+                (crate::tui::split::PaneKind::Terminal, Some(t)) => {
+                    crate::tui::split::render_terminal(frame, *rect, t, focused)
+                }
+                _ => crate::tui::split::render_pane(
+                    frame,
+                    *rect,
+                    kind,
+                    &g.subagents,
+                    &g.split.side,
+                    live.as_ref().map(|(q, a)| (q.as_str(), a.as_str())),
+                    focused,
+                ),
+            }
             g.dash_hits.targets.push((*rect, DashTarget::Pane(i)));
         }
         centre = main;

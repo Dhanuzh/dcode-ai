@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### New
+- **Terminal pane** (`/term`, Alt+T): your shell in a pane beside the
+  conversation, started in the workspace folder. From the inline view it
+  switches to the dashboard. With the pane focused every key goes to the
+  shell (Ctrl+C, Tab, arrows, F-keys, pastes), so full-screen programs
+  work; colours, bold and the cursor show. Alt+Z gives it the whole
+  screen, Shift+PgUp/PgDn or the wheel scroll 2,000 lines of history,
+  Alt+O goes back to the conversation, Alt+W ends the shell. If the shell
+  exits, Enter starts a new one.
+
+### Security
+- `url` 2.5.9 (RUSTSEC-2026-0592: a deeply nested `blob:` URL could
+  overflow the stack).
+
 ## 1.0.92 — 2026-11-25
 
 ### Fixed

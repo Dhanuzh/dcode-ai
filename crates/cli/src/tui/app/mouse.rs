@@ -477,7 +477,24 @@ pub(super) fn handle_dashboard_mouse(
     if dashboard_selection(m, g, transcript_cache) {
         return;
     }
+    // The wheel over the terminal pane scrolls its history.
+    let over_term = g.split.term.clone().filter(|_| {
+        g.dash_hits.targets.iter().any(|(r, t)| {
+            matches!(t, DashTarget::Pane(i)
+                if g.split.panes.get(*i) == Some(&crate::tui::split::PaneKind::Terminal))
+                && rect_contains(*r, m.column, m.row)
+        })
+    });
     match m.kind {
+        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if over_term.is_some() => {
+            if let Some(t) = over_term {
+                t.scroll_by(if m.kind == MouseEventKind::ScrollUp {
+                    3
+                } else {
+                    -3
+                });
+            }
+        }
         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown if over_explorer => {
             let files = std::mem::take(&mut g.file_map);
             let step = if m.kind == MouseEventKind::ScrollUp {

@@ -134,6 +134,7 @@ pub const SLASH_COMMANDS: &[&str] = &[
     "/transcript",
     "/dashboard",
     "/split",
+    "/term",
     "/cost",
     "/stats",
     "/auto-answer",
@@ -335,7 +336,10 @@ pub fn slash_command_description(command: &str) -> &'static str {
         "/transcript" => "full-screen transcript (scroll/expand)",
         "/dashboard" => "toggle the full-screen dashboard (Ctrl+\\)",
         "/split" => {
-            "panes beside the conversation: /split [right|below|next|show|close] (Alt+\\, Alt+-, Alt+O, Alt+A, Alt+W)"
+            "panes beside the conversation: /split [right|below|next|show|term|close] (Alt+\\, Alt+-, Alt+O, Alt+A, Alt+W)"
+        }
+        "/term" | "/terminal" => {
+            "a shell in a pane beside the conversation (Alt+T) · Alt+O leaves it, Alt+W ends it"
         }
         "/cost" => {
             "token cost for this session · /cost today|week|month: history with cache hits and sub-agents"
