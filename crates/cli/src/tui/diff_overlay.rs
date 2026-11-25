@@ -44,8 +44,13 @@ fn hunk_starts(header: &str) -> (usize, usize) {
 
 /// The diff of one file as lines, plus the line index where each hunk starts.
 pub(crate) fn diff_lines(hunks: &[DiffHunk], width: usize) -> (Vec<Line<'static>>, Vec<usize>) {
-    // Wide enough: old and new side by side.
-    if width >= SIDE_BY_SIDE_MIN_W {
+    // Wide enough and something removed: old and new side by side. (A new
+    // file or pure addition would leave the left half empty.)
+    let removes = hunks
+        .iter()
+        .flat_map(|h| &h.lines)
+        .any(|(sigil, _)| *sigil == '-');
+    if width >= SIDE_BY_SIDE_MIN_W && removes {
         return diff_lines_side_by_side(hunks, width);
     }
     let mut lines = Vec::new();

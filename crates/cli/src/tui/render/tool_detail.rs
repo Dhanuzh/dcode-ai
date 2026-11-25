@@ -190,7 +190,7 @@ pub(crate) fn approval_numbered_diff(
     let old = std::fs::read_to_string(&full).ok();
     let new = match tool {
         "write_file" => val.get("content")?.as_str()?.to_string(),
-        "edit_file" | "replace_match" => {
+        "edit_file" | "replace_match" | "apply_patch" => {
             let mut text = old.clone()?;
             let edits: Vec<(String, String, bool)> =
                 match val.get("edits").and_then(|e| e.as_array()) {
@@ -198,8 +198,14 @@ pub(crate) fn approval_numbered_diff(
                         .iter()
                         .filter_map(|e| {
                             Some((
-                                e.get("old_string")?.as_str()?.to_string(),
-                                e.get("new_string")?.as_str()?.to_string(),
+                                e.get("old_string")
+                                    .or_else(|| e.get("old_text"))?
+                                    .as_str()?
+                                    .to_string(),
+                                e.get("new_string")
+                                    .or_else(|| e.get("new_text"))?
+                                    .as_str()?
+                                    .to_string(),
                                 e.get("replace_all")
                                     .and_then(|b| b.as_bool())
                                     .unwrap_or(false),
@@ -207,8 +213,14 @@ pub(crate) fn approval_numbered_diff(
                         })
                         .collect(),
                     None => vec![(
-                        val.get("old_string")?.as_str()?.to_string(),
-                        val.get("new_string")?.as_str()?.to_string(),
+                        val.get("old_string")
+                            .or_else(|| val.get("old_text"))?
+                            .as_str()?
+                            .to_string(),
+                        val.get("new_string")
+                            .or_else(|| val.get("new_text"))?
+                            .as_str()?
+                            .to_string(),
                         val.get("replace_all")
                             .and_then(|b| b.as_bool())
                             .unwrap_or(false),
@@ -241,7 +253,9 @@ pub(crate) fn approval_numbered_diff(
             '-' => (a, d + 1),
             _ => (a, d),
         });
-    let (body, _) = crate::tui::diff_overlay::diff_lines(&hunks, width);
+    // One column in the permission box (side by side is for the full view).
+    let one_column = width.min(crate::tui::diff_overlay::SIDE_BY_SIDE_MIN_W - 1);
+    let (body, _) = crate::tui::diff_overlay::diff_lines(&hunks, one_column);
     let mut out = vec![Line::from(vec![
         Span::styled(
             truncate_chars(path, width.saturating_sub(16)),

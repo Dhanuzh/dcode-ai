@@ -40,6 +40,10 @@ pub(crate) struct PromptBox {
     pub title: String,
     pub color: Color,
     pub lines: Vec<Line<'static>>,
+    /// The last `keep_tail` lines (the question and its choices) always
+    /// show: when the box is taller than the space, the preview above them
+    /// is shortened instead of the choices being cut off.
+    pub keep_tail: usize,
 }
 
 /// The prompt that currently owns the composer area, if any.
@@ -97,6 +101,7 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
             title: c.title.clone(),
             color: theme::accent(),
             lines,
+            keep_tail: 0,
         });
     }
     if let Some(pending) = &g.rewind_pending {
@@ -144,6 +149,7 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
             title: "Rewind".into(),
             color: theme::accent(),
             lines,
+            keep_tail: 0,
         });
     }
     if g.backtrack_open {
@@ -173,6 +179,7 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
             title: "Rewind".into(),
             color: theme::accent(),
             lines,
+            keep_tail: 0,
         });
     }
     if let Some(index) = g.plan_exit_index {
@@ -188,6 +195,7 @@ pub(crate) fn active_prompt_box(g: &TuiSessionState, inner_w: usize) -> Option<P
             title: "Ready to code?".into(),
             color: theme::accent(),
             lines,
+            keep_tail: 0,
         });
     }
     None
@@ -288,6 +296,7 @@ fn question_box(g: &TuiSessionState, q: &InteractiveQuestionPayload, inner_w: us
         title,
         color: theme::accent(),
         lines,
+        keep_tail: 0,
     }
 }
 
@@ -339,6 +348,7 @@ fn btw_box(v: &crate::tui::btw::BtwView, inner_w: usize) -> PromptBox {
         title: "btw".into(),
         color: theme::accent(),
         lines,
+        keep_tail: 0,
     }
 }
 
@@ -365,6 +375,7 @@ fn theme_box(g: &TuiSessionState, inner_w: usize) -> PromptBox {
         title: "Theme".into(),
         color: theme::accent(),
         lines,
+        keep_tail: 0,
     }
 }
 
@@ -427,6 +438,7 @@ fn approval_box(g: &TuiSessionState, req: &ApprovalRequest, inner_w: usize) -> P
             title: format!("{title} · choose hunks"),
             color: theme::warn(),
             lines,
+            keep_tail: 0,
         };
     }
 
@@ -478,6 +490,8 @@ fn approval_box(g: &TuiSessionState, req: &ApprovalRequest, inner_w: usize) -> P
             Style::default().fg(theme::text()),
         )));
     }
+    // From here on: the question and choices, never cut off.
+    let tail_start = lines.len();
     lines.push(Line::default());
 
     let file = path.unwrap_or_else(|| "this file".into());
@@ -510,10 +524,12 @@ fn approval_box(g: &TuiSessionState, req: &ApprovalRequest, inner_w: usize) -> P
     {
         lines.push(muted("h choose which hunks to apply"));
     }
+    let keep_tail = lines.len() - tail_start;
     PromptBox {
         title,
         color: theme::warn(),
         lines,
+        keep_tail,
     }
 }
 
@@ -561,8 +577,41 @@ pub(crate) fn prompt_box_height(pb: &PromptBox, max: u16) -> u16 {
     (pb.lines.len() as u16 + 1).min(max)
 }
 
+/// `lines` fitted into `rows`: when they don't fit, the last `keep_tail`
+/// stay and the lines above them are cut, with a note of how many.
+pub(crate) fn fit_lines(
+    mut lines: Vec<Line<'static>>,
+    keep_tail: usize,
+    rows: usize,
+) -> Vec<Line<'static>> {
+    if lines.len() <= rows || keep_tail == 0 {
+        return lines;
+    }
+    let keep_tail = keep_tail.min(lines.len());
+    let tail = lines.split_off(lines.len() - keep_tail);
+    if tail.len() >= rows {
+        // Not even room for the choices: show as many of them as fit.
+        return tail[tail.len() - rows..].to_vec();
+    }
+    let room = rows - tail.len() - 1;
+    let hidden = lines.len() - room;
+    lines.truncate(room);
+    lines.push(Line::from(Span::styled(
+        format!(
+            "  … {hidden} more line{} above the choices",
+            if hidden == 1 { "" } else { "s" }
+        ),
+        Style::default().fg(theme::muted()),
+    )));
+    lines.extend(tail);
+    lines
+}
+
 pub(crate) fn render_prompt_box(frame: &mut ratatui::Frame<'_>, area: Rect, pb: PromptBox) {
     frame.render_widget(ClearWidget, area);
+    // One row is the top rule.
+    let rows = area.height.saturating_sub(1) as usize;
+    let lines = fit_lines(pb.lines, pb.keep_tail, rows);
     let block = Block::default()
         // Claude's permission prompts: one rule on top, no box.
         .borders(Borders::TOP)
@@ -574,7 +623,7 @@ pub(crate) fn render_prompt_box(frame: &mut ratatui::Frame<'_>, area: Rect, pb: 
         ))
         .padding(Padding::horizontal(1))
         .style(Style::default().bg(theme::bg()));
-    frame.render_widget(Paragraph::new(Text::from(pb.lines)).block(block), area);
+    frame.render_widget(Paragraph::new(Text::from(lines)).block(block), area);
 }
 
 /// `Ctrl+F`: the query, how many matches, and the matching lines around the
@@ -664,6 +713,7 @@ fn find_box(g: &TuiSessionState, inner_w: usize) -> PromptBox {
         title: "Find in conversation".into(),
         color: theme::accent(),
         lines,
+        keep_tail: 0,
     }
 }
 
@@ -694,6 +744,26 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn choices_stay_when_the_box_is_short() {
+        let mut lines: Vec<Line<'static>> =
+            (0..30).map(|i| Line::from(format!("diff {i}"))).collect();
+        lines.push(Line::default());
+        lines.push(Line::from("Do you want to create x?"));
+        lines.push(Line::from("❯ 1. Yes"));
+        lines.push(Line::from("  2. No"));
+        let out = fit_lines(lines, 4, 10);
+        let text: Vec<String> = out.iter().map(|l| l.to_string()).collect();
+        assert_eq!(text.len(), 10);
+        assert_eq!(text[0], "diff 0");
+        assert!(text[5].contains("25 more lines"), "{text:?}");
+        assert_eq!(text[9], "  2. No");
+        assert_eq!(text[7], "Do you want to create x?");
+        // Fits: unchanged.
+        let short = vec![Line::from("a"), Line::from("b")];
+        assert_eq!(fit_lines(short, 1, 5).len(), 2);
     }
 
     #[test]
