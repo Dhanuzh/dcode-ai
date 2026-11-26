@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Faster
+- **Starts in about a third of the time**: the screen waited for every MCP
+  server to connect (up to 3 s — 4.4 s to the first frame with four
+  servers). It comes up at once now; the first message waits for what's
+  left of those 3 s, so the servers' tools are still there for it.
+
 ### Fixed
 - **Terminal pane blank on Windows**: Windows' console host asks the
   terminal where the cursor is when a shell starts and shows nothing until
@@ -9,6 +15,15 @@
 - **Terminal pane opened cmd.exe on Windows**: it now opens PowerShell 7
   (`pwsh`), else Windows PowerShell, else `%COMSPEC%`. `DCODE_AI_SHELL`
   picks any shell, on every system.
+- **The research loop could panic** on start-up of its metric parser or
+  when an experiment's output couldn't be captured; both are errors now.
+
+### Developer
+- `speech` Cargo feature (on by default): `cargo build
+  --no-default-features` builds without Whisper/candle (2.3 MB smaller).
+- 11 unused dependencies removed; the biggest files split (`jira_sync`
+  into a folder, `main.rs` subcommands into `cmd/`, tests into their own
+  files).
 
 ## 1.0.93 — 2026-11-25
 

@@ -101,6 +101,8 @@ curl -sSL https://raw.githubusercontent.com/Dhanuzh/dcode-ai/main/install.sh | D
 # from source (Rust 1.91+)
 cargo build --release
 sudo cp target/release/dcode-ai /usr/local/bin/
+# without on-device speech to text (Whisper): smaller and faster to build
+cargo build --release --no-default-features
 ```
 
 On Windows, `search_code` uses ripgrep: `winget install BurntSushi.ripgrep.MSVC`.

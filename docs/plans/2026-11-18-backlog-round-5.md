@@ -211,6 +211,10 @@ provider, chosen by the user on 2026-11-19 as the main step to free entry.
 
 ## 6. Code health (found reading the code)
 
+*Status 2026-11-26 (see `2026-11-26-code-health.md`):* 23, 25 (speech
+feature), 26 (unused deps), 27 (startup), 28 done; 24 waits on the user
+(the folder only holds a private `.env`).
+
 23. **Split the biggest files** — `jira_sync.rs` 4.6k lines,
     `supervisor/mod.rs` 4.3k, `repl.rs` 3.9k, `tui/state/mod.rs` 3.8k,
     `main.rs` 3.8k, `video/render.rs` 3.4k. Smaller modules rebuild faster
