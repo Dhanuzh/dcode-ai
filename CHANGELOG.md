@@ -1,5 +1,20 @@
 # Changelog
 
+## 1.0.95 — 2026-11-26
+
+### Fixed
+- **Linux: "GLIBC_2.43 not found"**: 1.0.94's Linux binaries were built on
+  a newer image and only ran on the newest distros. They're built on
+  Ubuntu 22.04 again (glibc 2.35: Ubuntu 22.04+, Debian 12+), and
+  `install.sh` checks glibc first and says what to do on older systems.
+
+### Better
+- **Sign-in picker**: `dcode-ai login` (no provider) opens it, as does the
+  first launch. Each choice shows its state — `✓ signed in`, `sign in`, or
+  `not set up` with how to fix it (install Claude Code, start Ollama) — and
+  the cursor starts on one that can work here: on a machine without
+  `claude`, that's Copilot. `1`–`3` pick directly.
+
 ## 1.0.94 — 2026-11-26
 
 ### Faster

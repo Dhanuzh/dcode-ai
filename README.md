@@ -116,7 +116,7 @@ cd my-project
 dcode-ai
 ```
 
-The first launch asks you to sign in:
+The first launch opens a sign-in picker (also `dcode-ai login`): each choice shows whether it's signed in, ready, or what's missing, and the cursor starts on one that works on this machine.
 
 | Provider | Sign in | How it works |
 | --- | --- | --- |
@@ -129,6 +129,7 @@ Switch any time with `/provider` and `/model` (Claude aliases: `opus`, `sonnet`,
 dcode-ai -p "explain the architecture of this project"   # one-shot answer
 dcode-ai -c                                              # continue the last session
 dcode-ai -r                                              # pick a session to resume
+dcode-ai login                                           # sign in / switch: Claude, Copilot, local
 dcode-ai spawn --prompt "refactor the auth module"       # detached; attach later
 ```
 
