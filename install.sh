@@ -31,6 +31,16 @@ detect_platform() {
     echo "${arch}-${os}"
 }
 
+check_glibc() {
+    # Linux release binaries are built on Ubuntu 22.04 and need glibc 2.35+.
+    local have
+    have="$(ldd --version 2>/dev/null | head -n1 | grep -oE '[0-9]+\.[0-9]+$' || true)"
+    [ -n "$have" ] || return 0
+    if [ "$(printf '%s\n2.35\n' "$have" | sort -V | head -n1)" != "2.35" ]; then
+        error "glibc $have is too old (need 2.35+, e.g. Ubuntu 22.04 / Debian 12). Build from source: cargo install --git https://github.com/${REPO} dcode-ai-cli"
+    fi
+}
+
 http_get() {
     # Print response body to stdout.
     if command -v curl >/dev/null 2>&1; then
@@ -175,6 +185,7 @@ main() {
     info "Installing ${BINARY} ${TAG}"
 
     platform="$(detect_platform)"
+    case "$platform" in *linux-gnu) check_glibc ;; esac
     target_url="https://github.com/${REPO}/releases/download/${TAG}/${BINARY}-${platform}.tar.gz"
 
     info "Platform: ${platform}"

@@ -59,7 +59,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config ripgrep
+          sudo apt-get install -y libssl-dev libasound2-dev pkg-config ripgrep
 
       - name: Check formatting
         run: cargo fmt --check --all
@@ -78,11 +78,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Linux builds on the oldest supported runner: the binary needs the
+          # glibc it was built against or newer (ubuntu-latest's 2.43 broke
+          # Ubuntu 24.04 / Debian 12). 22.04 = glibc 2.35.
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             archive: tar.gz
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
+            os: ubuntu-22.04-arm
             archive: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
@@ -107,7 +110,7 @@ jobs:
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
-          sudo apt-get install -y libssl-dev pkg-config
+          sudo apt-get install -y libssl-dev libasound2-dev pkg-config
 
       - uses: Swatinem/rust-cache@v2
         with:
