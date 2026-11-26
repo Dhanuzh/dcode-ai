@@ -135,8 +135,9 @@ impl ExperimentRunner {
             })?;
 
         // Set up output capture
-        let stdout = child.stdout.take().expect("stdout captured");
-        let stderr = child.stderr.take().expect("stderr captured");
+        let (Some(stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
+            anyhow::bail!("{}: output could not be captured", self.config.command);
+        };
 
         // Use Arc for shared state between tasks
         let output_arc = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));

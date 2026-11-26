@@ -56,87 +56,43 @@ pub struct MetricParser {
     patterns: HashMap<String, Regex>,
 }
 
+/// The metrics found by default: (name, pattern whose first group is the
+/// value). Karpathy nanochat/nanoGPT names first, then common ones.
+const DEFAULT_PATTERNS: &[(&str, &str)] = &[
+    ("val_bpb", r"val_bpb:\s*([\d.]+)"),
+    ("peak_vram_mb", r"peak_vram_mb:\s*([\d.]+)"),
+    ("training_seconds", r"training_seconds:\s*([\d.]+)"),
+    ("total_seconds", r"total_seconds:\s*([\d.]+)"),
+    ("mfu_percent", r"mfu_percent:\s*([\d.]+)"),
+    ("total_tokens_m", r"total_tokens_M:\s*([\d.]+)"),
+    ("num_steps", r"num_steps:\s*(\d+)"),
+    ("num_params_m", r"num_params_M:\s*([\d.]+)"),
+    ("depth", r"depth:\s*(\d+)"),
+    ("batch_size", r"batch_size:\s*(\d+)"),
+    ("learning_rate", r"(?:learning_rate|lr):\s*([\d.e-]+)"),
+    (
+        "val_loss",
+        r"(?:val_loss|validation_loss|validation error):\s*([\d.]+)",
+    ),
+    (
+        "train_loss",
+        r"(?:train_loss|training_loss|training error):\s*([\d.]+)",
+    ),
+    ("accuracy", r"(?:accuracy|acc):\s*([\d.]+)"),
+    ("perplexity", r"perplexity:\s*([\d.]+)"),
+    ("memory_mb", r"(?:peak_)?memory(?:_mb)?:\s*([\d.]+)"),
+    ("peak_memory", r"peak_memory:\s*([\d.]+)"),
+    ("elapsed", r"(?:elapsed|wall.?clock|time):\s*([\d.]+)"),
+];
+
 impl Default for MetricParser {
     fn default() -> Self {
-        let mut patterns = HashMap::new();
-
-        // Karpathy nanochat/nanoGPT patterns
-        patterns.insert(
-            "val_bpb".to_string(),
-            Regex::new(r"val_bpb:\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "peak_vram_mb".to_string(),
-            Regex::new(r"peak_vram_mb:\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "training_seconds".to_string(),
-            Regex::new(r"training_seconds:\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "total_seconds".to_string(),
-            Regex::new(r"total_seconds:\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "mfu_percent".to_string(),
-            Regex::new(r"mfu_percent:\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "total_tokens_m".to_string(),
-            Regex::new(r"total_tokens_M:\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "num_steps".to_string(),
-            Regex::new(r"num_steps:\s*(\d+)").unwrap(),
-        );
-        patterns.insert(
-            "num_params_m".to_string(),
-            Regex::new(r"num_params_M:\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert("depth".to_string(), Regex::new(r"depth:\s*(\d+)").unwrap());
-        patterns.insert(
-            "batch_size".to_string(),
-            Regex::new(r"batch_size:\s*(\d+)").unwrap(),
-        );
-        patterns.insert(
-            "learning_rate".to_string(),
-            Regex::new(r"(?:learning_rate|lr):\s*([\d.e-]+)").unwrap(),
-        );
-
-        // Generic loss/accuracy patterns
-        patterns.insert(
-            "val_loss".to_string(),
-            Regex::new(r"(?:val_loss|validation_loss|validation error):\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "train_loss".to_string(),
-            Regex::new(r"(?:train_loss|training_loss|training error):\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "accuracy".to_string(),
-            Regex::new(r"(?:accuracy|acc):\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "perplexity".to_string(),
-            Regex::new(r"perplexity:\s*([\d.]+)").unwrap(),
-        );
-
-        // Memory patterns
-        patterns.insert(
-            "memory_mb".to_string(),
-            Regex::new(r"(?:peak_)?memory(?:_mb)?:\s*([\d.]+)").unwrap(),
-        );
-        patterns.insert(
-            "peak_memory".to_string(),
-            Regex::new(r"peak_memory:\s*([\d.]+)").unwrap(),
-        );
-
-        // Timing patterns
-        patterns.insert(
-            "elapsed".to_string(),
-            Regex::new(r"(?:elapsed|wall.?clock|time):\s*([\d.]+)").unwrap(),
-        );
-
+        // A pattern that doesn't compile is skipped (the test below keeps
+        // them all valid) — never a panic in the middle of a run.
+        let patterns = DEFAULT_PATTERNS
+            .iter()
+            .filter_map(|(name, pattern)| Some((name.to_string(), Regex::new(pattern).ok()?)))
+            .collect();
         Self { patterns }
     }
 }
@@ -280,6 +236,14 @@ impl MetricParser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_default_pattern_compiles() {
+        for (name, pattern) in DEFAULT_PATTERNS {
+            assert!(Regex::new(pattern).is_ok(), "{name}: {pattern}");
+        }
+        assert_eq!(MetricParser::new().patterns.len(), DEFAULT_PATTERNS.len());
+    }
 
     #[test]
     fn test_parse_val_bpb() {
