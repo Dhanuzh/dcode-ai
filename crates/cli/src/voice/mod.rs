@@ -10,6 +10,8 @@ pub mod audio;
 pub mod mixer;
 pub mod stt;
 pub mod vad;
+#[cfg(feature = "speech")]
+mod whisper;
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};

@@ -144,19 +144,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
-name = "ansi-to-tui"
-version = "8.0.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e42366bb9d958f042bf58f0a85e1b2d091997c1257ca49bddd7e4827aadc65fd"
-dependencies = [
- "nom 8.0.0",
- "ratatui-core",
- "simdutf8",
- "smallvec",
- "thiserror 2.0.21",
-]
-
-[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1680,18 +1667,12 @@ name = "dcode-ai-autoresearch"
 version = "1.0.93"
 dependencies = [
  "anyhow",
- "async-trait",
  "chrono",
- "dcode-ai-common",
- "futures-util",
  "parking_lot",
  "regex",
  "serde",
- "serde_json",
  "tempfile",
- "thiserror 2.0.21",
  "tokio",
- "toml",
  "tracing",
 ]
 
@@ -1699,7 +1680,6 @@ dependencies = [
 name = "dcode-ai-cli"
 version = "1.0.93"
 dependencies = [
- "ansi-to-tui",
  "anyhow",
  "arboard",
  "assert_cmd",
@@ -1751,8 +1731,6 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
- "two-face",
- "unicode-segmentation",
  "unicode-width 0.2.2",
  "url",
  "urlencoding",
@@ -1826,7 +1804,6 @@ dependencies = [
  "dcode-ai-common",
  "dcode-ai-core",
  "futures-util",
- "ignore",
  "landlock",
  "libc",
  "portable-pty",
@@ -1840,7 +1817,6 @@ dependencies = [
  "tiktoken-rs",
  "tokio",
  "tracing",
- "walkdir",
 ]
 
 [[package]]
@@ -7326,17 +7302,6 @@ dependencies = [
  "sha1",
  "thiserror 2.0.21",
  "utf-8",
-]
-
-[[package]]
-name = "two-face"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b285c51f8a6ade109ed4566d33ac4fb289fb5d6cf87ed70908a5eaf65e948e34"
-dependencies = [
- "serde",
- "serde_derive",
- "syntect",
 ]
 
 [[package]]
