@@ -470,10 +470,10 @@ enum Command {
         #[command(subcommand)]
         command: WorktreesCmd,
     },
-    /// OAuth login for providers.
+    /// Sign in: no provider opens the picker (Claude, Copilot, local model).
     Login {
         #[arg(value_enum)]
-        provider: OAuthProvider,
+        provider: Option<OAuthProvider>,
     },
     /// Logout provider auth tokens.
     Logout {
@@ -1421,8 +1421,14 @@ async fn try_main() -> anyhow::Result<()> {
                 autoresearch_once(program, ws).await?;
             }
         },
-        Some(Command::Login { provider }) => {
+        Some(Command::Login {
+            provider: Some(provider),
+        }) => {
             oauth_login::login(provider).await?;
+        }
+        Some(Command::Login { provider: None }) => {
+            crate::tui::onboarding::run_onboarding(config.clone()).await?;
+            println!("Signed in — run `dcode-ai` to start.");
         }
         Some(Command::Logout { provider }) => {
             dcode_ai_common::provider_runtime::forget_claude_signin();

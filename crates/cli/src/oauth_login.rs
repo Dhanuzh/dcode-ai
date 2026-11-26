@@ -155,7 +155,7 @@ where
 {
     let already = match provider {
         OAuthProvider::Anthropic => anthropic_ready(),
-        OAuthProvider::Copilot => AuthStore::load().unwrap_or_default().copilot.is_some(),
+        OAuthProvider::Copilot => copilot_signed_in(),
     };
     if already {
         emit("Already logged in. Use `dcode-ai logout ...` first if you want to re-login.");
@@ -177,6 +177,23 @@ fn anthropic_config() -> dcode_ai_common::config::AnthropicConfig {
 /// Signed in for the configured Claude backend (Claude Code account or `ant`).
 pub fn anthropic_ready() -> bool {
     dcode_ai_common::provider_runtime::anthropic_signed_in(&anthropic_config())
+}
+
+pub fn copilot_signed_in() -> bool {
+    AuthStore::load().unwrap_or_default().copilot.is_some()
+}
+
+/// Why Claude sign-in can't start on this machine (the tool it needs is
+/// missing), or `None` when it can.
+pub fn claude_login_blocker() -> Option<&'static str> {
+    use dcode_ai_common::provider_runtime::{has_ant_cli, has_claude_cli};
+    if anthropic_uses_claude_code() {
+        (!has_claude_cli()).then_some(
+            "Claude needs Claude Code (`claude`) installed: https://claude.com/claude-code — then choose it again",
+        )
+    } else {
+        (!has_ant_cli()).then_some(ANT_INSTALL_HINT)
+    }
 }
 
 pub fn anthropic_uses_claude_code() -> bool {
