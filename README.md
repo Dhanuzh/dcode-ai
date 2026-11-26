@@ -354,6 +354,7 @@ When a command fails, the shell shows `dcode-ai: Alt+F to fix`. Press `Alt+F` an
 - **Move a session to another computer:** `/move [file]` writes it to one file (secrets masked); `/move import <file>` on the other machine, then `/resume`.
 - **A budget that asks:** `/budget <usd>` (or `[session] max_cost_usd`) warns at 80 % and, at 100 %, asks whether to go on with a raised budget instead of stopping cold.
 - **Pins through compaction:** `/pin <fact>` keeps a fact word for word through every compaction; `/compact` says what went into the summary.
+- **`/tasks`:** everything running in one list — shells, background jobs, sub-agents, schedules and the goal; `/tasks stop <ref>` ends one.
 - **`/bugreport`:** one file for an issue — version, the newest crash, the log, config and recent events, secrets masked.
 
 ### 🤖 Agents and automation
@@ -427,6 +428,9 @@ default = "anthropic"          # anthropic | copilot | local
 [provider.anthropic]
 backend = "claude-code"        # your Claude account; "api" = Console OAuth via `ant`
 model = "claude-sonnet-5-5"    # or "auto": cheap model for quick ones, strong for real work
+
+# [model]
+# max_tokens = 16384           # longest reply per request (room for a whole file in one tool call)
 
 # [model.routing]              # what "auto" picks between (defaults per provider)
 # cheap = "claude-haiku-5-5"
