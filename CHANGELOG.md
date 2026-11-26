@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.0.94 — 2026-11-26
 
 ### Faster
 - **Starts in about a third of the time**: the screen waited for every MCP
