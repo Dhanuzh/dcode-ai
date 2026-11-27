@@ -12,7 +12,83 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, TerminalOptions, Viewport, backend::CrosstermBackend};
+use ratatui::backend::{Backend, ClearType, CrosstermBackend, WindowSize};
+use ratatui::buffer::Cell;
+use ratatui::layout::{Position, Size};
+use ratatui::{Terminal, TerminalOptions, Viewport};
+
+/// The inline view's backend: crossterm, except that a terminal which
+/// doesn't answer the cursor-position query (ESC[6n) in time no longer stops
+/// dcode-ai with "The cursor position could not be read within a normal
+/// duration". The inline viewport is placed from that answer at start and
+/// on every resize; without one, ask again once, then assume the cursor is
+/// on the last row — the viewport opens at the bottom of the screen, which
+/// is where it usually is anyway. Once a terminal hasn't answered, it isn't
+/// asked again (each try waits 2 s — a freeze on every resize).
+pub struct InlineBackend(CrosstermBackend<Stdout>, bool);
+
+impl InlineBackend {
+    fn fallback_position(&self) -> Position {
+        let rows = self.0.size().map(|s| s.height).unwrap_or(24);
+        Position::new(0, rows.saturating_sub(1))
+    }
+}
+
+impl Backend for InlineBackend {
+    type Error = std::io::Error;
+
+    fn draw<'a, I>(&mut self, content: I) -> std::io::Result<()>
+    where
+        I: Iterator<Item = (u16, u16, &'a Cell)>,
+    {
+        self.0.draw(content)
+    }
+    fn append_lines(&mut self, n: u16) -> std::io::Result<()> {
+        self.0.append_lines(n)
+    }
+    fn hide_cursor(&mut self) -> std::io::Result<()> {
+        self.0.hide_cursor()
+    }
+    fn show_cursor(&mut self) -> std::io::Result<()> {
+        self.0.show_cursor()
+    }
+    fn get_cursor_position(&mut self) -> std::io::Result<Position> {
+        if self.1 {
+            return Ok(self.fallback_position());
+        }
+        match self.0.get_cursor_position() {
+            Ok(p) => Ok(p),
+            Err(first) => match self.0.get_cursor_position() {
+                Ok(p) => Ok(p),
+                Err(_) => {
+                    self.1 = true;
+                    tracing::debug!(
+                        "terminal didn't report the cursor position ({first}); assuming the last row"
+                    );
+                    Ok(self.fallback_position())
+                }
+            },
+        }
+    }
+    fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> std::io::Result<()> {
+        self.0.set_cursor_position(position)
+    }
+    fn clear(&mut self) -> std::io::Result<()> {
+        self.0.clear()
+    }
+    fn clear_region(&mut self, clear_type: ClearType) -> std::io::Result<()> {
+        self.0.clear_region(clear_type)
+    }
+    fn size(&self) -> std::io::Result<Size> {
+        self.0.size()
+    }
+    fn window_size(&mut self) -> std::io::Result<WindowSize> {
+        self.0.window_size()
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Backend::flush(&mut self.0)
+    }
+}
 
 fn install_terminal_panic_hook() {
     use std::sync::Once;
@@ -74,10 +150,10 @@ pub fn pop_key_flags() {
     }
 }
 
-pub fn setup_terminal(_mouse_capture: bool) -> anyhow::Result<Terminal<CrosstermBackend<Stdout>>> {
+pub fn setup_terminal(_mouse_capture: bool) -> anyhow::Result<Terminal<InlineBackend>> {
     install_terminal_panic_hook();
     enable_raw_mode().map_err(|e| anyhow::anyhow!("enable_raw_mode: {e}"))?;
-    let res: anyhow::Result<Terminal<CrosstermBackend<Stdout>>> = (|| {
+    let res: anyhow::Result<Terminal<InlineBackend>> = (|| {
         let mut out = stdout();
         let _ = execute!(out, EnableBracketedPaste);
         // Focus reporting lets us suppress completion notifications while the
@@ -90,7 +166,7 @@ pub fn setup_terminal(_mouse_capture: bool) -> anyhow::Result<Terminal<Crossterm
         use std::io::Write;
         let _ = out.flush();
         let height = inline_viewport_height();
-        let backend = CrosstermBackend::new(out);
+        let backend = InlineBackend(CrosstermBackend::new(out), false);
         let terminal = Terminal::with_options(
             backend,
             TerminalOptions {

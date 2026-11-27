@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.97 — 2026-11-27
+
+### Fixed
+- **"The cursor position could not be read within a normal duration"**:
+  some terminals don't answer the cursor-position query, and dcode-ai
+  stopped at start. It asks once more, then opens the view at the bottom
+  of the screen and doesn't ask that terminal again (no 2 s freeze on each
+  resize).
+
 ## 1.0.96 — 2026-11-27
 
 ### Fixed
