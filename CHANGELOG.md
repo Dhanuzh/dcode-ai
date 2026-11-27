@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.0.96 — 2026-11-27
+
+### Fixed
+- **Side chat after switching model or provider**: `/btw` kept asking with
+  the model of the last turn — after `/provider copilot` it sent Copilot
+  the Claude model name and failed. It now uses the model and provider in
+  use right away.
+
 ## 1.0.95 — 2026-11-26
 
 ### Fixed

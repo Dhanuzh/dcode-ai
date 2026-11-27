@@ -396,6 +396,9 @@ impl SessionRuntime {
         let model = model.into();
         self.supervisor.model = model.clone();
         self.supervisor.agent_mut().model = model;
+        // The side chat answers with the model in use now, not the one
+        // from the last turn.
+        self.snapshot_for_btw(None);
     }
 
     pub fn permission_mode(&self) -> PermissionMode {
@@ -587,6 +590,9 @@ impl SessionRuntime {
         self.supervisor.apply_dcode_ai_config(config.clone())?;
         dcode_ai_common::config::set_per_token_billing(config.bills_per_token());
         self.config = config;
+        // A provider switch reaches the side chat at once (it kept asking
+        // Copilot for the Claude model of the last turn).
+        self.snapshot_for_btw(None);
         Ok(())
     }
 
